@@ -36,6 +36,15 @@ object NativeMarkdownParser {
      *  200k input cap otherwise allows; generous for legit multi-table articles. */
     private const val MAX_TABLE_CELLS_TOTAL = 5_000
 
+    /** Blockquote nesting depth cap. The 200k input cap does NOT bound depth: a ~20KB
+     *  wall of nested `>` lines recurses the GFM parser ~5–10k deep → OOM/SOE. */
+    private const val MAX_BLOCKQUOTE_DEPTH = 32
+
+    /** Independent guard for recursion in our AST walkers. The lexical blockquote
+     *  pre-pass protects the third-party parser; this protects our own traversal if
+     *  another markdown construct produces an unexpectedly deep tree. */
+    private const val MAX_AST_DEPTH = 64
+
     /** Inline metacharacters; absence lets a table cell skip the sub-parse (fast path). */
     private val INLINE_MARKUP = charArrayOf('*', '_', '~', '\\', '[', ']', '(', ')', '<', '>', '!', '`')
 
@@ -70,29 +79,86 @@ object NativeMarkdownParser {
 
     fun parse(markdown: String): MarkdownDocument {
         val inputCapped = markdown.length > ParseLimits.MAX_ARTICLE_PARSE_CHARS
-        val src = if (inputCapped) markdown.take(ParseLimits.MAX_ARTICLE_PARSE_CHARS) else markdown
+        val lengthCapped = if (inputCapped) markdown.take(ParseLimits.MAX_ARTICLE_PARSE_CHARS) else markdown
+        // Cheap O(n) depth pre-pass BEFORE any expensive parse: cut the input at the
+        // first line whose blockquote nesting exceeds the cap (see MAX_BLOCKQUOTE_DEPTH).
+        val depthCut = firstLineBeyondBlockquoteDepth(lengthCapped)
+        val depthCapped = depthCut >= 0
+        val src = if (depthCapped) lengthCapped.substring(0, depthCut) else lengthCapped
         val budget = Budget()
         val tree = MarkdownParser(GFMFlavourDescriptor()).buildMarkdownTreeFromString(src)
         val blocks = parseBlocks(tree.children, src, budget).toMutableList()
-        val truncated = inputCapped || budget.truncated
+        val truncated = inputCapped || depthCapped || budget.truncated
         if (truncated) blocks.add(MdBlock.Paragraph(listOf(MdInline.Text(ParseLimits.TRUNCATION_MARKER))))
         return MarkdownDocument(blocks, truncated)
     }
 
+    /**
+     * Returns the START offset of the first line whose leading blockquote-marker
+     * depth exceeds [MAX_BLOCKQUOTE_DEPTH], or -1 when the input is within bounds.
+     * Single O(n) index walk, no regex per line. Marker form per CommonMark: up to
+     * three leading spaces, then `>` markers separated by indentation. We count
+     * spaces and tabs conservatively between markers; over-counting pathological
+     * prefixes is safer than letting parser recursion through.
+     */
+    private fun firstLineBeyondBlockquoteDepth(src: String): Int {
+        var lineStart = 0
+        while (lineStart < src.length) {
+            var i = lineStart
+            var spaces = 0
+            while (i < src.length && src[i] == ' ' && spaces < 3) { i++; spaces++ }
+            // Four-space indentation is a code block, not a block quote.
+            if (i < src.length && src[i] == ' ') {
+                val newline = src.indexOf('\n', i)
+                if (newline == -1) return -1
+                lineStart = newline + 1
+                continue
+            }
+            var depth = 0
+            while (i < src.length && src[i] != '\n' && src[i] != '\r') {
+                when (src[i]) {
+                    '>' -> { depth++; i++ }
+                    ' ', '\t' -> if (depth > 0) i++ else break
+                    else -> break
+                }
+            }
+            if (depth > MAX_BLOCKQUOTE_DEPTH) return lineStart
+            val newline = src.indexOf('\n', i)
+            if (newline == -1) return -1
+            lineStart = newline + 1
+        }
+        return -1
+    }
+
     // ── Blocks ───────────────────────────────────────────────────────────────
 
-    private fun parseBlocks(nodes: List<ASTNode>, src: String, budget: Budget): List<MdBlock> {
+    private fun parseBlocks(
+        nodes: List<ASTNode>,
+        src: String,
+        budget: Budget,
+        depth: Int = 0,
+    ): List<MdBlock> {
+        if (depth >= MAX_AST_DEPTH) {
+            budget.truncated = true
+            return flattenDeepBlocks(nodes, src)
+        }
         val out = mutableListOf<MdBlock>()
         for (node in nodes) {
             if (budget.blocksRemaining <= 0) { budget.truncated = true; break }
-            val block = blockFor(node, src, budget) ?: continue
+            val block = blockFor(node, src, budget, depth) ?: continue
             budget.blocksRemaining--
             out.add(block)
         }
         return out
     }
 
-    private fun blockFor(node: ASTNode, src: String, budget: Budget): MdBlock? = when (node.type) {
+    private fun flattenDeepBlocks(nodes: List<ASTNode>, src: String): List<MdBlock> {
+        val text = nodes.joinToString(separator = "") { it.text(src) }.trim()
+        return if (text.isEmpty()) emptyList()
+        else listOf(MdBlock.Paragraph(listOf(MdInline.Text(text))))
+    }
+
+    private fun blockFor(node: ASTNode, src: String, budget: Budget, depth: Int): MdBlock? = when (node.type) {
         MarkdownElementTypes.ATX_1 -> MdBlock.Heading(1, headingInlines(node, src, budget))
         MarkdownElementTypes.ATX_2 -> MdBlock.Heading(2, headingInlines(node, src, budget))
         MarkdownElementTypes.ATX_3 -> MdBlock.Heading(3, headingInlines(node, src, budget))
@@ -103,9 +169,10 @@ object NativeMarkdownParser {
         MarkdownElementTypes.SETEXT_2 -> MdBlock.Heading(2, headingInlines(node, src, budget))
 
         MarkdownElementTypes.PARAGRAPH -> paragraphOrImage(node, src, budget)
-        MarkdownElementTypes.BLOCK_QUOTE -> MdBlock.BlockQuote(parseBlocks(node.children, src, budget))
-        MarkdownElementTypes.UNORDERED_LIST -> listBlock(node, src, budget, ordered = false)
-        MarkdownElementTypes.ORDERED_LIST -> listBlock(node, src, budget, ordered = true)
+        MarkdownElementTypes.BLOCK_QUOTE ->
+            MdBlock.BlockQuote(parseBlocks(node.children, src, budget, depth + 1))
+        MarkdownElementTypes.UNORDERED_LIST -> listBlock(node, src, budget, ordered = false, depth = depth)
+        MarkdownElementTypes.ORDERED_LIST -> listBlock(node, src, budget, ordered = true, depth = depth)
         MarkdownElementTypes.CODE_FENCE -> codeFence(node, src)
         MarkdownElementTypes.CODE_BLOCK -> MdBlock.CodeBlock(null, indentedCode(node, src))
         MarkdownElementTypes.HTML_BLOCK -> MdBlock.Paragraph(listOf(MdInline.Text(node.text(src).trim())))
@@ -127,10 +194,16 @@ object NativeMarkdownParser {
         return MdBlock.Paragraph(parseInlines(node, src, budget))
     }
 
-    private fun listBlock(node: ASTNode, src: String, budget: Budget, ordered: Boolean): MdBlock {
+    private fun listBlock(
+        node: ASTNode,
+        src: String,
+        budget: Budget,
+        ordered: Boolean,
+        depth: Int,
+    ): MdBlock {
         val items = node.children
             .filter { it.type == MarkdownElementTypes.LIST_ITEM }
-            .map { parseBlocks(it.children, src, budget) }
+            .map { parseBlocks(it.children, src, budget, depth + 1) }
         return MdBlock.ListBlock(ordered, items)
     }
 
@@ -189,7 +262,14 @@ object NativeMarkdownParser {
         src: String,
         out: MutableList<MdInline>,
         ib: InlineBudget,
+        depth: Int = 0,
     ) {
+        if (depth >= MAX_AST_DEPTH) {
+            ib.doc.truncated = true
+            val text = nodes.joinToString(separator = "") { it.text(src) }
+            if (text.isNotEmpty()) emit(out, MdInline.Text(text), ib)
+            return
+        }
         for (node in nodes) {
             if (ib.remaining <= 0) { ib.doc.truncated = true; return }
             when (node.type) {
@@ -200,18 +280,18 @@ object NativeMarkdownParser {
 
                 // Children parsed first (sharing ib), then the wrapper emitted.
                 MarkdownElementTypes.EMPH ->
-                    emit(out, MdInline.Emphasis(childInlines(node, src, ib)), ib)
+                    emit(out, MdInline.Emphasis(childInlines(node, src, ib, depth + 1)), ib)
                 MarkdownElementTypes.STRONG ->
-                    emit(out, MdInline.Strong(childInlines(node, src, ib)), ib)
+                    emit(out, MdInline.Strong(childInlines(node, src, ib, depth + 1)), ib)
                 GFMElementTypes.STRIKETHROUGH ->
-                    emit(out, MdInline.Strikethrough(childInlines(node, src, ib)), ib)
+                    emit(out, MdInline.Strikethrough(childInlines(node, src, ib, depth + 1)), ib)
                 MarkdownElementTypes.CODE_SPAN ->
                     emit(out, MdInline.Code(node.text(src).trim('`').trim()), ib)
 
                 MarkdownElementTypes.INLINE_LINK,
                 MarkdownElementTypes.FULL_REFERENCE_LINK,
                 MarkdownElementTypes.SHORT_REFERENCE_LINK ->
-                    emit(out, linkInline(node, src, ib), ib)
+                    emit(out, linkInline(node, src, ib, depth + 1), ib)
 
                 MarkdownElementTypes.AUTOLINK, GFMTokenTypes.GFM_AUTOLINK, MarkdownTokenTypes.AUTOLINK,
                 MarkdownTokenTypes.EMAIL_AUTOLINK -> {
@@ -232,22 +312,27 @@ object NativeMarkdownParser {
                 else ->
                     // Unknown element → recurse; unknown leaf token → keep its text (don't drop content).
                     if (node.children.isEmpty()) appendTextWithHashtags(node.text(src), out, ib)
-                    else appendInlines(node.children, src, out, ib)
+                    else appendInlines(node.children, src, out, ib, depth + 1)
             }
         }
     }
 
     /** Inlines of a wrapper node (emph/strong/strikethrough/link-text), SHARING the budget. */
-    private fun childInlines(node: ASTNode, src: String, ib: InlineBudget): List<MdInline> {
+    private fun childInlines(
+        node: ASTNode,
+        src: String,
+        ib: InlineBudget,
+        depth: Int,
+    ): List<MdInline> {
         val out = mutableListOf<MdInline>()
-        appendInlines(node.children, src, out, ib)
+        appendInlines(node.children, src, out, ib, depth)
         return out
     }
 
-    private fun linkInline(node: ASTNode, src: String, ib: InlineBudget): MdInline {
+    private fun linkInline(node: ASTNode, src: String, ib: InlineBudget, depth: Int): MdInline {
         val dest = node.findChild(MarkdownElementTypes.LINK_DESTINATION)?.text(src)?.trimAngle()
         val textNode = node.findChild(MarkdownElementTypes.LINK_TEXT)
-        val children = if (textNode != null) childInlines(textNode, src, ib)
+        val children = if (textNode != null) childInlines(textNode, src, ib, depth)
             else listOf(MdInline.Text(node.text(src)))
         // FULL/SHORT_REFERENCE_LINK carry no LINK_DESTINATION → url "" (definitions
         // aren't resolved in v1); phase 2 renders empty-url Links as plain styled text.
@@ -335,11 +420,17 @@ object NativeMarkdownParser {
             return out.ifEmpty { listOf(MdInline.Text(t)) }
         }
         val tree = MarkdownParser(GFMFlavourDescriptor()).buildMarkdownTreeFromString(t)
-        fun walk(n: ASTNode) {
-            if (n.type == MarkdownElementTypes.PARAGRAPH) appendInlines(n.children, t, out, ib)
-            else n.children.forEach(::walk)
+        fun walk(n: ASTNode, depth: Int) {
+            if (depth >= MAX_AST_DEPTH) {
+                doc.truncated = true
+                emit(out, MdInline.Text(n.text(t)), ib)
+            } else if (n.type == MarkdownElementTypes.PARAGRAPH) {
+                appendInlines(n.children, t, out, ib, depth + 1)
+            } else {
+                n.children.forEach { walk(it, depth + 1) }
+            }
         }
-        walk(tree)
+        walk(tree, 0)
         return out.ifEmpty { listOf(MdInline.Text(t)) }
     }
 
@@ -389,10 +480,14 @@ object NativeMarkdownParser {
 
     /** Depth-first descendant search — an IMAGE wraps an INLINE_LINK in 0.7.3, so its
      *  LINK_DESTINATION/LINK_TEXT aren't direct children. */
-    private fun ASTNode.findDescendant(type: org.intellij.markdown.IElementType): ASTNode? {
+    private fun ASTNode.findDescendant(
+        type: org.intellij.markdown.IElementType,
+        depth: Int = 0,
+    ): ASTNode? {
+        if (depth >= MAX_AST_DEPTH) return null
         for (c in children) {
             if (c.type == type) return c
-            c.findDescendant(type)?.let { return it }
+            c.findDescendant(type, depth + 1)?.let { return it }
         }
         return null
     }

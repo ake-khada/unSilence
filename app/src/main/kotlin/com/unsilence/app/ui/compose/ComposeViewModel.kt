@@ -86,6 +86,29 @@ internal class ComposeSessionGate(initialSessionKey: String? = null) {
     }
 }
 
+/** Small generation gate for the external-signer round trip. It rejects a
+ * duplicate Confirm tap and makes a cancelled attempt unable to publish later. */
+internal class SigningAttemptGate {
+    private var generation = 0L
+    private var activeToken: Long? = null
+
+    fun begin(): Long? {
+        if (activeToken != null) return null
+        return (++generation).also { activeToken = it }
+    }
+
+    fun isCurrent(token: Long): Boolean = activeToken == token
+
+    fun complete(token: Long) {
+        if (activeToken == token) activeToken = null
+    }
+
+    fun cancel() {
+        generation++
+        activeToken = null
+    }
+}
+
 @androidx.compose.runtime.Immutable
 data class PollDraftOption(val id: String, val label: String = "")
 
@@ -351,6 +374,8 @@ class ComposeViewModel @Inject constructor(
 
     private val _sendState = MutableStateFlow<SendState>(SendState.Composing)
     val sendState: StateFlow<SendState> = _sendState.asStateFlow()
+    private val signingAttemptGate = SigningAttemptGate()
+    private var signingJob: Job? = null
 
     // ── NIP-36 sensitive toggle ─────────────────────────────────────────────
 
@@ -905,6 +930,7 @@ class ComposeViewModel @Inject constructor(
 
     /** Reset state for reuse — ViewModel is activity-scoped, survives recomposition. */
     fun reset() {
+        cancelPendingSigning()
         attachmentUploadJobs.values.forEach { it.cancel() }
         attachmentUploadJobs.clear()
         published = false
@@ -1279,9 +1305,17 @@ class ComposeViewModel @Inject constructor(
     }
 
     fun cancelSend() {
-        // Cannot cancel during Publishing — event already broadcast
+        // Once Publishing starts, the signed event has already been inserted and
+        // broadcast. The preceding Amber/signing round trip remains cancellable.
         if (_sendState.value is SendState.Publishing) return
+        cancelPendingSigning()
         _sendState.value = SendState.Composing
+    }
+
+    private fun cancelPendingSigning() {
+        signingAttemptGate.cancel()
+        signingJob?.cancel()
+        signingJob = null
     }
 
     /** Relay hint for the quoted event — where others can fetch it. Prefers the
@@ -1303,50 +1337,65 @@ class ComposeViewModel @Inject constructor(
     }
 
     private fun publishPayload(confirmation: SendState.Confirming) {
+        val attemptToken = signingAttemptGate.begin() ?: return
         publishError = null
-        viewModelScope.launch {
-            val payload = confirmation.payload
-            val signed = signingManager.sign(payload.toEventTemplate()) ?: run {
-                _sendState.value = SendState.Failed(
-                    reason = "Signing failed - check your key or Amber connection",
-                    confirmation = confirmation,
-                )
-                return@launch
-            }
-
-            publishAndTrack(
-                eventId = signed.id,
-                eventJson = toEventJson(signed),
-                replyToId = payload.replyToId,
-                rootId = payload.rootId,
-                confirmation = confirmation,
-            ) {
-                val nowMs = System.currentTimeMillis()
-                val parsedTags = signed.tags.map { it.toList() }
-                memoryEventStore.insert(
-                    NostrEvent(
-                        id = signed.id,
-                        pubkey = signed.pubKey,
-                        kind = signed.kind,
-                        content = signed.content,
-                        createdAt = signed.createdAt,
-                        tags = parsedTags,
-                        tagsJson = tagsToJson(parsedTags),
-                        sig = signed.sig,
-                        relayUrl = "local",
-                        replyToId = payload.replyToId,
-                        rootId = payload.rootId,
-                        hasContentWarning = payload.hasContentWarning,
-                        contentWarningReason = null,
-                        firstSeenAt = nowMs,
-                        relaysSeen = ConcurrentHashMap.newKeySet<String>().apply { add("local") },
-                    )
-                )
-                if (payload.kind == 1068) {
-                    relayPool.refreshOwnNotificationSubscription(signed.pubKey)
+        val job = viewModelScope.launch(start = CoroutineStart.LAZY) {
+            try {
+                val payload = confirmation.payload
+                val signed = signingManager.sign(payload.toEventTemplate()) ?: run {
+                    if (signingAttemptGate.isCurrent(attemptToken)) {
+                        _sendState.value = SendState.Failed(
+                            reason = "Signing failed - check your key or Amber connection",
+                            confirmation = confirmation,
+                        )
+                    }
+                    return@launch
                 }
+                // Back/Close may cancel while Amber is in front. A late result must
+                // never publish a draft the user already returned to editing/discarded.
+                if (!signingAttemptGate.isCurrent(attemptToken)) return@launch
+                signingAttemptGate.complete(attemptToken)
+                signingJob = null
+
+                publishAndTrack(
+                    eventId = signed.id,
+                    eventJson = toEventJson(signed),
+                    replyToId = payload.replyToId,
+                    rootId = payload.rootId,
+                    confirmation = confirmation,
+                ) {
+                    val nowMs = System.currentTimeMillis()
+                    val parsedTags = signed.tags.map { it.toList() }
+                    memoryEventStore.insert(
+                        NostrEvent(
+                            id = signed.id,
+                            pubkey = signed.pubKey,
+                            kind = signed.kind,
+                            content = signed.content,
+                            createdAt = signed.createdAt,
+                            tags = parsedTags,
+                            tagsJson = tagsToJson(parsedTags),
+                            sig = signed.sig,
+                            relayUrl = "local",
+                            replyToId = payload.replyToId,
+                            rootId = payload.rootId,
+                            hasContentWarning = payload.hasContentWarning,
+                            contentWarningReason = null,
+                            firstSeenAt = nowMs,
+                            relaysSeen = ConcurrentHashMap.newKeySet<String>().apply { add("local") },
+                        )
+                    )
+                    if (payload.kind == 1068) {
+                        relayPool.refreshOwnNotificationSubscription(signed.pubKey)
+                    }
+                }
+            } finally {
+                signingAttemptGate.complete(attemptToken)
+                if (signingJob === coroutineContext[Job]) signingJob = null
             }
         }
+        signingJob = job
+        job.start()
     }
 
     /**

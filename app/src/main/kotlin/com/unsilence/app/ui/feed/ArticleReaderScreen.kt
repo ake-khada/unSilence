@@ -81,6 +81,8 @@ import com.unsilence.app.data.memory.FeedRow
 import com.unsilence.app.data.memory.toEventModel
 import com.unsilence.app.data.relay.wotSubjectsForFeedRows
 import com.unsilence.app.data.model.markdown.MarkdownDocument
+import com.unsilence.app.data.model.markdown.MdBlock
+import com.unsilence.app.data.model.markdown.MdInline
 import com.unsilence.app.data.model.markdown.NativeMarkdownParser
 import com.unsilence.app.data.wallet.ZapRequest
 import com.unsilence.app.ui.common.LocalAppSessionKey
@@ -232,7 +234,16 @@ fun ArticleReaderScreen(
         }
         value = null
         val parsed = withContext(Dispatchers.Default) {
-            NativeMarkdownParser.parse(model.articleContent ?: "")
+            try {
+                NativeMarkdownParser.parse(model.articleContent ?: "")
+            } catch (cancelled: kotlinx.coroutines.CancellationException) {
+                throw cancelled
+            } catch (oom: OutOfMemoryError) {
+                // The process cannot safely recover from genuine heap exhaustion.
+                throw oom
+            } catch (_: Throwable) {
+                markdownParseFailureDocument()
+            }
         }
         putArticleDoc(articleKey, parsed)
         value = parsed
@@ -740,3 +751,13 @@ private fun cachedArticleDoc(key: String): MarkdownDocument? =
 private fun putArticleDoc(key: String, doc: MarkdownDocument) {
     synchronized(articleDocCache) { articleDocCache[key] = doc }
 }
+
+/** Safe, renderable fallback for malformed input or an unexpected parser failure. */
+private fun markdownParseFailureDocument(): MarkdownDocument = MarkdownDocument(
+    blocks = listOf(
+        MdBlock.Paragraph(
+            listOf(MdInline.Text("This article could not be rendered safely.")),
+        ),
+    ),
+    truncated = true,
+)

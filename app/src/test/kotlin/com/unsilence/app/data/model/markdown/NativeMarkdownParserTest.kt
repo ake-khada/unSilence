@@ -358,4 +358,49 @@ class NativeMarkdownParserTest {
         assertEquals("https://e.com/i.png", link.url)
         assertEquals("alt", link.children.plain())
     }
+
+    // ── Blockquote depth cap ──────────────────────────────────────────────────
+
+    @Test
+    fun `blockquote nesting beyond depth 32 is truncated`() {
+        // A ~20KB article of nested `>` lines recurses the GFM parser into OOM/SOE;
+        // the depth pre-pass must cut the input at the first offending line.
+        val md = "intro\n\n" + (1..33).joinToString(" ") { ">" } + " too deep"
+        val doc = parse(md)
+        assertTrue("depth 33 must trip the depth cap", doc.truncated)
+        // Content before the offending line survives; the tail carries the marker.
+        assertTrue(doc.blocks.any { b -> b is MdBlock.Paragraph && b.inlines.plain().contains("intro") })
+        assertTrue(doc.blocks.last() is MdBlock.Paragraph)
+    }
+
+    @Test
+    fun `measured blockquote bomb is rejected before third party parsing`() {
+        // This is the hostile scale from H-14. The cheap lexical guard must cut it
+        // before markdown-jvm sees the deeply recursive input.
+        val doc = parse("> ".repeat(20_000) + "body")
+        assertTrue(doc.truncated)
+        assertTrue(doc.blocks.last() is MdBlock.Paragraph)
+    }
+
+    @Test
+    fun `blockquote nesting at depth 10 renders fully`() {
+        val doc = parse((1..10).joinToString(" ") { ">" } + " deep but fine")
+        assertFalse(doc.truncated)
+        assertTrue(doc.blocks.first() is MdBlock.BlockQuote)
+    }
+
+    @Test
+    fun `blockquote cap catches tabs and multi-space marker indentation`() {
+        val tabNested = (1..33).joinToString("\t") { ">" } + " too deep"
+        val spacedNested = (1..33).joinToString("   ") { ">" } + " too deep"
+        assertTrue(parse(tabNested).truncated)
+        assertTrue(parse(spacedNested).truncated)
+    }
+
+    @Test
+    fun `non-blockquote content is unaffected by the depth pre-pass`() {
+        // Mid-line `>` never counts; 4-space indent is code, not a quote marker.
+        val doc = parse("a > b\n\n1 > 2 > 3\n\n    > indented code, not a quote")
+        assertFalse(doc.truncated)
+    }
 }

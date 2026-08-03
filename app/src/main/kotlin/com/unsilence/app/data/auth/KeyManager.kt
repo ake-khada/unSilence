@@ -10,6 +10,7 @@ import com.vitorpamplona.quartz.nip19Bech32.Nip19Parser
 import com.vitorpamplona.quartz.nip19Bech32.entities.NPub
 import com.vitorpamplona.quartz.nip19Bech32.entities.NSec
 import dagger.hilt.android.qualifiers.ApplicationContext
+import java.math.BigInteger
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -21,6 +22,20 @@ private const val KEY_GRAPH_ONBOARDING_PENDING = "graph_onboarding_pending"
 private const val KEY_GRAPH_ONBOARDING_COMPLETED = "graph_onboarding_completed"
 private const val KEY_GRAPH_KNOWN_EMPTY = "graph_known_empty"
 private const val SIGNER_AMBER    = "AMBER"
+
+/** secp256k1 curve order N — a private key is only valid as a scalar in [1, N). */
+private val SECP256K1_ORDER =
+    BigInteger("FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141", 16)
+
+/** True only for a canonical 32-byte secp256k1 private scalar in [1, N). */
+internal fun isValidPrivateKeyScalar(hexKey: String): Boolean {
+    if (hexKey.length != 64 || !hexKey.all(Char::isHexDigit)) return false
+    val scalar = runCatching { BigInteger(hexKey, 16) }.getOrNull() ?: return false
+    return scalar >= BigInteger.ONE && scalar < SECP256K1_ORDER
+}
+
+private fun Char.isHexDigit(): Boolean =
+    this in '0'..'9' || this in 'a'..'f' || this in 'A'..'F'
 
 /** Minimal interface for mute-list decrypt — allows test construction without Android Context. */
 interface MuteKeyProvider {
@@ -91,7 +106,9 @@ class KeyManager @Inject constructor(
      * Overwrites any existing key.
      */
     fun savePrivateKey(hexKey: String) {
-        require(hexKey.length == 64) { "Private key must be 64 hex chars" }
+        require(isValidPrivateKeyScalar(hexKey)) {
+            "Private key must be a valid 32-byte secp256k1 scalar"
+        }
         cachedPubKeyHex = null
         // Establish a clean internal-signer state: remove any Amber markers from a
         // prior session, else isAmberMode stays true and getPublicKeyHex() returns
@@ -137,7 +154,7 @@ class KeyManager @Inject constructor(
         val trimmed = input.trim()
         val hexKey: String? = when {
             // Raw hex — 64 lowercase/uppercase hex chars
-            trimmed.length == 64 && trimmed.all { it.isDigit() || it in 'a'..'f' || it in 'A'..'F' } ->
+            trimmed.length == 64 && trimmed.all(Char::isHexDigit) ->
                 trimmed.lowercase()
             // nsec1… bech32 — let Quartz decode it
             trimmed.startsWith("nsec1", ignoreCase = true) -> {
@@ -146,7 +163,10 @@ class KeyManager @Inject constructor(
             }
             else -> null
         }
-        if (hexKey == null) return false
+        // Quartz normally returns canonical hex for nsec, but validate the decoded
+        // value instead of trusting that implementation detail. The helper is
+        // deliberately non-throwing for malformed decoder output.
+        if (hexKey == null || !isValidPrivateKeyScalar(hexKey)) return false
         savePrivateKey(hexKey)
         return true
     }
