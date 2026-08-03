@@ -650,6 +650,46 @@ class MemoryEventStoreInvariantsTest {
         assertEquals(1, store.replyCount(midId))  // only the deep reply targets mid
     }
 
+    @Test
+    fun `replyCount ignores inflated persisted scalar and uses unique live replies`() = runTest {
+        val source = MemoryEventStore(
+            object : MuteKeyProvider {},
+            com.unsilence.app.data.relay.stubTimelineServiceProvider(),
+        )
+        source.insert(event(id = "reply-source", kind = 1))
+        source.insert(event(id = "reply-child", kind = 1, replyToId = "reply-source"))
+
+        val snapshot = StringWriter()
+        snapshot.buffered().use { source.saveSnapshotTo(it) }
+        val inflated = snapshot.toString().replace(
+            "reply|reply-source|1",
+            "reply|reply-source|111",
+        )
+        val restored = MemoryEventStore(
+            object : MuteKeyProvider {},
+            com.unsilence.app.data.relay.stubTimelineServiceProvider(),
+        )
+        restored.restoreSnapshotFrom(StringReader(inflated).buffered())
+
+        assertEquals(1, restored.replyCount("reply-source"))
+    }
+
+    @Test
+    fun `replyCount excludes non-reply events carrying NIP-10 targets`() {
+        val parentId = "engagement-target"
+        store.insert(event(id = parentId, kind = 1))
+        store.insert(
+            event(
+                id = "target-zap",
+                kind = 9735,
+                replyToId = parentId,
+                rootId = parentId,
+            ),
+        )
+
+        assertEquals(0, store.replyCount(parentId))
+    }
+
     // ── Reaction count ──────────────────────────────────────────────────────
 
     @Test

@@ -121,6 +121,7 @@ private val CONTENT_KINDS = setOf(
 private const val ARTICLE_COMMENT_CAP = 200
 private val NOTIFICATION_KINDS = setOf(1, 6, 7, 1018, 9735, 16, 1111)
 private val DERIVED_ONLY_KINDS = setOf(30166, 30382)
+private val COUNTED_NIP22_PARENT_KINDS = setOf(21, 22, 34235, 34236, 1111)
 
 internal data class SnapshotEventSelection(
     val nonContentEvents: List<NostrEvent>,
@@ -1016,11 +1017,8 @@ class MemoryEventStore @Inject constructor(
         recentByCreatedAt.add(EventEntry(event.id, event.createdAt))
         lastTouchedAt[event.id] = System.currentTimeMillis()
 
-        if (event.replyToId != null) {
-            idsByReplyTarget.getOrPut(event.replyToId) { ConcurrentHashMap.newKeySet() }.add(event.id)
-        }
-        if (event.rootId != null && event.rootId != event.replyToId) {
-            idsByReplyTarget.getOrPut(event.rootId) { ConcurrentHashMap.newKeySet() }.add(event.id)
+        forEachReplyIndexTarget(event) { targetId ->
+            idsByReplyTarget.getOrPut(targetId) { ConcurrentHashMap.newKeySet() }.add(event.id)
         }
 
         // 2a. Addressable content coordinate ⇄ event id. Superseded revisions are
@@ -1481,8 +1479,9 @@ class MemoryEventStore @Inject constructor(
         videoRenderModelsByEventId.remove(event.id)
         imetaImageDimsByEventId.remove(event.id)
         eventModelsByEventId.remove(event.id)
-        if (event.replyToId != null) idsByReplyTarget[event.replyToId]?.remove(event.id)
-        if (event.rootId != null && event.rootId != event.replyToId) idsByReplyTarget[event.rootId]?.remove(event.id)
+        forEachReplyIndexTarget(event) { targetId ->
+            idsByReplyTarget[targetId]?.remove(event.id)
+        }
         if (event.kind == 30023 || event.kind == 34235 || event.kind == 34236) {
             addressableCoordinate(event)?.let { coord ->
                 articleIdByCoord.remove(coord)
@@ -2664,11 +2663,8 @@ class MemoryEventStore @Inject constructor(
             idsByKind[event.kind]?.remove(entry.id)
             idsByPubkey[event.pubkey]?.remove(entry.id)
             lastTouchedAt.remove(entry.id)
-            if (event.replyToId != null) {
-                idsByReplyTarget[event.replyToId]?.remove(entry.id)
-            }
-            if (event.rootId != null && event.rootId != event.replyToId) {
-                idsByReplyTarget[event.rootId]?.remove(entry.id)
+            forEachReplyIndexTarget(event) { targetId ->
+                idsByReplyTarget[targetId]?.remove(entry.id)
             }
             // Article comment index: drop this id from each coord it referenced.
             if (event.kind == 1 || event.kind == 1111) {
@@ -3120,9 +3116,58 @@ class MemoryEventStore @Inject constructor(
 
     fun replyCount(eventId: String): Int {
         val coord = articleCoordForEvent(eventId)
-        // Articles: count the EXACT same set the comment list renders (one source of
-        // truth) — never replyCounts + coord-index, which can disagree.
-        return if (coord != null) articleCommentIds(coord).size else (replyCounts[eventId] ?: 0)
+        // Count the EXACT same unique, live reply rows the corresponding thread can
+        // render. The persisted scalar is only a legacy invalidation aid: payload
+        // eviction + later refetch can increment it repeatedly for the same event ID.
+        return if (coord != null) {
+            articleCommentIds(coord).size
+        } else {
+            replyEventIdsForTarget(eventId).count()
+        }
+    }
+
+    /**
+     * Unique live replies whose insertion semantics contribute to [replyCount].
+     * idsByReplyTarget also contains repost/zap/video events because those kinds
+     * parse NIP-10 e-tags, so using the raw set size would count engagement as replies.
+     */
+    private fun replyEventIdsForTarget(targetId: String): Sequence<String> =
+        idsByReplyTarget[targetId]
+            .orEmpty()
+            .asSequence()
+            .filter { id ->
+                if (id == targetId) return@filter false
+                val event = eventsById[id] ?: return@filter false
+                when (event.kind) {
+                    1 -> event.replyToId == targetId || event.rootId == targetId
+                    1111 -> {
+                        val parentKind = event.tags
+                            .firstOrNull { it.size >= 2 && it[0] == "k" }
+                            ?.getOrNull(1)
+                            ?.toIntOrNull()
+                        val parentId = event.replyToId
+                            ?: event.tags.firstOrNull { it.size >= 2 && it[0] == "e" }?.getOrNull(1)
+                        parentKind in COUNTED_NIP22_PARENT_KINDS && parentId == targetId
+                    }
+                    else -> false
+                }
+            }
+
+    /** Keep the reply index symmetric even for legacy kind-1111 rows whose
+     * parsed parent field is absent but whose lowercase e-tag is authoritative. */
+    private inline fun forEachReplyIndexTarget(
+        event: NostrEvent,
+        action: (String) -> Unit,
+    ) {
+        val direct = event.replyToId ?: if (event.kind == 1111) {
+            event.tags.firstOrNull { it.size >= 2 && it[0] == "e" }?.getOrNull(1)
+        } else {
+            null
+        }
+        direct?.takeIf { it != event.id }?.let(action)
+        event.rootId
+            ?.takeIf { it != event.id && it != direct }
+            ?.let(action)
     }
     fun repostCount(eventId: String): Int {
         val pubkeys = repostPubkeysForEvent(eventId)
@@ -3315,7 +3360,11 @@ class MemoryEventStore @Inject constructor(
      *  the same comment-id source as the list/count. */
     fun replyPubkeysForEvent(eventId: String): List<String> {
         val coord = articleCoordForEvent(eventId)
-        val ids = if (coord != null) articleCommentIds(coord) else (idsByReplyTarget[eventId] ?: emptySet())
+        val ids = if (coord != null) {
+            articleCommentIds(coord).asSequence()
+        } else {
+            replyEventIdsForTarget(eventId)
+        }
         val seen = HashSet<String>()
         for (id in ids) eventsById[id]?.pubkey?.let { seen.add(it) }
         return seen.toList()
@@ -6090,11 +6139,8 @@ class MemoryEventStore @Inject constructor(
         // rather than live relay events the user is currently viewing.
         lastTouchedAt[event.id] = event.firstSeenAt
 
-        if (event.replyToId != null) {
-            idsByReplyTarget.getOrPut(event.replyToId) { ConcurrentHashMap.newKeySet() }.add(event.id)
-        }
-        if (event.rootId != null && event.rootId != event.replyToId) {
-            idsByReplyTarget.getOrPut(event.rootId) { ConcurrentHashMap.newKeySet() }.add(event.id)
+        forEachReplyIndexTarget(event) { targetId ->
+            idsByReplyTarget.getOrPut(targetId) { ConcurrentHashMap.newKeySet() }.add(event.id)
         }
 
         // Addressable index parity with live insert.

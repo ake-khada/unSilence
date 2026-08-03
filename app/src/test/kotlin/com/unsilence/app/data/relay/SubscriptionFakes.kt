@@ -46,7 +46,8 @@ class FakeRelayCapabilitiesStore : RelaySkipCheck {
 
 /** No-op TimelineEventLoader for tests. */
 class StubEventLoader : TimelineEventLoader {
-    override suspend fun getEvents(ids: List<String>): List<NostrEvent> = emptyList()
+    override suspend fun getEvents(ids: List<String>): TimelineEventResolution =
+        TimelineEventResolution(emptyList(), ids.distinct())
 }
 
 /** Create a [javax.inject.Provider] of a no-op [TimelineService] for MES tests. */

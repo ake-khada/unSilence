@@ -43,6 +43,12 @@ private const val PERSISTED_REFS_CAP = 500
  *  burst-work that saturates the main thread on tab switch (ANR). */
 private const val INITIAL_CACHE_EMIT_CAP = 60
 
+/** One targeted REQ page. Larger repairs progress on subsequent scroll pages. */
+private const val TIMELINE_ID_REPAIR_CAP = MAX_EVENT_IDS_PER_REQ
+
+/** At most two targeted REQs per page, including relay-hint rotation after a miss. */
+private const val TIMELINE_ID_REPAIR_REQUEST_CAP = 2
+
 /**
  * EOSE-aware multi-relay timeline subscription with persistent ref cache.
  *
@@ -87,6 +93,18 @@ class TimelineService @Inject constructor(
     private val timelines = ConcurrentHashMap<String, Timeline>()
     private val multiKeys = ConcurrentHashMap<String, List<String>>()
     private val seqCounter = AtomicLong(0)
+    private val payloadMismatchLoggedKeys = ConcurrentHashMap.newKeySet<String>()
+
+    private data class CachedRefCandidate(
+        val ref: TimelineRef,
+        val relayHints: List<String>,
+    )
+
+    private data class CachedTimelinePage(
+        val candidates: List<CachedRefCandidate>,
+        val resolution: TimelineEventResolution,
+        val contiguousEvents: List<NostrEvent>,
+    )
 
     private fun snapshotTimelineKeys(timelineKey: String): List<String> {
         val live = multiKeys[timelineKey] ?: return listOf(timelineKey)
@@ -249,7 +267,10 @@ class TimelineService @Inject constructor(
         var since: Long? = null
         var cachedEvents: List<NostrEvent> = emptyList()
         if (cached != null && cached.refs.isNotEmpty()) {
-            cachedEvents = eventLoader.getEvents(cached.refs.map { it.id })
+            val cachedRefs = cached.refs.distinctBy { it.id }
+            val resolution = eventLoader.getEvents(cachedRefs.map { it.id })
+            logPayloadMismatchOnce(key, cachedRefs.size, resolution)
+            cachedEvents = contiguousResolvedEvents(cachedRefs, resolution)
             if (cachedEvents.isNotEmpty()) {
                 // Cap initial emit to viewport-relevant size. The remainder
                 // is still in cached.refs and will be retrieved by
@@ -388,16 +409,93 @@ class TimelineService @Inject constructor(
         timelineKey: String,
         until: Long,
         limit: Int,
-    ): List<NostrEvent> {
+    ): List<NostrEvent> = loadCachedTimelinePage(timelineKey, until, limit).contiguousEvents
+
+    private suspend fun loadCachedTimelinePage(
+        timelineKey: String,
+        until: Long,
+        limit: Int,
+    ): CachedTimelinePage {
+        if (limit <= 0) {
+            return CachedTimelinePage(
+                candidates = emptyList(),
+                resolution = TimelineEventResolution(emptyList(), emptyList()),
+                contiguousEvents = emptyList(),
+            )
+        }
         val keys = snapshotTimelineKeys(timelineKey)
-        val gathered = mutableListOf<TimelineRef>()
+        val gathered = LinkedHashMap<String, Pair<TimelineRef, LinkedHashSet<String>>>()
         for (k in keys) {
             val tl = timelines[k] ?: continue
-            gathered.addAll(tl.refs.filter { it.createdAt < until })
+            for (ref in tl.refs) {
+                if (ref.createdAt >= until) continue
+                val candidate = gathered.getOrPut(ref.id) { ref to linkedSetOf() }
+                candidate.second.addAll(tl.urls)
+            }
         }
-        gathered.sortWith(compareTimelineRefsDesc)
-        val ids = gathered.take(limit).map { it.id }
-        return eventLoader.getEvents(ids)
+        val candidates = gathered.values
+            .sortedWith { a, b -> compareTimelineRefsDesc.compare(a.first, b.first) }
+            .take(limit)
+            .map { (ref, hints) -> CachedRefCandidate(ref, hints.toList()) }
+        val resolution = eventLoader.getEvents(candidates.map { it.ref.id })
+        logPayloadMismatchOnce(timelineKey, candidates.size, resolution)
+        return CachedTimelinePage(
+            candidates = candidates,
+            resolution = resolution,
+            contiguousEvents = contiguousResolvedEvents(candidates.map { it.ref }, resolution),
+        )
+    }
+
+    private fun contiguousResolvedEvents(
+        refs: List<TimelineRef>,
+        resolution: TimelineEventResolution,
+    ): List<NostrEvent> {
+        val eventsById = resolution.events.associateBy { it.id }
+        val contiguous = ArrayList<NostrEvent>(refs.size)
+        for (ref in refs) {
+            val event = eventsById[ref.id] ?: break
+            contiguous += event
+        }
+        return contiguous
+    }
+
+    private fun logPayloadMismatchOnce(
+        timelineKey: String,
+        requestedCount: Int,
+        resolution: TimelineEventResolution,
+    ) {
+        if (resolution.missingIds.isEmpty() || !payloadMismatchLoggedKeys.add(timelineKey)) return
+        Log.w(
+            TAG,
+            "timeline payload miss key=${timelineKey.take(12)} requested=$requestedCount " +
+                "resolved=${resolution.events.size} missing=${resolution.missingIds.size}",
+        )
+    }
+
+    private suspend fun repairMissingTimelineRefs(page: CachedTimelinePage) {
+        if (page.resolution.missingIds.isEmpty()) return
+        val missing = page.resolution.missingIds.toHashSet()
+        val groups = linkedMapOf<List<String>, MutableList<String>>()
+        var repairIdCount = 0
+        for (candidate in page.candidates) {
+            if (candidate.ref.id !in missing) continue
+            val hints = candidate.relayHints.distinct()
+            groups.getOrPut(hints) { mutableListOf() }.add(candidate.ref.id)
+            repairIdCount++
+            if (repairIdCount >= TIMELINE_ID_REPAIR_CAP) break
+        }
+        var requestCount = 0
+        for ((hints, ids) in groups) {
+            var unresolved = ids.toList()
+            val hintBatches = if (hints.isEmpty()) listOf(emptyList())
+                else hints.chunked(MAX_SEEN_RELAY_HINTS)
+            for (hintBatch in hintBatches) {
+                if (requestCount >= TIMELINE_ID_REPAIR_REQUEST_CAP) return
+                unresolved = eventLoader.repairEvents(unresolved, hintBatch).missingIds
+                requestCount++
+                if (unresolved.isEmpty()) break
+            }
+        }
     }
 
     /**
@@ -410,11 +508,19 @@ class TimelineService @Inject constructor(
         until: Long,
         limit: Int,
     ): List<NostrEvent> {
-        // Try cache first
-        val cached = loadMoreTimeline(timelineKey, until, limit)
-        if (cached.size >= limit) return cached
+        // Resolve the known ref page before guessing a time window. Return only
+        // the contiguous prefix so the next cursor cannot advance across a hole.
+        var cachedPage = loadCachedTimelinePage(timelineKey, until, limit)
+        if (cachedPage.resolution.missingIds.isNotEmpty()) {
+            repairMissingTimelineRefs(cachedPage)
+            cachedPage = loadCachedTimelinePage(timelineKey, until, limit)
+        }
+        val cached = cachedPage.contiguousEvents
+        if (cached.isNotEmpty()) return cached
 
-        // Cache exhausted — fetch from relays using stored filter + urls.
+        // No usable cached prefix (no refs, or targeted repair failed): preserve
+        // the existing time-window fallback so offline/quirky relays cannot strand
+        // pagination permanently.
         // Keys sharing the same filter are coalesced into ONE REQ across the
         // union of their relay groups (first-seen order, deduped) — the old
         // per-key loop sent duplicate until-paginated REQs to overlapping
@@ -513,12 +619,14 @@ class TimelineService @Inject constructor(
     fun clear() {
         timelines.clear()
         multiKeys.clear()
+        payloadMismatchLoggedKeys.clear()
     }
 
     // ── Test helpers ────────────────────────────────────────────────────────
     internal fun resetForTest() {
         timelines.clear()
         multiKeys.clear()
+        payloadMismatchLoggedKeys.clear()
     }
 
     internal fun timelineForTest(key: String): List<TimelineRef>? = timelines[key]?.refs
