@@ -54,6 +54,14 @@ private fun isVideoImeta(media: ImetaMedia): Boolean =
 
 private const val DEFAULT_ASPECT_RATIO = 16f / 9f
 
+// Render-model DoS bounds (untrusted relay content up to 512KB reaches both the
+// insert-time sidecar path and the on-composition sidecar-miss fallback):
+// scan cap mirrors ContentParser's MAX_PARSE_CHARS (private there) — VIDEO_EXT_REGEX
+// is O(content); URL cap bounds the per-event sidecar models, downstream only ever
+// consumes the first few (autoplay firstOrNull).
+private const val MAX_VIDEO_SCAN_CHARS = 20_000
+private const val MAX_VIDEO_URLS = 8
+
 private val MEDIA_TRAILING_PUNCTUATION = charArrayOf('.', ',', ';', ':', '!', ')', ']', '}', '"', '\'')
 
 internal fun cleanMediaUrl(url: String): String =
@@ -73,14 +81,45 @@ internal fun mediaUrlMatches(left: String, right: String): Boolean {
 private fun List<ImetaMedia>.firstMatchingMedia(url: String): ImetaMedia? =
     firstOrNull { mediaUrlMatches(it.url, url) }
 
-private fun Iterable<String>.distinctMediaUrls(): List<String> {
+/** Dedup key — the exact comparison [mediaUrlMatches] makes: cleaned URL, hash
+ *  stripped, and query stripped when the path ends in a filename-like segment
+ *  (its last-'.'-segment check). Lets dedup run O(n) instead of pairwise O(n²). */
+private fun mediaUrlDedupKey(url: String): String {
+    val cleaned = cleanMediaUrl(url).substringBefore('#')
+    val withoutQuery = cleaned.substringBefore('?')
+    return if (withoutQuery.substringAfterLast('/').contains('.')) withoutQuery else cleaned
+}
+
+private fun Sequence<String>.distinctMediaUrls(limit: Int): List<String> {
+    val seen = LinkedHashSet<String>()
     val result = mutableListOf<String>()
     for (url in this) {
-        if (result.none { existing -> mediaUrlMatches(existing, url) }) {
+        if (seen.add(mediaUrlDedupKey(url))) {
             result.add(url)
+            if (result.size == limit) break
         }
     }
     return result
+}
+
+private fun buildBoundedVideoRenderModels(
+    effectiveContent: String,
+    imetaMedia: List<ImetaMedia>,
+    effectiveKind: Int,
+): List<VideoRenderModel> {
+    val cappedContent = effectiveContent.take(MAX_VIDEO_SCAN_CHARS)
+    val regexVideoUrls = VIDEO_EXT_REGEX
+        .findAll(YOUTUBE_REGEX.replace(cappedContent, ""))
+        .map { cleanMediaUrl(it.value) }
+    val imetaVideoUrls = imetaMedia.asSequence()
+        .filter(::isVideoImeta)
+        .map { cleanMediaUrl(it.url) }
+        .filter { it.isNotBlank() }
+    val allVideoUrls = (regexVideoUrls + imetaVideoUrls)
+        .distinctMediaUrls(MAX_VIDEO_URLS)
+    return allVideoUrls.map { url ->
+        buildModelForUrl(url, imetaMedia, isShortFormVideoKind(effectiveKind))
+    }
 }
 
 /**
@@ -112,15 +151,7 @@ fun buildVideoRenderModels(
         Triple(content, ImetaParser.parseFromList(tags), kind)
     }
 
-    val youtubeStripped = YOUTUBE_REGEX.replace(effectiveContent, "")
-    val regexVideoUrls = VIDEO_EXT_REGEX.findAll(youtubeStripped).map { cleanMediaUrl(it.value) }.toList()
-    val imetaVideoUrls = imetaMedia
-        .filter(::isVideoImeta)
-        .map { cleanMediaUrl(it.url) }
-        .filter { it.isNotBlank() }
-    val allVideoUrls = (regexVideoUrls + imetaVideoUrls).distinctMediaUrls()
-    if (allVideoUrls.isEmpty()) return emptyList()
-    return allVideoUrls.map { url -> buildModelForUrl(url, imetaMedia, isShortFormVideoKind(effectiveKind)) }
+    return buildBoundedVideoRenderModels(effectiveContent, imetaMedia, effectiveKind)
 }
 
 fun buildVideoRenderModels(row: FeedRow): List<VideoRenderModel> {
@@ -142,28 +173,7 @@ fun buildVideoRenderModels(row: FeedRow): List<VideoRenderModel> {
         Triple(row.content, ImetaParser.parse(row.tags), row.kind)
     }
 
-    // Strip YouTube URLs first (they're web pages, not playable files)
-    val youtubeStripped = YOUTUBE_REGEX.replace(effectiveContent, "")
-
-    // Collect video URLs from regex
-    val regexVideoUrls = VIDEO_EXT_REGEX.findAll(youtubeStripped)
-        .map { cleanMediaUrl(it.value) }
-        .toList()
-
-    // Collect video URLs from imeta (MIME-based)
-    val imetaVideoUrls = imetaMedia
-        .filter(::isVideoImeta)
-        .map { cleanMediaUrl(it.url) }
-        .filter { it.isNotBlank() }
-
-    val allVideoUrls = (regexVideoUrls + imetaVideoUrls)
-        .distinctMediaUrls()
-
-    if (allVideoUrls.isEmpty()) return emptyList()
-
-    return allVideoUrls.map { url ->
-        buildModelForUrl(url, imetaMedia, isShortFormVideoKind(effectiveKind))
-    }
+    return buildBoundedVideoRenderModels(effectiveContent, imetaMedia, effectiveKind)
 }
 
 private fun buildModelForUrl(

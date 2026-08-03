@@ -1,14 +1,14 @@
 package com.unsilence.app.data.model
 
+import com.unsilence.app.data.memory.FeedRow
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
- * Unit tests for [buildVideoRenderModels] — the insert-time sidecar path that
- * pre-computes video metadata (poster, aspect, dims) consumed by
- * VideoPlaybackScope for autoplay eligibility (`noteIdsWithVideo`).
+ * Unit tests for [buildVideoRenderModels] — both the insert-time sidecar path
+ * and the on-composition fallback consumed by VideoPlaybackScope.
  *
  * This is a SEPARATE code path from ContentParser.tokenize: it has its own
  * kind-6/16 repost unwrap, so it needs its own coverage. The wrapper `tags`
@@ -16,6 +16,29 @@ import org.junit.Test
  * by unwrapping the embedded inner-event JSON — a true regression guard.
  */
 class VideoRenderModelTest {
+
+    private fun row(content: String, tags: String = "[]") = FeedRow(
+        id = "row",
+        pubkey = "a".repeat(64),
+        kind = 1,
+        content = content,
+        createdAt = 1L,
+        tags = tags,
+        relayUrl = "wss://relay.example",
+        replyToId = null,
+        rootId = null,
+        hasContentWarning = false,
+        contentWarningReason = null,
+        zapTotalSats = 0L,
+        authorName = null,
+        authorDisplayName = null,
+        authorPicture = null,
+        authorNip05 = null,
+        reactionCount = 0,
+        replyCount = 0,
+        repostCount = 0,
+        zapCount = 0,
+    )
 
     private val innerVideoEvent = """{"id":"inner","pubkey":"${"b".repeat(64)}","kind":21,""" +
         """"content":"","created_at":900,""" +
@@ -140,5 +163,48 @@ class VideoRenderModelTest {
     fun `malformed embedded json does not crash`() {
         val models = buildVideoRenderModels(kind = 16, content = "not json", tags = emptyList())
         assertNotNull(models)
+    }
+
+    // ── Insert-time DoS bounds ────────────────────────────────────────────────
+
+    @Test
+    fun `video urls are capped at 8 after dedup`() {
+        val content = (1..10).joinToString(" ") { "https://h/v$it.mp4" }
+        val models = buildVideoRenderModels(kind = 1, content = content, tags = emptyList())
+        assertEquals(8, models.size)
+        // Order stable: first occurrence wins, so the FIRST 8 URLs survive.
+        assertEquals((1..8).map { "https://h/v$it.mp4" }, models.map { it.videoUrl })
+    }
+
+    @Test
+    fun `near-duplicate video urls dedup to first occurrence`() {
+        val models = buildVideoRenderModels(
+            kind = 1,
+            content = "https://h/b.mp4 https://h/a.mp4?dl=1 https://h/a.mp4?dl=2 https://h/a.mp4#frag",
+            tags = emptyList(),
+        )
+        assertEquals(2, models.size)
+        assertEquals("https://h/b.mp4", models[0].videoUrl)
+        assertEquals("https://h/a.mp4?dl=1", models[1].videoUrl)
+    }
+
+    @Test
+    fun `content beyond the 20k scan cap is not scanned`() {
+        // 512KB relay content: the regex pass must be bounded by the scan cap, so a
+        // video URL past 20k chars is never seen (and the pathological input returns fast).
+        val content = "https://h/first.mp4 " + "x".repeat(512 * 1024) + " https://h/late.mp4"
+        val models = buildVideoRenderModels(kind = 1, content = content, tags = emptyList())
+        assertEquals(1, models.size)
+        assertEquals("https://h/first.mp4", models[0].videoUrl)
+    }
+
+    @Test
+    fun `feed row fallback uses the same scan and output bounds`() {
+        val content = (1..10).joinToString(" ") { "https://h/v$it.mp4" } +
+            "x".repeat(20_000) + " https://h/late.mp4"
+
+        val models = buildVideoRenderModels(row(content))
+
+        assertEquals((1..8).map { "https://h/v$it.mp4" }, models.map { it.videoUrl })
     }
 }
