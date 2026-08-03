@@ -651,7 +651,7 @@ class MemoryEventStoreInvariantsTest {
     }
 
     @Test
-    fun `replyCount ignores inflated persisted scalar and uses unique live replies`() = runTest {
+    fun `text snapshot omits reply scalar and ignores legacy value`() = runTest {
         val source = MemoryEventStore(
             object : MuteKeyProvider {},
             com.unsilence.app.data.relay.stubTimelineServiceProvider(),
@@ -661,17 +661,66 @@ class MemoryEventStoreInvariantsTest {
 
         val snapshot = StringWriter()
         snapshot.buffered().use { source.saveSnapshotTo(it) }
-        val inflated = snapshot.toString().replace(
-            "reply|reply-source|1",
-            "reply|reply-source|111",
+        val snapshotText = snapshot.toString()
+        assertFalse(snapshotText.lineSequence().any { it.startsWith("reply|") })
+        val withLegacyScalar = snapshotText.replace(
+            "---AGGREGATES---",
+            "---AGGREGATES---\nreply|reply-source|111",
         )
         val restored = MemoryEventStore(
             object : MuteKeyProvider {},
             com.unsilence.app.data.relay.stubTimelineServiceProvider(),
         )
-        restored.restoreSnapshotFrom(StringReader(inflated).buffered())
+        restored.restoreSnapshotFrom(StringReader(withLegacyScalar).buffered())
 
         assertEquals(1, restored.replyCount("reply-source"))
+    }
+
+    @Test
+    fun `binary snapshot writes zero reply scalar and ignores legacy entries`() = runTest {
+        val source = MemoryEventStore(
+            object : MuteKeyProvider {},
+            com.unsilence.app.data.relay.stubTimelineServiceProvider(),
+        )
+        source.insert(event(id = "binary-reply-source", kind = 1))
+        source.insert(
+            event(
+                id = "binary-reply-child",
+                kind = 1,
+                replyToId = "binary-reply-source",
+            ),
+        )
+
+        val snapshot = ByteArrayOutputStream()
+        val sizes = DataOutputStream(snapshot).use { source.saveSnapshotBinary(it) }
+        val bytes = snapshot.toByteArray()
+        val aggregatesOffset = sizes.headerBytes + sizes.followsBytes + sizes.eventsBytes
+        DataInputStream(
+            ByteArrayInputStream(bytes, aggregatesOffset, bytes.size - aggregatesOffset),
+        ).use { assertEquals(0, it.readInt()) }
+
+        val legacyField = ByteArrayOutputStream().also { buffer ->
+            DataOutputStream(buffer).use { output ->
+                val idBytes = "binary-reply-source".toByteArray(Charsets.UTF_8)
+                output.writeInt(1)
+                output.writeInt(idBytes.size)
+                output.write(idBytes)
+                output.writeInt(111)
+            }
+        }.toByteArray()
+        val legacySnapshot =
+            bytes.copyOfRange(0, aggregatesOffset) +
+                legacyField +
+                bytes.copyOfRange(aggregatesOffset + Int.SIZE_BYTES, bytes.size)
+        val restored = MemoryEventStore(
+            object : MuteKeyProvider {},
+            com.unsilence.app.data.relay.stubTimelineServiceProvider(),
+        )
+        DataInputStream(ByteArrayInputStream(legacySnapshot)).use {
+            restored.restoreSnapshotBinary(it)
+        }
+
+        assertEquals(1, restored.replyCount("binary-reply-source"))
     }
 
     @Test
@@ -688,6 +737,29 @@ class MemoryEventStoreInvariantsTest {
         )
 
         assertEquals(0, store.replyCount(parentId))
+    }
+
+    @Test
+    fun `reply stats invalidate when an indexed reply payload is evicted`() = runTest {
+        val parentId = "eviction-parent"
+        val replyId = "eviction-reply"
+        store.viewedPubkey = "anchored-parent-author"
+        store.insert(event(id = parentId, pubkey = "anchored-parent-author", kind = 1))
+        store.insert(event(id = replyId, pubkey = "reply-author", kind = 1, replyToId = parentId))
+
+        store.statsFlow(parentId).test {
+            assertEquals(1, awaitItem().replyCount)
+            repeat(4_998) { i ->
+                store.insert(event(id = "eviction-fill-a-$i", pubkey = "fill-a", kind = 1))
+            }
+            repeat(500) { i ->
+                store.insert(event(id = "eviction-fill-b-$i", pubkey = "fill-b", kind = 1))
+            }
+
+            assertEquals(0, awaitItem().replyCount)
+            assertNull(store.getNostrEvent(replyId))
+            cancelAndIgnoreRemainingEvents()
+        }
     }
 
     // ── Reaction count ──────────────────────────────────────────────────────

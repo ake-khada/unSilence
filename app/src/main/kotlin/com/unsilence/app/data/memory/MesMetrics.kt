@@ -19,7 +19,8 @@ data class MesSizeSnapshot(
     val followerCountEntries: Int,
 
     // ── Engagement aggregates ───────────────────────────────────────────
-    val replyCountEntries: Int,
+    /** Unique target memberships in the live reply-id index. */
+    val replyIndexEntries: Int,
     val repostCountEntries: Int,
     val reactionCountEntries: Int,
     val zapStatsEntries: Int,
@@ -57,8 +58,10 @@ data class MesSizeSnapshot(
         eventBytes + profileBytes +
             // Actor indexes: 64-char hex strings → ~128 bytes per entry (key + value ref)
             (reactedTargetsTotal + repostedTargetsTotal + zappedTargetsTotal) * 128L +
-            // Engagement: ~40 bytes per entry (64-char key + int/long value)
-            (replyCountEntries + repostCountEntries + reactionCountEntries + zapStatsEntries + statsUpdatedAtEntries) * 40L +
+            // Reply set memberships carry an event-id key/reference; scalar
+            // engagement maps carry a key + int/long value.
+            replyIndexEntries * 128L +
+            (repostCountEntries + reactionCountEntries + zapStatsEntries + statsUpdatedAtEntries) * 40L +
             // Sidecars: ~200 bytes avg per entry (EventModel ~600 bytes avg)
             (videoRenderModelEntries + imetaImageDimEntries) * 200L +
             eventModelEntries * 600L +
