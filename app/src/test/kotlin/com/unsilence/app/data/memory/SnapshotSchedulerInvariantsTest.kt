@@ -286,9 +286,9 @@ class SnapshotSchedulerInvariantsTest {
     // ── Test 8: Concurrent modification during save must not corrupt file ──
     //
     // Production bug: saveSnapshotBinary did `writeInt(chm.size)` followed by
-    // `for (e in chm) ...` for six ConcurrentHashMaps (replyCounts,
-    // repostCounts, reactionCounts, zapStatsByEventId, trustScoresByUrl,
-    // relayMonitorsByUrl). CHM iteration is weakly-consistent with respect
+    // `for (e in chm) ...` for aggregate and health ConcurrentHashMaps
+    // (including the now-retired reply scalar). CHM iteration is weakly
+    // consistent with respect
     // to .size — a concurrent insert mid-iteration can produce more entries
     // than the count we just wrote, leaving the reader misaligned. Field log
     // showed `IOException: Invalid string length: 1631139890` on restore.

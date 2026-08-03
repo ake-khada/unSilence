@@ -363,7 +363,6 @@ class MemoryEventStore @Inject constructor(
     private val lastTouchedAt = ConcurrentHashMap<String, Long>()
 
     // ─── Derived aggregates (incrementally maintained) ──────────────────────
-    private val replyCounts = ConcurrentHashMap<String, Int>()
     private val repostCounts = ConcurrentHashMap<String, Int>()
     private val zapStatsByEventId = ConcurrentHashMap<String, ZapAggregate>()
     private val statsUpdatedAt = ConcurrentHashMap<String, Long>()
@@ -1183,63 +1182,27 @@ class MemoryEventStore @Inject constructor(
     }
 
     private fun handleNote(event: NostrEvent, dirty: InsertDirty) {
-        // Increment reply counts for targets
-        event.replyToId?.let { targetId ->
-            replyCounts.compute(targetId) { _, v -> (v ?: 0) + 1 }
-            statsUpdatedAt[targetId] = System.currentTimeMillis()
-            dirty.invalidatedStatsIds.add(targetId)
-        }
-        // If rootId differs from replyToId, root also gets a reply count
+        invalidateReplyTarget(event.replyToId, dirty)
         if (event.rootId != null && event.rootId != event.replyToId) {
-            replyCounts.compute(event.rootId) { _, v -> (v ?: 0) + 1 }
-            statsUpdatedAt[event.rootId] = System.currentTimeMillis()
-            dirty.invalidatedStatsIds.add(event.rootId)
+            invalidateReplyTarget(event.rootId, dirty)
         }
     }
 
     private fun handleNip22Comment(event: NostrEvent, dirty: InsertDirty) {
         // Addressable-root counts come from articleCommentIds(coord). Event-addressed
-        // video roots (21/22) and kind-1111 parents use the ordinary id counter.
+        // video roots (21/22) and kind-1111 parents use the ordinary live reply index.
         val parentKind = event.tags
             .firstOrNull { it.size >= 2 && it[0] == "k" }
             ?.getOrNull(1)
             ?.toIntOrNull()
-        if (parentKind !in setOf(21, 22, 34235, 34236, 1111)) return
+        if (parentKind !in COUNTED_NIP22_PARENT_KINDS) return
 
         val parentId = event.replyToId
             ?: event.tags.firstOrNull { it.size >= 2 && it[0] == "e" }?.getOrNull(1)
             ?: return
         if (parentId == event.id) return
 
-        replyCounts.compute(parentId) { _, v -> (v ?: 0) + 1 }
-        statsUpdatedAt[parentId] = System.currentTimeMillis()
-        dirty.invalidatedStatsIds.add(parentId)
-    }
-
-    private fun reconcileNip22CommentReplyCountsFromEvents() {
-        val derived = HashMap<String, Int>()
-        for (event in eventsById.values) {
-            if (event.kind != 1111) continue
-            val parentKind = event.tags
-                .firstOrNull { it.size >= 2 && it[0] == "k" }
-                ?.getOrNull(1)
-                ?.toIntOrNull()
-            if (parentKind !in setOf(21, 22, 34235, 34236, 1111)) continue
-            val parentId = event.replyToId
-                ?: event.tags.firstOrNull { it.size >= 2 && it[0] == "e" }?.getOrNull(1)
-                ?: continue
-            if (parentId == event.id) continue
-            derived[parentId] = (derived[parentId] ?: 0) + 1
-        }
-        for ((parentId, count) in derived) {
-            if ((replyCounts[parentId] ?: 0) < count) {
-                replyCounts[parentId] = count
-                statsUpdatedAt[parentId] = maxOf(
-                    statsUpdatedAt[parentId] ?: 0L,
-                    System.currentTimeMillis(),
-                )
-            }
-        }
+        invalidateReplyTarget(parentId, dirty)
     }
 
     private fun handleFollows(event: NostrEvent, dirty: InsertDirty? = null) {
@@ -1480,7 +1443,7 @@ class MemoryEventStore @Inject constructor(
         imetaImageDimsByEventId.remove(event.id)
         eventModelsByEventId.remove(event.id)
         forEachReplyIndexTarget(event) { targetId ->
-            idsByReplyTarget[targetId]?.remove(event.id)
+            removeReplyIndexEntry(targetId, event.id)
         }
         if (event.kind == 30023 || event.kind == 34235 || event.kind == 34236) {
             addressableCoordinate(event)?.let { coord ->
@@ -1514,9 +1477,9 @@ class MemoryEventStore @Inject constructor(
     private fun deindexDerivedForDeletion(event: NostrEvent, dirty: InsertDirty) {
         when (event.kind) {
             1 -> {
-                decrementReplyTarget(event.replyToId, dirty)
+                invalidateRemovedReplyTarget(event.replyToId, dirty)
                 if (event.rootId != null && event.rootId != event.replyToId) {
-                    decrementReplyTarget(event.rootId, dirty)
+                    invalidateRemovedReplyTarget(event.rootId, dirty)
                 }
             }
             1111 -> {
@@ -1524,10 +1487,10 @@ class MemoryEventStore @Inject constructor(
                     .firstOrNull { it.size >= 2 && it[0] == "k" }
                     ?.getOrNull(1)
                     ?.toIntOrNull()
-                if (parentKind == 1111) {
+                if (parentKind in COUNTED_NIP22_PARENT_KINDS) {
                     val parentId = event.replyToId
                         ?: event.tags.firstOrNull { it.size >= 2 && it[0] == "e" }?.getOrNull(1)
-                    if (parentId != event.id) decrementReplyTarget(parentId, dirty)
+                    if (parentId != event.id) invalidateRemovedReplyTarget(parentId, dirty)
                 }
             }
             6, 16 -> {
@@ -1564,11 +1527,14 @@ class MemoryEventStore @Inject constructor(
         }
     }
 
-    private fun decrementReplyTarget(targetId: String?, dirty: InsertDirty) {
+    private fun invalidateReplyTarget(targetId: String?, dirty: InsertDirty) {
         if (targetId == null) return
-        decrementCounter(replyCounts, targetId)
         statsUpdatedAt[targetId] = System.currentTimeMillis()
         dirty.invalidatedStatsIds.add(targetId)
+    }
+
+    private fun invalidateRemovedReplyTarget(targetId: String?, dirty: InsertDirty) {
+        invalidateReplyTarget(targetId, dirty)
         dirty.stats = true
     }
 
@@ -2656,6 +2622,7 @@ class MemoryEventStore @Inject constructor(
             return
         }
 
+        val invalidatedReplyTargets = mutableSetOf<String>()
         for (entry in toEvict) {
             val event = eventsById.remove(entry.id) ?: continue
             deindexNotificationRecipients(event)
@@ -2664,13 +2631,19 @@ class MemoryEventStore @Inject constructor(
             idsByPubkey[event.pubkey]?.remove(entry.id)
             lastTouchedAt.remove(entry.id)
             forEachReplyIndexTarget(event) { targetId ->
-                idsByReplyTarget[targetId]?.remove(entry.id)
+                if (removeReplyIndexEntry(targetId, entry.id)) {
+                    invalidatedReplyTargets += targetId
+                }
             }
             // Article comment index: drop this id from each coord it referenced.
             if (event.kind == 1 || event.kind == 1111) {
                 for (tag in event.tags) {
                     if (tag.size >= 2 && (tag[0] == "a" || tag[0] == "A")) {
-                        commentIdsByCoord[tag[1]]?.remove(entry.id)
+                        val coord = tag[1]
+                        if (commentIdsByCoord[coord]?.remove(entry.id) == true) {
+                            invalidatedReplyTargets += coord
+                            articleIdByCoord[coord]?.let(invalidatedReplyTargets::add)
+                        }
                     }
                 }
             }
@@ -2684,13 +2657,19 @@ class MemoryEventStore @Inject constructor(
 
         // Clean up aggregates + contributor indexes that reference removed events
         val removeIds = toEvict.map { it.id }.toSet()
-        replyCounts.keys.removeAll(removeIds)
         repostCounts.keys.removeAll(removeIds)
         zapStatsByEventId.keys.removeAll(removeIds)
         statsUpdatedAt.keys.removeAll(removeIds)
         repostPubkeysByTarget.keys.removeAll(removeIds)
         reactionsByTarget.keys.removeAll(removeIds)
         zapDetailsByTarget.keys.removeAll(removeIds)
+
+        invalidatedReplyTargets.removeAll(removeIds)
+        if (invalidatedReplyTargets.isNotEmpty()) {
+            val updatedAt = System.currentTimeMillis()
+            invalidatedReplyTargets.forEach { statsUpdatedAt[it] = updatedAt }
+            _statsInvalidations.tryEmit(StatsInvalidation.Targeted(invalidatedReplyTargets))
+        }
 
         val summary = candidatesByKind
             .filter { (kind, candidates) -> candidates.size > (kindCaps[kind] ?: Int.MAX_VALUE) }
@@ -3169,6 +3148,13 @@ class MemoryEventStore @Inject constructor(
             ?.takeIf { it != event.id && it != direct }
             ?.let(action)
     }
+
+    private fun removeReplyIndexEntry(targetId: String, eventId: String): Boolean {
+        val ids = idsByReplyTarget[targetId] ?: return false
+        // Do not prune an empty set here: a concurrent inserter can already hold
+        // this set reference and add after a check-then-remove, orphaning its ID.
+        return ids.remove(eventId)
+    }
     fun repostCount(eventId: String): Int {
         val pubkeys = repostPubkeysForEvent(eventId)
         if (pubkeys.isNotEmpty()) return pubkeys.size
@@ -3238,7 +3224,7 @@ class MemoryEventStore @Inject constructor(
     private fun indexArticleComment(event: NostrEvent, dirty: InsertDirty?) {
         // Only NIP-22 kind-1111 is coordinate-indexed here, by its uppercase `A`
         // root scope. Legacy kind-1 article comments are NOT indexed by tag — they
-        // flow through the normal reply machinery (replyCounts / idsByReplyTarget),
+        // flow through the normal reply index (idsByReplyTarget),
         // keyed by the article EVENT id, which inherently counts only genuine replies
         // and excludes quote/mention posts (they reply elsewhere). Indexing legacy
         // kind-1 here too would double-count it (handleNote + this index).
@@ -4105,9 +4091,8 @@ class MemoryEventStore @Inject constructor(
      * Observe per-event engagement counts. Used by EventActionBar so individual
      * cards update their counts without going through a list-wide signal trigger.
      *
-     * Trigger: _statsSignal (kind 7/9735) plus _actionSignal (own kind 6/7/9734
-     * inserts) plus _feedSignal (kind 1 replies bump replyCounts). distinctUntilChanged
-     * via [EventStats] equality suppresses emission when THIS event's counts
+     * Targeted invalidations fire when a reply/reaction/repost/zap changes this
+     * event. [EventStats] equality suppresses emission when THIS event's counts
      * didn't change — so a kind-7 reaction on an unrelated event doesn't
      * recompose 100 visible cards, only the affected card.
      */
@@ -5035,7 +5020,7 @@ class MemoryEventStore @Inject constructor(
             profileBytes = profileBytes,
             followsEntries = followsByPubkey.size,
             followerCountEntries = followerCountCache.size,
-            replyCountEntries = replyCounts.size,
+            replyIndexEntries = idsByReplyTarget.values.sumOf { it.size },
             repostCountEntries = repostCounts.size,
             reactionCountEntries = reactionsByTarget.size,
             zapStatsEntries = zapStatsByEventId.size,
@@ -5149,10 +5134,6 @@ class MemoryEventStore @Inject constructor(
         // Write aggregates section
         writer.write("---AGGREGATES---")
         writer.newLine()
-        for ((id, count) in replyCounts) {
-            writer.write("reply|$id|$count")
-            writer.newLine()
-        }
         for ((id, count) in repostCounts) {
             writer.write("repost|$id|$count")
             writer.newLine()
@@ -5222,10 +5203,6 @@ class MemoryEventStore @Inject constructor(
         reindexReactionsFromEvents()
         rebuildActionEventIndexesFromEvents()
         rebuildNotificationIndex()
-        // Backfill parent reply counts for old snapshots created before
-        // kind-1111 parent `e/k/p` counts existed. Uses max(existing, derived)
-        // so newer snapshots that already persisted the counts do not double.
-        reconcileNip22CommentReplyCountsFromEvents()
         // V2 aggregates persist zap counts but no per-zap detail rows — rebuild
         // them from retained kind-9735 events so the drawer matches the summary.
         repairZapDetailsFromReceipts()
@@ -5341,9 +5318,9 @@ class MemoryEventStore @Inject constructor(
             // number of entries than the size we just recorded. The reader
             // then reads garbage when it consumes the next field — observed
             // in production as 'Invalid string length: 1631139890'.
-            val replies = replyCounts.toMap()
-            d.writeInt(replies.size)
-            for ((id, count) in replies) { d.writeStr(id); d.writeInt(count) }
+            // Legacy reply-count field: keep the zero marker for V3-V16 wire
+            // compatibility. Counts are rebuilt from unique retained reply IDs.
+            d.writeInt(0)
             val reposts = repostCounts.toMap()
             d.writeInt(reposts.size)
             for ((id, count) in reposts) { d.writeStr(id); d.writeInt(count) }
@@ -5651,13 +5628,12 @@ class MemoryEventStore @Inject constructor(
         rebuildActionEventIndexesFromEvents()
         rebuildNotificationIndex()
 
-        // AGGREGATES section
+        // AGGREGATES section. V3-V16 scalar reply counts were inflatable when
+        // a reply payload was evicted and fetched again. Consume them only to
+        // advance the stream; the live index was rebuilt from retained events.
         val replyN = input.readInt()
         if (replyN < 0 || replyN > 5_000_000) throw IOException("Invalid reply count: $replyN")
-        for (i in 0 until replyN) {
-            val id = input.readStr(); val c = input.readInt()
-            replyCounts[id] = c
-        }
+        for (i in 0 until replyN) { input.readStr(); input.readInt() }
         val repostN = input.readInt()
         if (repostN < 0 || repostN > 5_000_000) throw IOException("Invalid repost count: $repostN")
         for (i in 0 until repostN) {
@@ -5886,10 +5862,6 @@ class MemoryEventStore @Inject constructor(
         // Reindex kind-7 reactions from raw events so the widened shortcode regex
         // reclassifies old Standard(":shortcode:") entries as Custom(shortcode, url).
         reindexReactionsFromEvents()
-        // Backfill parent reply counts for old snapshots created before
-        // kind-1111 parent `e/k/p` counts existed. Uses max(existing, derived)
-        // so newer snapshots that already persisted the counts do not double.
-        reconcileNip22CommentReplyCountsFromEvents()
         // Rebuild zap detail rows from retained kind-9735 events so the drawer
         // matches the persisted summary (the detail section can drift from the
         // aggregate section across saves; insertFromSnapshot skips handleZapReceipt).
@@ -6192,7 +6164,7 @@ class MemoryEventStore @Inject constructor(
         val parts = line.split("|")
         if (parts.size < 3) return
         when (parts[0]) {
-            "reply" -> replyCounts[parts[1]] = parts[2].toIntOrNull() ?: return
+            "reply" -> { /* legacy scalar: consume and ignore */ }
             "repost" -> repostCounts[parts[1]] = parts[2].toIntOrNull() ?: return
             "reaction" -> { /* legacy: skip, reactionsByTarget is source of truth */ }
             "zap" -> {
@@ -6434,7 +6406,6 @@ class MemoryEventStore @Inject constructor(
         commentIdsByCoord.clear()
         recentByCreatedAt.clear()
         lastTouchedAt.clear()
-        replyCounts.clear()
         repostCounts.clear()
         zapStatsByEventId.clear()
         statsUpdatedAt.clear()

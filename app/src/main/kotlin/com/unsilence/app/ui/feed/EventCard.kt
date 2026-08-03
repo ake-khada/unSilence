@@ -207,8 +207,8 @@ fun EventCard(
     // resolves the inner author for both cases.
     val effectiveProfile = authorProfile
 
-    // Live engagement counts. statsFlow re-emits when reactionCounts /
-    // replyCounts / repostCounts / zapStatsByEventId change for THIS event;
+    // Live engagement counts. statsFlow re-emits when the reaction/reply-id/
+    // repost/zap indexes change for THIS event;
     // distinctUntilChanged inside MES filters out signal bumps caused by
     // unrelated events. Falls back to the FeedRow snapshot when no provider
     // is wired (older surfaces, tests).
