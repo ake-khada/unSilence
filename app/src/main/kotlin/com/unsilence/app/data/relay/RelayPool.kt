@@ -76,6 +76,8 @@ internal const val MAX_EPHEMERAL_CONNECTIONS = 4
 private const val FOREGROUND_RECONNECT_STAGGER_MS = 200L
 private const val MAX_FOLLOW_REFRESH_RELAYS = 4
 private const val FOLLOW_REFRESH_TIMEOUT_MS = 12_000L
+private const val MAX_PROFILE_METADATA_REFRESH_RELAYS = 4
+private const val PROFILE_METADATA_REFRESH_TIMEOUT_MS = 12_000L
 private const val MUTE_LIST_FETCH_TIMEOUT_MS = 8_000L
 internal const val FOLLOW_REFRESH_FRESH_MS = 60_000L
 internal const val FOLLOW_REFRESH_RETRY_MS = 15_000L
@@ -119,6 +121,46 @@ internal fun shouldRunFollowRefresh(
     if (lastSuccessMs != null && nowMs - lastSuccessMs < FOLLOW_REFRESH_FRESH_MS) return false
     if (lastAttemptMs != null && nowMs - lastAttemptMs < FOLLOW_REFRESH_RETRY_MS) return false
     return true
+}
+
+/**
+ * A profile refresh is usable only after one of the verified relay events at
+ * the newest observed timestamp has reached MES (or MES already has a newer
+ * event). EOSE alone is only a socket boundary and must not unlock a merge
+ * against an older snapshot.
+ */
+internal fun profileMetadataRefreshSettled(
+    currentEventId: String?,
+    currentCreatedAt: Long?,
+    receivedCreatedAtById: Map<String, Long>,
+): Boolean {
+    val newestReceivedAt = receivedCreatedAtById.values.maxOrNull() ?: return false
+    val retainedAt = currentCreatedAt ?: return false
+    if (retainedAt > newestReceivedAt) return true
+    return retainedAt == newestReceivedAt &&
+        currentEventId != null &&
+        receivedCreatedAtById[currentEventId] == newestReceivedAt
+}
+
+/** Wire-level result of the destructive-save kind-0 preflight. */
+internal enum class ProfileMetadataRefreshResult {
+    /** At least one verified kind-0 reached MES at the newest observed timestamp. */
+    SETTLED,
+    /** No event arrived, but at least one relay completed the query with a real EOSE. */
+    CONFIRMED_ABSENT,
+    /** No verified event and no real EOSE, or a received event failed to settle. */
+    UNAVAILABLE,
+}
+
+internal fun profileMetadataRefreshResult(
+    receivedEventCount: Int,
+    realEoseCount: Int,
+    settled: Boolean,
+): ProfileMetadataRefreshResult = when {
+    receivedEventCount > 0 && settled -> ProfileMetadataRefreshResult.SETTLED
+    receivedEventCount > 0 -> ProfileMetadataRefreshResult.UNAVAILABLE
+    realEoseCount > 0 -> ProfileMetadataRefreshResult.CONFIRMED_ABSENT
+    else -> ProfileMetadataRefreshResult.UNAVAILABLE
 }
 
 /** Kinds accepted by every ID-based reference fetch. Empty repost hydration depends on this. */
@@ -1822,6 +1864,118 @@ class RelayPool @Inject constructor(
             (eventResponses > 0).also { refreshed ->
                 if (refreshed) followRefreshLastSuccessMs[pubkeyHex] = android.os.SystemClock.elapsedRealtime()
             }
+        }
+
+    /**
+     * Fetch the latest own kind-0 immediately before a destructive profile
+     * merge. Unlike ordinary profile hydration this intentionally has no
+     * freshness cache: explicit Save must not trust a snapshot that another
+     * client may have replaced since this process started.
+     *
+     * A verified EVENT is freshness evidence for an existing profile. A real
+     * EOSE with no EVENT is separately retained as confirmed absence so a new
+     * key can publish its first profile; lifecycle completion caused by a
+     * timeout or CLOSED frame is not absence evidence.
+     */
+    internal suspend fun refreshProfileMetadata(pubkeyHex: String): ProfileMetadataRefreshResult =
+        withContext(Dispatchers.IO) {
+            val writeRelays = memoryEventStore.get().writeRelaysFor(pubkeyHex)
+                .ifEmpty { GLOBAL_RELAY_URLS }
+            val targets = followRefreshRelayTargets(
+                writeRelayUrls = writeRelays,
+                indexRelayUrls = FOLLOWER_INDEX_RELAY_URLS,
+                limit = MAX_PROFILE_METADATA_REFRESH_RELAYS,
+            )
+            if (targets.isEmpty()) return@withContext ProfileMetadataRefreshResult.UNAVAILABLE
+
+            // Keep the canonical "profiles-" prefix so RelayPool's one-shot
+            // EOSE/CLOSE lifecycle applies on both pooled and ephemeral sockets.
+            val subId = "profiles-save-refresh-${System.nanoTime()}"
+            val req = buildJsonArray {
+                add(JsonPrimitive("REQ"))
+                add(JsonPrimitive(subId))
+                add(buildJsonObject {
+                    put("kinds", buildJsonArray { add(JsonPrimitive(0)) })
+                    put("authors", buildJsonArray { add(JsonPrimitive(pubkeyHex)) })
+                    put("limit", JsonPrimitive(1))
+                })
+            }.toString()
+
+            val receivedCreatedAtById = ConcurrentHashMap<String, Long>()
+            val eoseRelays = ConcurrentHashMap.newKeySet<String>()
+            val evidenceTap = RelayMessageTap { message ->
+                when (message) {
+                    is RelayTapMessage.VerifiedEvent -> {
+                        val event = message.event
+                        if (message.subscriptionId == subId &&
+                            event.kind == 0 && event.pubkey == pubkeyHex
+                        ) {
+                            receivedCreatedAtById[event.id] = event.createdAt
+                        }
+                    }
+                    is RelayTapMessage.Control -> {
+                        if (message.raw.startsWith("[\"EOSE\"") &&
+                            extractEoseSubId(message.raw) == subId
+                        ) {
+                            eoseRelays.add(message.relayUrl)
+                        }
+                    }
+                }
+            }
+            val eose = CompletableDeferred<Unit>()
+            oneShotEoseCallbacks[subId] = eose
+            processor.registerTap(evidenceTap)
+            val lifecycleComplete = try {
+                try {
+                    sendOneShotBatch(
+                        urls = targets,
+                        reqs = listOf(req),
+                        subIds = listOf(subId),
+                        timeoutMs = PROFILE_METADATA_REFRESH_TIMEOUT_MS,
+                        includeActiveFeedRelay = true,
+                    )
+                    withTimeoutOrNull(PROFILE_METADATA_REFRESH_TIMEOUT_MS) { eose.await() } != null
+                } finally {
+                    cleanupOneShotSub(subId)
+                }
+            } finally {
+                processor.unregisterTap(evidenceTap)
+            }
+
+            val settled = if (receivedCreatedAtById.isEmpty()) {
+                false
+            } else {
+                withTimeoutOrNull(COLD_LANE_FLUSH_MS) {
+                    while (true) {
+                        val current = memoryEventStore.get().getProfile(pubkeyHex)
+                        if (profileMetadataRefreshSettled(
+                                currentEventId = current?.id,
+                                currentCreatedAt = current?.createdAt,
+                                receivedCreatedAtById = receivedCreatedAtById,
+                            )
+                        ) {
+                            return@withTimeoutOrNull true
+                        }
+                        delay(50L)
+                    }
+                } == true
+            }
+
+            val result = profileMetadataRefreshResult(
+                receivedEventCount = receivedCreatedAtById.size,
+                realEoseCount = eoseRelays.size,
+                settled = settled,
+            )
+            val logMessage =
+                "PROFILE-REFRESH author=${pubkeyHex.take(8)} targets=${targets.size} " +
+                    "verified=${receivedCreatedAtById.size} eose=${eoseRelays.size} " +
+                    "lifecycle=$lifecycleComplete settled=$settled result=$result"
+            if (result != ProfileMetadataRefreshResult.UNAVAILABLE) {
+                Log.i(TAG, logMessage)
+            } else {
+                Log.w(TAG, logMessage)
+            }
+            result
         }
 
     /** Best-effort refresh; offline callers still receive the MES-known count. */

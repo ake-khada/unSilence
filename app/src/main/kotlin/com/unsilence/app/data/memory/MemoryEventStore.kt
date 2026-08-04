@@ -4368,6 +4368,7 @@ class MemoryEventStore @Inject constructor(
             nip05 = fields["nip05"],
             lud16 = fields["lud16"],
             banner = fields["banner"],
+            website = fields["website"],
             createdAt = profile.createdAt,
             updatedAt = profileUpdatedAt[pubkey] ?: 0L,
         )
@@ -6979,7 +6980,16 @@ private fun Map<String, String?>.withIdentityFallback(fallbackFields: Map<String
 private fun Map<String, String?>.nonBlankProfileField(key: String): String? =
     this[key]?.takeIf { it.isNotBlank() }
 
-private val PROFILE_JSON_KEYS = listOf("name", "display_name", "about", "picture", "nip05", "lud16", "banner")
+private val PROFILE_JSON_KEYS = listOf(
+    "name",
+    "display_name",
+    "about",
+    "picture",
+    "nip05",
+    "lud16",
+    "banner",
+    "website",
+)
 private val PROFILE_JSON_FIELD_ALIASES = mapOf(
     "display_name" to listOf("display_name", "displayName"),
     "picture" to listOf("picture", "avatar", "image"),

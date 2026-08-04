@@ -48,9 +48,15 @@ class ReportRepository @Inject constructor(
             val signed = signingManager.sign(template) ?: run {
                 Log.w(TAG, "Sign failed for report ${eventId.take(8)}…"); return@launch
             }
-            val writeRelays = memoryEventStore.writeRelaysFor(ownPubkey)
-            relayPool.publishToRelays(toEventJson(signed), writeRelays)
-            Log.i(TAG, "Reported ${eventId.take(8)}… type=${type.tagValue}")
+            val targets = publishTargetsWithGlobalFallback(
+                memoryEventStore.writeRelaysFor(ownPubkey),
+            )
+            relayPool.publishToRelays(toEventJson(signed), targets.toList())
+            Log.i(
+                TAG,
+                "Report dispatch requested event=${eventId.take(8)}… " +
+                    "type=${type.tagValue} targets=${targets.size}",
+            )
         }
     }
 
@@ -73,9 +79,15 @@ class ReportRepository @Inject constructor(
             val signed = signingManager.sign(template) ?: run {
                 Log.w(TAG, "Sign failed for profile report ${pubkey.take(8)}…"); return@launch
             }
-            val writeRelays = memoryEventStore.writeRelaysFor(ownPubkey)
-            relayPool.publishToRelays(toEventJson(signed), writeRelays)
-            Log.i(TAG, "Reported profile ${pubkey.take(8)}… type=${type.tagValue}")
+            val targets = publishTargetsWithGlobalFallback(
+                memoryEventStore.writeRelaysFor(ownPubkey),
+            )
+            relayPool.publishToRelays(toEventJson(signed), targets.toList())
+            Log.i(
+                TAG,
+                "Profile report dispatch requested pubkey=${pubkey.take(8)}… " +
+                    "type=${type.tagValue} targets=${targets.size}",
+            )
         }
     }
 }

@@ -263,6 +263,7 @@ data class UserEntity(
     val nip05: String? = null,
     val lud16: String? = null,
     val banner: String? = null,
+    val website: String? = null,
     val createdAt: Long = 0,
     val updatedAt: Long = 0,
     val followerCount: Long? = null,
