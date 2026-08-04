@@ -17,6 +17,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.semantics.clearAndSetSemantics
+import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -167,9 +169,13 @@ fun WotSearchSignal(
 fun WotImpersonationBadge(
     risk: ImpersonationRisk,
     modifier: Modifier = Modifier,
+    showLabel: Boolean = true,
 ) {
+    val explanation = "Possible impersonation: name matches ${risk.protectedProfile.displayLabel}"
     Row(
-        modifier = modifier,
+        modifier = modifier.clearAndSetSemantics {
+            contentDescription = explanation
+        },
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Text(
@@ -180,16 +186,18 @@ fun WotImpersonationBadge(
             fontWeight = FontWeight.SemiBold,
             maxLines = 1,
         )
-        Spacer(Modifier.width(3.dp))
-        Text(
-            text = "name match: ${risk.protectedProfile.displayLabel}",
-            color = Zap.copy(alpha = 0.92f),
-            fontSize = AppType.caption,
-            lineHeight = 12.sp,
-            fontWeight = FontWeight.Medium,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-        )
+        if (showLabel) {
+            Spacer(Modifier.width(3.dp))
+            Text(
+                text = "name match: ${risk.protectedProfile.displayLabel}",
+                color = Zap.copy(alpha = 0.92f),
+                fontSize = AppType.caption,
+                lineHeight = 12.sp,
+                fontWeight = FontWeight.Medium,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
     }
 }
 

@@ -3845,7 +3845,7 @@ class MemoryEventStoreInvariantsTest {
     }
 
     @Test
-    fun `searchUsersFlow sorts prefix and word boundary matches before substrings`() = runTest {
+    fun `searchUsersFlow returns every matching identity tier for downstream ranking`() = runTest {
         store.insert(event(
             id = "p-substring", pubkey = "substring", kind = 0,
             content = """{"name":"substring","display_name":"Unretrocalled","about":"last"}""",
@@ -3862,16 +3862,17 @@ class MemoryEventStoreInvariantsTest {
         store.searchUsersFlow("calle").test {
             val results = awaitItem()
             assertEquals(3, results.size)
-            assertEquals("A Calle Person", results[0].displayName)
-            assertEquals("Calle", results[1].displayName)
-            assertEquals("Unretrocalled", results[2].displayName)
+            assertEquals(
+                setOf("A Calle Person", "Calle", "Unretrocalled"),
+                results.map { it.displayName }.toSet(),
+            )
             cancelAndIgnoreRemainingEvents()
         }
     }
 
     @Test
-    fun `searchUsersFlow respects limit of 50`() = runTest {
-        for (i in 1..55) {
+    fun `searchUsersFlow does not truncate candidates at the display limit`() = runTest {
+        for (i in 1..61) {
             store.insert(event(
                 id = "profile-$i", pubkey = "pk-$i", kind = 0,
                 content = """{"name":"user$i","display_name":"User $i","about":"searchable bio"}""",
@@ -3880,7 +3881,7 @@ class MemoryEventStoreInvariantsTest {
 
         store.searchUsersFlow("user").test {
             val results = awaitItem()
-            assertEquals("Capped at 50", 50, results.size)
+            assertEquals("Ranking receives all candidates", 61, results.size)
             cancelAndIgnoreRemainingEvents()
         }
     }

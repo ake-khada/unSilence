@@ -102,6 +102,79 @@ class WotSurfacePolicyTest {
     }
 
     @Test
+    fun `search ranks trusted same-tier candidate before display truncation`() {
+        val lowTrust = (0 until 60).map { index ->
+            user("candidate-$index", displayName = "Odell ${index.toString().padStart(2, '0')}")
+        }
+        val trusted = user("trusted", displayName = "Z Odell")
+        val lookups = buildMap<String, WotLookup> {
+            lowTrust.forEach { put(it.pubkey, scored(rank = 1, followers = 0)) }
+            put(trusted.pubkey, scored(rank = 100, followers = 500))
+        }
+
+        val result = sortPeopleForSearch(
+            users = lowTrust + trusted,
+            query = "odell",
+            limit = 50,
+        ) { lookups[it] }
+
+        assertEquals(50, result.size)
+        assertEquals(trusted.pubkey, result.first().pubkey)
+        assertTrue(trusted.pubkey in result.map { it.pubkey })
+    }
+
+    @Test
+    fun `candidate cap counts matches rather than profiles scanned`() {
+        val nonMatches = (0 until 100).map { index ->
+            user("nonmatch-$index", displayName = "Unrelated $index")
+        }
+        val match = user("match", displayName = "Odell")
+
+        assertEquals(
+            listOf(match.pubkey),
+            boundedIdentitySearchCandidates(
+                users = (nonMatches + match).asSequence(),
+                query = "odell",
+                limit = 1,
+            ).map { it.pubkey },
+        )
+    }
+
+    @Test
+    fun `exact identity match beats higher-rank partial match`() {
+        val exact = user("exact", displayName = "Odell")
+        val partial = user("partial", displayName = "Odell Updates")
+        val lookups = mapOf(
+            exact.pubkey to scored(rank = 0, followers = 0),
+            partial.pubkey to scored(rank = 100, followers = 10_000),
+        )
+
+        assertEquals(
+            listOf(exact.pubkey, partial.pubkey),
+            sortPeopleForSearch(listOf(partial, exact), query = "odell") { lookups[it] }
+                .map { it.pubkey },
+        )
+    }
+
+    @Test
+    fun `zero-WoT candidates remain visible when no scored match exists`() {
+        val pending = user("pending")
+        val absent = user("absent")
+        val unknown = user("unknown")
+        val lookups = mapOf(
+            pending.pubkey to WotLookup.Pending,
+            absent.pubkey to WotLookup.Absent,
+        )
+
+        assertEquals(
+            setOf(pending.pubkey, absent.pubkey, unknown.pubkey),
+            sortPeopleForSearch(listOf(pending, absent, unknown), query = "user") { lookups[it] }
+                .map { it.pubkey }
+                .toSet(),
+        )
+    }
+
+    @Test
     fun `search ordering groups prefix and word boundary identity matches before substrings`() {
         val prefix = user("a", displayName = "Calle")
         val wordBoundary = user("b", displayName = "A Calle Person")
@@ -113,7 +186,7 @@ class WotSurfacePolicyTest {
         )
 
         assertEquals(
-            listOf(wordBoundary.pubkey, prefix.pubkey, substring.pubkey),
+            listOf(prefix.pubkey, wordBoundary.pubkey, substring.pubkey),
             sortPeopleForSearch(listOf(substring, prefix, wordBoundary), query = "calle") { lookups[it] }
                 .map { it.pubkey },
         )
@@ -121,8 +194,101 @@ class WotSurfacePolicyTest {
 
     @Test
     fun `identity search uses nip05 local part`() {
-        assertEquals(2, identitySearchMatchTier(user("a", nip05 = "calle@getalby.com"), "calle"))
+        assertEquals(3, identitySearchMatchTier(user("a", nip05 = "calle@getalby.com"), "calle"))
         assertEquals(-1, identitySearchMatchTier(user("b", about = "called by friends"), "called"))
+    }
+
+    @Test
+    fun `search impersonation policy uses weighted signal threshold matrix`() {
+        data class Case(
+            val reporters: Long? = null,
+            val muters: Long? = null,
+            val followers: Long? = null,
+            val followed: Boolean = false,
+            val followsResolved: Boolean = true,
+            val expected: SearchImpersonationDisposition,
+        )
+
+        val cases = listOf(
+            Case(reporters = 2, muters = 2, followers = 0, expected = SearchImpersonationDisposition.KEEP),
+            Case(reporters = 3, followers = 0, expected = SearchImpersonationDisposition.DEMOTE),
+            Case(muters = 3, followers = 0, expected = SearchImpersonationDisposition.DEMOTE),
+            Case(reporters = 10, followers = 2, expected = SearchImpersonationDisposition.DEMOTE),
+            Case(reporters = 10, followers = null, expected = SearchImpersonationDisposition.DEMOTE),
+            Case(reporters = 10, followers = 1, expected = SearchImpersonationDisposition.DROP),
+            Case(
+                reporters = 10,
+                followers = 0,
+                followed = true,
+                expected = SearchImpersonationDisposition.KEEP,
+            ),
+            Case(
+                reporters = 10,
+                followers = 0,
+                followsResolved = false,
+                expected = SearchImpersonationDisposition.DEMOTE,
+            ),
+        )
+
+        cases.forEachIndexed { index, case ->
+            assertEquals(
+                "case $index",
+                case.expected,
+                searchImpersonationDisposition(
+                    lookup = scored(
+                        rank = 5,
+                        followers = case.followers,
+                        muters = case.muters,
+                        reporters = case.reporters,
+                    ),
+                    isFollowed = case.followed,
+                    followsResolved = case.followsResolved,
+                ),
+            )
+        }
+    }
+
+    @Test
+    fun `reported account with followers is demoted but present`() {
+        val clean = user("clean")
+        val reported = user("reported")
+        val lookups = mapOf(
+            clean.pubkey to scored(rank = 1, followers = 1),
+            reported.pubkey to scored(rank = 100, followers = 500, reporters = 20),
+        )
+
+        assertEquals(
+            listOf(clean.pubkey, reported.pubkey),
+            sortPeopleForSearch(listOf(reported, clean), query = "user") { lookups[it] }
+                .map { it.pubkey },
+        )
+    }
+
+    @Test
+    fun `heavily reported account with near-zero followers is dropped unless followed`() {
+        val candidate = user("c")
+        val lookup = scored(rank = 100, followers = 0, reporters = 20)
+
+        assertEquals(
+            "Unresolved follows must conservatively retain the candidate",
+            listOf(candidate.pubkey),
+            sortPeopleForSearch(listOf(candidate), query = "user") { lookup }.map { it.pubkey },
+        )
+        assertTrue(
+            sortPeopleForSearch(
+                users = listOf(candidate),
+                query = "user",
+                followedPubkeys = emptySet(),
+            ) { lookup }.isEmpty(),
+        )
+        assertEquals(
+            listOf(candidate.pubkey),
+            sortPeopleForSearch(
+                users = listOf(candidate),
+                query = "user",
+                followedPubkeys = setOf(candidate.pubkey),
+            ) { lookup }.map { it.pubkey },
+        )
     }
 
     @Test
@@ -246,7 +412,7 @@ class WotSurfacePolicyTest {
         }.reversed()
         val expected = users.sortedByDescending { it.pubkey.toInt(16) }.map { it.pubkey }
         val sorters = listOf<(List<UserEntity>, (String) -> WotLookup?) -> List<UserEntity>>(
-            { input, lookup -> sortPeopleForSearch(input, "User", lookup) },
+            { input, lookup -> sortPeopleForSearch(input, "User", lookup = lookup) },
             { input, lookup -> sortPeopleByWotFollowers(input, lookup) },
             { input, lookup -> sortMentionsByWotRank(input, lookup) },
         )
@@ -373,6 +539,7 @@ class WotSurfacePolicyTest {
         rank: Int,
         followers: Long? = null,
         muters: Long? = null,
+        reporters: Long? = null,
     ): WotLookup.Scored {
         val subject = rank.toString(16).padStart(64, '0').takeLast(64)
         return WotLookup.Scored(
@@ -382,6 +549,7 @@ class WotSurfacePolicyTest {
                 rank = rank,
                 verifiedFollowers = followers,
                 verifiedMuters = muters,
+                verifiedReporters = reporters,
             ),
         )
     }
