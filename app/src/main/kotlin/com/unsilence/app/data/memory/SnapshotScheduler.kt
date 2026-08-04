@@ -149,9 +149,11 @@ class SnapshotScheduler @Inject constructor(
                 if (t is CancellationException) throw t
 
                 // A reader can fail after inserting part of the file. Make the
-                // fallback a true cold start, then quarantine the source so the
-                // next process launch cannot retry the same failure.
+                // fallback a true cold start, but preserve mute intent recorded
+                // while the long background restore was running.
+                val pendingMutePublishes = memoryEventStore.pendingMutePublishesSnapshot()
                 memoryEventStore.clear()
+                memoryEventStore.restorePendingMutePublishesAfterReset(pendingMutePublishes)
                 val badFile = quarantineSnapshot()
                 val artifact = badFile?.absolutePath ?: "unavailable"
                 if (t is SnapshotOwnerMismatchException) {

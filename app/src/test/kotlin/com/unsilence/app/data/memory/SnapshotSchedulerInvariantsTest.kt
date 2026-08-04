@@ -180,7 +180,7 @@ class SnapshotSchedulerInvariantsTest {
         store.insert(event(id = "partial-before-failure", kind = 1, createdAt = 100))
         scheduler.saveNow()
 
-        // Truncate a valid V17 file at its tail. Restore inserts the event before
+        // Truncate a valid V18 file at its tail. Restore inserts the event before
         // it reaches the missing relay-identity bytes, exercising partial-restore
         // cleanup rather than only an early header failure.
         val corruptBytes = snapshotFile.readBytes().let { it.copyOf(it.size - 1) }
@@ -191,6 +191,9 @@ class SnapshotSchedulerInvariantsTest {
         val restoredStore = MemoryEventStore(
             object : MuteKeyProvider {},
             com.unsilence.app.data.relay.stubTimelineServiceProvider(),
+        ).apply { ownPubkey = "owner" }
+        restoredStore.recordPendingMuteMutation(
+            MuteMutation(MuteMutationKind.User, "local-during-restore", muted = true),
         )
         val restoredScheduler = SnapshotScheduler(restoredStore, AtomicFile(snapshotFile))
         restoredScheduler.restoreIfPresent()
@@ -205,6 +208,11 @@ class SnapshotSchedulerInvariantsTest {
             "a late parse failure must clear partially restored rows",
             restoredStore.eventsByIds(setOf("partial-before-failure")).isEmpty(),
         )
+        assertEquals(
+            setOf("local-during-restore"),
+            restoredStore.getMuteList("owner")?.privatePubkeys,
+        )
+        assertNotNull(restoredStore.getPendingMutePublish("owner"))
 
         // A second process launch sees no live snapshot and starts normally.
         val secondLaunchStore = MemoryEventStore(

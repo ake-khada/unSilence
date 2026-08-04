@@ -50,6 +50,7 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
+import java.util.concurrent.atomic.AtomicReference
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -75,6 +76,7 @@ internal const val MAX_EPHEMERAL_CONNECTIONS = 4
 private const val FOREGROUND_RECONNECT_STAGGER_MS = 200L
 private const val MAX_FOLLOW_REFRESH_RELAYS = 4
 private const val FOLLOW_REFRESH_TIMEOUT_MS = 12_000L
+private const val MUTE_LIST_FETCH_TIMEOUT_MS = 8_000L
 internal const val FOLLOW_REFRESH_FRESH_MS = 60_000L
 internal const val FOLLOW_REFRESH_RETRY_MS = 15_000L
 
@@ -191,6 +193,26 @@ data class RelayConnectionDebugSnapshot(
     val queuedReqCount: Int,
     val hasActiveSubscription: Boolean,
 )
+
+/**
+ * Freshness evidence collected by the dedicated kind-10000 request.
+ *
+ * [receivedEvent] is signature-verified by EventProcessor. [fullEoseCoverage]
+ * is deliberately based on real EOSE frames, not the one-shot lifecycle signal:
+ * failed/closed ephemeral sockets are released as lifecycle-complete so they do
+ * not leak slots, but they are not proof that the relay-side list was queried.
+ */
+internal data class MuteListFetchResult(
+    val receivedEvent: NostrEvent? = null,
+    val eoseRelays: Set<String> = emptySet(),
+    val expectedRelays: Set<String> = emptySet(),
+) {
+    val fullEoseCoverage: Boolean
+        get() = expectedRelays.isNotEmpty() && eoseRelays.containsAll(expectedRelays)
+
+    val hasFreshnessEvidence: Boolean
+        get() = receivedEvent != null || fullEoseCoverage
+}
 
 /** Source of "which relays currently have a non-paused subscription."
  *  Consulted by the pool sweep to avoid force-closing connections with
@@ -1308,6 +1330,10 @@ class RelayPool @Inject constructor(
                                 processor.process(raw, url)
                             }
                             raw.startsWith("[\"EOSE\"") -> {
+                                // Keep ephemeral and pooled relay delivery equivalent:
+                                // registered taps need the real EOSE to distinguish a
+                                // completed query from a failed/closed socket.
+                                processor.process(raw, url)
                                 val eoseSubId = extractEoseSubId(raw)
                                 if (eoseSubId != null && eoseSubId in pendingSubs) {
                                     conn.send("""["CLOSE","$eoseSubId"]""")
@@ -1992,10 +2018,12 @@ class RelayPool @Inject constructor(
      * One-shot fetch for NIP-51 mute list (kind 10000).
      * Sent to indexer + connected write relays, same pattern as fetchRelayEcosystem.
      */
-    fun fetchMuteList(pubkeyHex: String, rawIndexerRelayUrls: List<String>) {
+    internal suspend fun fetchMuteList(
+        pubkeyHex: String,
+        rawIndexerRelayUrls: List<String>,
+    ): MuteListFetchResult {
         val indexerRelayUrls = rawIndexerRelayUrls.mapNotNull { normalizeRelayUrl(it) }.toSet()
         val subId = "mute-${System.nanoTime()}"
-        _activeOneShotSubs.add(subId)
         val req = buildJsonArray {
             add(JsonPrimitive("REQ"))
             add(JsonPrimitive(subId))
@@ -2007,12 +2035,68 @@ class RelayPool @Inject constructor(
         }.toString()
         val writeRelayUrls = memoryEventStore.get().writeRelaysFor(pubkeyHex)
             .mapNotNull { normalizeRelayUrl(it) }
-            .filter { it !in indexerRelayUrls && connections.containsKey(it) }
-        val allTargets = indexerRelayUrls + writeRelayUrls
-        for (url in allTargets) {
-            connections[url]?.let { sendOneShotToRelay(it, req) }
+            .filter { it !in indexerRelayUrls }
+        val allTargets = (writeRelayUrls + indexerRelayUrls).distinct()
+        if (allTargets.isEmpty()) {
+            Log.w(TAG, "NIP-51 mute-list fetch skipped: no relay targets")
+            return MuteListFetchResult()
         }
-        Log.d(TAG, "Fetching NIP-51 mute list for ${pubkeyHex.take(8)}… from ${indexerRelayUrls.size} indexers + ${writeRelayUrls.size} write relays")
+
+        val receivedEvent = AtomicReference<NostrEvent?>(null)
+        val eoseRelays = ConcurrentHashMap.newKeySet<String>()
+        val evidenceTap = RelayMessageTap { message ->
+            when (message) {
+                is RelayTapMessage.VerifiedEvent -> {
+                    val event = message.event
+                    if (message.subscriptionId == subId &&
+                        event.kind == 10000 && event.pubkey == pubkeyHex
+                    ) {
+                        receivedEvent.set(event)
+                    }
+                }
+                is RelayTapMessage.Control -> {
+                    if (message.raw.startsWith("[\"EOSE\"") &&
+                        extractEoseSubId(message.raw) == subId
+                    ) {
+                        eoseRelays.add(message.relayUrl)
+                    }
+                }
+            }
+        }
+        val eose = CompletableDeferred<Unit>()
+        oneShotEoseCallbacks[subId] = eose
+        processor.registerTap(evidenceTap)
+        val batchCompleted = try {
+            try {
+                sendOneShotBatch(
+                    urls = allTargets,
+                    reqs = listOf(req),
+                    subIds = listOf(subId),
+                    timeoutMs = MUTE_LIST_FETCH_TIMEOUT_MS,
+                    includeActiveFeedRelay = true,
+                )
+                withTimeoutOrNull(MUTE_LIST_FETCH_TIMEOUT_MS) { eose.await() } != null
+            } finally {
+                cleanupOneShotSub(subId)
+            }
+        } finally {
+            processor.unregisterTap(evidenceTap)
+        }
+        // EOSE is a socket boundary, not an EventProcessor/MES boundary.
+        delay(EVENT_PROCESSOR_SETTLE_MS)
+        val result = MuteListFetchResult(
+            receivedEvent = receivedEvent.get(),
+            eoseRelays = eoseRelays.toSet(),
+            expectedRelays = allTargets.toSet(),
+        )
+        Log.d(
+            TAG,
+            "NIP-51 mute-list fetch lifecycleComplete=$batchCompleted " +
+                "event=${result.receivedEvent != null} " +
+                "realEose=${result.eoseRelays.size}/${result.expectedRelays.size} " +
+                "(${indexerRelayUrls.size} indexers, ${writeRelayUrls.size} write relays)",
+        )
+        return result
     }
 
     /**

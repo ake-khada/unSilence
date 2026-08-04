@@ -52,6 +52,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.unsilence.app.data.memory.MuteList
 import com.unsilence.app.data.memory.SensitiveContentMode
 import com.unsilence.app.data.memory.UserEntity
+import com.unsilence.app.data.repository.MuteSyncState
 import com.unsilence.app.ui.feed.AvatarImage
 import com.unsilence.app.ui.common.LocalAppSessionKey
 import com.unsilence.app.ui.theme.AppType
@@ -78,6 +79,7 @@ fun FiltersScreen(
     val sensitiveMode by viewModel.sensitiveContentMode.collectAsStateWithLifecycle()
     val hashtagCap by viewModel.hashtagCap.collectAsStateWithLifecycle()
     val publishSafe by viewModel.publishSafe.collectAsStateWithLifecycle()
+    val muteSyncState by viewModel.muteSyncState.collectAsStateWithLifecycle()
     val profileVersion by viewModel.profileVersion.collectAsStateWithLifecycle()
 
     var activeTab by remember { mutableStateOf(MuteTab.USERS) }
@@ -145,6 +147,7 @@ fun FiltersScreen(
                     item {
                         MuteSyncBanner(
                             isAmberMode = viewModel.isAmberMode,
+                            state = muteSyncState,
                             onRetry = { viewModel.retryAmberPermissions() },
                             modifier = Modifier.padding(
                                 horizontal = Spacing.large,
@@ -636,6 +639,7 @@ private fun EmptyLabel(text: String) {
 @Composable
 private fun MuteSyncBanner(
     isAmberMode: Boolean,
+    state: MuteSyncState,
     onRetry: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -647,17 +651,22 @@ private fun MuteSyncBanner(
             .padding(Spacing.medium),
     ) {
         Text(
-            text = if (isAmberMode) {
-                "Mute sync disabled \u2014 Amber denied permission to encrypt your mute list. " +
-                    "Mutes work locally but won\u2019t sync."
-            } else {
-                "Mute sync disabled \u2014 encryption check failed. " +
-                    "Mutes work locally but won\u2019t sync to relays or other clients."
+            text = when (state) {
+                MuteSyncState.Preparing ->
+                    "Preparing mute sync. Changes are saved locally in the meantime."
+                MuteSyncState.WaitingForRelayList ->
+                    "Waiting for your relay mute list. Changes are saved locally and will sync automatically."
+                MuteSyncState.EncryptionUnavailable -> if (isAmberMode) {
+                    "Mute sync needs Amber encryption access. Changes are saved locally until access is restored."
+                } else {
+                    "Mute-list encryption is unavailable. Changes are saved locally and will retry automatically."
+                }
+                MuteSyncState.Ready -> "Mute sync is ready."
             },
             color = Warn,
             fontSize = AppType.caption,
         )
-        if (isAmberMode) {
+        if (isAmberMode && state == MuteSyncState.EncryptionUnavailable) {
             Spacer(Modifier.height(Spacing.small))
             Button(
                 onClick = onRetry,
@@ -669,7 +678,7 @@ private fun MuteSyncBanner(
                 modifier = Modifier.fillMaxWidth(),
             ) {
                 Text(
-                    text = "Retry permission request",
+                    text = "Retry Amber access",
                     fontWeight = FontWeight.SemiBold,
                     fontSize = AppType.body,
                 )

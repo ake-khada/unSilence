@@ -748,14 +748,16 @@ fun UserProfileScreen(
                                     when (if (wasMuted) viewModel.unmuteUser() else viewModel.muteUser()) {
                                         MuteResult.Queued ->
                                             showSnackbar(if (wasMuted) "Unmuted" else "Muted")
-                                        MuteResult.LocalOnly ->
+                                        MuteResult.PendingSync ->
                                             showSnackbar(
                                                 if (wasMuted) {
-                                                    "Unmuted locally — grant NIP-44 decrypt in Amber to sync"
+                                                    "Unmuted locally — will sync when the mute list is ready"
                                                 } else {
-                                                    "Muted locally — grant NIP-44 decrypt in Amber to sync"
+                                                    "Muted locally — will sync when the mute list is ready"
                                                 },
                                             )
+                                        MuteResult.Unavailable ->
+                                            showSnackbar("Mute action unavailable — try again")
                                         null -> showSnackbar("Action unavailable")
                                     }
                                 },
