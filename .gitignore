@@ -12,6 +12,9 @@ commonMain/
 /local.properties
 local.properties
 gradlew-local
+*.jks
+*.keystore
+keystore.properties
 node_modules/
 /build
 /app/build
