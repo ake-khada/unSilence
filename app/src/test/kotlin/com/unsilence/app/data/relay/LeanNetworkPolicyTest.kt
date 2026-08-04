@@ -63,4 +63,77 @@ class LeanNetworkPolicyTest {
         assertTrue(reconnectPriority(setOf(ConnectionPurpose.PERSISTENT)) < reconnectPriority(setOf(ConnectionPurpose.FEED_WARM)))
         assertEquals(4, MAX_EPHEMERAL_CONNECTIONS)
     }
+
+    @Test
+    fun `follow refresh samples write relays and independent indexes`() {
+        val targets = followRefreshRelayTargets(
+            writeRelayUrls = listOf(
+                "wss://write-one.example",
+                "wss://write-two.example",
+                "wss://write-three.example",
+            ),
+            indexRelayUrls = listOf(
+                "wss://index-one.example",
+                "wss://index-two.example",
+            ),
+            limit = 4,
+        )
+
+        assertEquals(
+            listOf(
+                "wss://write-one.example",
+                "wss://write-two.example",
+                "wss://index-one.example",
+                "wss://index-two.example",
+            ),
+            targets,
+        )
+    }
+
+    @Test
+    fun `follow refresh deduplicates overlap without exceeding its cap`() {
+        val targets = followRefreshRelayTargets(
+            writeRelayUrls = listOf("wss://shared.example/", "invalid"),
+            indexRelayUrls = listOf("wss://shared.example", "wss://index.example"),
+            limit = 4,
+        )
+
+        assertEquals(listOf("wss://shared.example", "wss://index.example"), targets)
+    }
+
+    @Test
+    fun `follow refresh skips fresh success and throttles a recent failed attempt`() {
+        val now = 100_000L
+
+        assertFalse(
+            shouldRunFollowRefresh(
+                forceRefresh = false,
+                nowMs = now,
+                lastSuccessMs = now - FOLLOW_REFRESH_FRESH_MS + 1,
+                lastAttemptMs = null,
+            ),
+        )
+        assertFalse(
+            shouldRunFollowRefresh(
+                forceRefresh = false,
+                nowMs = now,
+                lastSuccessMs = null,
+                lastAttemptMs = now - FOLLOW_REFRESH_RETRY_MS + 1,
+            ),
+        )
+    }
+
+    @Test
+    fun `forced publish preflight bypasses follow refresh freshness`() {
+        val now = 100_000L
+
+        assertTrue(
+            shouldRunFollowRefresh(
+                forceRefresh = true,
+                nowMs = now,
+                lastSuccessMs = now,
+                lastAttemptMs = now,
+            ),
+        )
+    }
 }

@@ -1,10 +1,8 @@
 package com.unsilence.app.ui.profile
 
-import android.util.Log
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.unsilence.app.data.auth.KeyManager
-import com.unsilence.app.data.auth.SigningManager
 import com.unsilence.app.data.memory.EventStats
 import com.unsilence.app.data.memory.FeedRow
 import com.unsilence.app.data.memory.MuteList
@@ -21,7 +19,6 @@ import com.unsilence.app.data.relay.ProtectedProfile
 import com.unsilence.app.data.relay.detectImpersonationRisk
 import com.unsilence.app.data.relay.isProtectedWotLookup
 import com.unsilence.app.data.relay.protectedProfileFor
-import com.unsilence.app.data.relay.toEventJson
 import com.unsilence.app.data.relay.GLOBAL_RELAY_URLS
 import com.unsilence.app.data.relay.NostrFilter
 import com.unsilence.app.data.relay.RelayPool
@@ -32,19 +29,20 @@ import com.unsilence.app.data.relay.WotHydrationCoalescer
 import com.unsilence.app.data.relay.wotLookupSnapshot
 import com.unsilence.app.data.relay.wotSubjectsForFeedRows
 import com.unsilence.app.data.repository.UserRepository
+import com.unsilence.app.data.repository.FollowBatchPublisher
+import com.unsilence.app.data.repository.FollowPublishResult
 import com.unsilence.app.data.repository.MuteListRepository
 import com.unsilence.app.data.repository.MuteResult
 import com.unsilence.app.data.repository.ReportRepository
 import com.unsilence.app.ui.feed.FeedContentFilter
 import com.unsilence.app.ui.shared.TimelineCardData
-import com.vitorpamplona.quartz.nip01Core.core.Event
 import com.vitorpamplona.quartz.nip01Core.core.hexToByteArray
-import com.vitorpamplona.quartz.nip01Core.signers.EventTemplate
 import com.vitorpamplona.quartz.nip19Bech32.toNpub
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.FlowPreview
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -56,13 +54,12 @@ import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.receiveAsFlow
 import kotlinx.coroutines.flow.sample
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import javax.inject.Inject
-
-private const val TAG = "UserProfileVM"
 
 data class ProfileWotProvenance(
     val providerName: String,
@@ -76,7 +73,7 @@ class UserProfileViewModel @Inject constructor(
     private val memoryEventStore: MemoryEventStore,
     private val relayPool: RelayPool,
     private val keyManager: KeyManager,
-    private val signingManager: SigningManager,
+    private val followBatchPublisher: FollowBatchPublisher,
     private val relayPreferencesStore: com.unsilence.app.data.relay.RelayPreferencesStore,
     private val timelineService: TimelineService,
     private val profilePipeline: com.unsilence.app.data.relay.ProfilePipeline,
@@ -249,6 +246,8 @@ class UserProfileViewModel @Inject constructor(
     }
 
     val followLoading = MutableStateFlow(false)
+    private val followFeedbackChannel = Channel<String>(capacity = Channel.BUFFERED)
+    val followFeedback = followFeedbackChannel.receiveAsFlow()
 
     init {
         // Combine pubkey + tab → resubscribe. Drives timeline lifecycle.
@@ -462,45 +461,8 @@ class UserProfileViewModel @Inject constructor(
 
         viewModelScope.launch(Dispatchers.IO) {
             try {
-                val currentFollows = memoryEventStore.getFollows(myPubkey)?.toList() ?: emptyList()
-                val nowFollowing = targetPubkey in currentFollows
-                val newFollowList = if (nowFollowing) {
-                    currentFollows.filter { it != targetPubkey }
-                } else {
-                    currentFollows + targetPubkey
-                }
-
-                val nowSeconds = System.currentTimeMillis() / 1000L
-                val tags = newFollowList.map { arrayOf("p", it) }.toTypedArray()
-                val template = EventTemplate<Event>(
-                    createdAt = nowSeconds,
-                    kind      = 3,
-                    tags      = tags,
-                    content   = "",
-                )
-                val signed = signingManager.sign(template) ?: return@launch
-
-                // Optimistic local mutation FIRST
-                if (nowFollowing) {
-                    memoryEventStore.removeFollow(myPubkey, targetPubkey)
-                } else {
-                    memoryEventStore.addFollow(myPubkey, targetPubkey)
-                }
-
-                val writeUrls = getWriteRelayUrls(myPubkey)
-                val indexerUrls = relayPreferencesStore.indexerRelayUrlsSnapshot()
-                val targetUrls = (writeUrls + indexerUrls).distinct()
-                try {
-                    relayPool.publishToRelays(toEventJson(signed), targetUrls)
-                } catch (e: Exception) {
-                    // Rollback optimistic mutation on publish failure
-                    if (nowFollowing) {
-                        memoryEventStore.addFollow(myPubkey, targetPubkey)
-                    } else {
-                        memoryEventStore.removeFollow(myPubkey, targetPubkey)
-                    }
-                    Log.w(TAG, "Follow publish failed, rolled back", e)
-                }
+                val result = followBatchPublisher.toggleFollow(targetPubkey)
+                followFeedbackChannel.send(profileFollowFeedback(result, targetPubkey))
             } finally {
                 followLoading.value = false
             }
@@ -508,9 +470,6 @@ class UserProfileViewModel @Inject constructor(
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────
-
-    private fun getWriteRelayUrls(pubkey: String): List<String> =
-        memoryEventStore.getRelayList(pubkey)?.write ?: GLOBAL_RELAY_URLS
 
     private fun MuteList?.mutesPubkey(pubkey: String): Boolean =
         this != null && (pubkey in pubkeys || pubkey in privatePubkeys)
@@ -535,4 +494,26 @@ class UserProfileViewModel @Inject constructor(
         }
 
     }
+}
+
+internal fun profileFollowFeedback(
+    result: FollowPublishResult,
+    targetPubkey: String,
+): String = when (result) {
+    is FollowPublishResult.Success ->
+        if (targetPubkey in result.follows) "Following" else "Unfollowed"
+    FollowPublishResult.AccountUnavailable ->
+        "Account key unavailable. Sign in again and try once more."
+    FollowPublishResult.FollowsUnavailable ->
+        "Follow list not loaded yet. Check your connection and try again."
+    FollowPublishResult.SigningFailed ->
+        "Follow update was not signed. Try again."
+    FollowPublishResult.ChangedWhileSigning ->
+        "Follow list changed while signing. Review it and try again."
+    is FollowPublishResult.NoRelayAccepted ->
+        if (result.rollbackRestored) {
+            "Follow update did not reach any relay. Your previous list was restored."
+        } else {
+            "Follow update did not reach any relay. A newer follow list was kept."
+        }
 }

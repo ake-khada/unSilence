@@ -68,8 +68,9 @@ internal val SNAPSHOT_BINARY_MAGIC = byteArrayOf(0x55, 0x53, 0x4E, 0x53) // "USN
  *  ownPubkey (foreign-account bleed guard). ≤V13 have no owner field and are
  *  trusted as legacy, restamped to V14 on next save. */
 /** V15 appends the own-anon-zap pubkey set (private-zap self-recognition).
- *  V16 appends bounded device-authoritative NIP-11 relay identities. */
-private const val SNAPSHOT_BINARY_VERSION = 16
+ *  V16 appends bounded device-authoritative NIP-11 relay identities.
+ *  V17 retains the owner's raw kind-3 inside the FOLLOWS section. */
+private const val SNAPSHOT_BINARY_VERSION = 17
 /** Max retained own outgoing private-zap anon pubkeys (bounded, insertion-order eviction). */
 private const val OWN_ANON_ZAP_CAP = 500
 private const val RELAY_IDENTITY_CAP = 3_000
@@ -99,6 +100,14 @@ internal const val PERSISTED_FOLLOWS_LRU_CAP = 500
 internal const val PERSISTED_FOLLOWS_PAYLOAD_BYTE_CAP = 3 * 1024 * 1024
 internal const val FOLLOWS_ACCESS_INDEX_CAP = 1_000
 internal const val FOLLOWS_ACCESS_INDEX_TRIM = 200
+
+/** Atomic view of the materialized kind-3 state used by safe local mutations. */
+internal data class FollowsSnapshot(
+    val follows: Set<String>,
+    val createdAt: Long?,
+    val retainedContactList: NostrEvent? = null,
+)
+
 private const val FEED_ROW_CACHE_CAP = 2000
 private const val ACTOR_INDEX_CAP = 1_000
 private const val ACTOR_TARGETS_CAP = 500
@@ -591,6 +600,11 @@ class MemoryEventStore @Inject constructor(
 
     private val followsByPubkey = ConcurrentHashMap<String, Set<String>>()
     private val followsCreatedAt = ConcurrentHashMap<String, Long>()
+    /**
+     * Full NIP-02 payload for the signed-in user's latest kind-3 only. Other
+     * users remain derived-only so contact-list hydration stays memory-bounded.
+     */
+    @Volatile private var ownContactListEvent: NostrEvent? = null
     /** Epoch-ms recency for bounding non-anchored contact lists on disk.
      *  Independently LRU-bounded so the side index cannot outgrow its purpose. */
     private val followsAccessedAt = ConcurrentHashMap<String, Long>()
@@ -1210,7 +1224,13 @@ class MemoryEventStore @Inject constructor(
             .filter { it.size >= 2 && it[0] == "p" }
             .map { it[1] }
             .toSet()
-        updateFollowsInternal(event.pubkey, pubkeys, event.createdAt, dirty)
+        updateFollowsInternal(
+            pubkey = event.pubkey,
+            followedPubkeys = pubkeys,
+            createdAt = event.createdAt,
+            dirty = dirty,
+            retainedEvent = event,
+        )
     }
 
     private fun handleRepost(event: NostrEvent, dirty: InsertDirty) {
@@ -2843,6 +2863,57 @@ class MemoryEventStore @Inject constructor(
         return follows
     }
     fun getFollowsCreatedAt(pubkey: String): Long? = followsCreatedAt[pubkey]
+
+    /**
+     * Returns a set+version pair under the same per-pubkey lock used by all live
+     * kind-3 writes. A null result means unresolved; an empty set is known-empty.
+     */
+    internal fun getFollowsSnapshot(pubkey: String): FollowsSnapshot? {
+        var snapshot: FollowsSnapshot? = null
+        followsCreatedAt.compute(pubkey) { _, createdAt ->
+            followsByPubkey[pubkey]?.let { follows ->
+                snapshot = FollowsSnapshot(
+                    follows = follows.toSet(),
+                    createdAt = createdAt,
+                    retainedContactList = if (pubkey == ownPubkey) {
+                        ownContactListEvent?.copyForContactListRetention()
+                    } else {
+                        null
+                    },
+                )
+            }
+            createdAt
+        }
+        if (snapshot != null) recordFollowsAccess(pubkey, System.currentTimeMillis())
+        return snapshot
+    }
+
+    /**
+     * A non-empty owner list may be republished only when its materialized set
+     * and retained raw kind-3 are the same replaceable-event revision. Legacy
+     * snapshots contain only the set; treating that state as publishable would
+     * silently strip relay hints, petnames, non-p tags, and content on the first
+     * follow after upgrade. Known-empty remains a valid new-account state.
+     */
+    internal fun getPublishableFollowsSnapshot(pubkey: String): FollowsSnapshot? {
+        val snapshot = getFollowsSnapshot(pubkey) ?: return null
+        if (pubkey != ownPubkey || snapshot.follows.isEmpty()) return snapshot
+
+        val retained = snapshot.retainedContactList ?: return null
+        val retainedFollows = retained.tags
+            .asSequence()
+            .filter { it.size >= 2 && it[0] == "p" }
+            .map { it[1] }
+            .toSet()
+        return snapshot.takeIf {
+            retained.createdAt == snapshot.createdAt && retainedFollows == snapshot.follows
+        }
+    }
+
+    /** Test/persistence view; callers cannot mutate the retained provenance set. */
+    internal fun getOwnContactListEvent(): NostrEvent? =
+        ownContactListEvent?.copyForContactListRetention()
+
     fun followersOf(pubkey: String): Set<String> = followsByPubkey.entries
         .asSequence()
         .filter { (_, follows) -> pubkey in follows }
@@ -2886,12 +2957,124 @@ class MemoryEventStore @Inject constructor(
         updateFollowsInternal(pubkey, followedPubkeys, createdAt, dirty = null)
     }
 
+    /**
+     * Raw kind-3 direct path. The derived set is retained for every author, but
+     * the full event is retained only when it belongs to the signed-in account.
+     */
+    internal fun updateFollows(event: NostrEvent): Int {
+        if (event.kind != 3) return 0
+        val followedPubkeys = event.tags
+            .asSequence()
+            .filter { it.size >= 2 && it[0] == "p" }
+            .map { it[1] }
+            .toSet()
+        updateFollowsInternal(
+            pubkey = event.pubkey,
+            followedPubkeys = followedPubkeys,
+            createdAt = event.createdAt,
+            dirty = null,
+            retainedEvent = event,
+        )
+        return followedPubkeys.size
+    }
+
+    /**
+     * Applies a locally signed kind-3 only if the exact state captured before
+     * signing is still current. This is an atomic post-sign re-read + write.
+     */
+    internal fun applyOptimisticFollows(
+        pubkey: String,
+        previous: FollowsSnapshot,
+        updatedFollows: Set<String>,
+        updatedCreatedAt: Long,
+    ): Boolean = compareAndSetFollows(
+        pubkey = pubkey,
+        expectedFollows = previous.follows,
+        expectedCreatedAt = previous.createdAt,
+        expectedContactListEventId = previous.retainedContactList?.id,
+        updatedFollows = updatedFollows,
+        updatedCreatedAt = updatedCreatedAt,
+    )
+
+    /**
+     * Restores the state that preceded an unacknowledged optimistic publish.
+     * Unlike [updateFollows], this deliberately permits moving createdAt backward,
+     * but only while our exact optimistic set+version is still current. A newer
+     * relay event therefore wins and can never be overwritten by a late rollback.
+     */
+    internal fun revertOptimisticFollows(
+        pubkey: String,
+        optimisticFollows: Set<String>,
+        optimisticCreatedAt: Long,
+        previous: FollowsSnapshot,
+    ): Boolean = compareAndSetFollows(
+        pubkey = pubkey,
+        expectedFollows = optimisticFollows,
+        expectedCreatedAt = optimisticCreatedAt,
+        expectedContactListEventId = previous.retainedContactList?.id,
+        updatedFollows = previous.follows,
+        updatedCreatedAt = previous.createdAt,
+    )
+
+    /**
+     * Commits metadata from a locally signed kind-3 only after a relay accepts
+     * it, and only while its optimistic set+version is still authoritative.
+     */
+    internal fun retainAcceptedOwnContactList(event: NostrEvent): Boolean {
+        val owner = ownPubkey
+        if (event.kind != 3 || owner == null || event.pubkey != owner) return false
+        val eventFollows = event.tags
+            .asSequence()
+            .filter { it.size >= 2 && it[0] == "p" }
+            .map { it[1] }
+            .toSet()
+        var retained = false
+        followsCreatedAt.compute(owner) { _, currentCreatedAt ->
+            if (currentCreatedAt == event.createdAt && followsByPubkey[owner] == eventFollows) {
+                ownContactListEvent = event.copyForContactListRetention()
+                retained = true
+            }
+            currentCreatedAt
+        }
+        return retained
+    }
+
+    private fun compareAndSetFollows(
+        pubkey: String,
+        expectedFollows: Set<String>,
+        expectedCreatedAt: Long?,
+        expectedContactListEventId: String?,
+        updatedFollows: Set<String>,
+        updatedCreatedAt: Long?,
+    ): Boolean {
+        var applied = false
+        followsCreatedAt.compute(pubkey) { _, currentCreatedAt ->
+            val currentFollows = followsByPubkey[pubkey]
+            val currentContactListEventId =
+                if (pubkey == ownPubkey) ownContactListEvent?.id else null
+            if (currentCreatedAt != expectedCreatedAt ||
+                currentFollows != expectedFollows ||
+                currentContactListEventId != expectedContactListEventId
+            ) {
+                return@compute currentCreatedAt
+            }
+            followsByPubkey[pubkey] = updatedFollows.toSet()
+            recordFollowsAccess(pubkey, System.currentTimeMillis())
+            applied = true
+            updatedCreatedAt
+        }
+        if (applied) _followsSignal.value = System.nanoTime()
+        return applied
+    }
+
     private fun updateFollowsInternal(
         pubkey: String,
         followedPubkeys: Set<String>,
         createdAt: Long,
         dirty: InsertDirty?,
-    ) {
+        retainedEvent: NostrEvent? = null,
+    ): Boolean {
+        var accepted = false
         followsCreatedAt.compute(pubkey) { _, existingTs ->
             if (existingTs != null && existingTs > createdAt) {
                 Log.d("MES", "updateFollows: stale for ${pubkey.take(8)}… (existing=$existingTs > new=$createdAt)")
@@ -2901,6 +3084,10 @@ class MemoryEventStore @Inject constructor(
             val changed = existing == null || existing != followedPubkeys
             followsByPubkey[pubkey] = followedPubkeys
             recordFollowsAccess(pubkey, System.currentTimeMillis())
+            if (retainedEvent?.kind == 3 && retainedEvent.pubkey == ownPubkey) {
+                ownContactListEvent = retainedEvent.copyForContactListRetention()
+            }
+            accepted = true
             if (changed) {
                 if (dirty != null) dirty.follows = true
                 else _followsSignal.value = System.nanoTime()
@@ -2908,7 +3095,13 @@ class MemoryEventStore @Inject constructor(
             Log.d("MES", "updateFollows: ${pubkey.take(8)}… → ${followedPubkeys.size} follows (createdAt=$createdAt, changed=$changed)")
             createdAt
         }
+        return accepted
     }
+
+    private fun NostrEvent.copyForContactListRetention(): NostrEvent = copy(
+        tags = tags.map { it.toList() },
+        relaysSeen = ConcurrentHashMap.newKeySet<String>().apply { addAll(this@copyForContactListRetention.relaysSeen) },
+    )
     fun getRelayList(pubkey: String): RelayList? = relayListsByPubkey[pubkey]
     fun getMuteList(pubkey: String): MuteList? = muteListsByPubkey[pubkey]
 
@@ -5265,7 +5458,13 @@ class MemoryEventStore @Inject constructor(
     // V2 TSV files are still readable — SnapshotScheduler peeks the first
     // 4 bytes and dispatches: "USNS" → binary, anything else → V2 reader.
 
-    internal suspend fun saveSnapshotBinary(out: DataOutputStream): SnapshotSectionSizes {
+    internal suspend fun saveSnapshotBinary(
+        out: DataOutputStream,
+        snapshotVersion: Int = SNAPSHOT_BINARY_VERSION,
+    ): SnapshotSectionSizes {
+        require(snapshotVersion in 16..SNAPSHOT_BINARY_VERSION) {
+            "Binary writer supports V16..V$SNAPSHOT_BINARY_VERSION, got V$snapshotVersion"
+        }
         // Serialize each section once, compute offsets from the live buffer sizes,
         // then stream those buffers directly. This keeps peak memory near the
         // snapshot size instead of duplicating 15-20MB into contiguous arrays.
@@ -5291,6 +5490,15 @@ class MemoryEventStore @Inject constructor(
                 d.writeInt(capped)
                 var written = 0
                 for (id in snapshot) { if (++written > PERSISTED_ENGAGED_CAP) break; d.writeStr(id) }
+            }
+
+            // V17: one raw kind-3 for the signed-in account. Other users remain
+            // derived-only; legacy V16 snapshots end this section above.
+            if (snapshotVersion >= 17) {
+                val retained = getOwnContactListEvent()
+                    ?.takeIf { it.kind == 3 && it.pubkey == ownPubkey }
+                d.writeBoolean(retained != null)
+                if (retained != null) d.writeEventBinary(retained)
             }
         }
 
@@ -5318,7 +5526,7 @@ class MemoryEventStore @Inject constructor(
             // number of entries than the size we just recorded. The reader
             // then reads garbage when it consumes the next field — observed
             // in production as 'Invalid string length: 1631139890'.
-            // Legacy reply-count field: keep the zero marker for V3-V16 wire
+            // Legacy reply-count field: keep the zero marker for V3-V17 wire
             // compatibility. Counts are rebuilt from unique retained reply IDs.
             d.writeInt(0)
             val reposts = repostCounts.toMap()
@@ -5470,7 +5678,7 @@ class MemoryEventStore @Inject constructor(
 
         // Header
         out.write(SNAPSHOT_BINARY_MAGIC)
-        out.writeInt(SNAPSHOT_BINARY_VERSION)
+        out.writeInt(snapshotVersion)
         out.writeInt(followsOffset)
         out.writeInt(eventsOffset)
         out.writeInt(aggregatesOffset)
@@ -5568,6 +5776,7 @@ class MemoryEventStore @Inject constructor(
         }
 
         // FOLLOWS section
+        ownContactListEvent = null
         val followsCount = input.readInt()
         if (followsCount < 0 || followsCount > 100_000) {
             throw IOException("Invalid follows count: $followsCount")
@@ -5607,6 +5816,17 @@ class MemoryEventStore @Inject constructor(
             }
         }
 
+        // V17: retained raw owner kind-3. Its p-tags/content are metadata only;
+        // the materialized follows set above remains authoritative.
+        if (version >= 17 && input.readBoolean()) {
+            val retained = input.readEventBinary(version)
+            val owner = ownPubkey
+            if (retained.kind != 3 || owner == null || retained.pubkey != owner) {
+                throw IOException("Invalid retained owner contact list")
+            }
+            ownContactListEvent = retained.copyForContactListRetention()
+        }
+
         // Fire follows + action signals early so FeedVM cold-start resolves
         // and engagement icons light up before the events parse completes.
         if (followsByPubkey.isNotEmpty()) {
@@ -5628,7 +5848,7 @@ class MemoryEventStore @Inject constructor(
         rebuildActionEventIndexesFromEvents()
         rebuildNotificationIndex()
 
-        // AGGREGATES section. V3-V16 scalar reply counts were inflatable when
+        // AGGREGATES section. V3-V17 scalar reply counts were inflatable when
         // a reply payload was evicted and fetched again. Consume them only to
         // advance the stream; the live index was rebuilt from retained events.
         val replyN = input.readInt()
@@ -6357,6 +6577,7 @@ class MemoryEventStore @Inject constructor(
     fun clearUserState() {
         followsByPubkey.clear()
         followsCreatedAt.clear()
+        ownContactListEvent = null
         followsAccessedAt.clear()
         followerCountCache.clear()
         relayListsByPubkey.clear()
@@ -6422,6 +6643,7 @@ class MemoryEventStore @Inject constructor(
         feedRowAccessedAt.clear()
         followsByPubkey.clear()
         followsCreatedAt.clear()
+        ownContactListEvent = null
         followsAccessedAt.clear()
         followerCountCache.clear()
         relayListsByPubkey.clear()

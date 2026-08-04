@@ -2324,6 +2324,310 @@ class MemoryEventStoreInvariantsTest {
     }
 
     @Test
+    fun `raw kind 3 retains full metadata for owner only`() {
+        val owner = "owner-pk"
+        store.ownPubkey = owner
+        val ownerEvent = event(
+            id = "owner-contact-list",
+            pubkey = owner,
+            kind = 3,
+            content = "{\"wss://legacy.example\":{\"read\":true}}",
+            createdAt = 2_000L,
+            tags = listOf(
+                listOf("p", "alice", "wss://alice.example", "Alice"),
+                listOf("client", "other-client"),
+            ),
+        )
+
+        store.updateFollows(ownerEvent)
+        store.updateFollows(
+            event(
+                id = "other-contact-list",
+                pubkey = "other-pk",
+                kind = 3,
+                content = "other-content",
+                createdAt = 3_000L,
+                tags = listOf(listOf("p", "bob", "wss://bob.example", "Bob")),
+            ),
+        )
+
+        val retained = requireNotNull(store.getOwnContactListEvent())
+        assertEquals(ownerEvent.id, retained.id)
+        assertEquals(ownerEvent.tags, retained.tags)
+        assertEquals(ownerEvent.content, retained.content)
+        assertEquals(setOf("alice"), store.getFollows(owner))
+        assertEquals(setOf("bob"), store.getFollows("other-pk"))
+    }
+
+    @Test
+    fun `nonempty owner follows without aligned raw kind 3 are not publishable`() {
+        val owner = "owner-pk"
+        store.ownPubkey = owner
+        store.updateFollows(owner, setOf("alice"), createdAt = 2_000L)
+
+        assertNotNull(store.getFollowsSnapshot(owner))
+        assertNull(store.getPublishableFollowsSnapshot(owner))
+
+        store.updateFollows(
+            event(
+                id = "owner-contact-list",
+                pubkey = owner,
+                kind = 3,
+                createdAt = 2_000L,
+                tags = listOf(listOf("p", "alice", "wss://alice.example")),
+            ),
+        )
+        assertNotNull(store.getPublishableFollowsSnapshot(owner))
+
+        // An optimistic or otherwise split derived state must close the gate
+        // until an accepted/raw event realigns both halves.
+        store.updateFollows(owner, setOf("alice", "bob"), createdAt = 2_001L)
+        assertNull(store.getPublishableFollowsSnapshot(owner))
+    }
+
+    @Test
+    fun `known empty owner follows remain publishable without raw kind 3`() {
+        val owner = "owner-pk"
+        store.ownPubkey = owner
+        store.updateFollows(owner, emptySet(), createdAt = 2_000L)
+
+        val snapshot = requireNotNull(store.getPublishableFollowsSnapshot(owner))
+        assertTrue(snapshot.follows.isEmpty())
+        assertNull(snapshot.retainedContactList)
+    }
+
+    @Test
+    fun `stale owner kind 3 cannot replace retained metadata`() {
+        val owner = "owner-pk"
+        store.ownPubkey = owner
+        store.updateFollows(
+            event(
+                id = "newer-contact-list",
+                pubkey = owner,
+                kind = 3,
+                content = "newer-content",
+                createdAt = 2_000L,
+                tags = listOf(listOf("p", "alice", "wss://newer.example", "Alice")),
+            ),
+        )
+        store.updateFollows(
+            event(
+                id = "stale-contact-list",
+                pubkey = owner,
+                kind = 3,
+                content = "stale-content",
+                createdAt = 1_000L,
+                tags = listOf(listOf("p", "bob", "wss://stale.example", "Bob")),
+            ),
+        )
+
+        assertEquals("newer-contact-list", store.getOwnContactListEvent()?.id)
+        assertEquals("newer-content", store.getOwnContactListEvent()?.content)
+        assertEquals(setOf("alice"), store.getFollows(owner))
+    }
+
+    @Test
+    fun `metadata change during signing invalidates the captured follows snapshot`() {
+        val owner = "owner-pk"
+        store.ownPubkey = owner
+        store.updateFollows(
+            event(
+                id = "metadata-before-signing",
+                pubkey = owner,
+                kind = 3,
+                content = "before",
+                createdAt = 2_000L,
+                tags = listOf(listOf("p", "alice", "wss://before.example", "Before")),
+            ),
+        )
+        val captured = requireNotNull(store.getFollowsSnapshot(owner))
+
+        // Same set and createdAt, but a different raw replaceable event changed
+        // the metadata while an external signer could have been in front.
+        store.updateFollows(
+            event(
+                id = "metadata-during-signing",
+                pubkey = owner,
+                kind = 3,
+                content = "during",
+                createdAt = 2_000L,
+                tags = listOf(listOf("p", "alice", "wss://during.example", "During")),
+            ),
+        )
+
+        assertFalse(
+            store.applyOptimisticFollows(
+                pubkey = owner,
+                previous = captured,
+                updatedFollows = setOf("alice", "bob"),
+                updatedCreatedAt = 2_001L,
+            ),
+        )
+        assertEquals(setOf("alice"), store.getFollows(owner))
+        assertEquals("metadata-during-signing", store.getOwnContactListEvent()?.id)
+    }
+
+    @Test
+    fun `accepted local contact list retains only while optimistic state is current`() {
+        val owner = "owner-pk"
+        store.ownPubkey = owner
+        store.updateFollows(owner, setOf("alice"), createdAt = 1_000L)
+        val previous = requireNotNull(store.getFollowsSnapshot(owner))
+        assertTrue(
+            store.applyOptimisticFollows(
+                pubkey = owner,
+                previous = previous,
+                updatedFollows = setOf("alice", "bob"),
+                updatedCreatedAt = 1_001L,
+            ),
+        )
+        val accepted = event(
+            id = "accepted-contact-list",
+            pubkey = owner,
+            kind = 3,
+            createdAt = 1_001L,
+            tags = listOf(listOf("p", "alice"), listOf("p", "bob")),
+        )
+
+        assertTrue(store.retainAcceptedOwnContactList(accepted))
+        assertEquals("accepted-contact-list", store.getOwnContactListEvent()?.id)
+        assertFalse(
+            store.retainAcceptedOwnContactList(
+                accepted.copy(
+                    id = "superseded-contact-list",
+                    createdAt = 1_000L,
+                    tags = listOf(listOf("p", "alice")),
+                ),
+            ),
+        )
+        assertEquals("accepted-contact-list", store.getOwnContactListEvent()?.id)
+    }
+
+    @Test
+    fun `binary snapshot round-trip preserves retained owner contact list`() = runTest {
+        val owner = "owner-pk"
+        store.ownPubkey = owner
+        val original = event(
+            id = "persisted-contact-list",
+            pubkey = owner,
+            kind = 3,
+            content = "{\"legacy\":\"bytes\\nkept\"}",
+            createdAt = 2_000L,
+            tags = listOf(
+                listOf("p", "alice", "wss://alice.example", "Alice"),
+                listOf("client", "opaque", "value"),
+            ),
+        )
+        store.updateFollows(original)
+
+        val bytes = ByteArrayOutputStream()
+        DataOutputStream(bytes).use { store.saveSnapshotBinary(it) }
+        val restored = MemoryEventStore(
+            object : MuteKeyProvider {},
+            com.unsilence.app.data.relay.stubTimelineServiceProvider(),
+        ).apply { ownPubkey = owner }
+        DataInputStream(ByteArrayInputStream(bytes.toByteArray())).use {
+            restored.restoreSnapshotBinary(it)
+        }
+
+        val retained = requireNotNull(restored.getOwnContactListEvent())
+        assertEquals(original.id, retained.id)
+        assertEquals(original.tags, retained.tags)
+        assertEquals(original.content, retained.content)
+        assertEquals(setOf("alice"), restored.getFollows(owner))
+    }
+
+    @Test
+    fun `legacy V16 snapshot restores follows with no retained contact list`() = runTest {
+        val owner = "owner-pk"
+        store.ownPubkey = owner
+        store.updateFollows(
+            event(
+                id = "legacy-contact-list",
+                pubkey = owner,
+                kind = 3,
+                content = "legacy-content-that-v16-cannot-store",
+                createdAt = 2_000L,
+                tags = listOf(listOf("p", "alice", "wss://alice.example", "Alice")),
+            ),
+        )
+
+        val bytes = ByteArrayOutputStream()
+        DataOutputStream(bytes).use { store.saveSnapshotBinary(it, snapshotVersion = 16) }
+        val restored = MemoryEventStore(
+            object : MuteKeyProvider {},
+            com.unsilence.app.data.relay.stubTimelineServiceProvider(),
+        ).apply { ownPubkey = owner }
+        DataInputStream(ByteArrayInputStream(bytes.toByteArray())).use {
+            restored.restoreSnapshotBinary(it)
+        }
+
+        assertEquals(setOf("alice"), restored.getFollows(owner))
+        assertNull(restored.getOwnContactListEvent())
+        assertNull(restored.getPublishableFollowsSnapshot(owner))
+    }
+
+    @Test
+    fun `unacknowledged optimistic follows restore both set and createdAt`() {
+        val pubkey = "pk-alice"
+        val previous = setOf("pk-bob")
+        val optimistic = setOf("pk-bob", "pk-carol")
+        store.updateFollows(pubkey, previous, createdAt = 1_000L)
+        val snapshot = requireNotNull(store.getFollowsSnapshot(pubkey))
+
+        assertTrue(
+            store.applyOptimisticFollows(
+                pubkey = pubkey,
+                previous = snapshot,
+                updatedFollows = optimistic,
+                updatedCreatedAt = 1_001L,
+            ),
+        )
+        assertTrue(
+            store.revertOptimisticFollows(
+                pubkey = pubkey,
+                optimisticFollows = optimistic,
+                optimisticCreatedAt = 1_001L,
+                previous = snapshot,
+            ),
+        )
+
+        assertEquals(previous, store.getFollows(pubkey))
+        assertEquals(1_000L, store.getFollowsCreatedAt(pubkey))
+    }
+
+    @Test
+    fun `optimistic rollback never overwrites a newer relay contact list`() {
+        val pubkey = "pk-alice"
+        val previous = setOf("pk-bob")
+        val optimistic = setOf("pk-bob", "pk-carol")
+        val newerRelayState = setOf("pk-bob", "pk-dave")
+        store.updateFollows(pubkey, previous, createdAt = 1_000L)
+        val snapshot = requireNotNull(store.getFollowsSnapshot(pubkey))
+        assertTrue(
+            store.applyOptimisticFollows(
+                pubkey = pubkey,
+                previous = snapshot,
+                updatedFollows = optimistic,
+                updatedCreatedAt = 1_001L,
+            ),
+        )
+
+        store.updateFollows(pubkey, newerRelayState, createdAt = 1_002L)
+        assertFalse(
+            store.revertOptimisticFollows(
+                pubkey = pubkey,
+                optimisticFollows = optimistic,
+                optimisticCreatedAt = 1_001L,
+                previous = snapshot,
+            ),
+        )
+
+        assertEquals(newerRelayState, store.getFollows(pubkey))
+        assertEquals(1_002L, store.getFollowsCreatedAt(pubkey))
+    }
+
+    @Test
     fun `followersOf drops author after newer contact list unfollows subject`() {
         val subject = "pk-subject"
         store.updateFollows("pk-alice", setOf(subject), createdAt = 1_000L)

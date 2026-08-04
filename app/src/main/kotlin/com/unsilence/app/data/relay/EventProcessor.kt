@@ -484,12 +484,8 @@ class EventProcessor @Inject constructor(
         // Updates the followsByPubkey index directly without entering MES
         // proper. Snapshot persists followsByPubkey so this is reconstructible.
         if (nostrEvent.kind == 3) {
-            val follows = tags
-                .filter { it.size >= 2 && it[0] == "p" }
-                .map { it[1] }
-                .toSet()
-            memoryEventStore.updateFollows(nostrEvent.pubkey, follows, nostrEvent.createdAt)
-            Log.d(TAG, "Kind-3 direct path: pubkey=${nostrEvent.pubkey.take(8)}… ${follows.size} follows (createdAt=${nostrEvent.createdAt})")
+            val followCount = memoryEventStore.updateFollows(nostrEvent)
+            Log.d(TAG, "Kind-3 direct path: pubkey=${nostrEvent.pubkey.take(8)}… $followCount follows (createdAt=${nostrEvent.createdAt})")
         }
         // Control-plane events → CONTROL channel (separate lane, batched).
         // 10002 for outbox prefetch, 10006/10007/10012/10063/30002 for relay config

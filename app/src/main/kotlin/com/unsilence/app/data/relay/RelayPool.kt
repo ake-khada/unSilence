@@ -73,6 +73,10 @@ private const val EVENT_PROCESSOR_SETTLE_MS = 200L
 private const val BRIDGE_EVENT_FETCH_TTL_MS = 5 * 60_000L
 internal const val MAX_EPHEMERAL_CONNECTIONS = 4
 private const val FOREGROUND_RECONNECT_STAGGER_MS = 200L
+private const val MAX_FOLLOW_REFRESH_RELAYS = 4
+private const val FOLLOW_REFRESH_TIMEOUT_MS = 12_000L
+internal const val FOLLOW_REFRESH_FRESH_MS = 60_000L
+internal const val FOLLOW_REFRESH_RETRY_MS = 15_000L
 
 internal fun reconnectPriority(purposes: Set<ConnectionPurpose>): Int = when {
     ConnectionPurpose.FEED_SUB in purposes -> 0
@@ -80,6 +84,39 @@ internal fun reconnectPriority(purposes: Set<ConnectionPurpose>): Int = when {
     ConnectionPurpose.BROWSE in purposes -> 2
     ConnectionPurpose.FEED_WARM in purposes -> 3
     else -> 4
+}
+
+/**
+ * A follow-list refresh must sample both the author's declared write relays and
+ * independent indexes. Keeping the two sources explicit prevents a stale fast
+ * responder in either group from becoming the sole authority.
+ */
+internal fun followRefreshRelayTargets(
+    writeRelayUrls: Collection<String>,
+    indexRelayUrls: Collection<String>,
+    limit: Int,
+): List<String> {
+    if (limit <= 0) return emptyList()
+    val writes = writeRelayUrls.mapNotNull(::normalizeRelayUrl).distinct()
+    val indexes = indexRelayUrls.mapNotNull(::normalizeRelayUrl).distinct()
+    val selected = linkedSetOf<String>()
+
+    writes.take(minOf(2, limit)).forEach(selected::add)
+    indexes.forEach { if (selected.size < limit) selected.add(it) }
+    writes.drop(2).forEach { if (selected.size < limit) selected.add(it) }
+    return selected.take(limit)
+}
+
+internal fun shouldRunFollowRefresh(
+    forceRefresh: Boolean,
+    nowMs: Long,
+    lastSuccessMs: Long?,
+    lastAttemptMs: Long?,
+): Boolean {
+    if (forceRefresh) return true
+    if (lastSuccessMs != null && nowMs - lastSuccessMs < FOLLOW_REFRESH_FRESH_MS) return false
+    if (lastAttemptMs != null && nowMs - lastAttemptMs < FOLLOW_REFRESH_RETRY_MS) return false
+    return true
 }
 
 /** Kinds accepted by every ID-based reference fetch. Empty repost hydration depends on this. */
@@ -362,8 +399,6 @@ class RelayPool @Inject constructor(
     }
 
     private val countCallbacks = ConcurrentHashMap<String, CompletableDeferred<Nip45CountResult?>>()
-    /** One-shot REQ callbacks that return the first EVENT's raw tags JSON. */
-    internal val eventTagsCallbacks = ConcurrentHashMap<String, CompletableDeferred<String?>>()
     /** Per-subId EOSE completion signal. Callers register before dispatch, await after.
      *  handleEose completes the deferred when any relay EOSE's the sub. */
     internal val oneShotEoseCallbacks = ConcurrentHashMap<String, CompletableDeferred<Unit>>()
@@ -380,6 +415,8 @@ class RelayPool @Inject constructor(
     /** Pubkeys that went through the full indexer+fallback chain and still missed.
      *  5-min TTL prevents scroll-back from re-firing the chain. */
     private val profileFallbackNegCache = ConcurrentHashMap<String, Long>()
+    private val followRefreshLastAttemptMs = ConcurrentHashMap<String, Long>()
+    private val followRefreshLastSuccessMs = ConcurrentHashMap<String, Long>()
 
     /** In-flight event fetch dedup — maps event ID to completion signal.
      *  Callers that arrive while a fetch is in-flight skip the REQ;
@@ -982,27 +1019,6 @@ class RelayPool @Inject constructor(
      * Extract the Nostr event ID from a raw EVENT message without JSON parsing.
      * Scans for the `"id":"` marker and grabs the next 64 hex chars.
      */
-    /** Extract the "tags" array from a raw EVENT JSON as a JSON string.
-     *  Scans for `"tags":` and grabs the JSON array. */
-    private fun extractTagsFromRaw(raw: String): String? {
-        val marker = "\"tags\":"
-        val idx = raw.indexOf(marker)
-        if (idx < 0) return null
-        val start = raw.indexOf('[', idx + marker.length)
-        if (start < 0) return null
-        var depth = 0
-        for (i in start until raw.length) {
-            when (raw[i]) {
-                '[' -> depth++
-                ']' -> {
-                    depth--
-                    if (depth == 0) return raw.substring(start, i + 1)
-                }
-            }
-        }
-        return null
-    }
-
     /** True when a relay has been marked auth-unavailable this session. */
     override fun isAuthUnavailable(url: String): Boolean =
         normalizeRelayUrl(url)?.let { it in authUnavailableRelays } ?: false
@@ -1529,12 +1545,6 @@ class RelayPool @Inject constructor(
                 }
                 val subId = extractEventSubId(raw)
                 if (subId != null) {
-                    // One-shot event-tags callback (e.g. following count)
-                    eventTagsCallbacks[subId]?.let { deferred ->
-                        val tagsJson = extractTagsFromRaw(raw)
-                        deferred.complete(tagsJson)
-                        eventTagsCallbacks.remove(subId)
-                    }
                     // Emit (token, eventId) for search-notes subscriptions so SearchViewModel
                     // can correlate relay results with the correct query session.
                     if (subId.startsWith("search-notes-")) {
@@ -1738,56 +1748,61 @@ class RelayPool @Inject constructor(
         }
 
     /**
-     * Fetch the following count for a pubkey by retrieving their kind-3 event
-     * and counting p-tags. Returns null on timeout or failure.
+     * Refresh a user's replaceable kind-3 from their write relays plus one
+     * independent broad index. Every selected relay gets a chance to respond;
+     * EventProcessor/MES created-at ordering then chooses the newest event.
+     * This deliberately avoids the old first-responder race, where one stale
+     * relay won and all newer in-flight responses were immediately closed.
      */
-    suspend fun fetchFollowingCount(pubkeyHex: String): Long? =
+    suspend fun refreshFollowList(
+        pubkeyHex: String,
+        forceRefresh: Boolean = false,
+    ): Boolean =
         withContext(Dispatchers.IO) {
-            try {
-                val subId = "following-count-${System.nanoTime()}"
-                val req = buildJsonArray {
-                    add(JsonPrimitive("REQ"))
-                    add(JsonPrimitive(subId))
-                    add(buildJsonObject {
-                        put("kinds", buildJsonArray { add(JsonPrimitive(3)) })
-                        put("authors", buildJsonArray { add(JsonPrimitive(pubkeyHex)) })
-                        put("limit", JsonPrimitive(1))
-                    })
-                }.toString()
+            val nowMs = android.os.SystemClock.elapsedRealtime()
+            val lastSuccessMs = followRefreshLastSuccessMs[pubkeyHex]
+            val lastAttemptMs = followRefreshLastAttemptMs[pubkeyHex]
+            if (!shouldRunFollowRefresh(forceRefresh, nowMs, lastSuccessMs, lastAttemptMs)) {
+                return@withContext lastSuccessMs != null &&
+                    nowMs - lastSuccessMs < FOLLOW_REFRESH_FRESH_MS
+            }
+            followRefreshLastAttemptMs[pubkeyHex] = nowMs
 
-                val deferred = CompletableDeferred<String?>()
-                eventTagsCallbacks[subId] = deferred
+            val targets = followRefreshRelayTargets(
+                writeRelayUrls = memoryEventStore.get().writeRelaysFor(pubkeyHex),
+                indexRelayUrls = FOLLOWER_INDEX_RELAY_URLS,
+                limit = MAX_FOLLOW_REFRESH_RELAYS,
+            )
+            if (targets.isEmpty()) return@withContext false
 
-                // Ensure indexer relays are connected before sending the kind-3 REQ —
-                // they may have been evicted by idle timer or not yet connected on navigation.
-                val indexerUrls = relayPreferencesStore.get().indexerRelayUrlsSnapshot()
-                connectAndAwait(indexerUrls, timeoutMs = 3_000, forceEvict = true)
-                val targets = indexerUrls.mapNotNull { connections[it] }
-                    .ifEmpty { connections.values.take(3).toList() }
-                targets.forEach { it.send(req) }
-
-                // Raw send bypasses the one-shot EOSE auto-close path — without an
-                // explicit CLOSE the relay streams future kind-3 updates until socket drop.
-                val close = """["CLOSE","$subId"]"""
-
-                val tagsJson = withTimeoutOrNull(10_000) { deferred.await() }
-                    ?: run {
-                        eventTagsCallbacks.remove(subId)
-                        targets.forEach { conn -> runCatching { conn.send(close) } }
-                        return@withContext null
-                    }
-                eventTagsCallbacks.remove(subId)
-                targets.forEach { conn -> runCatching { conn.send(close) } }
-
-                // Count p-tags in the tags array
-                runCatching {
-                    NostrJson.parseToJsonElement(tagsJson).jsonArray
-                        .count { tag ->
-                            tag.jsonArray.getOrNull(0)?.jsonPrimitive?.content == "p"
-                        }.toLong()
-                }.getOrNull()
-            } catch (_: Exception) { null }
+            val filter = buildJsonObject {
+                put("kinds", buildJsonArray { add(JsonPrimitive(3)) })
+                put("authors", buildJsonArray { add(JsonPrimitive(pubkeyHex)) })
+                put("limit", JsonPrimitive(1))
+            }
+            val results = fetchPaginatedEvents(
+                urls = targets,
+                baseFilter = filter,
+                subIdPrefix = "follow-refresh",
+                maxPages = 1,
+                timeoutMs = FOLLOW_REFRESH_TIMEOUT_MS,
+            )
+            val eventResponses = results.count { it.totalEvents > 0 }
+            Log.i(
+                TAG,
+                "FOLLOW-REFRESH author=${pubkeyHex.take(8)} targets=${targets.size} " +
+                    "covered=${results.size} events=${results.sumOf { it.totalEvents }}",
+            )
+            (eventResponses > 0).also { refreshed ->
+                if (refreshed) followRefreshLastSuccessMs[pubkeyHex] = android.os.SystemClock.elapsedRealtime()
+            }
         }
+
+    /** Best-effort refresh; offline callers still receive the MES-known count. */
+    suspend fun fetchFollowingCount(pubkeyHex: String): Long? {
+        refreshFollowList(pubkeyHex)
+        return memoryEventStore.get().getFollows(pubkeyHex)?.size?.toLong()
+    }
 
     /**
      * Extract the subscription ID from an EOSE message without JSON parsing.
