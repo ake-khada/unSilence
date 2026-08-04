@@ -11,14 +11,18 @@ import com.unsilence.app.data.auth.SigningManager
 import com.unsilence.app.data.relay.RelayPreferencesStore
 import com.unsilence.app.data.wallet.NwcManager
 import com.unsilence.app.data.memory.MemoryEventStore
+import com.unsilence.app.data.memory.NostrEvent
 import com.unsilence.app.data.memory.RelayConfig
 import com.unsilence.app.data.memory.SnapshotScheduler
 import com.unsilence.app.data.memory.WotProviderDescriptor
 import com.unsilence.app.data.relay.ConnectionPurpose
 import com.unsilence.app.data.relay.CardHydrator
 import com.unsilence.app.data.relay.EventProcessor
+import com.unsilence.app.data.relay.MuteListFetchResult
 import com.unsilence.app.data.relay.ProfileResolver
 import com.unsilence.app.data.relay.RelayPool
+import com.unsilence.app.data.relay.RelayMessageTap
+import com.unsilence.app.data.relay.RelayTapMessage
 import com.unsilence.app.data.relay.WotProviderSource
 import com.unsilence.app.data.relay.TrendingClient
 import com.unsilence.app.data.relay.normalizeRelayUrl
@@ -28,6 +32,7 @@ import com.unsilence.app.data.relay.shouldSkipBootstrapWotFetch
 import com.unsilence.app.data.relay.wotProviderDescriptorFromPrefs
 import com.unsilence.app.data.relay.wotTargetsHash
 import com.unsilence.app.data.repository.MuteListRepository
+import com.unsilence.app.data.repository.MuteSyncState
 import com.unsilence.app.data.settings.SettingsStore
 import com.unsilence.app.data.wallet.ZapPreferencesStore
 import com.unsilence.app.ui.feed.SharedPlayerHolder
@@ -38,6 +43,7 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.filter
@@ -54,6 +60,39 @@ import javax.inject.Singleton
 
 private const val TAG = "AppBootstrapper"
 private const val FRESHNESS_WINDOW_SEC = 6 * 3600L  // 6 hours
+
+/**
+ * Coalesces verification of the same replaceable mute-list revision.
+ *
+ * A kind-10000 commonly arrives from several relays. Without this gate every
+ * copy can trigger the same NIP-44 decrypt, which is wasted work for nsec users
+ * and can produce repeated authorization prompts for Amber users.
+ */
+internal class MuteEventVerificationGate {
+    private val lock = Any()
+    private val inFlight = mutableSetOf<String>()
+    private var verifiedEventId: String? = null
+
+    fun tryBegin(eventId: String): Boolean = synchronized(lock) {
+        if (eventId == verifiedEventId) return@synchronized false
+        inFlight.add(eventId)
+    }
+
+    fun finish(eventId: String, verified: Boolean) = synchronized(lock) {
+        inFlight.remove(eventId)
+        if (verified) verifiedEventId = eventId
+    }
+
+    fun markVerified(eventId: String?) = synchronized(lock) {
+        verifiedEventId = eventId
+        if (eventId != null) inFlight.remove(eventId)
+    }
+
+    fun reset() = synchronized(lock) {
+        verifiedEventId = null
+        inFlight.clear()
+    }
+}
 
 /** Default indexer relays — only used for first-launch seeding. */
 private val DEFAULT_INDEXER_URLS = listOf(
@@ -103,14 +142,32 @@ class AppBootstrapper @Inject constructor(
     // singletons (RelayPool, EventProcessor, MES, KeyManager).
     private val bootstrapMutex = Mutex()
     private var bootstrapJob: Job? = null
+    @Volatile private var muteRecoveryJob: Job? = null
+    private val muteEventVerificationGate = MuteEventVerificationGate()
     // Monotonic session generation. Bumped by both bootstrap() (login) and teardown()
     // (logout). Each holds its captured gen and, inside the mutex, bails if a newer
     // session has superseded it — so a fast logout↔relogin can't corrupt the winner.
     private val sessionGen = java.util.concurrent.atomic.AtomicInteger(0)
+    /** Non-null only after the initial kind-10000 fetch/settle pass for this session. */
+    @Volatile private var muteBootstrapSettledForPubkey: String? = null
+
+    /**
+     * MES correctly drops a relay copy whose ID was restored from the snapshot.
+     * This verified tap still observes that copy, allowing reconnect replay to
+     * prove freshness and reopen the publish gate without another request loop.
+     */
+    private val ownMuteRelayTap = RelayMessageTap { message ->
+        val event = (message as? RelayTapMessage.VerifiedEvent)?.event
+            ?: return@RelayMessageTap
+        val settledOwner = muteBootstrapSettledForPubkey ?: return@RelayMessageTap
+        if (event.kind == 10000 && event.pubkey == settledOwner) {
+            scope.launch { handleOwnMuteListEvent(event) }
+        }
+    }
 
     /**
      * Emitted when bootstrap detects Amber NIP-44 permissions are missing
-     * (AmberDecryptFailed or EncryptRoundTripFailed). MainActivity collects
+     * (DecryptFailed or EncryptRoundTripFailed). MainActivity collects
      * this and launches Amber's consent screen automatically.
      */
     private val _amberReauthorizeRequiredFlow = MutableSharedFlow<Unit>(
@@ -162,11 +219,22 @@ class AppBootstrapper @Inject constructor(
         // Phase 1 (0ms): Feed connections — user sees content ASAP
         // ═══════════════════════════════════════════════════════════════════
         claimAccountOwner(pubkeyHex)
+        muteRecoveryJob?.cancel()
+        muteRecoveryJob = null
+        muteBootstrapSettledForPubkey = null
+        muteEventVerificationGate.reset()
+        muteListRepository.markPublishUnsafe("bootstrap in progress")
+        muteListRepository.markSnapshotPending()
+        // The encrypted journal is tiny and synchronous. Restore it before the
+        // large background snapshot so an immediate force-stop cannot erase a
+        // mute made during a prior offline session.
+        muteListRepository.restoreDurablePending(pubkeyHex)
         // Provider declarations are identity claims. Select/reset the session owner's
         // declaration before EventProcessor, snapshot restore, or a fetch can observe it.
         val sessionWotPrefs = relayPreferencesStore.ensureWotPrefsOwner(pubkeyHex)
         memoryEventStore.setActiveWotProvider(sessionWotPrefs.pubkey, sessionWotPrefs.relay)
         eventProcessor.start()
+        eventProcessor.registerTap(ownMuteRelayTap)
 
         // Once per login: clear ProfilePipeline session state so the own-post
         // below-head gap heal runs exactly once per session, not once per process
@@ -200,16 +268,15 @@ class AppBootstrapper @Inject constructor(
         val ready = relayPool.connectAndAwait(indexerUrls, timeoutMs = 5_000)
         Log.d(TAG, "Phase1 Step1: $ready indexer relay(s) connected")
 
-        // Wire MES mute list callbacks BEFORE snapshot restore — snapshot may
-        // contain kind-10000 events that need Amber decrypt on restore.
+        // Wire MES mute-list callbacks BEFORE snapshot restore. Every accepted
+        // own event closes the publish gate until that exact event is verified.
         memoryEventStore.isSelfPublishedCheck = { eventId ->
             muteListRepository.isSelfPublished(eventId)
         }
-        memoryEventStore.muteListDecryptCallback = { event ->
-            scope.launch { handleAmberMuteDecrypt(event) }
+        memoryEventStore.ownMuteListEventCallback = { event ->
+            muteListRepository.markPublishUnsafe("own kind-10000 awaiting verification")
+            scope.launch { handleOwnMuteListEvent(event) }
         }
-        muteListRepository.markPublishUnsafe("bootstrap in progress")
-
         // Phase 1.5: Launch snapshot restore in background — does NOT block bootstrap.
         // Follows-first snapshot format fires _followsSignal early so downstream
         // steps can await follows via signal flows without waiting for full parse.
@@ -217,7 +284,12 @@ class AppBootstrapper @Inject constructor(
         val snapshotFresh = snapshotAgeSec < FRESHNESS_WINDOW_SEC
         val snapshotJob = scope.launch {
             snapshotScheduler.restoreIfPresent()
-            Log.d(TAG, "Phase1.5: snapshot restore complete (background)")
+            if (sessionGen.get() == myGen && keyManager.getPublicKeyHex() == pubkeyHex) {
+                muteListRepository.markSnapshotReady()
+                Log.d(TAG, "Phase1.5: snapshot restore complete (background)")
+            } else {
+                Log.w(TAG, "SESSION-FENCE: stale snapshot completion ignored (gen=$myGen)")
+            }
         }
 
         // Step 2: Wait for follows in MES, with snapshot-fresh fast path.
@@ -329,8 +401,13 @@ class AppBootstrapper @Inject constructor(
         relayPool.fetchRelayEcosystem(pubkeyHex, indexerUrls)
         Log.d(TAG, "Phase2: NIP-51 relay kinds (10006/10007/10012/30002) requested")
 
-        relayPool.fetchMuteList(pubkeyHex, indexerUrls)
-        Log.d(TAG, "Phase2: NIP-51 mute list (kind 10000) requested")
+        val muteFetch = relayPool.fetchMuteList(pubkeyHex, indexerUrls)
+        Log.d(
+            TAG,
+            "Phase2: NIP-51 mute list evidence=" +
+                "${muteFetch.hasFreshnessEvidence} event=${muteFetch.receivedEvent != null} " +
+                "eose=${muteFetch.eoseRelays.size}/${muteFetch.expectedRelays.size}",
+        )
 
         // Fetch kind-10002 (relay lists) for ALL follows. Outbox routing in
         // OutboxRelayResolver requires writeRelaysFor(author) to return real data
@@ -367,24 +444,19 @@ class AppBootstrapper @Inject constructor(
         // Settle the mute list: wait for the relay fetch to complete (or timeout)
         // before allowing any publish. The safety gate prevents premature publish
         // from replacing the user's complete relay-side mute list with a stub.
-        val settleResult = settleMuteList(pubkeyHex)
-        when (settleResult) {
-            MuteSettleResult.NsecDecrypted,
-            MuteSettleResult.AmberDecrypted,
-            MuteSettleResult.NoPrivateContent -> {
-                muteListRepository.markPublishSafe("bootstrap settled: $settleResult")
-            }
-            MuteSettleResult.NoEventFound,
-            MuteSettleResult.AmberDecryptFailed,
-            MuteSettleResult.Timeout,
-            MuteSettleResult.EncryptRoundTripFailed -> {
-                muteListRepository.markPublishUnsafe("settle incomplete: $settleResult")
-                // Auto-launch Amber consent screen for crypto-related failures
-                // (not Timeout — that's a network issue, not a permissions issue)
-                if (keyManager.isAmberMode && settleResult != MuteSettleResult.Timeout) {
-                    _amberReauthorizeRequiredFlow.tryEmit(Unit)
-                }
-            }
+        val settleOutcome = settleMuteList(pubkeyHex, muteFetch)
+        muteBootstrapSettledForPubkey = pubkeyHex
+        val muteReady = applyMuteSettleOutcome(
+            pubkeyHex = pubkeyHex,
+            outcome = settleOutcome,
+            reasonPrefix = "bootstrap settled",
+        )
+        if (!muteReady && settleOutcome.result in setOf(
+                MuteSettleResult.NoEventFound,
+                MuteSettleResult.Timeout,
+            )
+        ) {
+            startMuteListReconnectRecovery(pubkeyHex, indexerUrls, myGen)
         }
 
         // Ensure own write relays are connected so subscribeOwnMuteList can attach
@@ -683,6 +755,12 @@ class AppBootstrapper @Inject constructor(
                 return@withLock
             }
             bootstrapJob = null
+            muteRecoveryJob?.cancel()
+            muteRecoveryJob = null
+            muteBootstrapSettledForPubkey = null
+            muteEventVerificationGate.reset()
+            muteListRepository.markPublishUnsafe("session teardown")
+            muteListRepository.markSnapshotPending()
 
             // 1. Close persistent subscriptions + clear relay pool caches
             relayPool.closeLiveMuteSub()
@@ -712,6 +790,7 @@ class AppBootstrapper @Inject constructor(
 
             // 5. Cancel child scopes (NOT this scope — it must survive for next login)
             eventProcessor.stop()
+            eventProcessor.unregisterTap(ownMuteRelayTap)
 
             // 6. Release shared ExoPlayer (must be on Main — ExoPlayer thread affinity)
             withContext(Dispatchers.Main) { sharedPlayerHolder.release() }
@@ -735,21 +814,144 @@ class AppBootstrapper @Inject constructor(
      * runs an encrypt→decrypt round-trip self-test to verify the crypto path
      * actually works before allowing any publish.
      */
-    private suspend fun settleMuteList(pubkeyHex: String): MuteSettleResult {
-        val baseResult = settleMuteListInner(pubkeyHex)
+    private suspend fun settleMuteList(
+        pubkeyHex: String,
+        fetchResult: MuteListFetchResult,
+    ): MuteSettleOutcome {
+        val baseResult = settleMuteListInner(pubkeyHex, fetchResult)
 
         // Only run round-trip if we'd otherwise mark safe
-        val wouldBeSafe = baseResult in setOf(
+        val wouldBeSafe = baseResult.result in setOf(
             MuteSettleResult.NsecDecrypted,
             MuteSettleResult.AmberDecrypted,
             MuteSettleResult.NoPrivateContent,
+            MuteSettleResult.RelayConfirmedEmpty,
         )
         if (!wouldBeSafe) return baseResult
 
         // Round-trip self-test: encrypt a canary, decrypt it, verify equality.
         val roundTripOk = signingManager.encryptRoundTrip()
-        if (!roundTripOk) return MuteSettleResult.EncryptRoundTripFailed
+        if (!roundTripOk) {
+            return baseResult.copy(result = MuteSettleResult.EncryptRoundTripFailed)
+        }
         return baseResult
+    }
+
+    /**
+     * Apply one fetch/decrypt outcome. Kept in one place so initial bootstrap
+     * and bounded reconnect recovery cannot disagree about which states open
+     * the publish gate or prompt Amber authorization.
+     */
+    private fun applyMuteSettleOutcome(
+        pubkeyHex: String,
+        outcome: MuteSettleOutcome,
+        reasonPrefix: String,
+    ): Boolean = when (outcome.result) {
+        MuteSettleResult.NsecDecrypted,
+        MuteSettleResult.AmberDecrypted,
+        MuteSettleResult.NoPrivateContent,
+        MuteSettleResult.RelayConfirmedEmpty -> {
+            val opened = muteListRepository.markPublishSafe(
+                reason = "$reasonPrefix: ${outcome.result}",
+                expectedEventId = outcome.eventId,
+                expectNoCurrentEvent = outcome.result == MuteSettleResult.RelayConfirmedEmpty,
+            )
+            if (opened) muteEventVerificationGate.markVerified(outcome.eventId)
+            if (!opened) {
+                muteListRepository.markPublishUnsafe("settled event was superseded")
+                memoryEventStore.getLatestMuteListEvent(pubkeyHex)?.let { latest ->
+                    scope.launch { handleOwnMuteListEvent(latest) }
+                }
+            }
+            opened
+        }
+        MuteSettleResult.NoEventFound,
+        MuteSettleResult.DecryptFailed,
+        MuteSettleResult.Timeout,
+        MuteSettleResult.EncryptRoundTripFailed -> {
+            val syncState = when (outcome.result) {
+                MuteSettleResult.NoEventFound,
+                MuteSettleResult.Timeout,
+                -> MuteSyncState.WaitingForRelayList
+                MuteSettleResult.DecryptFailed,
+                MuteSettleResult.EncryptRoundTripFailed,
+                -> MuteSyncState.EncryptionUnavailable
+                MuteSettleResult.NsecDecrypted,
+                MuteSettleResult.AmberDecrypted,
+                MuteSettleResult.NoPrivateContent,
+                MuteSettleResult.RelayConfirmedEmpty,
+                -> MuteSyncState.Preparing
+            }
+            muteListRepository.markPublishUnsafe(
+                reason = "$reasonPrefix incomplete: ${outcome.result}",
+                state = syncState,
+            )
+            if (keyManager.isAmberMode && outcome.result in setOf(
+                    MuteSettleResult.DecryptFailed,
+                    MuteSettleResult.EncryptRoundTripFailed,
+                )
+            ) {
+                _amberReauthorizeRequiredFlow.tryEmit(Unit)
+            }
+            false
+        }
+    }
+
+    /**
+     * A failed one-shot is not replayed when a socket reconnects. Retry only on
+     * real RelayPool reconnect signals, at most three times for the session.
+     * This avoids polling/radio loops while guaranteeing that an encrypted
+     * pending edit does not remain silently local after connectivity recovers.
+     */
+    private fun startMuteListReconnectRecovery(
+        pubkeyHex: String,
+        indexerUrls: List<String>,
+        myGen: Int,
+    ) {
+        muteRecoveryJob?.cancel()
+        muteRecoveryJob = scope.launch {
+            repeat(3) { attempt ->
+                val reconnectedRelay = relayPool.onRelayReconnected.first()
+                if (sessionGen.get() != myGen ||
+                    keyManager.getPublicKeyHex() != pubkeyHex ||
+                    muteBootstrapSettledForPubkey != pubkeyHex ||
+                    muteListRepository.publishSafe.value
+                ) {
+                    return@launch
+                }
+
+                // Let a burst of staggered reconnects settle so one request can
+                // reuse several warm sockets instead of racing each handshake.
+                delay(1_000L)
+                if (muteListRepository.publishSafe.value) return@launch
+
+                Log.i(
+                    TAG,
+                    "MUTE-RECOVERY attempt=${attempt + 1}/3 trigger=$reconnectedRelay",
+                )
+                val fetchResult = relayPool.fetchMuteList(pubkeyHex, indexerUrls)
+                if (sessionGen.get() != myGen || keyManager.getPublicKeyHex() != pubkeyHex) {
+                    return@launch
+                }
+                val outcome = settleMuteList(pubkeyHex, fetchResult)
+                if (applyMuteSettleOutcome(
+                        pubkeyHex = pubkeyHex,
+                        outcome = outcome,
+                        reasonPrefix = "reconnect recovery ${attempt + 1}",
+                    )
+                ) {
+                    return@launch
+                }
+                if (outcome.result in setOf(
+                        MuteSettleResult.DecryptFailed,
+                        MuteSettleResult.EncryptRoundTripFailed,
+                    )
+                ) {
+                    return@launch
+                }
+            }
+            Log.w(TAG, "MUTE-RECOVERY exhausted for ${pubkeyHex.take(8)}…; pending edit retained")
+        }
     }
 
     /**
@@ -764,108 +966,191 @@ class AppBootstrapper @Inject constructor(
             muteListRepository.markPublishUnsafe("Amber reauth: no active account")
             return false
         }
+        if (muteBootstrapSettledForPubkey != pubkeyHex) {
+            muteListRepository.markPublishUnsafe("Amber reauth: bootstrap not settled")
+            return false
+        }
         if (!signingManager.encryptRoundTrip()) {
-            muteListRepository.markPublishUnsafe("Amber reauth: encrypt round-trip failed")
+            muteListRepository.markPublishUnsafe(
+                "Amber reauth: encrypt round-trip failed",
+                MuteSyncState.EncryptionUnavailable,
+            )
             return false
         }
 
-        val content = memoryEventStore.getMuteListContent(pubkeyHex)
-        if (content.isNullOrEmpty()) {
-            muteListRepository.markPublishUnsafe("Amber reauth: no loaded encrypted mute list to decrypt")
+        val event = memoryEventStore.getLatestMuteListEvent(pubkeyHex)
+        if (event == null) {
+            muteListRepository.markPublishUnsafe(
+                "Amber reauth: no loaded mute list",
+                MuteSyncState.WaitingForRelayList,
+            )
             return false
         }
 
-        val plaintext = signingManager.decrypt(content, pubkeyHex)
+        if (event.content.isEmpty()) {
+            val opened = muteListRepository.markPublishSafe(
+                reason = "Amber reauth: current mute list has no private content",
+                expectedEventId = event.id,
+            )
+            if (opened) muteEventVerificationGate.markVerified(event.id)
+            return opened
+        }
+
+        val plaintext = signingManager.decrypt(event.content, pubkeyHex)
         val parsed = plaintext?.let(::parseMuteTags)
         if (parsed == null) {
-            muteListRepository.markPublishUnsafe("Amber reauth: existing mute list decrypt failed")
+            muteListRepository.markPublishUnsafe(
+                "Amber reauth: existing mute list decrypt failed",
+                MuteSyncState.EncryptionUnavailable,
+            )
             return false
         }
 
-        memoryEventStore.updateMuteListPrivateTags(
-            pubkeyHex,
-            parsed.pubkeys,
-            parsed.hashtags,
-            parsed.words,
-            parsed.eventIds,
+        val applied = memoryEventStore.updateMuteListPrivateTagsIfCurrent(
+            eventId = event.id,
+            pubkey = pubkeyHex,
+            privatePubkeys = parsed.pubkeys,
+            privateHashtags = parsed.hashtags,
+            privateWords = parsed.words,
+            privateEventIds = parsed.eventIds,
         )
-        muteListRepository.markPublishSafe("Amber reauth decrypted existing mute list")
-        return true
+        val opened = applied && muteListRepository.markPublishSafe(
+            reason = "Amber reauth decrypted existing mute list",
+            expectedEventId = event.id,
+        )
+        if (opened) muteEventVerificationGate.markVerified(event.id)
+        return opened
     }
 
-    private suspend fun settleMuteListInner(pubkeyHex: String): MuteSettleResult {
-        // nsec mode decrypts inline in handleMuteList — always safe immediately
-        if (!keyManager.isAmberMode) {
-            // Wait briefly for the kind-10000 to arrive from relays
-            delay(2_000L)
-            return MuteSettleResult.NsecDecrypted
+    private suspend fun settleMuteListInner(
+        pubkeyHex: String,
+        fetchResult: MuteListFetchResult,
+    ): MuteSettleOutcome {
+        // A snapshot event is useful cached state, but it is not proof that this
+        // launch queried the relay-side replaceable list. Never open the publish
+        // gate from disk alone: require a verified response event, or real EOSE
+        // from every target in the dedicated fetch.
+        if (!fetchResult.hasFreshnessEvidence) {
+            return MuteSettleOutcome(MuteSettleResult.NoEventFound)
         }
 
-        // Amber mode: wait for the kind-10000 event + async decrypt
+        val observedEvent = fetchResult.receivedEvent
         val settled = withTimeoutOrNull(10_000L) {
-            // First: wait for ANY mute list to appear in MES
-            val muteList = withTimeoutOrNull(5_000L) {
-                memoryEventStore.ownMuteListFlow()
-                    .filter { it != null }
-                    .first()
-            }
-            if (muteList == null) {
-                val content = memoryEventStore.getMuteListContent(pubkeyHex)
-                if (content == null) {
-                    return@withTimeoutOrNull MuteSettleResult.NoEventFound
+            while (true) {
+                val event = awaitMuteListEvent(
+                    current = { memoryEventStore.getLatestMuteListEvent(pubkeyHex) },
+                    updates = memoryEventStore.ownMuteListEventFlow(),
+                    timeoutMs = 2_000L,
+                    accept = { candidate ->
+                        observedEvent == null ||
+                            candidate.id == observedEvent.id ||
+                            candidate.createdAt >= observedEvent.createdAt
+                    },
+                )
+                if (event == null) {
+                    return@withTimeoutOrNull if (
+                        observedEvent == null && fetchResult.fullEoseCoverage
+                    ) {
+                        MuteSettleOutcome(MuteSettleResult.RelayConfirmedEmpty)
+                    } else {
+                        MuteSettleOutcome(MuteSettleResult.NoEventFound)
+                    }
                 }
-            }
 
-            val content = memoryEventStore.getMuteListContent(pubkeyHex)
-            if (content.isNullOrEmpty()) {
-                return@withTimeoutOrNull MuteSettleResult.NoPrivateContent
-            }
-
-            // Content exists — try decrypt
-            val plaintext = signingManager.decrypt(content, pubkeyHex)
-            if (plaintext != null) {
-                val privateTags = parseMuteTags(plaintext)
-                if (privateTags != null) {
-                    memoryEventStore.updateMuteListPrivateTags(
-                        pubkeyHex,
-                        privateTags.pubkeys,
-                        privateTags.hashtags,
-                        privateTags.words,
-                        privateTags.eventIds,
+                if (event.content.isEmpty()) {
+                    if (!memoryEventStore.isCurrentMuteListEvent(pubkeyHex, event.id)) continue
+                    return@withTimeoutOrNull MuteSettleOutcome(
+                        result = MuteSettleResult.NoPrivateContent,
+                        eventId = event.id,
                     )
-                    return@withTimeoutOrNull MuteSettleResult.AmberDecrypted
                 }
-            }
 
-            MuteSettleResult.AmberDecryptFailed
+                val plaintext = signingManager.decrypt(event.content, pubkeyHex)
+                val privateTags = plaintext?.let(::parseMuteTags)
+                if (!memoryEventStore.isCurrentMuteListEvent(pubkeyHex, event.id)) continue
+                if (privateTags == null) {
+                    return@withTimeoutOrNull MuteSettleOutcome(
+                        result = MuteSettleResult.DecryptFailed,
+                        eventId = event.id,
+                    )
+                }
+
+                val applied = memoryEventStore.updateMuteListPrivateTagsIfCurrent(
+                    eventId = event.id,
+                    pubkey = pubkeyHex,
+                    privatePubkeys = privateTags.pubkeys,
+                    privateHashtags = privateTags.hashtags,
+                    privateWords = privateTags.words,
+                    privateEventIds = privateTags.eventIds,
+                )
+                if (!applied) continue
+                return@withTimeoutOrNull MuteSettleOutcome(
+                    result = if (keyManager.isAmberMode) {
+                        MuteSettleResult.AmberDecrypted
+                    } else {
+                        MuteSettleResult.NsecDecrypted
+                    },
+                    eventId = event.id,
+                )
+            }
+            @Suppress("UNREACHABLE_CODE")
+            MuteSettleOutcome(MuteSettleResult.Timeout)
         }
 
-        return settled ?: MuteSettleResult.Timeout
+        return settled ?: MuteSettleOutcome(MuteSettleResult.Timeout)
     }
 
     /**
-     * Async Amber decrypt callback — fired by MES when a kind-10000 with
-     * encrypted content arrives. Updates only private fields in MES.
-     * MES contract: muteListDecryptCallback only fires when isOwn && content.isNotEmpty() && isAmberMode.
+     * Verify a newly accepted own kind-10000. The MES callback closes the gate
+     * synchronously; this reopens it only if the same event remains current.
      */
-    private suspend fun handleAmberMuteDecrypt(event: com.unsilence.app.data.memory.NostrEvent) {
-        // Guard: skip if a newer kind-10000 was inserted between callback dispatch
-        // and execution (snapshot restore deserializes events sequentially — the older
-        // event fires its callback before the newer one is in eventsById).
-        if (!memoryEventStore.isNewestMuteEvent(event.id, event.pubkey)) return
+    private suspend fun handleOwnMuteListEvent(
+        event: com.unsilence.app.data.memory.NostrEvent,
+    ) {
+        // Initial bootstrap settlement verifies only the final event after fetch
+        // coverage. Avoid decrypting every historical snapshot revision.
+        if (muteBootstrapSettledForPubkey != event.pubkey) return
+        // A stale relay copy cannot become current again without a newer MES
+        // callback, so reject it before potentially invoking Amber.
+        if (!memoryEventStore.isCurrentMuteListEvent(event.pubkey, event.id)) return
+        if (!muteEventVerificationGate.tryBegin(event.id)) return
 
-        val plaintext = signingManager.decrypt(event.content, event.pubkey) ?: return
-        val parsed = parseMuteTags(plaintext) ?: return
-        memoryEventStore.updateMuteListPrivateTags(
-            event.pubkey,
-            parsed.pubkeys, parsed.hashtags, parsed.words, parsed.eventIds,
-        )
-        muteListRepository.markPublishSafe("Amber async decrypt succeeded")
-    }
-
-    private enum class MuteSettleResult {
-        NsecDecrypted, AmberDecrypted, NoPrivateContent, NoEventFound,
-        AmberDecryptFailed, Timeout, EncryptRoundTripFailed,
+        var opened = false
+        try {
+            val verified = if (event.content.isEmpty()) {
+                memoryEventStore.isCurrentMuteListEvent(event.pubkey, event.id)
+            } else {
+                val plaintext = signingManager.decrypt(event.content, event.pubkey)
+                val parsed = plaintext?.let(::parseMuteTags)
+                if (parsed == null) {
+                    if (memoryEventStore.isCurrentMuteListEvent(event.pubkey, event.id)) {
+                        muteListRepository.markPublishUnsafe(
+                            "new own kind-10000 decrypt failed",
+                            MuteSyncState.EncryptionUnavailable,
+                        )
+                        if (keyManager.isAmberMode) _amberReauthorizeRequiredFlow.tryEmit(Unit)
+                    }
+                    return
+                }
+                memoryEventStore.updateMuteListPrivateTagsIfCurrent(
+                    eventId = event.id,
+                    pubkey = event.pubkey,
+                    privatePubkeys = parsed.pubkeys,
+                    privateHashtags = parsed.hashtags,
+                    privateWords = parsed.words,
+                    privateEventIds = parsed.eventIds,
+                )
+            }
+            if (verified) {
+                opened = muteListRepository.markPublishSafe(
+                    reason = "new own kind-10000 verified",
+                    expectedEventId = event.id,
+                )
+                if (opened) muteRecoveryJob?.cancel()
+            }
+        } finally {
+            muteEventVerificationGate.finish(event.id, verified = opened)
+        }
     }
 
     private data class ParsedMuteTags(
@@ -900,4 +1185,30 @@ class AppBootstrapper @Inject constructor(
             null
         }
     }
+}
+
+internal enum class MuteSettleResult {
+    NsecDecrypted,
+    AmberDecrypted,
+    NoPrivateContent,
+    RelayConfirmedEmpty,
+    NoEventFound,
+    DecryptFailed,
+    Timeout,
+    EncryptRoundTripFailed,
+}
+
+internal data class MuteSettleOutcome(
+    val result: MuteSettleResult,
+    val eventId: String? = null,
+)
+
+/** Waits for a real raw kind-10000, never a locally-derived MuteList overlay. */
+internal suspend fun awaitMuteListEvent(
+    current: () -> NostrEvent?,
+    updates: Flow<NostrEvent?>,
+    timeoutMs: Long,
+    accept: (NostrEvent) -> Boolean = { true },
+): NostrEvent? = current()?.takeIf(accept) ?: withTimeoutOrNull(timeoutMs) {
+    updates.filterNotNull().first(accept)
 }

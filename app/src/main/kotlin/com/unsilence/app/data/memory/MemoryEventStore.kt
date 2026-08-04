@@ -14,6 +14,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.distinctUntilChangedBy
 import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.map
@@ -69,11 +70,14 @@ internal val SNAPSHOT_BINARY_MAGIC = byteArrayOf(0x55, 0x53, 0x4E, 0x53) // "USN
  *  trusted as legacy, restamped to V14 on next save. */
 /** V15 appends the own-anon-zap pubkey set (private-zap self-recognition).
  *  V16 appends bounded device-authoritative NIP-11 relay identities.
- *  V17 retains the owner's raw kind-3 inside the FOLLOWS section. */
-private const val SNAPSHOT_BINARY_VERSION = 17
+ *  V17 retains the owner's raw kind-3 inside the FOLLOWS section.
+ *  V18 appends the unacknowledged own kind-10000 mutation journal. */
+private const val SNAPSHOT_BINARY_VERSION = 18
 /** Max retained own outgoing private-zap anon pubkeys (bounded, insertion-order eviction). */
 private const val OWN_ANON_ZAP_CAP = 500
 private const val RELAY_IDENTITY_CAP = 3_000
+private const val PENDING_MUTE_OWNER_CAP = 4
+private const val PENDING_MUTE_CHANGE_CAP = 100_000
 /** Thrown by restoreSnapshotBinary when a V14+ snapshot's stamped owner pubkey
  *  differs from the current session's ownPubkey — a foreign-account snapshot must
  *  not bleed into this user's MES. Thrown before any MES insertion, so the store
@@ -613,14 +617,16 @@ class MemoryEventStore @Inject constructor(
      *  Kept separate from kind-10002 so feed subscription resolution never sees them. */
     private val profileDerivedLookupRelaysByPubkey = ConcurrentHashMap<String, List<String>>()
     private val muteListsByPubkey = ConcurrentHashMap<String, MuteList>()
-    /** Epoch-seconds floor: reject own kind-10000 relay events older than this.
-     *  Set by addPrivateMute/removePrivateMute; cleared when a relay event
-     *  with createdAt >= floor is accepted (our publish echo arrived). */
-    @Volatile private var muteListOptimisticFloor: Long = 0L
+    /** Serializes own kind-10000 insertion, local intent mutation, and publish CAS. */
+    private val muteStateLock = Any()
+    /** Accepted/raw event identity per owner; materialized mute state may include pending intent. */
+    private val latestMuteEventIdByPubkey = ConcurrentHashMap<String, String>()
+    /** Durable local intent, cleared only after at least one relay accepts its signed event. */
+    private val pendingMutePublishesByPubkey = ConcurrentHashMap<String, PendingMutePublish>()
 
-    /** Callback fired when a kind-10000 with encrypted content arrives in Amber mode.
-     *  Set by AppBootstrapper to trigger async decrypt via SigningManager. */
-    @Volatile internal var muteListDecryptCallback: ((NostrEvent) -> Unit)? = null
+    /** Callback fired for every accepted own kind-10000 (including empty content).
+     *  AppBootstrapper verifies/decrypts the exact event before reopening publishing. */
+    @Volatile internal var ownMuteListEventCallback: ((NostrEvent) -> Unit)? = null
 
     /** Checks if an event was self-published by MuteListRepository.
      *  Wired by AppBootstrapper to avoid re-processing our own echoes. */
@@ -999,7 +1005,16 @@ class MemoryEventStore @Inject constructor(
      * _relayMonitorSignal / _relaySetSignal set the corresponding flag
      * here instead. The caller (insert / insertBatch) flushes once at end.
      */
-    private fun insertCore(event: NostrEvent, dirty: InsertDirty): Boolean {
+    private fun insertCore(event: NostrEvent, dirty: InsertDirty): Boolean =
+        if (event.kind == 10000) {
+            synchronized(muteStateLock) { insertCoreUnlocked(event, dirty) }
+        } else {
+            insertCoreUnlocked(event, dirty)
+        }
+
+    /** Caller holds [muteStateLock] for kind-10000 so publish snapshots cannot
+     * observe the raw event index before its materialized mute state is ready. */
+    private fun insertCoreUnlocked(event: NostrEvent, dirty: InsertDirty): Boolean {
         if (event.kind == 30385 && !isTrustScoreProvider(event.pubkey)) return false
         if (event.kind in DERIVED_ONLY_KINDS) {
             return insertDerivedOnly(event, dirty)
@@ -1804,38 +1819,20 @@ class MemoryEventStore @Inject constructor(
     private fun handleMuteList(event: NostrEvent) {
         // Newest-known kind-10000 createdAt per pubkey (replaceable dedup index,
         // shared with the other replaceable handlers). Read the prior value for
-        // the guard below, then merge this event's createdAt in — unconditionally,
-        // mirroring the eventsById scan this replaces: every kind-10000 that lands
-        // in the store counts toward "newest", even when the guards below skip
-        // processing (the event is already in eventsById at this point).
+        // the guard below, then merge this event's createdAt for every
+        // non-local-echo event, mirroring the eventsById scan this replaces.
         val dedupKey = "${event.pubkey}:10000"
-        val newestKnown = relayKindCreatedAt[dedupKey]
-        relayKindCreatedAt.merge(dedupKey, event.createdAt) { a, b -> maxOf(a, b) }
-
         val isOwn = event.pubkey == ownPubkey
 
-        // Skip our own published events — we already have canonical local state.
-        // The echo would clobber private fields (Amber can't decrypt inline).
+        // An echo is not the transaction's commit point: only an explicit relay
+        // OK is. Do not advance the authoritative base here, otherwise an echo
+        // could hide a concurrent event from the commit-time CAS below.
         if (isOwn && isSelfPublishedCheck(event.id)) {
-            // Still update floor timestamp so subsequent relay events are accepted
-            val floor = muteListOptimisticFloor
-            if (floor > 0L && event.createdAt >= floor) muteListOptimisticFloor = 0L
             return
         }
 
-        // Guard: reject relay events older than an in-flight optimistic update.
-        // addPrivateMute/removePrivateMute set the floor; it clears when a relay
-        // event with createdAt >= floor is accepted (our publish echo arrived).
-        if (isOwn) {
-            val floor = muteListOptimisticFloor
-            if (floor > 0L && event.createdAt < floor) {
-                return
-            }
-            if (floor > 0L) {
-                // Relay event caught up — clear the floor
-                muteListOptimisticFloor = 0L
-            }
-        }
+        val newestKnown = relayKindCreatedAt[dedupKey]
+        relayKindCreatedAt.merge(dedupKey, event.createdAt) { a, b -> maxOf(a, b) }
 
         // Replaceable event guard: skip if a newer kind-10000 for this pubkey
         // already exists in MES. Prevents older relay echoes from clobbering
@@ -1866,7 +1863,16 @@ class MemoryEventStore @Inject constructor(
         var inlinePrivHashtags: Set<String>? = null
         var inlinePrivWords: Set<String>? = null
         var inlinePrivEventIds: Set<String>? = null
-        if (isOwn && event.content.isNotEmpty() && !keyProvider.isAmberMode) {
+        if (isOwn && event.content.isEmpty()) {
+            // Empty content is an authoritative empty private half, not a
+            // temporary decrypt failure. Carrying the previous private fields
+            // here would resurrect mutes another client deliberately cleared
+            // the next time unSilence republishes the list.
+            inlinePrivPubkeys = emptySet()
+            inlinePrivHashtags = emptySet()
+            inlinePrivWords = emptySet()
+            inlinePrivEventIds = emptySet()
+        } else if (isOwn && !keyProvider.isAmberMode) {
             val decryptedTags = decryptMuteContent(event.content, event.pubkey)
             if (decryptedTags != null) {
                 val pp = mutableSetOf<String>()
@@ -1890,7 +1896,7 @@ class MemoryEventStore @Inject constructor(
             }
         }
 
-        muteListsByPubkey[event.pubkey] = MuteList(
+        val authoritative = MuteList(
             pubkeys = pubkeys,
             hashtags = hashtags,
             words = words,
@@ -1900,11 +1906,20 @@ class MemoryEventStore @Inject constructor(
             privateWords = inlinePrivWords ?: muteListsByPubkey[event.pubkey]?.privateWords ?: emptySet(),
             privateEventIds = inlinePrivEventIds ?: muteListsByPubkey[event.pubkey]?.privateEventIds ?: emptySet(),
         )
+        val materialized = if (isOwn) {
+            pendingMutePublishesByPubkey[event.pubkey]?.applyTo(authoritative) ?: authoritative
+        } else {
+            authoritative
+        }
+        muteListsByPubkey[event.pubkey] = materialized
+        latestMuteEventIdByPubkey[event.pubkey] = event.id
         if (isOwn) _muteListSignal.value = System.nanoTime()
 
-        // For Amber mode + own pubkey + non-empty content: fire async decrypt callback
-        if (isOwn && event.content.isNotEmpty() && keyProvider.isAmberMode) {
-            muteListDecryptCallback?.invoke(event)
+        // Verify the exact accepted event before publishing can reopen. This runs
+        // for nsec and Amber, and for empty content, so a late EOSE/event can
+        // recover an initially unsafe bootstrap without a fixed delay.
+        if (isOwn) {
+            ownMuteListEventCallback?.invoke(event)
         }
     }
 
@@ -3129,8 +3144,30 @@ class MemoryEventStore @Inject constructor(
         privateWords: Set<String>,
         privateEventIds: Set<String>,
     ) {
-        muteListsByPubkey.compute(pubkey) { _, existing ->
-            if (existing == null) {
+        updateMuteListPrivateTagsIfCurrent(
+            eventId = null,
+            pubkey = pubkey,
+            privatePubkeys = privatePubkeys,
+            privateHashtags = privateHashtags,
+            privateWords = privateWords,
+            privateEventIds = privateEventIds,
+        )
+    }
+
+    /** Apply decrypted private tags only if [eventId] is still the accepted
+     * replaceable event, then reapply any durable local mutation journal. */
+    internal fun updateMuteListPrivateTagsIfCurrent(
+        eventId: String?,
+        pubkey: String,
+        privatePubkeys: Set<String>,
+        privateHashtags: Set<String>,
+        privateWords: Set<String>,
+        privateEventIds: Set<String>,
+    ): Boolean {
+        synchronized(muteStateLock) {
+            if (eventId != null && latestMuteEventIdByPubkey[pubkey] != eventId) return false
+            val existing = muteListsByPubkey[pubkey]
+            val decrypted = if (existing == null) {
                 MuteList(
                     pubkeys = emptySet(), hashtags = emptySet(),
                     words = emptySet(), eventIds = emptySet(),
@@ -3147,29 +3184,44 @@ class MemoryEventStore @Inject constructor(
                     privateEventIds = privateEventIds,
                 )
             }
+            muteListsByPubkey[pubkey] =
+                pendingMutePublishesByPubkey[pubkey]?.applyTo(decrypted) ?: decrypted
         }
         Log.i("MES", "MuteList private update: ${privatePubkeys.size}p ${privateHashtags.size}t ${privateWords.size}word ${privateEventIds.size}e | owner=${pubkey.take(8)}…")
         if (pubkey == ownPubkey) _muteListSignal.value = System.nanoTime()
+        return true
     }
 
     /**
      * Find the kind-10000 event content for a pubkey (for external decrypt).
      * Returns content from the NEWEST kind-10000 event for that pubkey.
      */
-    fun getMuteListContent(pubkey: String): String? {
-        // Per-pubkey index scan (not full eventsById): the newest-createdAt
-        // index alone can't answer this — it has no event reference, and the
-        // newest kind-10000 may have EMPTY content while an older one carries
-        // the encrypted private tags.
-        val ids = idsByPubkey[pubkey] ?: return null
-        var newest: NostrEvent? = null
-        for (id in ids) {
-            val event = eventsById[id] ?: continue
-            if (event.kind == 10000 && event.content.isNotEmpty()) {
-                if (newest == null || event.createdAt > newest.createdAt) newest = event
-            }
-        }
-        return newest?.content
+    fun getMuteListContent(pubkey: String): String? = getLatestMuteListEvent(pubkey)?.content
+
+    /** Latest accepted kind-10000, including an intentionally empty content field. */
+    fun getLatestMuteListEvent(pubkey: String): NostrEvent? = synchronized(muteStateLock) {
+        latestMuteEventIdByPubkey[pubkey]?.let(eventsById::get)
+    }
+
+    fun ownMuteListEventFlow(): Flow<NostrEvent?> =
+        _muteListSignal.map { ownPubkey?.let(::getLatestMuteListEvent) }
+            .distinctUntilChangedBy { it?.id }
+            .flowOn(Dispatchers.Default)
+
+    internal fun isCurrentMuteListEvent(pubkey: String, eventId: String): Boolean =
+        synchronized(muteStateLock) { latestMuteEventIdByPubkey[pubkey] == eventId }
+
+    /**
+     * Execute a short base-state decision under the same lock used by kind-10000
+     * insertion. This closes the check-then-open race where a newer relay event
+     * could close the publish gate between an identity check and the gate write,
+     * only for the stale check to reopen it afterward.
+     */
+    internal fun <T> inspectMuteListBaseAtomically(
+        pubkey: String,
+        block: (currentEventId: String?) -> T,
+    ): T = synchronized(muteStateLock) {
+        block(latestMuteEventIdByPubkey[pubkey])
     }
 
     /** True if [eventId] is the newest kind-10000 for [pubkey] in eventsById. */
@@ -3183,96 +3235,143 @@ class MemoryEventStore @Inject constructor(
         return target.createdAt >= newestKnown
     }
 
-    /** Optimistic local mute — feed refilters via _muteListSignal.
-     *  Sets muteListOptimisticFloor so relay events don't overwrite. */
-    fun addPrivateMute(targetPubkey: String) {
-        val ownPk = ownPubkey ?: return
-        muteListOptimisticFloor = System.currentTimeMillis() / 1000L
-        muteListsByPubkey.compute(ownPk) { _, existing ->
-            if (existing == null) MuteList(
-                pubkeys = emptySet(), hashtags = emptySet(),
-                words = emptySet(), eventIds = emptySet(),
-                privatePubkeys = setOf(targetPubkey),
-            ) else existing.copy(privatePubkeys = existing.privatePubkeys + targetPubkey)
+    /**
+     * Apply one local edit and durably journal its intent. No optimistic createdAt
+     * floor is installed here: while publishing is unsafe, a complete older relay
+     * list must still be allowed to arrive and become the base under this overlay.
+     */
+    internal fun recordPendingMuteMutation(mutation: MuteMutation): PendingMutePublish? {
+        val ownPk = ownPubkey ?: return null
+        val updated = synchronized(muteStateLock) {
+            val previous = pendingMutePublishesByPubkey[ownPk]
+                ?: PendingMutePublish(ownerPubkey = ownPk, revision = 0L)
+            val next = previous.withMutation(mutation)
+            if (next == previous) return null
+            if (next.changeCount > PENDING_MUTE_CHANGE_CAP) return null
+            pendingMutePublishesByPubkey[ownPk] = next
+            muteListsByPubkey[ownPk] = next.applyTo(muteListsByPubkey[ownPk] ?: emptyMuteList())
+            next
         }
         _muteListSignal.value = System.nanoTime()
+        return updated
+    }
+
+    // Compatibility wrappers keep one mutation implementation for every caller.
+    fun addPrivateMute(targetPubkey: String) {
+        recordPendingMuteMutation(MuteMutation(MuteMutationKind.User, targetPubkey, muted = true))
     }
 
     fun addPrivateWord(word: String) {
-        val ownPk = ownPubkey ?: return
-        muteListOptimisticFloor = System.currentTimeMillis() / 1000L
-        muteListsByPubkey.compute(ownPk) { _, existing ->
-            if (existing == null) MuteList(
-                pubkeys = emptySet(), hashtags = emptySet(),
-                words = emptySet(), eventIds = emptySet(),
-                privateWords = setOf(word),
-            ) else existing.copy(privateWords = existing.privateWords + word)
-        }
-        _muteListSignal.value = System.nanoTime()
+        recordPendingMuteMutation(MuteMutation(MuteMutationKind.Word, word, muted = true))
     }
 
     fun removePrivateWord(word: String) {
-        val ownPk = ownPubkey ?: return
-        muteListOptimisticFloor = System.currentTimeMillis() / 1000L
-        muteListsByPubkey.computeIfPresent(ownPk) { _, existing ->
-            existing.copy(
-                words = existing.words - word,
-                privateWords = existing.privateWords - word,
-            )
-        }
-        _muteListSignal.value = System.nanoTime()
+        recordPendingMuteMutation(MuteMutation(MuteMutationKind.Word, word, muted = false))
     }
 
     fun addPrivateHashtag(tag: String) {
-        val ownPk = ownPubkey ?: return
-        muteListOptimisticFloor = System.currentTimeMillis() / 1000L
-        muteListsByPubkey.compute(ownPk) { _, existing ->
-            if (existing == null) MuteList(
-                pubkeys = emptySet(), hashtags = emptySet(),
-                words = emptySet(), eventIds = emptySet(),
-                privateHashtags = setOf(tag),
-            ) else existing.copy(privateHashtags = existing.privateHashtags + tag)
-        }
-        _muteListSignal.value = System.nanoTime()
+        recordPendingMuteMutation(MuteMutation(MuteMutationKind.Hashtag, tag, muted = true))
     }
 
     fun removePrivateHashtag(tag: String) {
-        val ownPk = ownPubkey ?: return
-        muteListOptimisticFloor = System.currentTimeMillis() / 1000L
-        muteListsByPubkey.computeIfPresent(ownPk) { _, existing ->
-            existing.copy(
-                hashtags = existing.hashtags - tag,
-                privateHashtags = existing.privateHashtags - tag,
-            )
-        }
-        _muteListSignal.value = System.nanoTime()
+        recordPendingMuteMutation(MuteMutation(MuteMutationKind.Hashtag, tag, muted = false))
     }
 
-    /** Optimistic local unmute — removes from both public and private sets.
-     *  Sets muteListOptimisticFloor so relay events don't overwrite. */
     fun removePrivateMute(targetPubkey: String) {
-        val ownPk = ownPubkey ?: return
-        muteListOptimisticFloor = System.currentTimeMillis() / 1000L
-        muteListsByPubkey.computeIfPresent(ownPk) { _, existing ->
-            existing.copy(
-                pubkeys = existing.pubkeys - targetPubkey,
-                privatePubkeys = existing.privatePubkeys - targetPubkey,
-            )
+        recordPendingMuteMutation(MuteMutation(MuteMutationKind.User, targetPubkey, muted = false))
+    }
+
+    internal fun getPendingMutePublish(pubkey: String): PendingMutePublish? =
+        synchronized(muteStateLock) { pendingMutePublishesByPubkey[pubkey] }
+
+    /** Preserve valid in-process mute intent if a corrupt snapshot restore must
+     * clear partially materialized MES state. */
+    internal fun pendingMutePublishesSnapshot(): List<PendingMutePublish> =
+        synchronized(muteStateLock) { pendingMutePublishesByPubkey.values.toList() }
+
+    internal fun restorePendingMutePublishesAfterReset(
+        pendingPublishes: Collection<PendingMutePublish>,
+    ) {
+        val owner = ownPubkey ?: return
+        val pending = pendingPublishes.firstOrNull { it.ownerPubkey == owner } ?: return
+        synchronized(muteStateLock) {
+            val live = pendingMutePublishesByPubkey[owner]
+            val merged = if (live == null) pending else mergePendingMutePublishes(pending, live)
+            pendingMutePublishesByPubkey[owner] = merged
+            muteListsByPubkey[owner] = merged.applyTo(muteListsByPubkey[owner] ?: emptyMuteList())
         }
         _muteListSignal.value = System.nanoTime()
     }
 
-    /** Clear the optimistic floor — called when publish fails to avoid
-     *  permanently blocking relay mute list updates. */
-    fun clearMuteListOptimisticFloor() {
-        muteListOptimisticFloor = 0L
+    internal fun getMutePublishSnapshot(pubkey: String): MutePublishSnapshot? =
+        synchronized(muteStateLock) {
+            val pending = pendingMutePublishesByPubkey[pubkey] ?: return@synchronized null
+            MutePublishSnapshot(
+                pending = pending,
+                muteList = muteListsByPubkey[pubkey] ?: pending.applyTo(emptyMuteList()),
+                baseEventId = latestMuteEventIdByPubkey[pubkey],
+                baseCreatedAt = relayKindCreatedAt["$pubkey:10000"],
+            )
+        }
+
+    /** CAS the exact journal/base captured before an external signing round-trip. */
+    internal fun beginMutePublish(snapshot: MutePublishSnapshot): Boolean =
+        synchronized(muteStateLock) {
+            val pubkey = snapshot.pending.ownerPubkey
+            if (pendingMutePublishesByPubkey[pubkey] != snapshot.pending) return@synchronized false
+            if (muteListsByPubkey[pubkey] != snapshot.muteList) return@synchronized false
+            if (latestMuteEventIdByPubkey[pubkey] != snapshot.baseEventId) return@synchronized false
+            if (relayKindCreatedAt["$pubkey:10000"] != snapshot.baseCreatedAt) return@synchronized false
+            true
+        }
+
+    /**
+     * Relay acceptance is the commit point. Store the signed event before
+     * clearing the journal; the binary writer snapshots the journal before its
+     * event selection, making every concurrent save ordering recoverable.
+     */
+    internal fun commitAcceptedMutePublish(
+        snapshot: MutePublishSnapshot,
+        event: NostrEvent,
+    ): Boolean {
+        val committed = synchronized(muteStateLock) {
+            val pending = pendingMutePublishesByPubkey[event.pubkey] ?: return@synchronized false
+            if (pending != snapshot.pending) return@synchronized false
+
+            val key = "${event.pubkey}:10000"
+            // The relay base may change during the network round-trip. Preserve
+            // the journal and retry against that new base instead of clearing it
+            // after a stale event happened to receive an OK.
+            if (latestMuteEventIdByPubkey[event.pubkey] != snapshot.baseEventId) {
+                return@synchronized false
+            }
+            if (relayKindCreatedAt[key] != snapshot.baseCreatedAt) {
+                return@synchronized false
+            }
+            val newestCreatedAt = relayKindCreatedAt[key]
+            val newestEventId = latestMuteEventIdByPubkey[event.pubkey]
+            val superseded = newestCreatedAt != null && (
+                newestCreatedAt > event.createdAt ||
+                    (newestCreatedAt == event.createdAt &&
+                        newestEventId != null && newestEventId != event.id)
+                )
+            if (superseded) return@synchronized false
+
+            // Re-entrant monitor: storeLocalEvent itself does not run handlers.
+            storeLocalEvent(event)
+            relayKindCreatedAt.merge(key, event.createdAt) { a, b -> maxOf(a, b) }
+            latestMuteEventIdByPubkey[event.pubkey] = event.id
+            pendingMutePublishesByPubkey.remove(event.pubkey, pending)
+            true
+        }
+        if (committed) _muteListSignal.value = System.nanoTime()
+        return committed
     }
 
     /**
      * Store a locally-signed event in eventsById without triggering kind handlers.
-     * Used by MuteListRepository to ensure the latest kind-10000 event reaches the
-     * snapshot before the relay echo arrives — prevents data loss if the user
-     * backgrounds between local mute and echo.
+     * Used after relay acceptance so the committed kind-10000 reaches the next
+     * snapshot even when its relay echo has not arrived yet.
      *
      * When the relay echo arrives, [insertCore] sees the existing event via
      * putIfAbsent and merges relaysSeen only (no double-processing).
@@ -5470,6 +5569,14 @@ class MemoryEventStore @Inject constructor(
         // snapshot size instead of duplicating 15-20MB into contiguous arrays.
         val writeStart = out.size()
 
+        // Capture pending intent BEFORE event selection. commitAcceptedMutePublish
+        // stores its event before clearing the journal, so a concurrent writer sees
+        // either the pending intent, the accepted event, or both — never neither.
+        val pendingMuteSnapshot = synchronized(muteStateLock) {
+            val owner = ownPubkey
+            owner?.let(pendingMutePublishesByPubkey::get)?.let(::listOf).orEmpty()
+        }
+
         val followsSelection = snapshotFollowsSelection()
         val followsBuf = ByteArrayOutputStream(8 * 1024)
         DataOutputStream(followsBuf).use { d ->
@@ -5714,6 +5821,14 @@ class MemoryEventStore @Inject constructor(
             out.writeStrOrNull(identity.name)
             out.writeStrOrNull(identity.iconUrl)
             out.writeLong(identity.fetchedAt)
+        }
+
+        // V18: local mute intent not yet acknowledged by any relay. Values are
+        // stored in the app-private, OS-encrypted snapshot so they survive a hard
+        // kill without pretending an unacknowledged event is canonical.
+        if (snapshotVersion >= 18) {
+            out.writeInt(pendingMuteSnapshot.size)
+            for (pending in pendingMuteSnapshot) out.writePendingMutePublish(pending)
         }
         val totalBytes = out.size() - writeStart
         val knownSectionBytes = headerBytes +
@@ -6079,6 +6194,32 @@ class MemoryEventStore @Inject constructor(
             }
         }
 
+        // V18: apply the durable journal after raw kind-10000 events have rebuilt
+        // their authoritative state. In-process edits made during the background
+        // restore are newer and win per target.
+        if (version >= 18) {
+            val pendingOwnerCount = input.readInt()
+            if (pendingOwnerCount < 0 || pendingOwnerCount > PENDING_MUTE_OWNER_CAP) {
+                throw IOException("Invalid pending mute owner count: $pendingOwnerCount")
+            }
+            repeat(pendingOwnerCount) {
+                val restoredPending = input.readPendingMutePublish()
+                val owner = ownPubkey
+                if (owner != null && restoredPending.ownerPubkey == owner) {
+                    synchronized(muteStateLock) {
+                        val live = pendingMutePublishesByPubkey[owner]
+                        val merged = if (live == null) restoredPending else {
+                            mergePendingMutePublishes(restoredPending, live)
+                        }
+                        pendingMutePublishesByPubkey[owner] = merged
+                        muteListsByPubkey[owner] =
+                            merged.applyTo(muteListsByPubkey[owner] ?: emptyMuteList())
+                    }
+                }
+            }
+            _muteListSignal.value = System.nanoTime()
+        }
+
         // Reindex kind-7 reactions from raw events so the widened shortcode regex
         // reclassifies old Standard(":shortcode:") entries as Custom(shortcode, url).
         reindexReactionsFromEvents()
@@ -6208,6 +6349,53 @@ class MemoryEventStore @Inject constructor(
         )
     }
 
+    private fun DataOutputStream.writePendingMutePublish(pending: PendingMutePublish) {
+        writeStr(pending.ownerPubkey)
+        writeLong(pending.revision)
+        writeMuteChanges(pending.userChanges)
+        writeMuteChanges(pending.wordChanges)
+        writeMuteChanges(pending.hashtagChanges)
+    }
+
+    private fun DataOutputStream.writeMuteChanges(changes: Map<String, Boolean>) {
+        require(changes.size <= PENDING_MUTE_CHANGE_CAP)
+        writeInt(changes.size)
+        for ((value, muted) in changes) {
+            writeStr(value)
+            writeBoolean(muted)
+        }
+    }
+
+    private fun DataInputStream.readPendingMutePublish(): PendingMutePublish {
+        val owner = readStr()
+        val revision = readLong()
+        if (revision < 0L) throw IOException("Invalid pending mute revision: $revision")
+        val users = readMuteChanges("user")
+        val words = readMuteChanges("word")
+        val hashtags = readMuteChanges("hashtag")
+        val total = users.size + words.size + hashtags.size
+        if (total > PENDING_MUTE_CHANGE_CAP) {
+            throw IOException("Invalid pending mute change count: $total")
+        }
+        return PendingMutePublish(
+            ownerPubkey = owner,
+            revision = revision,
+            userChanges = users,
+            wordChanges = words,
+            hashtagChanges = hashtags,
+        )
+    }
+
+    private fun DataInputStream.readMuteChanges(label: String): Map<String, Boolean> {
+        val count = readInt()
+        if (count < 0 || count > PENDING_MUTE_CHANGE_CAP) {
+            throw IOException("Invalid pending mute $label count: $count")
+        }
+        return LinkedHashMap<String, Boolean>(count).apply {
+            repeat(count) { put(readStr(), readBoolean()) }
+        }
+    }
+
     private fun DataOutputStream.writeStr(s: String) {
         val bytes = s.toByteArray(Charsets.UTF_8)
         writeInt(bytes.size)
@@ -6314,6 +6502,14 @@ class MemoryEventStore @Inject constructor(
     }
 
     internal fun insertFromSnapshot(event: NostrEvent) {
+        if (event.kind == 10000) {
+            synchronized(muteStateLock) { insertFromSnapshotUnlocked(event) }
+        } else {
+            insertFromSnapshotUnlocked(event)
+        }
+    }
+
+    private fun insertFromSnapshotUnlocked(event: NostrEvent) {
         val nowSec = System.currentTimeMillis() / 1000L
         if (event.createdAt > nowSec + MAX_FUTURE_DRIFT_SECONDS) return
         if (event.kind in DERIVED_ONLY_KINDS) {
@@ -6582,6 +6778,8 @@ class MemoryEventStore @Inject constructor(
         followerCountCache.clear()
         relayListsByPubkey.clear()
         muteListsByPubkey.clear()
+        latestMuteEventIdByPubkey.clear()
+        pendingMutePublishesByPubkey.clear()
         blockedRelaysByPubkey.clear()
         searchRelaysByPubkey.clear()
         favoritesByPubkey.clear()
@@ -6648,6 +6846,8 @@ class MemoryEventStore @Inject constructor(
         followerCountCache.clear()
         relayListsByPubkey.clear()
         muteListsByPubkey.clear()
+        latestMuteEventIdByPubkey.clear()
+        pendingMutePublishesByPubkey.clear()
         blockedRelaysByPubkey.clear()
         searchRelaysByPubkey.clear()
         favoritesByPubkey.clear()

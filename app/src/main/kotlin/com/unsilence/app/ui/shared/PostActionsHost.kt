@@ -73,8 +73,10 @@ fun PostActionsHost(
             onMuteUser = {
                 when (onMuteUser(activeRow.pubkey)) {
                     MuteResult.Queued -> showSnackbar("Muted")
-                    MuteResult.LocalOnly ->
-                        showSnackbar("Muted locally \u2014 grant NIP-44 decrypt in Amber to sync")
+                    MuteResult.PendingSync ->
+                        showSnackbar("Muted locally — will sync when the mute list is ready")
+                    MuteResult.Unavailable ->
+                        showSnackbar("Mute unavailable — try again")
                 }
             },
             onReport = {

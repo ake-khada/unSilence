@@ -11,6 +11,7 @@ import com.unsilence.app.data.memory.UserEntity
 import com.unsilence.app.data.relay.RelayPreferencesStore
 import com.unsilence.app.data.repository.MuteListRepository
 import com.unsilence.app.data.repository.MuteResult
+import com.unsilence.app.data.repository.MuteSyncState
 import com.unsilence.app.data.repository.UserRepository
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.flow.SharingStarted
@@ -42,6 +43,7 @@ class FiltersViewModel @Inject constructor(
             .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), com.unsilence.app.data.memory.DEFAULT_HASHTAG_CAP)
 
     val publishSafe: StateFlow<Boolean> = muteListRepository.publishSafe
+    val muteSyncState: StateFlow<MuteSyncState> = muteListRepository.syncState
 
     val profileVersion: StateFlow<Long> = memoryEventStore.profileSignalFlow
 
