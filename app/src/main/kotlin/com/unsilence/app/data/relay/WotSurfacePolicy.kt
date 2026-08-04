@@ -10,6 +10,12 @@ import com.unsilence.app.data.model.Segment
 private const val DISTANT_HOPS_THRESHOLD = 5
 private const val IMPERSONATION_LOW_RANK_THRESHOLD = 10
 private const val PROTECTED_PROFILE_RANK_THRESHOLD = 40
+// Removal is deliberately much stricter than demotion: multiple trusted
+// reporters plus explicit evidence that the account has almost no trusted reach.
+internal const val SEARCH_ELEVATED_VERIFIED_REPORTERS = 3L
+internal const val SEARCH_ELEVATED_VERIFIED_MUTERS = 3L
+internal const val SEARCH_HEAVY_VERIFIED_REPORTERS = 10L
+internal const val SEARCH_NEAR_ZERO_VERIFIED_FOLLOWERS = 1L
 
 enum class FeedWotDisplayMode {
     NUMBERS,
@@ -33,6 +39,12 @@ data class ProtectedProfile(
 data class ImpersonationRisk(
     val protectedProfile: ProtectedProfile,
 )
+
+internal enum class SearchImpersonationDisposition {
+    KEEP,
+    DEMOTE,
+    DROP,
+}
 
 internal fun wotFeedException(lookup: WotLookup): FeedWotSignal? = when (lookup) {
     WotLookup.Pending -> null
@@ -76,42 +88,96 @@ internal fun wotVerifiedFollowers(lookup: WotLookup?): Long? =
 private data class WotSortKeys(
     val rank: Int,
     val verifiedFollowers: Long,
+    val impersonationDisposition: SearchImpersonationDisposition,
 )
 
 private fun snapshotWotSortKeys(
     users: List<UserEntity>,
+    followedPubkeys: Set<String>?,
     lookup: (String) -> WotLookup?,
-): Map<String, WotSortKeys> =
-    users.asSequence()
+): Map<String, WotSortKeys> {
+    val normalizedFollows = followedPubkeys?.mapNotNullTo(HashSet(), ::normalizeWotPubkey)
+    return users.asSequence()
         .map(UserEntity::pubkey)
         .distinct()
         .associateWith { pubkey ->
             val snapshot = lookup(pubkey)
+            val normalizedPubkey = normalizeWotPubkey(pubkey)
             WotSortKeys(
                 rank = wotRank(snapshot) ?: Int.MIN_VALUE,
                 verifiedFollowers = wotVerifiedFollowers(snapshot) ?: Long.MIN_VALUE,
+                impersonationDisposition = searchImpersonationDisposition(
+                    lookup = snapshot,
+                    isFollowed = normalizedPubkey != null && normalizedPubkey in normalizedFollows.orEmpty(),
+                    followsResolved = followedPubkeys != null,
+                ),
             )
         }
+}
+
+internal fun searchImpersonationDisposition(
+    lookup: WotLookup?,
+    isFollowed: Boolean,
+    followsResolved: Boolean = true,
+): SearchImpersonationDisposition {
+    if (isFollowed) return SearchImpersonationDisposition.KEEP
+    val assertion = (lookup as? WotLookup.Scored)?.assertion
+        ?: return SearchImpersonationDisposition.KEEP
+    val verifiedReporters = assertion.verifiedReporters?.coerceAtLeast(0L) ?: 0L
+    val verifiedMuters = assertion.verifiedMuters?.coerceAtLeast(0L) ?: 0L
+    val isElevated = verifiedReporters >= SEARCH_ELEVATED_VERIFIED_REPORTERS ||
+        verifiedMuters >= SEARCH_ELEVATED_VERIFIED_MUTERS
+    if (!isElevated) return SearchImpersonationDisposition.KEEP
+
+    // Null follower data is unknown, not zero. Likewise, an unresolved own
+    // follow list cannot prove this candidate is safe to remove.
+    val verifiedFollowers = assertion.verifiedFollowers
+    val shouldDrop = followsResolved &&
+        verifiedReporters >= SEARCH_HEAVY_VERIFIED_REPORTERS &&
+        verifiedFollowers != null &&
+        verifiedFollowers <= SEARCH_NEAR_ZERO_VERIFIED_FOLLOWERS
+    return if (shouldDrop) {
+        SearchImpersonationDisposition.DROP
+    } else {
+        SearchImpersonationDisposition.DEMOTE
+    }
+}
 
 internal fun sortPeopleForSearch(
     users: List<UserEntity>,
     query: String,
+    followedPubkeys: Set<String>? = null,
+    limit: Int = Int.MAX_VALUE,
     lookup: (String) -> WotLookup?,
 ): List<UserEntity> {
-    val keys = snapshotWotSortKeys(users, lookup)
-    return users.sortedWith(
-        compareByDescending<UserEntity> { identitySearchMatchTier(it, query) }
-            .thenByDescending { keys.getValue(it.pubkey).rank }
-            .thenByDescending { keys.getValue(it.pubkey).verifiedFollowers }
-            .thenBy { it.displayName?.lowercase() ?: it.name?.lowercase() ?: it.pubkey },
-    )
+    val keys = snapshotWotSortKeys(users, followedPubkeys, lookup)
+    return users.asSequence()
+        .filter { keys.getValue(it.pubkey).impersonationDisposition != SearchImpersonationDisposition.DROP }
+        .sortedWith(
+            compareByDescending<UserEntity> { identitySearchMatchTier(it, query) }
+                .thenBy { keys.getValue(it.pubkey).impersonationDisposition }
+                .thenByDescending { keys.getValue(it.pubkey).rank }
+                .thenByDescending { keys.getValue(it.pubkey).verifiedFollowers }
+                .thenBy { it.displayName?.lowercase() ?: it.name?.lowercase() ?: it.pubkey },
+        )
+        .take(limit.coerceAtLeast(0))
+        .toList()
 }
+
+internal fun boundedIdentitySearchCandidates(
+    users: Sequence<UserEntity>,
+    query: String,
+    limit: Int,
+): List<UserEntity> = users
+    .filter { identitySearchMatchTier(it, query) >= 0 }
+    .take(limit.coerceAtLeast(0))
+    .toList()
 
 internal fun sortPeopleByWotFollowers(
     users: List<UserEntity>,
     lookup: (String) -> WotLookup?,
 ): List<UserEntity> {
-    val keys = snapshotWotSortKeys(users, lookup)
+    val keys = snapshotWotSortKeys(users, emptySet(), lookup)
     return users.sortedWith(
         compareByDescending<UserEntity> { keys.getValue(it.pubkey).verifiedFollowers }
             .thenByDescending { keys.getValue(it.pubkey).rank }
@@ -123,7 +189,7 @@ internal fun sortMentionsByWotRank(
     users: List<UserEntity>,
     lookup: (String) -> WotLookup?,
 ): List<UserEntity> {
-    val keys = snapshotWotSortKeys(users, lookup)
+    val keys = snapshotWotSortKeys(users, emptySet(), lookup)
     return users.sortedWith(
         compareByDescending<UserEntity> { keys.getValue(it.pubkey).rank }
             .thenBy { it.displayName?.lowercase() ?: it.name?.lowercase() ?: it.pubkey },
@@ -137,6 +203,7 @@ fun identitySearchMatchTier(user: UserEntity, query: String): Int {
         .mapNotNull { field ->
             val lower = field.lowercase()
             when {
+                lower == q -> 3
                 lower.startsWith(q) || lower.wordBoundaryContains(q) -> 2
                 lower.contains(q) -> 1
                 else -> null

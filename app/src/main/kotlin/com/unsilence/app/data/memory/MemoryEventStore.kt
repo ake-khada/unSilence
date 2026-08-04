@@ -39,7 +39,7 @@ import com.unsilence.app.data.relay.effectiveContentWarning
 import com.unsilence.app.data.relay.TimelineRef
 import com.unsilence.app.data.relay.TimelineService
 import com.unsilence.app.data.relay.boundedSeenRelayHints
-import com.unsilence.app.data.relay.identitySearchMatchTier
+import com.unsilence.app.data.relay.boundedIdentitySearchCandidates
 import com.unsilence.app.data.relay.deriveProfileRelayCount
 import com.unsilence.app.data.relay.normalizeRelayUrl
 import com.unsilence.app.data.relay.parseNip51RelayTags
@@ -116,6 +116,8 @@ private const val FEED_ROW_CACHE_CAP = 2000
 private const val ACTOR_INDEX_CAP = 1_000
 private const val ACTOR_TARGETS_CAP = 500
 private const val PROFILE_CAP = 2_000
+/** Defensive cap on matching candidates materialized for the final trust-aware ranking pass. */
+private const val SEARCH_PROFILE_MATCH_CAP = 5_000
 private const val PROFILE_ANCHOR_RECENT_EVENTS = 500
 /** Backoff after a profile trim pass evicts nothing. When everything over
  *  [PROFILE_CAP] is anchored (typical mid-restore: every restored profile's
@@ -4218,7 +4220,12 @@ class MemoryEventStore @Inject constructor(
             .map { toFeedRow(it) }
     }
 
-    /** Reactive profile search: identity fields only; prefix/word-boundary hits before substrings; limit 50. */
+    /**
+     * Reactive profile candidate search over identity fields only.
+     *
+     * This deliberately does not rank or apply the 50-row display limit. The
+     * consumer applies the single WoT-aware ranking pass before truncation.
+     */
     fun searchUsersFlow(query: String): Flow<List<UserEntity>> =
         _profileSignal
             .map { searchUsers(query) }
@@ -4226,18 +4233,13 @@ class MemoryEventStore @Inject constructor(
             .flowOn(Dispatchers.Default)
 
     private fun searchUsers(query: String): List<UserEntity> {
-        return profilesByPubkey.values
-            .mapNotNull { event ->
-                val entity = getUserEntity(event.pubkey) ?: return@mapNotNull null
-                val tier = identitySearchMatchTier(entity, query)
-                if (tier >= 0) entity to tier else null
-            }
-            .sortedWith(
-                compareByDescending<Pair<UserEntity, Int>> { it.second }
-                    .thenBy { it.first.displayName?.lowercase() ?: it.first.name?.lowercase() ?: it.first.pubkey },
-            )
-            .take(50)
-            .map { it.first }
+        return boundedIdentitySearchCandidates(
+            users = profilesByPubkey.values.asSequence().mapNotNull { event ->
+                getUserEntity(event.pubkey)
+            },
+            query = query,
+            limit = SEARCH_PROFILE_MATCH_CAP,
+        )
     }
 
     /** Exact ID lookup returning FeedRows, sorted by createdAt DESC. */

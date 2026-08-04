@@ -38,6 +38,7 @@ import com.unsilence.app.ui.navigation.DeepLinkTarget
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.FlowPreview
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -51,12 +52,14 @@ import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicLong
 import javax.inject.Inject
 
 private const val TRENDING_DISPLAY_LIMIT = 8
 private const val TRENDING_CANDIDATE_LIMIT = 32
+private const val SEARCH_PEOPLE_RESULT_LIMIT = 50
 
 data class SearchUiState(
     val query: String           = "",
@@ -83,6 +86,13 @@ private data class SearchResultsBundle(
     val people: List<UserEntity>,
     val muteList: MuteList? = null,
     val hashtagCap: Int? = null,
+    val followedPubkeys: Set<String>? = null,
+)
+
+private data class SearchSafetyBundle(
+    val muteList: MuteList?,
+    val hashtagCap: Int?,
+    val followedPubkeys: Set<String>?,
 )
 
 @OptIn(FlowPreview::class, ExperimentalCoroutinesApi::class)
@@ -402,11 +412,18 @@ class SearchViewModel @Inject constructor(
                     val safetyFlow = combine(
                         memoryEventStore.ownMuteListFlow(),
                         relayPreferencesStore.hashtagCapFlow(),
-                    ) { muteList, hashtagCap ->
-                        muteList to hashtagCap
+                        memoryEventStore.followsSignalFlow.map {
+                            memoryEventStore.getFollows(ownPubkey)?.toSet()
+                        }.distinctUntilChanged(),
+                    ) { muteList, hashtagCap, followedPubkeys ->
+                        SearchSafetyBundle(muteList, hashtagCap, followedPubkeys)
                     }
                     combine(searchResultsFlow, safetyFlow) { results, safety ->
-                        results.copy(muteList = safety.first, hashtagCap = safety.second)
+                        results.copy(
+                            muteList = safety.muteList,
+                            hashtagCap = safety.hashtagCap,
+                            followedPubkeys = safety.followedPubkeys,
+                        )
                     }.collect { results ->
                         val localNotes = filterSearchNoteRows(results.localNotes, results.muteList, results.hashtagCap)
                         val relayNotes = filterSearchNoteRows(results.relayNotes, results.muteList, results.hashtagCap)
@@ -419,7 +436,15 @@ class SearchViewModel @Inject constructor(
                         val tagResults = (localTagNotes + tagRelayNotes)
                             .distinctBy { it.id }
                             .sortedByDescending { it.createdAt }
-                        val sortedPeople = sortPeopleForSearch(people, query, memoryEventStore::wotFor)
+                        val sortedPeople = withContext(Dispatchers.Default) {
+                            sortPeopleForSearch(
+                                users = people,
+                                query = query,
+                                followedPubkeys = results.followedPubkeys,
+                                limit = SEARCH_PEOPLE_RESULT_LIMIT,
+                                lookup = memoryEventStore::wotFor,
+                            )
+                        }
                         val protectedProfiles = buildProtectedProfiles(ownPubkey)
                         val impersonationRisks = sortedPeople.mapNotNull { user ->
                             detectImpersonationRisk(

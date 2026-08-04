@@ -17,7 +17,6 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
@@ -119,7 +118,6 @@ import kotlin.math.abs
 
 private val TAB_LABELS = listOf("All", "People", "Notes", "Tags")
 private val WOT_SEARCH_SIGNAL_WIDTH = 48.dp
-private val SEARCH_IMPERSONATION_INLINE_MAX_WIDTH = 150.dp
 private const val SEARCH_TAB_SWIPE_THRESHOLD_PX = 120f
 
 @Composable
@@ -828,7 +826,7 @@ private fun ProfileCard(
                     Spacer(Modifier.width(Spacing.small))
                     WotImpersonationBadge(
                         risk = impersonationRisk,
-                        modifier = Modifier.widthIn(max = SEARCH_IMPERSONATION_INLINE_MAX_WIDTH),
+                        showLabel = false,
                     )
                 }
             }

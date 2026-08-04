@@ -68,6 +68,7 @@ import kotlinx.coroutines.withContext
 import javax.inject.Inject
 
 private const val TAG = "ComposeViewModel"
+private const val MENTION_SEARCH_RESULT_LIMIT = 50
 
 internal class ComposeSessionGate(initialSessionKey: String? = null) {
     var activeSessionKey: String? = initialSessionKey
@@ -445,6 +446,7 @@ class ComposeViewModel @Inject constructor(
                     memoryEventStore.wotSignalFlow,
                 ) { users, _ ->
                     val sorted = sortMentionsByWotRank(users, memoryEventStore::wotFor)
+                        .take(MENTION_SEARCH_RESULT_LIMIT)
                     updateMentionWotSubjects(sorted)
                     sorted
                 }
