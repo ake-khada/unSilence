@@ -5,7 +5,6 @@ import android.util.Log
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.unsilence.app.data.auth.KeyManager
-import com.unsilence.app.data.auth.SigningManager
 import com.unsilence.app.data.blossom.BlossomImageUploader
 import com.unsilence.app.data.memory.EventStats
 import com.unsilence.app.data.memory.FeedRow
@@ -15,7 +14,6 @@ import com.unsilence.app.data.memory.UserEntity
 import com.unsilence.app.data.memory.MemoryEventStore
 import com.unsilence.app.data.memory.WotLookup
 import com.unsilence.app.data.memory.ZapDetail
-import com.unsilence.app.data.relay.toEventJson
 import com.unsilence.app.data.relay.GLOBAL_RELAY_URLS
 import com.unsilence.app.data.relay.NostrFilter
 import com.unsilence.app.data.relay.RelayPool
@@ -26,15 +24,17 @@ import com.unsilence.app.data.relay.WotHydrationCoalescer
 import com.unsilence.app.data.relay.FeedWotDisplayMode
 import com.unsilence.app.data.relay.wotLookupSnapshot
 import com.unsilence.app.data.relay.wotSubjectsForFeedRows
+import com.unsilence.app.data.repository.EditableProfileMetadata
+import com.unsilence.app.data.repository.ProfileMetadataPublisher
+import com.unsilence.app.data.repository.ProfilePublishResult
 import com.unsilence.app.ui.feed.FeedContentFilter
 import com.unsilence.app.ui.shared.TimelineCardData
-import com.vitorpamplona.quartz.nip01Core.core.Event
-import com.vitorpamplona.quartz.nip01Core.signers.EventTemplate
 import com.vitorpamplona.quartz.nip01Core.core.hexToByteArray
 import com.vitorpamplona.quartz.nip19Bech32.toNpub
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.FlowPreview
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -49,17 +49,22 @@ import kotlinx.coroutines.flow.sample
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
-import kotlinx.serialization.json.buildJsonObject
-import kotlinx.serialization.json.put
-import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicLong
 import javax.inject.Inject
 
 private const val TAG = "ProfileVM"
 
+sealed interface ProfileSaveState {
+    data object Idle : ProfileSaveState
+    data object Saving : ProfileSaveState
+    data object Saved : ProfileSaveState
+    data class Failed(val message: String) : ProfileSaveState
+}
+
 @HiltViewModel
 class ProfileViewModel @Inject constructor(
     private val keyManager: KeyManager,
-    private val signingManager: SigningManager,
+    private val profileMetadataPublisher: ProfileMetadataPublisher,
     private val memoryEventStore: MemoryEventStore,
     private val relayPool: RelayPool,
     private val timelineService: TimelineService,
@@ -87,6 +92,11 @@ class ProfileViewModel @Inject constructor(
 
     private val _uploadingBanner = MutableStateFlow(false)
     val uploadingBanner: StateFlow<Boolean> = _uploadingBanner.asStateFlow()
+
+    private val _profileSaveState = MutableStateFlow<ProfileSaveState>(ProfileSaveState.Idle)
+    val profileSaveState: StateFlow<ProfileSaveState> = _profileSaveState.asStateFlow()
+    private var profileSaveJob: Job? = null
+    private val profileSaveGeneration = AtomicLong(0L)
 
     /** Init coroutines write this field, so it must be initialized before any init block. */
     val followerCount = MutableStateFlow<Long?>(null)
@@ -377,78 +387,43 @@ class ProfileViewModel @Inject constructor(
 
     // ── Save profile ─────────────────────────────────────────────────────
 
-    fun saveProfile(
-        name: String,
-        displayName: String,
-        about: String,
-        picture: String,
-        banner: String,
-        nip05: String,
-        lud16: String,
-        website: String,
-        onDone: () -> Unit,
+    internal fun saveProfile(
+        original: EditableProfileMetadata,
+        edited: EditableProfileMetadata,
     ) {
-        viewModelScope.launch(Dispatchers.IO) {
-            val contentJson = buildJsonObject {
-                if (name.isNotBlank())        put("name",         name.trim())
-                if (displayName.isNotBlank()) put("display_name", displayName.trim())
-                if (about.isNotBlank())       put("about",        about.trim())
-                if (picture.isNotBlank())     put("picture",      picture.trim())
-                if (banner.isNotBlank())      put("banner",       banner.trim())
-                if (nip05.isNotBlank())       put("nip05",        nip05.trim())
-                if (lud16.isNotBlank())       put("lud16",        lud16.trim())
-                if (website.isNotBlank())     put("website",      website.trim())
-            }.toString()
+        if (!_profileSaveState.compareAndSet(ProfileSaveState.Idle, ProfileSaveState.Saving)) return
+        val generation = profileSaveGeneration.incrementAndGet()
+        val ownPubkey = pubkeyHex
+        if (ownPubkey == null) {
+            _profileSaveState.value = profileSaveStateFor(ProfilePublishResult.AccountUnavailable)
+            return
+        }
 
-            val template = EventTemplate<Event>(
-                createdAt = System.currentTimeMillis() / 1000L,
-                kind      = 0,
-                tags      = emptyArray(),
-                content   = contentJson,
-            )
-
-            val signed = signingManager.sign(template) ?: return@launch
-
-            // Optimistic local update — kind-0 is replaceable (newest wins), so insert
-            // the just-signed event so the profile reflects IMMEDIATELY. Previously the
-            // UI only updated via a relay echo of the broadcast; with the targeted
-            // publish (H20c) we update locally instead of depending on an echo.
-            val nowMs = System.currentTimeMillis()
-            memoryEventStore.insert(
-                NostrEvent(
-                    id = signed.id,
-                    pubkey = signed.pubKey,
-                    kind = 0,
-                    content = signed.content,
-                    createdAt = signed.createdAt,
-                    tags = emptyList(),
-                    tagsJson = "[]",
-                    sig = signed.sig,
-                    relayUrl = "local",
-                    replyToId = null,
-                    rootId = null,
-                    hasContentWarning = false,
-                    contentWarningReason = null,
-                    firstSeenAt = nowMs,
-                    relaysSeen = ConcurrentHashMap.newKeySet<String>().apply { add("local") },
-                ),
-            )
-
-            // kind-0 goes ONLY to own write + indexer relays (targeted) — not a raw
-            // broadcast to every open socket (H20c).
-            val writeUrls = pubkeyHex?.let { getWriteRelayUrls(it) }.orEmpty()
-            val indexerUrls = relayPreferencesStore.indexerRelayUrlsSnapshot()
-            val targetUrls = (writeUrls + indexerUrls).distinct()
-            relayPool.publishToRelays(toEventJson(signed), targetUrls)
-
-            launch(Dispatchers.Main) { onDone() }
+        profileSaveJob = viewModelScope.launch(Dispatchers.IO) {
+            val result = profileMetadataPublisher.publish(ownPubkey, original, edited)
+            // SigningManager deliberately converts Amber cancellation to null.
+            // The generation fence prevents that late result from resurrecting
+            // a failed state after the user has already cancelled and left.
+            if (profileSaveGeneration.get() == generation) {
+                _profileSaveState.value = profileSaveStateFor(result)
+            }
         }
     }
 
-    // ── Helpers ───────────────────────────────────────────────────────────
+    fun consumeProfileSaveResult() {
+        _profileSaveState.update { state ->
+            if (state == ProfileSaveState.Saving) state else ProfileSaveState.Idle
+        }
+    }
 
-    private fun getWriteRelayUrls(pubkey: String): List<String> =
-        memoryEventStore.getRelayList(pubkey)?.write ?: emptyList()
+    fun cancelProfileSave() {
+        profileSaveGeneration.incrementAndGet()
+        profileSaveJob?.cancel()
+        profileSaveJob = null
+        _profileSaveState.value = ProfileSaveState.Idle
+    }
+
+    // ── Helpers ───────────────────────────────────────────────────────────
 
     override fun onCleared() {
         currentHandle?.close()
@@ -470,4 +445,24 @@ class ProfileViewModel @Inject constructor(
         }
 
     }
+}
+
+internal fun profileSaveStateFor(result: ProfilePublishResult): ProfileSaveState = when (result) {
+    ProfilePublishResult.Success -> ProfileSaveState.Saved
+    ProfilePublishResult.AccountUnavailable ->
+        ProfileSaveState.Failed("No signing account is available.")
+    ProfilePublishResult.FreshnessUnavailable ->
+        ProfileSaveState.Failed("Could not refresh your latest profile from relays. Nothing was changed.")
+    ProfilePublishResult.ProfileUnavailable ->
+        ProfileSaveState.Failed("Your profile has not loaded yet. Connect and try again.")
+    ProfilePublishResult.InvalidExistingProfile ->
+        ProfileSaveState.Failed("Your existing profile could not be read safely. Nothing was changed.")
+    ProfilePublishResult.SigningFailed ->
+        ProfileSaveState.Failed("Profile signing was cancelled or failed.")
+    ProfilePublishResult.ChangedWhileSigning ->
+        ProfileSaveState.Failed("Your profile changed while signing. Review it and try again.")
+    ProfilePublishResult.NoRelayAccepted ->
+        ProfileSaveState.Failed("No relay accepted the profile update. Check your connection and try again.")
+    ProfilePublishResult.SupersededAfterAcceptance ->
+        ProfileSaveState.Failed("A newer profile update arrived. Reload and try again.")
 }

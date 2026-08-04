@@ -45,6 +45,9 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import coil3.compose.AsyncImage
+import com.unsilence.app.data.memory.UserEntity
+import com.unsilence.app.data.repository.EditableProfileMetadata
+import com.unsilence.app.data.repository.profileMetadataHasChanges
 import com.unsilence.app.ui.common.IdentIcon
 import com.unsilence.app.ui.common.rememberAvatarImageRequest
 import com.unsilence.app.ui.common.rememberFullWidthImageRequest
@@ -60,6 +63,18 @@ import com.unsilence.app.ui.theme.TextSecondary
 private val EDIT_AVATAR_SIZE = 72.dp
 private val EDIT_BANNER_HEIGHT = 100.dp
 
+internal fun profileMetadataForEdit(user: UserEntity?): EditableProfileMetadata =
+    EditableProfileMetadata(
+        name = user?.name ?: "",
+        displayName = user?.displayName ?: "",
+        about = user?.about ?: "",
+        picture = user?.picture ?: "",
+        banner = user?.banner ?: "",
+        nip05 = user?.nip05 ?: "",
+        lud16 = user?.lud16 ?: "",
+        website = user?.website ?: "",
+    )
+
 @Composable
 fun EditProfileScreen(
     viewModel: ProfileViewModel,
@@ -68,10 +83,12 @@ fun EditProfileScreen(
     val user by viewModel.userFlow.collectAsStateWithLifecycle(initialValue = null)
     val uploadingAvatar by viewModel.uploadingAvatar.collectAsStateWithLifecycle()
     val uploadingBanner by viewModel.uploadingBanner.collectAsStateWithLifecycle()
+    val saveState by viewModel.profileSaveState.collectAsStateWithLifecycle()
     val showSnackbar = com.unsilence.app.ui.common.LocalShowSnackbar.current
+    val isSaving = saveState == ProfileSaveState.Saving
 
-    // Form state — pre-populated once when user data first arrives.
-    var initialized  by remember { mutableStateOf(false) }
+    // Start with a legitimate blank baseline so a never-published key can edit.
+    // If cached/relay metadata arrives before the user types, hydrate it below.
     var name         by remember { mutableStateOf("") }
     var displayName  by remember { mutableStateOf("") }
     var about        by remember { mutableStateOf("") }
@@ -80,31 +97,58 @@ fun EditProfileScreen(
     var nip05        by remember { mutableStateOf("") }
     var lud16        by remember { mutableStateOf("") }
     var website      by remember { mutableStateOf("") }
+    var original     by remember { mutableStateOf(profileMetadataForEdit(null)) }
+
+    val edited = EditableProfileMetadata(
+        name = name,
+        displayName = displayName,
+        about = about,
+        picture = picture,
+        banner = bannerUrl,
+        nip05 = nip05,
+        lud16 = lud16,
+        website = website,
+    )
 
     LaunchedEffect(user) {
-        if (user != null && !initialized) {
-            name        = user?.name        ?: ""
-            displayName = user?.displayName ?: ""
-            about       = user?.about       ?: ""
-            picture     = user?.picture     ?: ""
-            bannerUrl   = user?.banner      ?: ""
-            nip05       = user?.nip05       ?: ""
-            lud16       = user?.lud16       ?: ""
-            initialized = true
+        val loaded = user?.let(::profileMetadataForEdit) ?: return@LaunchedEffect
+        // Never replace text already entered into a provisional blank form.
+        if (profileMetadataHasChanges(original, edited)) return@LaunchedEffect
+        original = loaded
+        name        = loaded.name
+        displayName = loaded.displayName
+        about       = loaded.about
+        picture     = loaded.picture
+        bannerUrl   = loaded.banner
+        nip05       = loaded.nip05
+        lud16       = loaded.lud16
+        website     = loaded.website
+    }
+
+    LaunchedEffect(saveState) {
+        when (val state = saveState) {
+            ProfileSaveState.Saved -> {
+                viewModel.consumeProfileSaveResult()
+                onDismiss()
+            }
+            is ProfileSaveState.Failed -> {
+                viewModel.consumeProfileSaveResult()
+                showSnackbar(state.message)
+            }
+            ProfileSaveState.Idle,
+            ProfileSaveState.Saving,
+            -> Unit
         }
     }
 
-    // Save enabled when any field differs from stored values.
-    val hasChanges = initialized && (
-        name.trim()        != (user?.name        ?: "") ||
-        displayName.trim() != (user?.displayName ?: "") ||
-        about.trim()       != (user?.about       ?: "") ||
-        picture.trim()     != (user?.picture     ?: "") ||
-        bannerUrl.trim()   != (user?.banner      ?: "") ||
-        nip05.trim()       != (user?.nip05       ?: "") ||
-        lud16.trim()       != (user?.lud16       ?: "") ||
-        website.isNotBlank()
-    )
+    // Compare against the form's opening snapshot, not the live MES flow. A
+    // save-time relay refresh may update MES while this screen is still open.
+    val hasChanges = profileMetadataHasChanges(original, edited)
+
+    val dismiss = {
+        viewModel.cancelProfileSave()
+        onDismiss()
+    }
 
     val avatarPicker = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.PickVisualMedia(),
@@ -132,7 +176,7 @@ fun EditProfileScreen(
         }
     }
 
-    BackHandler(onBack = onDismiss)
+    BackHandler(onBack = dismiss)
     Box(
         modifier = Modifier
             .fillMaxSize()
@@ -150,31 +194,21 @@ fun EditProfileScreen(
                     .padding(horizontal = 4.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                TextButton(onClick = onDismiss) {
+                TextButton(onClick = dismiss) {
                     Text(text = "Cancel", color = TextSecondary, fontSize = 14.sp)
                 }
                 Spacer(Modifier.weight(1f))
                 TextButton(
                     onClick  = {
                         if (hasChanges) {
-                            viewModel.saveProfile(
-                                name        = name,
-                                displayName = displayName,
-                                about       = about,
-                                picture     = picture,
-                                banner      = bannerUrl,
-                                nip05       = nip05,
-                                lud16       = lud16,
-                                website     = website,
-                                onDone      = onDismiss,
-                            )
+                            viewModel.saveProfile(original, edited)
                         }
                     },
-                    enabled = hasChanges,
+                    enabled = hasChanges && saveState == ProfileSaveState.Idle,
                 ) {
                     Text(
-                        text  = "Save",
-                        color = if (hasChanges) Brand else TextSecondary,
+                        text  = if (isSaving) "Saving…" else "Save",
+                        color = if (hasChanges && !isSaving) Brand else TextSecondary,
                         fontSize = 14.sp,
                         fontWeight = FontWeight.SemiBold,
                     )

@@ -120,7 +120,7 @@ fun PostActionsHost(
             onDismiss = { reportRow = null },
             onTypeSelected = { type ->
                 onReport(activeRow, type)
-                showSnackbar("Reported")
+                showSnackbar("Report queued")
             },
         )
     }

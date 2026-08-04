@@ -2929,7 +2929,7 @@ class MemoryEventStoreInvariantsTest {
             id = "profile-adapt",
             pubkey = "pk-profile",
             kind = 0,
-            content = """{"name":"Alice","display_name":"Alice W","about":"Bio here","picture":"https://example.com/a.jpg","nip05":"alice@example.com","lud16":"alice@ln.tips","banner":"https://example.com/banner.jpg"}""",
+            content = """{"name":"Alice","display_name":"Alice W","about":"Bio here","picture":"https://example.com/a.jpg","nip05":"alice@example.com","lud16":"alice@ln.tips","banner":"https://example.com/banner.jpg","website":"https://alice.example"}""",
             createdAt = 1700000000L,
         ))
 
@@ -2943,6 +2943,7 @@ class MemoryEventStoreInvariantsTest {
         assertEquals("alice@example.com", user.nip05)
         assertEquals("alice@ln.tips", user.lud16)
         assertEquals("https://example.com/banner.jpg", user.banner)
+        assertEquals("https://alice.example", user.website)
         assertEquals(1700000000L, user.createdAt)
         assertTrue("updatedAt should be recent local time", user.updatedAt > 0)
     }

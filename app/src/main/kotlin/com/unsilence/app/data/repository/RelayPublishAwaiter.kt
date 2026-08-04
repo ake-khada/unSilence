@@ -1,5 +1,7 @@
 package com.unsilence.app.data.repository
 
+import com.unsilence.app.data.relay.GLOBAL_RELAY_URLS
+import com.unsilence.app.data.relay.normalizeRelayUrl
 import java.util.concurrent.ConcurrentHashMap
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.withTimeoutOrNull
@@ -34,4 +36,21 @@ internal suspend fun awaitRelayAcceptance(
     } finally {
         unregister()
     }
+}
+
+/**
+ * Normalizes an author's write relays, falling back to the global bootstrap
+ * set only when that write set resolves empty. Additional indexers are always
+ * retained, but cannot accidentally suppress the write-relay fallback.
+ */
+internal fun publishTargetsWithGlobalFallback(
+    writeRelays: Iterable<String>,
+    additionalRelays: Iterable<String> = emptyList(),
+): Set<String> {
+    val targets = writeRelays.mapNotNullTo(linkedSetOf(), ::normalizeRelayUrl)
+    if (targets.isEmpty()) {
+        GLOBAL_RELAY_URLS.mapNotNullTo(targets, ::normalizeRelayUrl)
+    }
+    additionalRelays.mapNotNullTo(targets, ::normalizeRelayUrl)
+    return targets
 }

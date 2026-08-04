@@ -136,4 +136,57 @@ class LeanNetworkPolicyTest {
             ),
         )
     }
+
+    @Test
+    fun `profile refresh waits for the newest verified event to reach MES`() {
+        val received = mapOf("older" to 100L, "newest" to 200L)
+
+        assertFalse(profileMetadataRefreshSettled("snapshot", 50L, received))
+        assertFalse(profileMetadataRefreshSettled("older", 100L, received))
+        assertTrue(profileMetadataRefreshSettled("newest", 200L, received))
+    }
+
+    @Test
+    fun `profile refresh accepts a locally retained event newer than all replies`() {
+        assertTrue(
+            profileMetadataRefreshSettled(
+                currentEventId = "local-newer",
+                currentCreatedAt = 300L,
+                receivedCreatedAtById = mapOf("relay" to 200L),
+            ),
+        )
+        assertFalse(profileMetadataRefreshSettled("snapshot", 300L, emptyMap()))
+    }
+
+    @Test
+    fun `real empty EOSE is confirmed absence while timeout is unavailable`() {
+        assertEquals(
+            ProfileMetadataRefreshResult.CONFIRMED_ABSENT,
+            profileMetadataRefreshResult(
+                receivedEventCount = 0,
+                realEoseCount = 1,
+                settled = false,
+            ),
+        )
+        assertEquals(
+            ProfileMetadataRefreshResult.UNAVAILABLE,
+            profileMetadataRefreshResult(
+                receivedEventCount = 0,
+                realEoseCount = 0,
+                settled = false,
+            ),
+        )
+    }
+
+    @Test
+    fun `verified profile must settle before refresh succeeds`() {
+        assertEquals(
+            ProfileMetadataRefreshResult.SETTLED,
+            profileMetadataRefreshResult(1, 1, settled = true),
+        )
+        assertEquals(
+            ProfileMetadataRefreshResult.UNAVAILABLE,
+            profileMetadataRefreshResult(1, 1, settled = false),
+        )
+    }
 }

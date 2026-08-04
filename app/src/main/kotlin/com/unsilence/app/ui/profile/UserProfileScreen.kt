@@ -851,7 +851,7 @@ fun UserProfileScreen(
             onDismiss = { showReportSheet = false },
             onTypeSelected = { type ->
                 viewModel.reportProfile(type)
-                showSnackbar("Profile reported")
+                showSnackbar("Profile report queued")
             },
         )
     }
