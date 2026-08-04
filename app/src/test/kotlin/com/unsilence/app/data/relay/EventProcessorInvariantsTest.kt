@@ -242,22 +242,31 @@ class EventProcessorInvariantsTest {
         // Kind 3 contact list with two followed pubkeys
         val followedPk1 = "d".repeat(64)
         val followedPk2 = "e".repeat(64)
+        val authorPk = "b".repeat(64) // rawEvent uses "b" * 64 as pubkey
+        store.ownPubkey = authorPk
         val (raw, relay) = rawEvent(
             seed = 30,
             kind = 3,
-            content = "",
-            tags = """[["p","$followedPk1"],["p","$followedPk2"]]""",
+            content = "legacy-relay-map",
+            tags = """[["p","$followedPk1","wss://hint.example","Petname"],["p","$followedPk2"],["client","opaque"]]""",
         )
         processor.process(raw, relay)
         processor.drainForTest()
 
         // Follows should be populated via direct-path updateFollows()
-        val authorPk = "b".repeat(64)  // rawEvent uses "b" * 64 as pubkey
         val follows = store.getFollows(authorPk)
         assertNotNull("getFollows should return non-null after kind-3", follows)
         assertEquals("Should have 2 followed pubkeys", 2, follows!!.size)
         assertTrue("Should contain followedPk1", followedPk1 in follows)
         assertTrue("Should contain followedPk2", followedPk2 in follows)
+
+        val retained = requireNotNull(store.getOwnContactListEvent())
+        assertEquals("legacy-relay-map", retained.content)
+        assertEquals(
+            listOf("p", followedPk1, "wss://hint.example", "Petname"),
+            retained.tags.first(),
+        )
+        assertEquals(listOf("client", "opaque"), retained.tags.last())
 
         // Kind-3 is NOT channeled — follows are persisted in ---FOLLOWS---
         // section, not as raw events in eventsById (see CLAUDE.md rule 55)

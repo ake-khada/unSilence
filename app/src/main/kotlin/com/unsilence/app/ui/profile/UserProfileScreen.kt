@@ -187,6 +187,9 @@ fun UserProfileScreen(
     LaunchedEffect(Unit) {
         actionsViewModel.actionError.collect { showSnackbar(it) }
     }
+    LaunchedEffect(Unit) {
+        viewModel.followFeedback.collect { showSnackbar(it) }
+    }
 
     // Intercept avatar tap: same pubkey → scroll to top, different → navigate
     val interceptedAuthorClick: (String) -> Unit = { tappedPubkey ->
@@ -720,9 +723,7 @@ fun UserProfileScreen(
                                 },
                                 onClick = {
                                     showProfileActions = false
-                                    val wasFollowing = isFollowing
                                     viewModel.toggleFollow()
-                                    showSnackbar(if (wasFollowing) "Unfollowed" else "Following")
                                 },
                             )
                             DropdownMenuItem(

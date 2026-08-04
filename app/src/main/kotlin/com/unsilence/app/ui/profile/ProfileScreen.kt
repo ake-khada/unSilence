@@ -126,6 +126,8 @@ fun ProfileScreen(
         key = "note-actions-${LocalAppSessionKey.current}",
     ),
 ) {
+    LaunchedEffect(viewModel) { viewModel.refreshFollowingCount() }
+
     val user            by viewModel.userFlow.collectAsStateWithLifecycle(initialValue = null)
     val posts           by viewModel.tabPostsFlow.collectAsStateWithLifecycle(initialValue = emptyList())
     val sensitiveMode   by viewModel.sensitiveContentMode.collectAsStateWithLifecycle()

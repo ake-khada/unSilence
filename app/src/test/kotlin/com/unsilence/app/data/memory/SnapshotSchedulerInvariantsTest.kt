@@ -180,7 +180,7 @@ class SnapshotSchedulerInvariantsTest {
         store.insert(event(id = "partial-before-failure", kind = 1, createdAt = 100))
         scheduler.saveNow()
 
-        // Truncate a valid V16 file at its tail. Restore inserts the event before
+        // Truncate a valid V17 file at its tail. Restore inserts the event before
         // it reaches the missing relay-identity bytes, exercising partial-restore
         // cleanup rather than only an early header failure.
         val corruptBytes = snapshotFile.readBytes().let { it.copyOf(it.size - 1) }

@@ -26,6 +26,7 @@ import com.unsilence.app.data.relay.shouldShowEmptyFollowingEntry
 import com.unsilence.app.data.relay.topFollowPackMembers
 import com.unsilence.app.data.relay.topNotablePubkeys
 import com.unsilence.app.data.repository.FollowBatchPublisher
+import com.unsilence.app.data.repository.FollowPublishResult
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
@@ -205,7 +206,16 @@ internal class StartYourGraphViewModel @Inject constructor(
             val follows = if (selected.isEmpty()) {
                 materializeEmptyFollowsIfNeeded()
             } else {
-                followBatchPublisher.addFollows(selected)
+                when (val result = followBatchPublisher.addFollows(selected)) {
+                    is FollowPublishResult.Success -> result.follows
+                    else -> {
+                        _uiState.value = _uiState.value.copy(
+                            publishing = false,
+                            error = startGraphFollowError(result),
+                        )
+                        return@launch
+                    }
+                }
             }
             if (follows == null) {
                 _uiState.value = _uiState.value.copy(
@@ -387,6 +397,20 @@ internal class StartYourGraphViewModel @Inject constructor(
         memoryEventStore.updateFollows(own, emptySet(), now)
         return emptySet()
     }
+}
+
+internal fun startGraphFollowError(result: FollowPublishResult): String = when (result) {
+    is FollowPublishResult.Success -> error("Successful follow publish has no error message")
+    FollowPublishResult.AccountUnavailable ->
+        "Account key unavailable. Sign in again and try once more."
+    FollowPublishResult.FollowsUnavailable ->
+        "Your follow list has not loaded yet. Check your connection and try again."
+    FollowPublishResult.SigningFailed ->
+        "The follow list was not signed. Try again."
+    FollowPublishResult.ChangedWhileSigning ->
+        "Your follow list changed while signing. Review it and try again."
+    is FollowPublishResult.NoRelayAccepted ->
+        "No relay accepted the follow list. Check your connection and try again."
 }
 
 internal fun interleavedPackRelays(

@@ -256,6 +256,16 @@ class ProfileViewModel @Inject constructor(
             .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), 0)
     } ?: MutableStateFlow(0)
 
+    /**
+     * Reconcile the owner's replaceable contact list whenever the profile tab
+     * is entered. The count remains a live MES projection; this only refreshes
+     * its source from multiple relays so a restored stale snapshot cannot win.
+     */
+    suspend fun refreshFollowingCount() {
+        val ownPubkey = pubkeyHex ?: return
+        relayPool.refreshFollowList(ownPubkey)
+    }
+
     // ── User actions ─────────────────────────────────────────────────────
 
     fun onViewportChanged(first: Int, last: Int, isScrolling: Boolean = false) {
