@@ -275,6 +275,8 @@ class SnapshotScheduler @Inject constructor(
                             "(anchored=${sections.anchoredNonContentCount}) " +
                             "content=${sections.contentEventCount}/" +
                             "${sections.contentCandidateCount} " +
+                            "ownProfile=${sections.anchoredOwnProfileContentCount}/" +
+                            "${sections.ownProfileContentCandidateCount} " +
                             "followsEntries=${sections.followsEntryCount}/" +
                             "${sections.followsCandidateCount}" +
                             "(anchored=${sections.anchoredFollowsCount})",

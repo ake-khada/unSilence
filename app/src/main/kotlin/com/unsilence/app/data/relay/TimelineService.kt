@@ -583,17 +583,26 @@ class TimelineService @Inject constructor(
     // ── Snapshot persistence ──────────────────────────────────────────────
 
     /**
-     * Snapshot writer entry — returns a snapshot view of the cache with
-     * refs capped at PERSISTED_REFS_CAP. MES calls this during binary
-     * snapshot write.
+     * Snapshot writer entry. Persist only the contiguous newest ref prefix
+     * whose payloads are present in the event selection written beside it.
+     * This keeps every new snapshot internally resolvable; legacy snapshots
+     * remain protected by the read-time repair path.
      */
-    internal fun snapshotData(): Map<String, Timeline> {
+    internal fun snapshotData(selectedContentEventIds: Set<String>): Map<String, Timeline> {
         val result = HashMap<String, Timeline>(timelines.size)
         for ((key, tl) in timelines) {
-            val refs = if (tl.refs.size > PERSISTED_REFS_CAP) {
-                tl.refs.take(PERSISTED_REFS_CAP)
-            } else {
+            val cappedSize = minOf(tl.refs.size, PERSISTED_REFS_CAP)
+            var coveredSize = 0
+            while (
+                coveredSize < cappedSize &&
+                tl.refs[coveredSize].id in selectedContentEventIds
+            ) {
+                coveredSize++
+            }
+            val refs = if (coveredSize == tl.refs.size) {
                 tl.refs
+            } else {
+                tl.refs.subList(0, coveredSize).toList()
             }
             result[key] = if (refs === tl.refs) tl else tl.copy(refs = refs)
         }

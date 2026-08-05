@@ -12,6 +12,15 @@ import app.cash.turbine.test
 import com.unsilence.app.data.DEFAULT_WOT_PROVIDER_PUBKEY
 import com.unsilence.app.data.TRUST_SCORE_PROVIDER_PUBKEY
 import com.unsilence.app.data.auth.MuteKeyProvider
+import com.unsilence.app.data.relay.FakeReconnectSource
+import com.unsilence.app.data.relay.FakeRelayCapabilitiesStore
+import com.unsilence.app.data.relay.FakeRelayTransport
+import com.unsilence.app.data.relay.FakeTapRegistration
+import com.unsilence.app.data.relay.NostrFilter
+import com.unsilence.app.data.relay.StubEventLoader
+import com.unsilence.app.data.relay.Subscription
+import com.unsilence.app.data.relay.TimelineRef
+import com.unsilence.app.data.relay.TimelineService
 import com.unsilence.app.ui.feed.engagementId
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
@@ -1631,6 +1640,7 @@ class MemoryEventStoreInvariantsTest {
     @Test
     fun `snapshot persistence keeps anchors then LRU and newest content within separate caps`() {
         assertEquals(5_000, PERSISTED_CONTENT_EVENT_CAP)
+        assertEquals(750, PERSISTED_OWN_CONTENT_CAP)
         assertEquals(1_000, PERSISTED_NON_CONTENT_LRU_CAP)
         assertEquals(500, PERSISTED_FOLLOWS_LRU_CAP)
         assertEquals(3 * 1024 * 1024, PERSISTED_FOLLOWS_PAYLOAD_BYTE_CAP)
@@ -1696,6 +1706,186 @@ class MemoryEventStoreInvariantsTest {
         assertEquals(5, selected.nonContentCandidateCount)
         assertEquals(4, selected.contentCandidateCount)
         assertEquals(2, selected.anchoredNonContentCount)
+        assertEquals(0, selected.ownProfileContentCandidateCount)
+        assertEquals(0, selected.anchoredOwnProfileContentCount)
+    }
+
+    @Test
+    fun `snapshot anchors old owner content ahead of a full newer foreign band`() {
+        val own = "own-pk"
+        val ownOld = event(
+            id = "own-old",
+            pubkey = own,
+            kind = 1,
+            createdAt = 1L,
+            firstSeenAt = 1L,
+        )
+        val newerForeign = (1..PERSISTED_CONTENT_EVENT_CAP).map { index ->
+            event(
+                id = "foreign-$index",
+                pubkey = "foreign-$index",
+                kind = 1,
+                createdAt = 1_000L + index,
+                firstSeenAt = 1_000L + index,
+            )
+        }
+
+        val selected = selectSnapshotEventsForPersistence(
+            events = newerForeign + ownOld,
+            ownPubkey = own,
+            followedPubkeys = emptySet(),
+            lastTouchedAt = emptyMap(),
+        )
+
+        assertEquals(PERSISTED_CONTENT_EVENT_CAP, selected.contentEvents.size)
+        assertTrue(selected.contentEvents.any { it.id == ownOld.id })
+        assertEquals(1, selected.ownProfileContentCandidateCount)
+        assertEquals(1, selected.anchoredOwnProfileContentCount)
+    }
+
+    @Test
+    fun `snapshot respects owner and total content budgets`() {
+        val own = "own-pk"
+        val ownEvents = (1..5).map { index ->
+            event(
+                id = "own-$index",
+                pubkey = own,
+                kind = 1,
+                createdAt = index.toLong(),
+                firstSeenAt = index.toLong(),
+            )
+        }
+        val foreignEvents = (1..5).map { index ->
+            event(
+                id = "foreign-$index",
+                pubkey = "foreign-pk",
+                kind = 1,
+                createdAt = 100L + index,
+                firstSeenAt = 100L + index,
+            )
+        }
+
+        val selected = selectSnapshotEventsForPersistence(
+            events = ownEvents + foreignEvents,
+            ownPubkey = own,
+            followedPubkeys = emptySet(),
+            lastTouchedAt = emptyMap(),
+            contentCap = 5,
+            ownContentCap = 2,
+        )
+
+        assertEquals(5, selected.contentEvents.size)
+        assertEquals(2, selected.contentEvents.count { it.pubkey == own })
+        assertEquals(listOf("own-5", "own-4"), selected.contentEvents.take(2).map { it.id })
+        assertEquals(5, selected.ownProfileContentCandidateCount)
+        assertEquals(2, selected.anchoredOwnProfileContentCount)
+    }
+
+    @Test
+    fun `owner reactions cannot displace owner profile posts from the anchor`() {
+        val own = "own-pk"
+        val profilePosts = listOf(
+            event(id = "old-note", pubkey = own, kind = 1, createdAt = 1L),
+            event(id = "old-repost", pubkey = own, kind = 6, createdAt = 2L),
+        )
+        val newerReactions = (1..5).map { index ->
+            event(
+                id = "reaction-$index",
+                pubkey = own,
+                kind = 7,
+                createdAt = 100L + index,
+            )
+        }
+
+        val selected = selectSnapshotEventsForPersistence(
+            events = profilePosts + newerReactions,
+            ownPubkey = own,
+            followedPubkeys = emptySet(),
+            lastTouchedAt = emptyMap(),
+            contentCap = 4,
+            ownContentCap = 2,
+        )
+
+        assertEquals(listOf("old-repost", "old-note"), selected.contentEvents.take(2).map { it.id })
+        assertEquals(2, selected.ownProfileContentCandidateCount)
+        assertEquals(2, selected.anchoredOwnProfileContentCount)
+    }
+
+    @Test
+    fun `binary snapshot round-trip keeps old owner timeline refs resolvable under foreign pressure`() = runTest {
+        fun timelineService(): TimelineService = TimelineService(
+            Subscription(
+                FakeRelayTransport(),
+                FakeTapRegistration(),
+                FakeReconnectSource(),
+                FakeRelayCapabilitiesStore(),
+            ),
+            StubEventLoader(),
+        )
+
+        val own = "owner-pubkey"
+        val sourceTimelineService = timelineService()
+        val source = MemoryEventStore(
+            object : MuteKeyProvider {},
+            javax.inject.Provider { sourceTimelineService },
+        ).apply { ownPubkey = own }
+        val ownEvents = (1..3).map { index ->
+            event(
+                id = "own-year-old-$index",
+                pubkey = own,
+                kind = 1,
+                createdAt = index.toLong(),
+                firstSeenAt = index.toLong(),
+            )
+        }
+        ownEvents.forEach { source.insert(it) }
+        repeat(PERSISTED_CONTENT_EVENT_CAP) { index ->
+            source.insert(
+                event(
+                    id = "newer-foreign-$index",
+                    pubkey = "foreign-$index",
+                    kind = 1,
+                    createdAt = 10_000L + index,
+                    firstSeenAt = 10_000L + index,
+                ),
+            )
+        }
+        val urls = listOf("wss://timeline.example")
+        val filter = NostrFilter(kinds = listOf(1), authors = listOf(own), limit = 500)
+        val timelineKey = sourceTimelineService.generateTimelineKey(urls, filter)
+        val expectedRefs = ownEvents
+            .sortedByDescending { it.createdAt }
+            .map { TimelineRef(it.id, it.createdAt) }
+        sourceTimelineService.restoreFromSnapshot(
+            mapOf(
+                timelineKey to TimelineService.Timeline(
+                    refs = expectedRefs,
+                    filter = filter,
+                    urls = urls,
+                ),
+            ),
+        )
+
+        val bytes = ByteArrayOutputStream()
+        DataOutputStream(bytes).use { source.saveSnapshotBinary(it) }
+
+        val restoredTimelineService = timelineService()
+        val restored = MemoryEventStore(
+            object : MuteKeyProvider {},
+            javax.inject.Provider { restoredTimelineService },
+        ).apply { ownPubkey = own }
+        DataInputStream(ByteArrayInputStream(bytes.toByteArray())).use {
+            restored.restoreSnapshotBinary(it)
+        }
+        val restoredIds = ownEvents.mapNotNull { restored.getNostrEvent(it.id)?.id }.toSet()
+        val restoredRefs = restoredTimelineService
+            .snapshotData(restoredIds)
+            .getValue(timelineKey)
+            .refs
+
+        assertEquals(expectedRefs, restoredRefs)
+        assertEquals(expectedRefs.size, restoredIds.size)
+        assertTrue(restoredRefs.all { restored.getNostrEvent(it.id) != null })
     }
 
     @Test
