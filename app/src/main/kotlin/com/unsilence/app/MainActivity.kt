@@ -7,6 +7,7 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.fragment.app.FragmentActivity
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.lifecycleScope
@@ -16,9 +17,11 @@ import com.unsilence.app.data.auth.AmberSigner
 import com.unsilence.app.data.auth.KeyManager
 import com.unsilence.app.data.auth.SigningManager
 import com.unsilence.app.data.memory.SensitiveContentMode
+import com.unsilence.app.data.network.Nip05Verifier
 import com.unsilence.app.data.relay.RelayPreferencesStore
 import kotlinx.coroutines.launch
 import com.unsilence.app.ui.onboarding.RootScreen
+import com.unsilence.app.ui.common.LocalNip05VerificationController
 import com.unsilence.app.ui.navigation.DeepLinkRouter
 import com.unsilence.app.ui.theme.UnsilenceTheme
 import dagger.hilt.android.AndroidEntryPoint
@@ -32,6 +35,7 @@ class MainActivity : FragmentActivity() {
     @Inject lateinit var appBootstrapper: AppBootstrapper
     @Inject lateinit var keyManager: KeyManager
     @Inject lateinit var deepLinkRouter: DeepLinkRouter
+    @Inject lateinit var nip05Verifier: Nip05Verifier
 
     // Launcher for automatic Amber re-authorize when bootstrap detects
     // missing NIP-44 permissions. Runs round-trip self-test on success.
@@ -110,7 +114,11 @@ class MainActivity : FragmentActivity() {
                     signingManager.registerLauncher(launcher)
                     onDispose { signingManager.unregisterLauncher(launcher) }
                 }
-                RootScreen()
+                CompositionLocalProvider(
+                    LocalNip05VerificationController provides nip05Verifier,
+                ) {
+                    RootScreen()
+                }
             }
         }
     }

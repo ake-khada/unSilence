@@ -5,6 +5,13 @@ import android.util.Log
 import com.unsilence.app.data.DEFAULT_WOT_PROVIDER_PUBKEY
 import com.unsilence.app.data.DEFAULT_WOT_RELAY
 import com.unsilence.app.data.TRUST_SCORE_PROVIDER_PUBKEY
+import com.unsilence.app.data.network.NIP05_CACHE_CAP
+import com.unsilence.app.data.network.NIP05_CACHE_RECORD_MAX_BYTES
+import com.unsilence.app.data.network.Nip05VerificationCacheEntry
+import com.unsilence.app.data.network.Nip05VerificationCacheKey
+import com.unsilence.app.data.network.Nip05VerificationStatus
+import com.unsilence.app.data.network.isValidAt
+import com.unsilence.app.data.network.nip05VerificationCacheKey
 import com.unsilence.app.data.relay.NostrJson
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.channels.BufferOverflow
@@ -28,6 +35,7 @@ import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import java.io.BufferedReader
 import java.io.BufferedWriter
+import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
 import java.io.DataInputStream
 import java.io.DataOutputStream
@@ -71,8 +79,9 @@ internal val SNAPSHOT_BINARY_MAGIC = byteArrayOf(0x55, 0x53, 0x4E, 0x53) // "USN
 /** V15 appends the own-anon-zap pubkey set (private-zap self-recognition).
  *  V16 appends bounded device-authoritative NIP-11 relay identities.
  *  V17 retains the owner's raw kind-3 inside the FOLLOWS section.
- *  V18 appends the unacknowledged own kind-10000 mutation journal. */
-private const val SNAPSHOT_BINARY_VERSION = 18
+ *  V18 appends the unacknowledged own kind-10000 mutation journal.
+ *  V19 appends the bounded NIP-05 verification cache. */
+private const val SNAPSHOT_BINARY_VERSION = 19
 /** Max retained own outgoing private-zap anon pubkeys (bounded, insertion-order eviction). */
 private const val OWN_ANON_ZAP_CAP = 500
 private const val RELAY_IDENTITY_CAP = 3_000
@@ -604,6 +613,9 @@ class MemoryEventStore @Inject constructor(
     // ─── Cached profile fields (populated on profile insert, read during toFeedRow) ──
     private val profileFieldsCache = ConcurrentHashMap<String, Map<String, String?>>()
     private val profileAccessedAt = ConcurrentHashMap<String, Long>()
+    private val nip05VerificationCache =
+        ConcurrentHashMap<Nip05VerificationCacheKey, Nip05VerificationCacheEntry>()
+    private val nip05VerificationSignal = MutableStateFlow(0L)
     // ─── FeedRow cache (per-author / per-event keys) ───────────────────────
     // Cache hit requires the row's author profile timestamp AND the row's
     // own stats timestamp to be unchanged. Profile/stats updates for OTHER
@@ -1152,6 +1164,10 @@ class MemoryEventStore @Inject constructor(
                 existing
             }
         }
+        retainNip05VerificationForCurrentProfile(
+            event.pubkey,
+            profileFieldsCache[event.pubkey]?.get("nip05"),
+        )
         val derivedLookupRelays = profileDerivedBridgeOutbox(
             profileFieldsCache[event.pubkey]?.get("nip05"),
         )
@@ -4406,6 +4422,96 @@ class MemoryEventStore @Inject constructor(
     fun userEntityFlow(pubkey: String): Flow<UserEntity?> =
         _profileSignal.map { getUserEntity(pubkey) }
 
+    internal fun nip05VerificationFlow(
+        pubkey: String,
+        nip05: String,
+    ): Flow<Nip05VerificationStatus> {
+        val key = nip05VerificationCacheKey(pubkey, nip05)
+            ?: return kotlinx.coroutines.flow.flowOf(Nip05VerificationStatus.UNKNOWN)
+        return nip05VerificationSignal
+            .map { currentNip05Verification(key, nowMs = System.currentTimeMillis()) }
+            .distinctUntilChanged()
+    }
+
+    internal fun currentNip05Verification(
+        key: Nip05VerificationCacheKey,
+        nowMs: Long = System.currentTimeMillis(),
+    ): Nip05VerificationStatus {
+        val entry = nip05VerificationCache[key] ?: return Nip05VerificationStatus.UNKNOWN
+        if (!isCurrentProfileNip05Claim(key)) {
+            if (nip05VerificationCache.remove(key, entry)) bumpNip05VerificationSignal()
+            return Nip05VerificationStatus.UNKNOWN
+        }
+        if (entry.isValidAt(nowMs)) return entry.status
+        if (nip05VerificationCache.remove(key, entry)) bumpNip05VerificationSignal()
+        return Nip05VerificationStatus.UNKNOWN
+    }
+
+    internal fun storeNip05Verification(
+        entry: Nip05VerificationCacheEntry,
+        nowMs: Long = System.currentTimeMillis(),
+    ): Boolean {
+        if (!entry.isValidAt(nowMs)) return false
+        if (!isCurrentProfileNip05Claim(entry.key)) return false
+
+        nip05VerificationCache[entry.key] = entry
+        trimNip05VerificationCache()
+        bumpNip05VerificationSignal()
+        return true
+    }
+
+    private fun retainNip05VerificationForCurrentProfile(pubkey: String, nip05: String?) {
+        val normalizedPubkey = pubkey.lowercase()
+        val currentKey = nip05?.let { nip05VerificationCacheKey(normalizedPubkey, it) }
+        val staleKeys = nip05VerificationCache.keys
+            .filter { it.pubkey == normalizedPubkey && it != currentKey }
+        var changed = false
+        for (staleKey in staleKeys) {
+            changed = nip05VerificationCache.remove(staleKey) != null || changed
+        }
+        if (changed) bumpNip05VerificationSignal()
+    }
+
+    internal fun isCurrentProfileNip05Claim(key: Nip05VerificationCacheKey): Boolean {
+        if (!profilesByPubkey.containsKey(key.pubkey)) return true
+        return profileFieldsCache[key.pubkey]?.get("nip05")?.trim() == key.nip05
+    }
+
+    internal fun nip05VerificationSnapshot(
+        nowMs: Long = System.currentTimeMillis(),
+    ): List<Nip05VerificationCacheEntry> {
+        val valid = ArrayList<Nip05VerificationCacheEntry>(nip05VerificationCache.size)
+        var changed = false
+        for ((key, entry) in nip05VerificationCache) {
+            if (entry.isValidAt(nowMs) && isCurrentProfileNip05Claim(key)) {
+                valid.add(entry)
+            } else {
+                changed = nip05VerificationCache.remove(key, entry) || changed
+            }
+        }
+        if (changed) bumpNip05VerificationSignal()
+        return valid.sortedByDescending { it.checkedAtMs }.take(NIP05_CACHE_CAP)
+    }
+
+    private fun trimNip05VerificationCache() {
+        if (nip05VerificationCache.size <= NIP05_CACHE_CAP) return
+        val overflow = nip05VerificationCache.entries
+            .sortedBy { it.value.checkedAtMs }
+            .take(nip05VerificationCache.size - NIP05_CACHE_CAP)
+        for ((key, entry) in overflow) {
+            nip05VerificationCache.remove(key, entry)
+        }
+    }
+
+    private fun clearNip05VerificationCache() {
+        nip05VerificationCache.clear()
+        bumpNip05VerificationSignal()
+    }
+
+    private fun bumpNip05VerificationSignal() {
+        nip05VerificationSignal.value = nip05VerificationSignal.value + 1L
+    }
+
     /**
      * Observe per-event engagement counts. Used by EventActionBar so individual
      * cards update their counts without going through a list-wide signal trigger.
@@ -5859,6 +5965,18 @@ class MemoryEventStore @Inject constructor(
             out.writeInt(pendingMuteSnapshot.size)
             for (pending in pendingMuteSnapshot) out.writePendingMutePublish(pending)
         }
+
+        // V19: long-lived NIP-05 verification cache. Each entry is framed so
+        // one malformed record can be dropped without losing the full snapshot.
+        if (snapshotVersion >= 19) {
+            val nip05Entries = nip05VerificationSnapshot()
+            out.writeInt(nip05Entries.size)
+            for (entry in nip05Entries) {
+                val record = encodeNip05VerificationCacheRecord(entry)
+                out.writeInt(record.size)
+                out.write(record)
+            }
+        }
         val totalBytes = out.size() - writeStart
         val knownSectionBytes = headerBytes +
             followsBuf.size() +
@@ -6251,6 +6369,25 @@ class MemoryEventStore @Inject constructor(
             _muteListSignal.value = System.nanoTime()
         }
 
+        if (version >= 19) {
+            val entryCount = input.readInt()
+            if (entryCount < 0 || entryCount > NIP05_CACHE_CAP) {
+                throw IOException("Invalid NIP-05 cache count: $entryCount")
+            }
+            val nowMs = System.currentTimeMillis()
+            repeat(entryCount) {
+                val recordLength = input.readInt()
+                if (recordLength < 0 || recordLength > MAX_SNAPSHOT_STR_LEN) {
+                    throw IOException("Invalid NIP-05 cache record length: $recordLength")
+                }
+                val record = ByteArray(recordLength)
+                input.readFully(record)
+                if (recordLength <= NIP05_CACHE_RECORD_MAX_BYTES) {
+                    restoreNip05VerificationCacheRecord(record, nowMs)
+                }
+            }
+        }
+
         // Reindex kind-7 reactions from raw events so the widened shortcode regex
         // reclassifies old Standard(":shortcode:") entries as Custom(shortcode, url).
         reindexReactionsFromEvents()
@@ -6386,6 +6523,55 @@ class MemoryEventStore @Inject constructor(
         writeMuteChanges(pending.userChanges)
         writeMuteChanges(pending.wordChanges)
         writeMuteChanges(pending.hashtagChanges)
+    }
+
+    internal fun encodeNip05VerificationCacheRecord(
+        entry: Nip05VerificationCacheEntry,
+    ): ByteArray {
+        val bytes = ByteArrayOutputStream(256)
+        DataOutputStream(bytes).use { record ->
+            record.writeByte(1) // record format version
+            record.writeStr(entry.key.pubkey)
+            record.writeStr(entry.key.nip05)
+            record.writeByte(
+                when (entry.status) {
+                    Nip05VerificationStatus.VERIFIED -> 1
+                    Nip05VerificationStatus.UNVERIFIED -> 2
+                    Nip05VerificationStatus.UNKNOWN -> 0
+                },
+            )
+            record.writeLong(entry.checkedAtMs)
+            record.writeStrOrNull(entry.resolvedPubkey)
+        }
+        return bytes.toByteArray()
+    }
+
+    internal fun restoreNip05VerificationCacheRecord(
+        recordBytes: ByteArray,
+        nowMs: Long = System.currentTimeMillis(),
+    ): Boolean {
+        val entry = runCatching {
+            DataInputStream(ByteArrayInputStream(recordBytes)).use { record ->
+                if (record.readUnsignedByte() != 1) return@use null
+                val key = nip05VerificationCacheKey(record.readStr(), record.readStr())
+                    ?: return@use null
+                val status = when (record.readUnsignedByte()) {
+                    1 -> Nip05VerificationStatus.VERIFIED
+                    2 -> Nip05VerificationStatus.UNVERIFIED
+                    else -> return@use null
+                }
+                val checkedAtMs = record.readLong()
+                val resolvedPubkey = record.readStrOrNull()
+                if (record.available() != 0) return@use null
+                Nip05VerificationCacheEntry(
+                    key = key,
+                    status = status,
+                    checkedAtMs = checkedAtMs,
+                    resolvedPubkey = resolvedPubkey,
+                )
+            }
+        }.getOrNull() ?: return false
+        return storeNip05Verification(entry, nowMs)
     }
 
     private fun DataOutputStream.writeMuteChanges(changes: Map<String, Boolean>) {
@@ -6807,6 +6993,7 @@ class MemoryEventStore @Inject constructor(
         ownContactListEvent = null
         followsAccessedAt.clear()
         followerCountCache.clear()
+        clearNip05VerificationCache()
         relayListsByPubkey.clear()
         muteListsByPubkey.clear()
         latestMuteEventIdByPubkey.clear()
@@ -6867,6 +7054,7 @@ class MemoryEventStore @Inject constructor(
         profileUpdatedAt.clear()
         profileFieldsCache.clear()
         profileAccessedAt.clear()
+        clearNip05VerificationCache()
         profileDerivedLookupRelaysByPubkey.clear()
         feedRowCache.clear()
         feedRowAccessedAt.clear()
