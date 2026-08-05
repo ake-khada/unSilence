@@ -41,7 +41,7 @@ class PrivateZapSelfRecognitionTest {
 
     private fun event(id: String, pubkey: String, kind: Int, tags: List<List<String>> = emptyList()) = NostrEvent(
         id = id, pubkey = pubkey, kind = kind, content = "",
-        createdAt = System.currentTimeMillis() / 1000, tags = tags, tagsJson = "[]",
+        createdAt = System.currentTimeMillis() / 1000, tags = tags,
         sig = "sig", relayUrl = "wss://r.example", replyToId = null, rootId = null,
         hasContentWarning = false, contentWarningReason = null,
         firstSeenAt = System.currentTimeMillis(), relaysSeen = mutableSetOf("wss://r.example"),

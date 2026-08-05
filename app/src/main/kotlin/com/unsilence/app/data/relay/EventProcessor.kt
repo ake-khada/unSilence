@@ -3,7 +3,6 @@ package com.unsilence.app.data.relay
 import android.util.Log
 import com.unsilence.app.data.memory.MemoryEventStore
 import com.unsilence.app.data.memory.NostrEvent
-import com.unsilence.app.data.memory.tagsToJson
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -59,7 +58,6 @@ internal fun EventDto.toNostrEvent(relayUrl: String): NostrEvent {
         content = content,
         createdAt = createdAt,
         tags = tags,
-        tagsJson = tagsToJson(tags),
         sig = sig,
         relayUrl = relayUrl,
         replyToId = replyToId,

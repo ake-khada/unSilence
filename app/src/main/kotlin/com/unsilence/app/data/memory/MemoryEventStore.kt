@@ -70,9 +70,9 @@ private const val SNAPSHOT_VERSION = "SNAPSHOT_V2"
 
 /** V3 binary snapshot magic — first 4 bytes of every V3 file. */
 internal val SNAPSHOT_BINARY_MAGIC = byteArrayOf(0x55, 0x53, 0x4E, 0x53) // "USNS"
-/** V13: event records carry the pre-built tagsJson string — readers of V13+
- *  skip the per-event tagsToJson reconstruction on cold start. Older files
- *  (≤V12) still restore via the reconstruction path in readEventBinary.
+/** V13: event records carry a redundant tagsJson wire slot. V19 keeps that
+ *  slot byte-compatible but discards it after restore; parsed tags are the
+ *  sole in-memory representation.
  *  V14: a length-prefixed owner pubkey is stamped immediately after the 32-byte
  *  header. Restore rejects a snapshot whose owner differs from the current
  *  ownPubkey (foreign-account bleed guard). ≤V13 have no owner field and are
@@ -1010,7 +1010,7 @@ class MemoryEventStore @Inject constructor(
                 pubkey = event.pubkey,
                 kind = event.kind,
                 content = event.content,
-                tagsJson = event.tagsJson,
+                tags = event.tags,
                 createdAt = event.createdAt,
                 relayUrl = event.relayUrl,
                 replyToId = event.replyToId,
@@ -5801,7 +5801,7 @@ class MemoryEventStore @Inject constructor(
             kind = event.kind,
             content = event.content,
             createdAt = event.createdAt,
-            tags = event.tagsJson,
+            tags = tagsToJson(event.tags),
             relayUrl = event.relayUrl,
             replyToId = event.replyToId,
             rootId = projectedRootId,
@@ -5864,11 +5864,7 @@ class MemoryEventStore @Inject constructor(
         var eventBytes = 0L
         for ((_, event) in eventsById) {
             kindCounts[event.kind] = (kindCounts[event.kind] ?: 0) + 1
-            // Estimate: content + tagsJson + id(64) + pubkey(64) + sig(128) + relayUrl + overhead
-            eventBytes += event.content.length + event.tagsJson.length +
-                (event.relayUrl.length) + (event.replyToId?.length ?: 0) +
-                (event.rootId?.length ?: 0) + (event.contentWarningReason?.length ?: 0) +
-                event.relaysSeen.sumOf { it.length } + 320L // fixed overhead
+            eventBytes += estimateNostrEventRetainedBytes(event)
         }
 
         // Profile byte estimate
@@ -6913,9 +6909,9 @@ class MemoryEventStore @Inject constructor(
             writeInt(tag.size)
             for (item in tag) writeStr(item)
         }
-        // V13: pre-built tagsJson — restore reads it directly instead of
-        // reconstructing via tagsToJson(tags) for every event on cold start.
-        writeStr(e.tagsJson)
+        // V13+ wire slot retained for snapshot compatibility. The JSON is no
+        // longer kept in memory; serialize only at this persistence seam.
+        writeStr(tagsToJson(e.tags))
         var flags = 0
         if (e.replyToId != null) flags = flags or 0x01
         if (e.rootId != null) flags = flags or 0x02
@@ -6955,8 +6951,9 @@ class MemoryEventStore @Inject constructor(
             for (j in 0 until itemCount) tag.add(readStr())
             tags.add(tag)
         }
-        // V13+ stores the pre-built tagsJson; older files reconstruct it.
-        val tagsJson = if (version >= 13) readStr() else tagsToJson(tags)
+        // V13+ snapshots contain a redundant serialized copy. Consume it to
+        // preserve the wire cursor, then discard it in favour of parsed tags.
+        if (version >= 13) readStr()
         val flags = readByte().toInt() and 0xff
         val replyToId = if (flags and 0x01 != 0) readStr() else null
         val rootId = if (flags and 0x02 != 0) readStr() else null
@@ -6982,7 +6979,6 @@ class MemoryEventStore @Inject constructor(
             content = content,
             createdAt = createdAt,
             tags = tags,
-            tagsJson = tagsJson,
             sig = sig,
             relayUrl = relayUrl,
             replyToId = replyToId,
@@ -7381,7 +7377,6 @@ class MemoryEventStore @Inject constructor(
             content = evContent,
             createdAt = parts[4].toLongOrNull() ?: return null,
             tags = tags,
-            tagsJson = tagsToJson(tags),
             sig = parts[6],
             relayUrl = parts[7],
             replyToId = parts[8].ifEmpty { null },
@@ -7615,13 +7610,8 @@ class MemoryEventStore @Inject constructor(
 // ─── Utilities ──────────────────────────────────────────────────────────────
 
 /** Serialize tags to JSON format matching snapshot storage: [["tag","val"],["tag","val"]] */
-internal fun tagsToJson(tags: List<List<String>>): String {
-    return tags.joinToString(",", "[", "]") { tag ->
-        tag.joinToString(",", "[", "]") { value ->
-            "\"${value.replace("\\", "\\\\").replace("\"", "\\\"")}\""
-        }
-    }
-}
+internal fun tagsToJson(tags: List<List<String>>): String =
+    JsonArray(tags.map { tag -> JsonArray(tag.map(::JsonPrimitive)) }).toString()
 
 internal fun NostrEvent.toEventEntity(): EventEntity = EventEntity(
     id = id,
@@ -7629,7 +7619,7 @@ internal fun NostrEvent.toEventEntity(): EventEntity = EventEntity(
     kind = kind,
     content = content,
     createdAt = createdAt,
-    tags = tagsJson,
+    tags = tagsToJson(tags),
     sig = sig,
     relayUrl = relayUrl,
     replyToId = replyToId,

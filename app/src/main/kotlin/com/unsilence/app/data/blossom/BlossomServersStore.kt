@@ -12,7 +12,6 @@ import androidx.datastore.preferences.preferencesDataStore
 import com.unsilence.app.data.auth.KeyManager
 import com.unsilence.app.data.auth.SigningManager
 import com.unsilence.app.data.memory.MemoryEventStore
-import com.unsilence.app.data.memory.tagsToJson
 import com.unsilence.app.data.memory.NostrEvent
 import com.unsilence.app.data.relay.RelayPool
 import com.unsilence.app.data.relay.toEventJson
@@ -247,7 +246,6 @@ class BlossomServersStore @Inject constructor(
             content = signed.content,
             createdAt = signed.createdAt,
             tags = tagsList,
-            tagsJson = tagsToJson(tagsList),
             sig = signed.sig,
             relayUrl = "",
             replyToId = null,

@@ -277,7 +277,7 @@ class ProfilePublishCoordinatorTest {
             content = content,
             createdAt = createdAt,
             tags = emptyList(),
-            tagsJson = "[]",
+
             sig = "sig",
             relayUrl = "wss://relay.example",
             replyToId = null,

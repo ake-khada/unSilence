@@ -42,6 +42,13 @@ internal fun profileNetworkDemandAllowed(
     isNetworkDown: Boolean,
 ): Boolean = networkState == NetworkState.ONLINE && !isNetworkDown
 
+/** Extract event ids without reparsing the serialized tag representation. */
+internal fun extractETagIds(tags: List<List<String>>): List<String> =
+    tags.asSequence()
+        .filter { it.getOrNull(0) == "e" }
+        .mapNotNull { it.getOrNull(1) }
+        .toList()
+
 internal fun selectProfileEngagementRelays(
     preferredRelays: List<String>,
     sourceRelaysByEvent: List<List<String>>,
@@ -365,7 +372,7 @@ class ProfilePipeline @Inject constructor(
         var count = 0
         for (event in ownEvents) {
             // e-tag refs (repost targets, thread parents)
-            extractETagIds(event.tagsJson).forEach {
+            extractETagIds(event.tags).forEach {
                 if (anchored.add(it)) count++
             }
             // nostr:nevent/note URIs in content (quoted notes)
@@ -495,8 +502,8 @@ class ProfilePipeline @Inject constructor(
             // Kind-6 / kind-16 repost targets (e-tag). a-tag-only coordinate
             // reposts resolve later (#5); our own reposts embed the original JSON.
             if (event.kind == 6 || event.kind == 16) {
-                extractRepostTargetId(event.tagsJson)?.let { id ->
-                    addReference(id, listOfNotNull(extractRepostTargetRelay(event.tagsJson)))
+                extractRepostTargetId(event.tags)?.let { id ->
+                    addReference(id, listOfNotNull(extractRepostTargetRelay(event.tags)))
                 }
             }
             // Quoted event IDs from nostr:nevent/note URIs in content
@@ -597,7 +604,7 @@ class ProfilePipeline @Inject constructor(
         // Extract author pubkeys from source events' p-tags
         val refAuthorPubkeys = mutableSetOf<String>()
         for (event in sourceEvents) {
-            extractPTagPubkeys(event.tagsJson).forEach { refAuthorPubkeys.add(it) }
+            extractPTagPubkeys(event.tags).forEach { refAuthorPubkeys.add(it) }
             if (event.kind == 6 && refAuthorPubkeys.isEmpty()) {
                 refAuthorPubkeys.add(event.pubkey)
             }
@@ -759,12 +766,4 @@ class ProfilePipeline @Inject constructor(
 
     // ── Helpers ──────────────────────────────────────────────────────────
 
-    /** Extract event IDs from e-tags in a tags JSON string. */
-    private fun extractETagIds(tagsJson: String): List<String> {
-        return try {
-            NostrJson.parseToJsonElement(tagsJson).jsonArray
-                .filter { it.jsonArray.getOrNull(0)?.jsonPrimitive?.content == "e" }
-                .mapNotNull { it.jsonArray.getOrNull(1)?.jsonPrimitive?.content }
-        } catch (_: Exception) { emptyList() }
-    }
 }

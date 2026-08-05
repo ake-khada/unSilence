@@ -178,7 +178,7 @@ class GlobalFeedPolicyTest {
         content = content,
         createdAt = createdAt,
         tags = tags,
-        tagsJson = "[]",
+
         sig = "sig",
         relayUrl = "wss://relay.example",
         replyToId = null,

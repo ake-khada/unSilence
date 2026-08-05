@@ -149,7 +149,7 @@ class StartGraphPolicyTest {
             content = "",
             createdAt = createdAt,
             tags = tags,
-            tagsJson = "[]",
+
             sig = "sig",
             relayUrl = "wss://nos.lol",
             replyToId = null,

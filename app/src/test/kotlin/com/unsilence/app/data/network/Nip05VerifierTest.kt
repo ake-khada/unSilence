@@ -167,7 +167,7 @@ class Nip05VerifierTest {
         content = """{"nip05":"$nip05"}""",
         createdAt = 1L,
         tags = emptyList(),
-        tagsJson = "[]",
+
         sig = "sig",
         relayUrl = "wss://relay.example",
         replyToId = null,

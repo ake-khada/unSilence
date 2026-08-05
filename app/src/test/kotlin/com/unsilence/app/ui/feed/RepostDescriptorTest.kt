@@ -29,7 +29,7 @@ class RepostDescriptorTest {
         content = "",
         createdAt = 1_000,
         tags = tags,
-        tagsJson = "[]",
+
         sig = "sig",
         relayUrl = "wss://relay.example",
         replyToId = null,

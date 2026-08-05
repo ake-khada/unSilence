@@ -28,7 +28,7 @@ class PollProtocolTest {
         content = "",
         createdAt = createdAt,
         tags = listOf(listOf("e", "poll")) + choices.map { listOf("response", it) },
-        tagsJson = "[]",
+
         sig = "sig",
         relayUrl = "wss://relay.test",
         replyToId = null,

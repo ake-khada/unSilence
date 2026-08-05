@@ -385,7 +385,7 @@ class TimelineServiceTest {
             createdAt = createdAt,
             content = "",
             tags = emptyList(),
-            tagsJson = "[]",
+
             sig = "s".repeat(128),
             relayUrl = "wss://test.example",
             replyToId = null,

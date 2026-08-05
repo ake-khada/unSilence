@@ -271,7 +271,7 @@ class FollowPublishCoordinatorTest {
             content = "",
             createdAt = createdAt,
             tags = follows.sorted().map { listOf("p", it) },
-            tagsJson = "[]",
+
             sig = "sig",
             relayUrl = "",
             replyToId = null,

@@ -1437,6 +1437,11 @@ internal fun buildBatchedEngagementReq(
     }.toString()
 
 /** Extract the relay hint (index 2) from the first "e" tag in a repost's tags. */
+fun extractRepostTargetRelay(tags: List<List<String>>): String? =
+    tags.firstOrNull { it.getOrNull(0) == "e" }
+        ?.getOrNull(2)
+        ?.takeIf { it.isNotBlank() }
+
 fun extractRepostTargetRelay(tagsJson: String): String? {
     return try {
         val parsed = NostrJson.parseToJsonElement(tagsJson).jsonArray
@@ -1445,7 +1450,10 @@ fun extractRepostTargetRelay(tagsJson: String): String? {
     } catch (_: Exception) { null }
 }
 
-/** Extract the repost target event ID from the first "e" tag in a tags JSON string. */
+/** Extract the repost target event ID from the first "e" tag. */
+fun extractRepostTargetId(tags: List<List<String>>): String? =
+    tags.firstOrNull { it.getOrNull(0) == "e" }?.getOrNull(1)
+
 fun extractRepostTargetId(tagsJson: String): String? {
     return try {
         val parsed = NostrJson.parseToJsonElement(tagsJson).jsonArray
@@ -1476,7 +1484,13 @@ fun extractQuotedEventIds(content: String): List<String> {
     }.toList()
 }
 
-/** Extract all p-tag pubkeys from a tags JSON string. */
+/** Extract all p-tag pubkeys, retaining source order and duplicates. */
+fun extractPTagPubkeys(tags: List<List<String>>): List<String> =
+    tags.asSequence()
+        .filter { it.getOrNull(0) == "p" }
+        .mapNotNull { it.getOrNull(1) }
+        .toList()
+
 fun extractPTagPubkeys(tagsJson: String): List<String> {
     return try {
         NostrJson.parseToJsonElement(tagsJson).jsonArray

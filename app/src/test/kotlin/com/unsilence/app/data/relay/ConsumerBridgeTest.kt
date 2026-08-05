@@ -48,7 +48,7 @@ class ConsumerBridgeTest {
         rootId: String? = null,
     ) = NostrEvent(
         id = id, pubkey = pubkey, kind = kind, content = content,
-        createdAt = createdAt, tags = tags, tagsJson = "[]", sig = "sig",
+        createdAt = createdAt, tags = tags,sig = "sig",
         relayUrl = relayUrl, replyToId = replyToId, rootId = rootId,
         hasContentWarning = false, contentWarningReason = null,
         firstSeenAt = System.currentTimeMillis(),
