@@ -9,7 +9,6 @@ import com.unsilence.app.data.memory.MutePublishSnapshot
 import com.unsilence.app.data.memory.NostrEvent
 import com.unsilence.app.data.memory.PendingMuteJournalStore
 import com.unsilence.app.data.memory.SnapshotScheduler
-import com.unsilence.app.data.memory.tagsToJson
 import com.unsilence.app.data.relay.GLOBAL_RELAY_URLS
 import com.unsilence.app.data.relay.RelayPool
 import com.unsilence.app.data.relay.normalizeRelayUrl
@@ -246,7 +245,6 @@ class MuteListRepository @Inject constructor(
             content = signed.content,
             createdAt = signed.createdAt,
             tags = tags,
-            tagsJson = tagsToJson(tags),
             sig = signed.sig,
             relayUrl = "",
             replyToId = null,

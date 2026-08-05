@@ -31,7 +31,7 @@ class ArticleCommentsTest {
         tags: List<List<String>> = emptyList(),
     ) = NostrEvent(
         id = id, pubkey = pubkey, kind = kind, content = content,
-        createdAt = createdAt, tags = tags, tagsJson = "[]", sig = "sig",
+        createdAt = createdAt, tags = tags,sig = "sig",
         relayUrl = "wss://r.example", replyToId = null, rootId = null,
         hasContentWarning = false, contentWarningReason = null,
         firstSeenAt = System.currentTimeMillis(), relaysSeen = mutableSetOf("wss://r.example"),
@@ -90,7 +90,7 @@ class ArticleCommentsTest {
             NostrEvent(
                 id = "legacy-comment", pubkey = "c".repeat(64), kind = 1, content = "good read",
                 createdAt = 1000, tags = listOf(listOf("a", coord), listOf("e", "article-1")),
-                tagsJson = "[]", sig = "sig", relayUrl = "wss://r.example",
+sig = "sig", relayUrl = "wss://r.example",
                 replyToId = "article-1", rootId = "article-1",
                 hasContentWarning = false, contentWarningReason = null,
                 firstSeenAt = System.currentTimeMillis(), relaysSeen = mutableSetOf("wss://r.example"),
@@ -107,7 +107,7 @@ class ArticleCommentsTest {
             NostrEvent(
                 id = "orphan", pubkey = "c".repeat(64), kind = 1, content = "x",
                 createdAt = 1000, tags = listOf(listOf("a", coord)),
-                tagsJson = "[]", sig = "sig", relayUrl = "wss://r.example",
+sig = "sig", relayUrl = "wss://r.example",
                 replyToId = "something-else", rootId = "something-else",
                 hasContentWarning = false, contentWarningReason = null,
                 firstSeenAt = System.currentTimeMillis(), relaysSeen = mutableSetOf("wss://r.example"),
@@ -142,7 +142,7 @@ class ArticleCommentsTest {
         store.insert(
             NostrEvent(
                 id = "reply-elsewhere", pubkey = "c".repeat(64), kind = 1, content = "see this",
-                createdAt = 1000, tags = listOf(listOf("a", coord)), tagsJson = "[]", sig = "sig",
+                createdAt = 1000, tags = listOf(listOf("a", coord)),sig = "sig",
                 relayUrl = "wss://r.example", replyToId = "somenote", rootId = "somenote",
                 hasContentWarning = false, contentWarningReason = null,
                 firstSeenAt = System.currentTimeMillis(), relaysSeen = mutableSetOf("wss://r.example"),
@@ -159,7 +159,7 @@ class ArticleCommentsTest {
             NostrEvent(
                 id = "comment", pubkey = "c".repeat(64), kind = 1, content = "top",
                 createdAt = 1000, tags = listOf(listOf("a", coord), listOf("e", "article-1")),
-                tagsJson = "[]", sig = "sig", relayUrl = "wss://r.example",
+sig = "sig", relayUrl = "wss://r.example",
                 replyToId = "article-1", rootId = "article-1",
                 hasContentWarning = false, contentWarningReason = null,
                 firstSeenAt = System.currentTimeMillis(), relaysSeen = mutableSetOf("wss://r.example"),
@@ -170,7 +170,7 @@ class ArticleCommentsTest {
             NostrEvent(
                 id = "child", pubkey = "d".repeat(64), kind = 1, content = "nested",
                 createdAt = 1001, tags = listOf(listOf("e", "comment")),
-                tagsJson = "[]", sig = "sig", relayUrl = "wss://r.example",
+sig = "sig", relayUrl = "wss://r.example",
                 replyToId = "comment", rootId = "comment",
                 hasContentWarning = false, contentWarningReason = null,
                 firstSeenAt = System.currentTimeMillis(), relaysSeen = mutableSetOf("wss://r.example"),
@@ -189,7 +189,7 @@ class ArticleCommentsTest {
             NostrEvent(
                 id = "comment", pubkey = "c".repeat(64), kind = 1, content = "top",
                 createdAt = 1000, tags = listOf(listOf("a", coord), listOf("e", "article-1")),
-                tagsJson = "[]", sig = "sig", relayUrl = "wss://r.example",
+sig = "sig", relayUrl = "wss://r.example",
                 replyToId = "article-1", rootId = "article-1",
                 hasContentWarning = false, contentWarningReason = null,
                 firstSeenAt = System.currentTimeMillis(), relaysSeen = mutableSetOf("wss://r.example"),
@@ -200,7 +200,7 @@ class ArticleCommentsTest {
             NostrEvent(
                 id = "quote-child", pubkey = "d".repeat(64), kind = 1, content = "quoting",
                 createdAt = 1001, tags = listOf(listOf("e", "comment"), listOf("q", "something")),
-                tagsJson = "[]", sig = "sig", relayUrl = "wss://r.example",
+sig = "sig", relayUrl = "wss://r.example",
                 replyToId = "comment", rootId = "comment",
                 hasContentWarning = false, contentWarningReason = null,
                 firstSeenAt = System.currentTimeMillis(), relaysSeen = mutableSetOf("wss://r.example"),
@@ -235,7 +235,7 @@ class ArticleCommentsTest {
                     listOf("A", videoCoord), listOf("K", "34236"),
                     listOf("a", videoCoord), listOf("k", "34236"),
                 ),
-                tagsJson = "[]", sig = "sig", relayUrl = "local",
+sig = "sig", relayUrl = "local",
                 replyToId = "video", rootId = "video",
                 hasContentWarning = false, contentWarningReason = null,
                 firstSeenAt = System.currentTimeMillis(), relaysSeen = mutableSetOf("local"),
@@ -270,7 +270,7 @@ class ArticleCommentsTest {
                     listOf("A", videoCoord), listOf("K", "34236"),
                     listOf("a", videoCoord), listOf("k", "34236"),
                 ),
-                tagsJson = "[]", sig = "sig", relayUrl = "local",
+sig = "sig", relayUrl = "local",
                 replyToId = "video", rootId = "video",
                 hasContentWarning = false, contentWarningReason = null,
                 firstSeenAt = System.currentTimeMillis(), relaysSeen = mutableSetOf("local"),
@@ -292,7 +292,7 @@ class ArticleCommentsTest {
                     listOf("E", "video"), listOf("K", "21"),
                     listOf("e", "video"), listOf("k", "21"),
                 ),
-                tagsJson = "[]", sig = "sig", relayUrl = "local",
+sig = "sig", relayUrl = "local",
                 replyToId = "video", rootId = "video",
                 hasContentWarning = false, contentWarningReason = null,
                 firstSeenAt = System.currentTimeMillis(), relaysSeen = mutableSetOf("local"),

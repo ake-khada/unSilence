@@ -165,7 +165,7 @@ class AppBootstrapperMuteSettlementTest {
         content = "",
         createdAt = 100L,
         tags = emptyList(),
-        tagsJson = "[]",
+
         sig = "sig",
         relayUrl = "wss://relay.example",
         replyToId = null,

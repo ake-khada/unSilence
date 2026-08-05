@@ -5,7 +5,6 @@ import com.unsilence.app.data.relay.ImetaMedia
 import com.unsilence.app.data.relay.ImetaParser
 import com.unsilence.app.data.relay.Nip19FailureCache
 import com.unsilence.app.data.relay.NostrJson
-import com.unsilence.app.data.relay.extractRepostAuthorPubkey
 import com.vitorpamplona.quartz.nip19Bech32.Nip19Parser
 import com.vitorpamplona.quartz.nip19Bech32.entities.NAddress
 import com.vitorpamplona.quartz.nip19Bech32.entities.NEvent
@@ -95,31 +94,63 @@ object ContentParser {
         hasContentWarning: Boolean,
         contentWarningReason: String?,
         preparsedImeta: List<ImetaMedia>? = null,
+    ): EventModel = parse(
+        id = id,
+        pubkey = pubkey,
+        kind = kind,
+        content = content,
+        tags = parseTagLists(tagsJson),
+        createdAt = createdAt,
+        relayUrl = relayUrl,
+        replyToId = replyToId,
+        rootId = rootId,
+        hasContentWarning = hasContentWarning,
+        contentWarningReason = contentWarningReason,
+        preparsedImeta = preparsedImeta,
+    )
+
+    /**
+     * Structured-tag entry point for [com.unsilence.app.data.memory.NostrEvent].
+     * Avoids serializing and reparsing a representation MES already owns.
+     */
+    fun parse(
+        id: String,
+        pubkey: String,
+        kind: Int,
+        content: String,
+        tags: List<List<String>>,
+        createdAt: Long,
+        relayUrl: String,
+        replyToId: String?,
+        rootId: String?,
+        hasContentWarning: Boolean,
+        contentWarningReason: String?,
+        preparsedImeta: List<ImetaMedia>? = null,
     ): EventModel {
         // ── Step 1: Repost unwrap ─────────────────────────────────────────
         // Both kind-6 (note repost) and kind-16 (NIP-18 generic repost) wrap a
         // target event; parseRepostInfo is generic over embedded-JSON + e-tag.
-        val repost = if (kind == 6 || kind == 16) parseRepostInfo(content, tagsJson) else null
+        val repost = if (kind == 6 || kind == 16) parseRepostInfo(content, tags) else null
 
         // Effective kind drives detection/routing: a 6/16 wrapping a 30023 must be
         // detected and rendered as an article, not raw markdown. Resolved from the
         // wrapped target's kind (embedded JSON, kind-16 `k` tag, else note=1).
-        val effectiveKind = resolveEffectiveKind(kind, repost, tagsJson)
+        val effectiveKind = resolveEffectiveKind(kind, repost, tags)
 
         val effectiveContent = if (repost != null) extractEffectiveContent(repost, content) else content
-        val effectiveTagsJson = if (repost != null) extractEffectiveTags(repost, tagsJson) else tagsJson
-        val effectivePubkey = if (repost != null) effectivePubkey(repost, pubkey, content, tagsJson) else pubkey
+        val effectiveTags = if (repost != null) extractEffectiveTags(repost, tags) else tags
+        val effectivePubkey = if (repost != null) effectivePubkey(repost, pubkey, content, tags) else pubkey
         val effectiveCreatedAt = if (repost != null) effectiveCreatedAt(repost, createdAt) else createdAt
 
         // ── Step 2: Imeta + q-tag relay hints ────────────────────────────
         // Reuse preparsed imeta when available — but for kind-6 reposts,
         // always reparse from inner tags (preparsed was the wrapper's tags).
         val imeta = when {
-            repost != null -> ImetaParser.parse(effectiveTagsJson)
+            repost != null -> ImetaParser.parseFromList(effectiveTags)
             preparsedImeta != null -> preparsedImeta
-            else -> ImetaParser.parse(effectiveTagsJson)
+            else -> ImetaParser.parseFromList(effectiveTags)
         }
-        val qHints = extractQTagHints(effectiveTagsJson)
+        val qHints = extractQTagHints(effectiveTags)
 
         // ── Step 3: Bounded single-pass tokenization (spam-post DoS bound) ─
         // Cap 1: truncate INPUT before the O(content) regex pass. Long-form gets a
@@ -149,7 +180,7 @@ object ContentParser {
         // remain inspectable: expose bounded `t` tags as ordinary hashtags so users can
         // identify and mute the pattern even when the sender rotates pubkeys.
         val segments = if (kind == 1 && effectiveContent.isBlank() && parsedSegments.isEmpty()) {
-            tagOnlyHashtags(effectiveTagsJson).map { Segment.Hashtag(it) }
+            tagOnlyHashtags(effectiveTags).map { Segment.Hashtag(it) }
         } else {
             parsedSegments
         }
@@ -172,14 +203,14 @@ object ContentParser {
         // empty ArticleInfo — that must NOT route a blank shell to ArticleLayout;
         // it falls through to a note stub until the a-tag/naddr resolver (#5).
         val article = if (effectiveKind == 30023) {
-            parseArticleInfo(effectiveTagsJson).takeIf {
+            parseArticleInfo(effectiveTags).takeIf {
                 it.title != null || it.summary != null || it.image != null || effectiveContent.isNotBlank()
             }
         } else null
 
         // ── Step 6: NIP-30 custom emoji tags ─────────────────────────────
-        val customEmojis = parseCustomEmojis(effectiveTagsJson)
-        val poll = if (effectiveKind == 1068) parsePollInfo(effectiveTagsJson) else null
+        val customEmojis = parseCustomEmojis(effectiveTags)
+        val poll = if (effectiveKind == 1068) parsePollInfo(effectiveTags) else null
 
         return EventModel(
             id = id,
@@ -200,7 +231,7 @@ object ContentParser {
             thread = ThreadRefs(replyToId, rootId),
             repost = repost,
             article = article,
-            warnings = effectiveWarnings(repost, hasContentWarning, contentWarningReason, effectiveTagsJson),
+            warnings = effectiveWarnings(repost, hasContentWarning, contentWarningReason, effectiveTags),
             shortForm = isShortFormVideoKind(effectiveKind),
             customEmojis = customEmojis,
             poll = poll,
@@ -208,16 +239,15 @@ object ContentParser {
         )
     }
 
-    private fun parsePollInfo(tagsJson: String): PollInfo? = runCatching {
-        val tags = NostrJson.parseToJsonElement(tagsJson).jsonArray.map { it.jsonArray }
+    private fun parsePollInfo(tags: List<List<String>>): PollInfo? = runCatching {
         val seenIds = mutableSetOf<String>()
         val options = tags.asSequence()
-            .filter { it.getOrNull(0)?.jsonPrimitive?.content == "option" }
+            .filter { it.getOrNull(0) == "option" }
             .mapNotNull { tag ->
-                val id = tag.getOrNull(1)?.jsonPrimitive?.content?.take(128)?.takeIf {
+                val id = tag.getOrNull(1)?.take(128)?.takeIf {
                     it.isNotBlank() && it.none(Char::isISOControl)
                 } ?: return@mapNotNull null
-                val label = tag.getOrNull(2)?.jsonPrimitive?.content?.trim()?.take(300)
+                val label = tag.getOrNull(2)?.trim()?.take(300)
                     ?.takeIf { it.isNotBlank() } ?: return@mapNotNull null
                 if (!seenIds.add(id)) return@mapNotNull null
                 PollOption(id, label)
@@ -226,16 +256,16 @@ object ContentParser {
             .toList()
         if (options.size < 2) return@runCatching null
 
-        val pollType = tags.firstOrNull { it.getOrNull(0)?.jsonPrimitive?.content == "polltype" }
-            ?.getOrNull(1)?.jsonPrimitive?.content
+        val pollType = tags.firstOrNull { it.getOrNull(0) == "polltype" }
+            ?.getOrNull(1)
         val endsAt = tags.firstOrNull {
-            val name = it.getOrNull(0)?.jsonPrimitive?.content
+            val name = it.getOrNull(0)
             name == "endsAt" || name == "closed_at"
         }
-            ?.getOrNull(1)?.jsonPrimitive?.content?.toLongOrNull()?.takeIf { it > 0L }
+            ?.getOrNull(1)?.toLongOrNull()?.takeIf { it > 0L }
         val relays = tags.asSequence()
-            .filter { it.getOrNull(0)?.jsonPrimitive?.content == "relay" }
-            .mapNotNull { it.getOrNull(1)?.jsonPrimitive?.content }
+            .filter { it.getOrNull(0) == "relay" }
+            .mapNotNull { it.getOrNull(1) }
             .filter { it.startsWith("wss://") || it.startsWith("ws://") }
             .distinct()
             .take(6)
@@ -254,15 +284,12 @@ object ContentParser {
         repost: RepostInfo?,
         wrapperHasCw: Boolean,
         wrapperReason: String?,
-        effectiveTagsJson: String,
+        effectiveTags: List<List<String>>,
     ): ContentWarnings {
         if (repost == null) return ContentWarnings(wrapperHasCw, wrapperReason)
-        val inner = runCatching {
-            val arr = NostrJson.parseToJsonElement(effectiveTagsJson).jsonArray
-            val cw = arr.firstOrNull { it.jsonArray.getOrNull(0)?.jsonPrimitive?.content == "content-warning" }
-            if (cw == null) false to null
-            else true to cw.jsonArray.getOrNull(1)?.jsonPrimitive?.content?.takeIf { it.isNotBlank() }
-        }.getOrDefault(false to null)
+        val cw = effectiveTags.firstOrNull { it.getOrNull(0) == "content-warning" }
+        val inner = if (cw == null) false to null
+            else true to cw.getOrNull(1)?.takeIf { it.isNotBlank() }
         return ContentWarnings(wrapperHasCw || inner.first, wrapperReason ?: inner.second)
     }
 
@@ -273,22 +300,22 @@ object ContentParser {
      * an e-tag — we still produce a RepostInfo so the renderer can show a
      * stub until lookupModel resolves the target.
      */
-    private fun parseRepostInfo(content: String, tagsJson: String): RepostInfo? {
+    private fun parseRepostInfo(content: String, tags: List<List<String>>): RepostInfo? {
         val embeddedJson = if (content.isNotBlank()) {
             runCatching { NostrJson.parseToJsonElement(content).jsonObject.toString() }
                 .getOrNull()
         } else null
 
-        val targetId = extractFirstETagId(tagsJson)
-        val relayHint = extractFirstETagRelay(tagsJson)
-        val addressCoordinate = extractFirstAddressTagValue(tagsJson)
-        val addressRelayHint = extractFirstAddressTagRelay(tagsJson)
+        val targetId = extractFirstETagId(tags)
+        val relayHint = extractFirstETagRelay(tags)
+        val addressCoordinate = extractFirstAddressTagValue(tags)
+        val addressRelayHint = extractFirstAddressTagRelay(tags)
         val coordinateAuthor = addressCoordinate
             ?.split(':', limit = 3)
             ?.getOrNull(1)
             ?.takeIf { it.isNotBlank() }
-        val targetAuthorPubkey = extractRepostAuthorPubkey(content, tagsJson) ?: coordinateAuthor
-        val proxyUrl = extractActivityPubProxyUrl(tagsJson)
+        val targetAuthorPubkey = extractRepostAuthorPubkey(content, tags) ?: coordinateAuthor
+        val proxyUrl = extractActivityPubProxyUrl(tags)
 
         if (embeddedJson == null && targetId == null && addressCoordinate == null) return null
 
@@ -304,19 +331,12 @@ object ContentParser {
         )
     }
 
-    private fun extractActivityPubProxyUrl(tagsJson: String): String? = runCatching {
-        NostrJson.parseToJsonElement(tagsJson).jsonArray
-            .firstOrNull { tag ->
-                val cells = tag.jsonArray
-                cells.getOrNull(0)?.jsonPrimitive?.content == "proxy" &&
-                    cells.getOrNull(2)?.jsonPrimitive?.content == "activitypub"
-            }
-            ?.jsonArray
+    private fun extractActivityPubProxyUrl(tags: List<List<String>>): String? =
+        tags.firstOrNull { tag ->
+            tag.getOrNull(0) == "proxy" && tag.getOrNull(2) == "activitypub"
+        }
             ?.getOrNull(1)
-            ?.jsonPrimitive
-            ?.content
             ?.takeIf { it.startsWith("https://") || it.startsWith("http://") }
-    }.getOrNull()
 
     /**
      * The kind that drives detection/routing. A kind-6/16 repost wraps a target
@@ -329,32 +349,36 @@ object ContentParser {
      * resolves to 1 and renders as a note stub until a-tag/naddr resolution lands.
      * Non-reposts return their own kind.
      */
-    private fun resolveEffectiveKind(rawKind: Int, repost: RepostInfo?, wrapperTagsJson: String): Int {
+    private fun resolveEffectiveKind(rawKind: Int, repost: RepostInfo?, wrapperTags: List<List<String>>): Int {
         if (repost == null) return rawKind
         repost.embeddedJson?.let { json ->
             runCatching {
                 NostrJson.parseToJsonElement(json).jsonObject["kind"]?.jsonPrimitive?.content?.toIntOrNull()
             }.getOrNull()?.let { return it }
         }
-        if (rawKind == 16) extractKTagKind(wrapperTagsJson)?.let { return it }
+        if (rawKind == 16) extractKTagKind(wrapperTags)?.let { return it }
         return 1
     }
 
     /** NIP-18 generic repost (kind-16) tags the reposted event's kind as `k`. */
-    private fun extractKTagKind(tagsJson: String): Int? = runCatching {
-        val parsed = NostrJson.parseToJsonElement(tagsJson).jsonArray
-        val kTag = parsed.firstOrNull { it.jsonArray.getOrNull(0)?.jsonPrimitive?.content == "k" }
-        kTag?.jsonArray?.getOrNull(1)?.jsonPrimitive?.content?.toIntOrNull()
-    }.getOrNull()
+    private fun extractKTagKind(tags: List<List<String>>): Int? =
+        tags.firstOrNull { it.getOrNull(0) == "k" }
+            ?.getOrNull(1)
+            ?.toIntOrNull()
 
-    private fun effectivePubkey(repost: RepostInfo, wrapperPk: String, content: String, tagsJson: String): String {
+    private fun effectivePubkey(
+        repost: RepostInfo,
+        wrapperPk: String,
+        content: String,
+        tags: List<List<String>>,
+    ): String {
         if (repost.embeddedJson != null) {
             runCatching {
                 NostrJson.parseToJsonElement(repost.embeddedJson).jsonObject["pubkey"]
                     ?.jsonPrimitive?.content
             }.getOrNull()?.let { return it }
         }
-        return extractRepostAuthorPubkey(content, tagsJson) ?: wrapperPk
+        return extractRepostAuthorPubkey(content, tags) ?: wrapperPk
     }
 
     private fun effectiveCreatedAt(repost: RepostInfo, wrapperTs: Long): Long {
@@ -375,11 +399,28 @@ object ContentParser {
         }.getOrNull() ?: wrapperContent
     }
 
-    private fun extractEffectiveTags(repost: RepostInfo, wrapperTagsJson: String): String {
-        if (repost.embeddedJson == null) return wrapperTagsJson
+    private fun extractEffectiveTags(
+        repost: RepostInfo,
+        wrapperTags: List<List<String>>,
+    ): List<List<String>> {
+        if (repost.embeddedJson == null) return wrapperTags
         return runCatching {
-            NostrJson.parseToJsonElement(repost.embeddedJson).jsonObject["tags"]?.toString()
-        }.getOrNull() ?: wrapperTagsJson
+            val element = NostrJson.parseToJsonElement(repost.embeddedJson).jsonObject["tags"]
+            element?.let(::parseTagLists)
+        }.getOrNull() ?: wrapperTags
+    }
+
+    private fun extractRepostAuthorPubkey(
+        content: String,
+        tags: List<List<String>>,
+    ): String? {
+        if (content.isNotBlank()) {
+            runCatching {
+                NostrJson.parseToJsonElement(content).jsonObject["pubkey"]
+                    ?.jsonPrimitive?.content
+            }.getOrNull()?.let { return it }
+        }
+        return tags.firstOrNull { it.getOrNull(0) == "p" }?.getOrNull(1)
     }
 
     // ── Tokenization ─────────────────────────────────────────────────────
@@ -741,28 +782,24 @@ object ContentParser {
 
     // ── Article info ─────────────────────────────────────────────────────
 
-    private fun parseArticleInfo(tagsJson: String): ArticleInfo {
+    private fun parseArticleInfo(tags: List<List<String>>): ArticleInfo {
         var title: String? = null
         var summary: String? = null
         var image: String? = null
         var publishedAt: Long? = null
         var dTag: String? = null
         val hashtags = mutableListOf<String>()
-        runCatching {
-            val parsed = NostrJson.parseToJsonElement(tagsJson).jsonArray
-            for (tag in parsed) {
-                val arr = tag.jsonArray
-                val key = arr.getOrNull(0)?.jsonPrimitive?.content ?: continue
-                val value = arr.getOrNull(1)?.jsonPrimitive?.content ?: continue
-                when (key) {
-                    "title" -> title = value
-                    "summary" -> summary = value
-                    "image" -> image = value
-                    "published_at" -> publishedAt = value.toLongOrNull()
-                    "d" -> dTag = value
-                    "t" -> value.trim().removePrefix("#").takeIf { it.isNotBlank() }
-                        ?.let { if (it !in hashtags) hashtags.add(it) }
-                }
+        for (tag in tags) {
+            val key = tag.getOrNull(0) ?: continue
+            val value = tag.getOrNull(1) ?: continue
+            when (key) {
+                "title" -> title = value
+                "summary" -> summary = value
+                "image" -> image = value
+                "published_at" -> publishedAt = value.toLongOrNull()
+                "d" -> dTag = value
+                "t" -> value.trim().removePrefix("#").takeIf { it.isNotBlank() }
+                    ?.let { if (it !in hashtags) hashtags.add(it) }
             }
         }
         return ArticleInfo(title, summary, image, publishedAt, dTag, hashtags)
@@ -770,99 +807,79 @@ object ContentParser {
 
     // ── NIP-30 emoji tags ───────────────────────────────────────────────
 
-    private fun parseCustomEmojis(tagsJson: String): Map<String, String> {
-        if (!tagsJson.contains("\"emoji\"")) return emptyMap()
-        return try {
-            val parsed = NostrJson.parseToJsonElement(tagsJson).jsonArray
-            val out = LinkedHashMap<String, String>()
-            for (tag in parsed) {
-                val arr = tag.jsonArray
-                if (arr.size < 3) continue
-                if (arr[0].jsonPrimitive.content != "emoji") continue
-                val shortcode = arr[1].jsonPrimitive.content.takeIf { it.isNotBlank() } ?: continue
-                val url = arr[2].jsonPrimitive.content.takeIf { it.isNotBlank() } ?: continue
-                out.putIfAbsent(shortcode, url)
-            }
-            out
-        } catch (_: Exception) {
-            emptyMap()
+    private fun parseCustomEmojis(tags: List<List<String>>): Map<String, String> {
+        val out = LinkedHashMap<String, String>()
+        for (tag in tags) {
+            if (tag.size < 3 || tag[0] != "emoji") continue
+            val shortcode = tag[1].takeIf { it.isNotBlank() } ?: continue
+            val url = tag[2].takeIf { it.isNotBlank() } ?: continue
+            out.putIfAbsent(shortcode, url)
         }
+        return out
     }
 
     // ── Tag helpers ──────────────────────────────────────────────────────
 
     internal fun tagOnlyHashtags(tagsJson: String): List<String> {
-        if (!tagsJson.contains("\"t\"")) return emptyList()
-        return runCatching {
-            val seen = HashSet<String>()
-            buildList {
-                for (tag in NostrJson.parseToJsonElement(tagsJson).jsonArray) {
-                    val cells = runCatching { tag.jsonArray }.getOrNull() ?: continue
-                    val key = cells.getOrNull(0)
-                        ?.let { runCatching { it.jsonPrimitive.content }.getOrNull() }
-                    if (key != "t") continue
-                    val value = cells.getOrNull(1)
-                        ?.let { runCatching { it.jsonPrimitive.content }.getOrNull() }
-                        ?.trim()
-                        ?.trimStart('#')
-                        ?.takeIf { candidate ->
-                            candidate.isNotEmpty() &&
-                                candidate.length <= MAX_TAG_ONLY_HASHTAG_CHARS &&
-                                candidate.none { it.isWhitespace() || it.isISOControl() }
-                        }
-                        ?: continue
-                    if (seen.add(value.lowercase())) add(value)
-                    if (size >= MAX_TAG_ONLY_HASHTAGS) break
-                }
-            }
-        }.getOrDefault(emptyList())
+        return tagOnlyHashtags(parseTagLists(tagsJson))
     }
 
-    private fun extractFirstETagId(tagsJson: String): String? = runCatching {
-        val parsed = NostrJson.parseToJsonElement(tagsJson).jsonArray
-        val eTag = parsed.firstOrNull { it.jsonArray.getOrNull(0)?.jsonPrimitive?.content == "e" }
-        eTag?.jsonArray?.getOrNull(1)?.jsonPrimitive?.content
-    }.getOrNull()
-
-    private fun extractFirstETagRelay(tagsJson: String): String? = runCatching {
-        val parsed = NostrJson.parseToJsonElement(tagsJson).jsonArray
-        val eTag = parsed.firstOrNull { it.jsonArray.getOrNull(0)?.jsonPrimitive?.content == "e" }
-        eTag?.jsonArray?.getOrNull(2)?.jsonPrimitive?.content?.takeIf { it.isNotBlank() }
-    }.getOrNull()
-
-    private fun extractFirstAddressTagValue(tagsJson: String): String? = runCatching {
-        val parsed = NostrJson.parseToJsonElement(tagsJson).jsonArray
-        val tag = parsed.firstOrNull {
-            it.jsonArray.getOrNull(0)?.jsonPrimitive?.content in setOf("a", "A")
-        }
-        tag?.jsonArray?.getOrNull(1)?.jsonPrimitive?.content?.takeIf { it.isNotBlank() }
-    }.getOrNull()
-
-    private fun extractFirstAddressTagRelay(tagsJson: String): String? = runCatching {
-        val parsed = NostrJson.parseToJsonElement(tagsJson).jsonArray
-        val tag = parsed.firstOrNull {
-            it.jsonArray.getOrNull(0)?.jsonPrimitive?.content in setOf("a", "A")
-        }
-        tag?.jsonArray?.getOrNull(2)?.jsonPrimitive?.content?.takeIf { it.isNotBlank() }
-    }.getOrNull()
-
-    private fun extractQTagHints(tagsJson: String): Map<String, List<String>> {
-        if (!tagsJson.contains("\"q\"")) return emptyMap()
-        return try {
-            val parsed = NostrJson.parseToJsonElement(tagsJson).jsonArray
-            val result = mutableMapOf<String, MutableList<String>>()
-            for (tag in parsed) {
-                val arr = tag.jsonArray
-                if (arr.getOrNull(0)?.jsonPrimitive?.content == "q") {
-                    val id = arr.getOrNull(1)?.jsonPrimitive?.content ?: continue
-                    val relay = arr.getOrNull(2)?.jsonPrimitive?.content
-                        ?.takeIf { it.isNotBlank() } ?: continue
-                    result.getOrPut(id) { mutableListOf() }.add(relay)
-                }
+    internal fun tagOnlyHashtags(tags: List<List<String>>): List<String> {
+        val seen = HashSet<String>()
+        return buildList {
+            for (tag in tags) {
+                if (tag.getOrNull(0) != "t") continue
+                val value = tag.getOrNull(1)
+                    ?.trim()
+                    ?.trimStart('#')
+                    ?.takeIf { candidate ->
+                        candidate.isNotEmpty() &&
+                            candidate.length <= MAX_TAG_ONLY_HASHTAG_CHARS &&
+                            candidate.none { it.isWhitespace() || it.isISOControl() }
+                    }
+                    ?: continue
+                if (seen.add(value.lowercase())) add(value)
+                if (size >= MAX_TAG_ONLY_HASHTAGS) break
             }
-            result
-        } catch (_: Exception) {
-            emptyMap()
         }
     }
+
+    private fun extractFirstETagId(tags: List<List<String>>): String? =
+        tags.firstOrNull { it.getOrNull(0) == "e" }?.getOrNull(1)
+
+    private fun extractFirstETagRelay(tags: List<List<String>>): String? =
+        tags.firstOrNull { it.getOrNull(0) == "e" }
+            ?.getOrNull(2)
+            ?.takeIf { it.isNotBlank() }
+
+    private fun extractFirstAddressTagValue(tags: List<List<String>>): String? =
+        tags.firstOrNull { it.getOrNull(0) == "a" || it.getOrNull(0) == "A" }
+            ?.getOrNull(1)
+            ?.takeIf { it.isNotBlank() }
+
+    private fun extractFirstAddressTagRelay(tags: List<List<String>>): String? =
+        tags.firstOrNull { it.getOrNull(0) == "a" || it.getOrNull(0) == "A" }
+            ?.getOrNull(2)
+            ?.takeIf { it.isNotBlank() }
+
+    private fun extractQTagHints(tags: List<List<String>>): Map<String, List<String>> {
+        val result = mutableMapOf<String, MutableList<String>>()
+        for (tag in tags) {
+            if (tag.getOrNull(0) == "q") {
+                val id = tag.getOrNull(1) ?: continue
+                val relay = tag.getOrNull(2)?.takeIf { it.isNotBlank() } ?: continue
+                result.getOrPut(id) { mutableListOf() }.add(relay)
+            }
+        }
+        return result
+    }
+
+    private fun parseTagLists(tagsJson: String): List<List<String>> = runCatching {
+        parseTagLists(NostrJson.parseToJsonElement(tagsJson))
+    }.getOrDefault(emptyList())
+
+    private fun parseTagLists(element: kotlinx.serialization.json.JsonElement): List<List<String>> =
+        element.jsonArray.mapNotNull { row ->
+            runCatching { row.jsonArray.map { it.jsonPrimitive.content } }.getOrNull()
+        }
 }

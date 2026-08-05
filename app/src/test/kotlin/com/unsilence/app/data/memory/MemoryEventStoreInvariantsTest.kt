@@ -72,7 +72,7 @@ class MemoryEventStoreInvariantsTest {
         content = content,
         createdAt = createdAt,
         tags = tags,
-        tagsJson = "[]",
+
         sig = sig,
         relayUrl = relayUrl,
         replyToId = replyToId,

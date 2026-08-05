@@ -5,7 +5,6 @@ import com.unsilence.app.data.auth.SigningManager
 import com.unsilence.app.data.memory.MemoryEventStore
 import com.unsilence.app.data.memory.NostrEvent
 import com.unsilence.app.data.memory.SnapshotScheduler
-import com.unsilence.app.data.memory.tagsToJson
 import com.unsilence.app.data.relay.RelayPool
 import com.unsilence.app.data.relay.RelayPreferencesStore
 import com.unsilence.app.data.relay.normalizeRelayUrl
@@ -62,7 +61,6 @@ class ProfileMetadataPublisher @Inject constructor(
             content = signed.content,
             createdAt = signed.createdAt,
             tags = signedTags,
-            tagsJson = tagsToJson(signedTags),
             sig = signed.sig,
             relayUrl = "local",
             replyToId = null,

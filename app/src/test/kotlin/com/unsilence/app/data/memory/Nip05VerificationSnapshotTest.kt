@@ -124,7 +124,7 @@ class Nip05VerificationSnapshotTest {
         content = """{"nip05":"$nip05"}""",
         createdAt = createdAt,
         tags = emptyList(),
-        tagsJson = "[]",
+
         sig = "sig",
         relayUrl = "wss://relay.example",
         replyToId = null,

@@ -34,7 +34,7 @@ class ContentEvictionPolicyTest {
         content = "content-$id",
         createdAt = createdAt,
         tags = tags,
-        tagsJson = "[]",
+
         sig = "sig",
         relayUrl = "wss://relay.example",
         replyToId = null,

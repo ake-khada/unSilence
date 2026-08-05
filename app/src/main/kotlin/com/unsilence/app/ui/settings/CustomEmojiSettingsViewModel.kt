@@ -11,7 +11,6 @@ import com.unsilence.app.data.memory.EmojiSetRef
 import com.unsilence.app.data.memory.MemoryEventStore
 import com.unsilence.app.data.memory.NostrEvent
 import com.unsilence.app.data.memory.UserEntity
-import com.unsilence.app.data.memory.tagsToJson
 import com.unsilence.app.data.relay.RelayPool
 import com.unsilence.app.data.relay.toEventJson
 import com.unsilence.app.data.settings.SettingsStore
@@ -326,7 +325,6 @@ class CustomEmojiSettingsViewModel @Inject constructor(
                 content = signed.content,
                 createdAt = signed.createdAt,
                 tags = parsedTags,
-                tagsJson = tagsToJson(parsedTags),
                 sig = signed.sig,
                 relayUrl = "local",
                 replyToId = null,

@@ -6,7 +6,6 @@ import com.unsilence.app.data.auth.SigningManager
 import com.unsilence.app.data.memory.MemoryEventStore
 import com.unsilence.app.data.memory.NostrEvent
 import com.unsilence.app.data.memory.SnapshotScheduler
-import com.unsilence.app.data.memory.tagsToJson
 import com.unsilence.app.data.relay.GLOBAL_RELAY_URLS
 import com.unsilence.app.data.relay.RelayPool
 import com.unsilence.app.data.relay.RelayPreferencesStore
@@ -109,7 +108,6 @@ class FollowBatchPublisher @Inject constructor(
             content = signed.content,
             createdAt = signed.createdAt,
             tags = signedTags,
-            tagsJson = tagsToJson(signedTags),
             sig = signed.sig,
             relayUrl = "",
             replyToId = null,

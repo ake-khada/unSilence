@@ -48,7 +48,7 @@ class ProfileContentPolicyTest {
         content = "content",
         createdAt = 1L,
         tags = tags,
-        tagsJson = "[]",
+
         sig = "sig",
         relayUrl = "wss://relay.example",
         replyToId = replyToId,

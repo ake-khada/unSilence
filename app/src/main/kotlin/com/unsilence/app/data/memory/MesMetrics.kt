@@ -1,5 +1,74 @@
 package com.unsilence.app.data.memory
 
+private const val ART_OBJECT_ALIGNMENT = 8L
+private const val ART_STRING_SHALLOW_BYTES = 24L
+private const val ART_ARRAY_HEADER_BYTES = 16L
+private const val ART_ARRAY_LIST_SHALLOW_BYTES = 24L
+private const val ART_REFERENCE_BYTES = 4L
+private const val NOSTR_EVENT_SHALLOW_BYTES = 72L
+private const val CHM_SHALLOW_BYTES = 64L
+private const val CHM_KEY_SET_VIEW_BYTES = 16L
+private const val CHM_NODE_BYTES = 24L
+
+/**
+ * Amortized ownership outside the event object itself: eventsById node/table,
+ * kind/author memberships, recent-order entry, touch map, and admission index.
+ * Calibrated from the 2026-08-05 ART/MAT capture; kept explicit so future heap
+ * captures can adjust the model rather than hiding a multiplier in telemetry.
+ */
+private const val PRIMARY_EVENT_INDEX_BYTES = 640L
+
+private fun alignArt(bytes: Long): Long =
+    (bytes + ART_OBJECT_ALIGNMENT - 1L) and -ART_OBJECT_ALIGNMENT
+
+private fun artStringPayloadBytes(value: String): Long {
+    // ART compact strings use one byte for Latin-1 and two for other UTF-16
+    // code units. Scan without allocating an encoded byte array in the probe.
+    val bytesPerChar = if (value.all { it.code <= 0xff }) 1L else 2L
+    return value.length * bytesPerChar
+}
+
+internal fun estimateArtStringBytes(value: String): Long =
+    ART_STRING_SHALLOW_BYTES +
+        alignArt(ART_ARRAY_HEADER_BYTES + artStringPayloadBytes(value))
+
+private fun estimateArtListBytes(size: Int): Long =
+    ART_ARRAY_LIST_SHALLOW_BYTES +
+        alignArt(ART_ARRAY_HEADER_BYTES + size * ART_REFERENCE_BYTES)
+
+/** Estimated retained ART heap attributable to one indexed [NostrEvent]. */
+internal fun estimateNostrEventRetainedBytes(event: NostrEvent): Long {
+    var bytes = NOSTR_EVENT_SHALLOW_BYTES + PRIMARY_EVENT_INDEX_BYTES
+    bytes += estimateArtStringBytes(event.id)
+    bytes += estimateArtStringBytes(event.pubkey)
+    bytes += estimateArtStringBytes(event.content)
+    bytes += estimateArtStringBytes(event.sig)
+    bytes += estimateArtStringBytes(event.relayUrl)
+    event.replyToId?.let { bytes += estimateArtStringBytes(it) }
+    event.rootId?.let { bytes += estimateArtStringBytes(it) }
+    event.contentWarningReason?.let { bytes += estimateArtStringBytes(it) }
+
+    bytes += estimateArtListBytes(event.tags.size)
+    for (tag in event.tags) {
+        bytes += estimateArtListBytes(tag.size)
+        for (cell in tag) bytes += estimateArtStringBytes(cell)
+    }
+
+    // ConcurrentHashMap.newKeySet(): view + map + lazily allocated table and
+    // one node per relay. The primary relay string is already counted above.
+    val relayCount = event.relaysSeen.size
+    bytes += CHM_KEY_SET_VIEW_BYTES + CHM_SHALLOW_BYTES
+    if (relayCount > 0) {
+        val tableSlots = 16 // CHM's first allocation for the tiny provenance set
+        bytes += alignArt(ART_ARRAY_HEADER_BYTES + tableSlots * ART_REFERENCE_BYTES)
+        bytes += relayCount * CHM_NODE_BYTES
+        for (relay in event.relaysSeen) {
+            if (relay != event.relayUrl) bytes += estimateArtStringBytes(relay)
+        }
+    }
+    return bytes
+}
+
 /**
  * Point-in-time snapshot of MemoryEventStore collection sizes.
  * Produced by [MemoryEventStore.snapshotSize] — no locking, relies on

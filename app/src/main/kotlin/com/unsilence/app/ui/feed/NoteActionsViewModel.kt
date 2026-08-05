@@ -15,7 +15,6 @@ import com.unsilence.app.data.memory.UserEntity
 import com.unsilence.app.data.memory.MemoryEventStore
 import com.unsilence.app.data.memory.SnapshotScheduler
 import com.unsilence.app.data.memory.NostrEvent
-import com.unsilence.app.data.memory.tagsToJson
 import com.unsilence.app.data.relay.GLOBAL_RELAY_URLS
 import com.unsilence.app.data.relay.CardHydrator
 import com.unsilence.app.data.relay.NostrJson
@@ -67,6 +66,8 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.buildJsonArray
+import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.put
 import javax.inject.Inject
 
@@ -1049,7 +1050,11 @@ class NoteActionsViewModel @Inject constructor(
         put("pubkey",     event.pubkey)
         put("created_at", event.createdAt)
         put("kind",       event.kind)
-        put("tags",       NostrJson.parseToJsonElement(event.tagsJson))
+        put("tags", buildJsonArray {
+            event.tags.forEach { tag ->
+                add(buildJsonArray { tag.forEach { add(JsonPrimitive(it)) } })
+            }
+        })
         put("content",    event.content)
         put("sig",        event.sig)
     }.toString()
@@ -1085,7 +1090,6 @@ class NoteActionsViewModel @Inject constructor(
             content = signed.content,
             createdAt = signed.createdAt,
             tags = tagsList,
-            tagsJson = tagsToJson(tagsList),
             sig = signed.sig,
             relayUrl = "",
             replyToId = null,

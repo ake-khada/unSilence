@@ -44,6 +44,56 @@ class ContentParserTest {
         contentWarningReason = contentWarningReason,
     )
 
+    private fun parseStructured(
+        content: String,
+        kind: Int,
+        tags: List<List<String>>,
+    ): EventModel = ContentParser.parse(
+        id = "test-id",
+        pubkey = "a".repeat(64),
+        kind = kind,
+        content = content,
+        tags = tags,
+        createdAt = 1000L,
+        relayUrl = "wss://relay.test",
+        replyToId = null,
+        rootId = null,
+        hasContentWarning = false,
+        contentWarningReason = null,
+    )
+
+    @Test
+    fun `structured tag path matches serialized boundary path`() {
+        val fixtures = listOf(
+            Triple(
+                16,
+                "",
+                listOf(
+                    listOf("e", "reposted-id", "wss://relay.example"),
+                    listOf("p", "reposted-author"),
+                    listOf("k", "1"),
+                ),
+            ),
+            Triple(
+                1,
+                "https://media.example/image.jpg",
+                listOf(
+                    listOf("e", "root-id", "", "root"),
+                    listOf("e", "reply-id", "", "reply"),
+                    listOf("imeta", "url https://media.example/image.jpg", "dim 1200x800"),
+                    listOf("t", "nostr"),
+                ),
+            ),
+        )
+
+        fixtures.forEach { (kind, content, tags) ->
+            assertEquals(
+                parse(content = content, kind = kind, tagsJson = com.unsilence.app.data.memory.tagsToJson(tags)),
+                parseStructured(content = content, kind = kind, tags = tags),
+            )
+        }
+    }
+
     // ── Plain text ──────────────────────────────────────────────────────────
 
     @Test

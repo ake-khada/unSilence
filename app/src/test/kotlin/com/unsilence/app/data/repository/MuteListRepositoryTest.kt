@@ -264,7 +264,7 @@ class MuteListRepositoryTest {
                 content = "encrypted",
                 createdAt = createdAt,
                 tags = emptyList(),
-                tagsJson = "[]",
+
                 sig = "sig",
                 relayUrl = "",
                 replyToId = null,

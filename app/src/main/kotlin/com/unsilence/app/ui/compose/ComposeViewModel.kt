@@ -31,7 +31,6 @@ import com.unsilence.app.data.memory.MemoryEventStore
 import com.unsilence.app.data.memory.UserEntity
 import com.unsilence.app.data.memory.WotLookup
 import com.unsilence.app.data.memory.NostrEvent
-import com.unsilence.app.data.memory.tagsToJson
 import com.unsilence.app.data.settings.SettingsStore
 import com.unsilence.app.data.relay.RelayPool
 import com.unsilence.app.data.relay.WotHydrationCoalescer
@@ -1376,7 +1375,6 @@ class ComposeViewModel @Inject constructor(
                             content = signed.content,
                             createdAt = signed.createdAt,
                             tags = parsedTags,
-                            tagsJson = tagsToJson(parsedTags),
                             sig = signed.sig,
                             relayUrl = "local",
                             replyToId = payload.replyToId,

@@ -12,7 +12,6 @@ import com.unsilence.app.data.memory.FavoriteEntry
 import com.unsilence.app.data.memory.MemoryEventStore
 import com.unsilence.app.data.memory.NostrEvent
 import com.unsilence.app.data.memory.RelayConfig
-import com.unsilence.app.data.memory.tagsToJson
 import com.unsilence.app.data.memory.RelaySet
 import com.unsilence.app.data.memory.UserEntity
 import com.unsilence.app.data.relay.RelayCapabilitiesStore
@@ -465,7 +464,6 @@ class RelayManagementViewModel @Inject constructor(
             content = signed.content,
             createdAt = signed.createdAt,
             tags = tagsList,
-            tagsJson = tagsToJson(tagsList),
             sig = signed.sig,
             relayUrl = "",
             replyToId = null,

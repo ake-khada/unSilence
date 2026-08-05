@@ -57,7 +57,7 @@ class TimelineCardDataTest {
             content = """{"name":"$pubkey","picture":"$picture"}""",
             createdAt = System.currentTimeMillis() / 1000,
             tags = emptyList(),
-            tagsJson = "[]",
+
             sig = "sig",
             relayUrl = "wss://relay.example.com",
             replyToId = null,
