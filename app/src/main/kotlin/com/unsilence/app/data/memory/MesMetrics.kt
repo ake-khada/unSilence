@@ -73,3 +73,24 @@ data class MesSizeSnapshot(
             (relayListEntries + trustScoreEntries + relayMonitorEntries + relayIdentityEntries + relaySetEntries) * 300L +
             pendingRelayEntries * 128L
 }
+
+/** Eviction work accumulated since the previous metrics sample. */
+data class MesEvictionSnapshot(
+    val passes: Long,
+    val evicted: Long,
+    /** Followed-author events; strongest bounded protection. */
+    val tier1: Long,
+    /** Events referenced by a cached timeline. */
+    val tier2: Long,
+    /** Ordinary events; evicted before tiers 2 and 1. */
+    val tier3: Long,
+    /** Interval removals grouped by event kind. */
+    val evictedByKind: Map<Int, Long>,
+    /** Unique anchor counts observed by the latest completed eviction pass. */
+    val anchoredOwn: Long,
+    val anchoredMentioned: Long,
+    val anchoredViewed: Long,
+    val anchoredProfileRefs: Long,
+    /** Size of the most recent per-pass timeline-ref union. */
+    val liveTimelineRefs: Long,
+)

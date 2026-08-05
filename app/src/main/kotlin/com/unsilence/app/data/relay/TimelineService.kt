@@ -610,6 +610,28 @@ class TimelineService @Inject constructor(
     }
 
     /**
+     * Point-in-time union of refs whose payloads back the live timeline cache.
+     *
+     * [Timeline.refs] is immutable and replaced copy-on-write, so copying the
+     * timeline values first gives eviction a stable view without taking a lock
+     * on the subscription hot path. Protection is deliberately bounded to the
+     * same newest [PERSISTED_REFS_CAP] entries that a timeline may persist;
+     * deeper history remains relay-reconstructible and must not become an
+     * unbounded memory anchor.
+     */
+    internal fun liveReferencedIds(): Set<String> {
+        val timelineSnapshot = timelines.values.toList()
+        val referencedIds = HashSet<String>()
+        for (timeline in timelineSnapshot) {
+            val limit = minOf(timeline.refs.size, PERSISTED_REFS_CAP)
+            for (index in 0 until limit) {
+                referencedIds.add(timeline.refs[index].id)
+            }
+        }
+        return referencedIds
+    }
+
+    /**
      * Snapshot reader entry. Validates each entry's key by recomputing
      * from urls+filter; mismatches (schema drift) are skipped.
      */
