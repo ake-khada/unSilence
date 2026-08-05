@@ -99,6 +99,8 @@ private const val PENDING_RELAYS_CAP = 1_000
 private const val PENDING_RELAYS_TRIM = 200
 /** Disk warm-cache limits are deliberately lower than the in-memory kind caps. */
 internal const val PERSISTED_CONTENT_EVENT_CAP = 5_000
+/** Owner profile-timeline content is anchored ahead of the shared warm-cache band. */
+internal const val PERSISTED_OWN_CONTENT_CAP = 750
 internal const val PERSISTED_NON_CONTENT_LRU_CAP = 1_000
 internal const val PERSISTED_FOLLOWS_LRU_CAP = 500
 internal const val PERSISTED_FOLLOWS_PAYLOAD_BYTE_CAP = 3 * 1024 * 1024
@@ -131,6 +133,7 @@ private const val WOT_ASSERTION_TRIM = 500
 private val CONTENT_KINDS = setOf(
     1, 6, 7, 1018, 1068, 9734, 9735, 16, 20, 21, 22, 34235, 34236, 30023, 1111,
 )
+private val OWN_PROFILE_CONTENT_KINDS = PROFILE_NOTE_REPLY_EVENT_KIND_SET + 30023
 
 /** Max comments surfaced per article (bounds the rendered list + scan). */
 private const val ARTICLE_COMMENT_CAP = 200
@@ -144,6 +147,8 @@ internal data class SnapshotEventSelection(
     val nonContentCandidateCount: Int,
     val contentCandidateCount: Int,
     val anchoredNonContentCount: Int,
+    val ownProfileContentCandidateCount: Int,
+    val anchoredOwnProfileContentCount: Int,
 )
 
 internal fun selectSnapshotEventsForPersistence(
@@ -152,31 +157,46 @@ internal fun selectSnapshotEventsForPersistence(
     followedPubkeys: Set<String>,
     lastTouchedAt: Map<String, Long>,
     contentCap: Int = PERSISTED_CONTENT_EVENT_CAP,
+    ownContentCap: Int = PERSISTED_OWN_CONTENT_CAP,
     nonContentLruCap: Int = PERSISTED_NON_CONTENT_LRU_CAP,
 ): SnapshotEventSelection {
     require(contentCap >= 0)
+    require(ownContentCap >= 0)
     require(nonContentLruCap >= 0)
 
     val anchoredPubkeys = HashSet<String>(followedPubkeys.size + 1).apply {
         addAll(followedPubkeys)
         ownPubkey?.let(::add)
     }
-    val contentCandidates = ArrayList<NostrEvent>()
+    val ownProfileContentCandidates = ArrayList<NostrEvent>()
+    val sharedContentCandidates = ArrayList<NostrEvent>()
     val anchoredNonContent = ArrayList<NostrEvent>()
     val lruNonContent = ArrayList<NostrEvent>()
 
     for (event in events) {
         when {
             event.kind == 3 -> Unit // Persisted in the dedicated follows section.
-            event.kind in CONTENT_KINDS -> contentCandidates.add(event)
+            event.kind in OWN_PROFILE_CONTENT_KINDS && event.pubkey == ownPubkey ->
+                ownProfileContentCandidates.add(event)
+            event.kind in CONTENT_KINDS -> sharedContentCandidates.add(event)
             event.pubkey in anchoredPubkeys -> anchoredNonContent.add(event)
             else -> lruNonContent.add(event)
         }
     }
 
     val newestFirst = compareByDescending<NostrEvent> { it.createdAt }.thenBy { it.id }
-    contentCandidates.sortWith(newestFirst)
+    ownProfileContentCandidates.sortWith(newestFirst)
+    sharedContentCandidates.sortWith(newestFirst)
     anchoredNonContent.sortWith(newestFirst)
+
+    // Profile-timeline content has an independent owner anchor so old posts
+    // cannot be displaced by feed traffic or the owner's own high-volume
+    // reactions/zap requests. The anchor still counts against the total
+    // content budget, and owner profile overflow is deliberately excluded
+    // from the shared band so [ownContentCap] remains a real upper bound.
+    val anchoredOwnProfileContent =
+        ownProfileContentCandidates.take(minOf(ownContentCap, contentCap))
+    val sharedContentBudget = (contentCap - anchoredOwnProfileContent.size).coerceAtLeast(0)
 
     // Snapshot mutable touch values before sorting. Reading the live CHM from a
     // comparator can violate TimSort's ordering contract while hydration updates it.
@@ -192,10 +212,12 @@ internal fun selectSnapshotEventsForPersistence(
 
     return SnapshotEventSelection(
         nonContentEvents = anchoredNonContent + lruNonContent.take(nonContentLruCap),
-        contentEvents = contentCandidates.take(contentCap),
+        contentEvents = anchoredOwnProfileContent + sharedContentCandidates.take(sharedContentBudget),
         nonContentCandidateCount = anchoredNonContent.size + lruNonContent.size,
-        contentCandidateCount = contentCandidates.size,
+        contentCandidateCount = ownProfileContentCandidates.size + sharedContentCandidates.size,
         anchoredNonContentCount = anchoredNonContent.size,
+        ownProfileContentCandidateCount = ownProfileContentCandidates.size,
+        anchoredOwnProfileContentCount = anchoredOwnProfileContent.size,
     )
 }
 
@@ -309,6 +331,8 @@ internal data class SnapshotSectionSizes(
     val anchoredNonContentCount: Int,
     val contentEventCount: Int,
     val contentCandidateCount: Int,
+    val anchoredOwnProfileContentCount: Int,
+    val ownProfileContentCandidateCount: Int,
     val followsEntryCount: Int,
     val followsCandidateCount: Int,
     val anchoredFollowsCount: Int,
@@ -5618,6 +5642,8 @@ class MemoryEventStore @Inject constructor(
         val eventSelection = snapshotEventSelection()
         val totalEvents =
             eventSelection.nonContentEvents.size + eventSelection.contentEvents.size
+        val selectedContentEventIds = eventSelection.contentEvents
+            .mapTo(HashSet(eventSelection.contentEvents.size)) { it.id }
 
         val eventsBuf = ByteArrayOutputStream(2 * 1024 * 1024)
         DataOutputStream(eventsBuf).use { d ->
@@ -5765,7 +5791,7 @@ class MemoryEventStore @Inject constructor(
         // ── Timelines (V12+) ────────────────────────────────────────────
         val timelinesBuf = ByteArrayOutputStream(64 * 1024)
         DataOutputStream(timelinesBuf).use { d ->
-            val timelineEntries = timelineServiceProvider.get().snapshotData()
+            val timelineEntries = timelineServiceProvider.get().snapshotData(selectedContentEventIds)
             d.writeInt(timelineEntries.size)
             for ((key, timeline) in timelineEntries) {
                 d.writeStr(key)
@@ -5855,6 +5881,8 @@ class MemoryEventStore @Inject constructor(
             anchoredNonContentCount = eventSelection.anchoredNonContentCount,
             contentEventCount = eventSelection.contentEvents.size,
             contentCandidateCount = eventSelection.contentCandidateCount,
+            anchoredOwnProfileContentCount = eventSelection.anchoredOwnProfileContentCount,
+            ownProfileContentCandidateCount = eventSelection.ownProfileContentCandidateCount,
             followsEntryCount = followsSelection.entries.size,
             followsCandidateCount = followsSelection.candidateCount,
             anchoredFollowsCount = followsSelection.anchoredCount,

@@ -317,6 +317,63 @@ class TimelineServiceTest {
         assertEquals(listOf(newest.id), emitted.first().map { it.id })
     }
 
+    @Test
+    fun `snapshot trims refs at the first uncovered payload`() {
+        val relayUrl = "wss://a.example"
+        val filter = NostrFilter(kinds = listOf(1), limit = 10)
+        val key = service.generateTimelineKey(listOf(relayUrl), filter)
+        val refs = listOf(
+            TimelineRef("1".repeat(64), 300L),
+            TimelineRef("2".repeat(64), 200L),
+            TimelineRef("3".repeat(64), 100L),
+        )
+        service.restoreFromSnapshot(
+            mapOf(key to TimelineService.Timeline(refs, filter, listOf(relayUrl))),
+        )
+
+        val snapshot = service.snapshotData(setOf(refs[0].id, refs[2].id))
+
+        assertEquals(listOf(refs[0]), snapshot.getValue(key).refs)
+    }
+
+    @Test
+    fun `snapshot leaves a fully covered timeline unchanged`() {
+        val relayUrl = "wss://a.example"
+        val filter = NostrFilter(kinds = listOf(1), limit = 10)
+        val key = service.generateTimelineKey(listOf(relayUrl), filter)
+        val refs = listOf(
+            TimelineRef("1".repeat(64), 300L),
+            TimelineRef("2".repeat(64), 200L),
+        )
+        service.restoreFromSnapshot(
+            mapOf(key to TimelineService.Timeline(refs, filter, listOf(relayUrl))),
+        )
+
+        val snapshot = service.snapshotData(refs.mapTo(mutableSetOf()) { it.id })
+
+        assertEquals(refs, snapshot.getValue(key).refs)
+    }
+
+    @Test
+    fun `snapshot writes no refs when payload coverage is empty`() {
+        val relayUrl = "wss://a.example"
+        val filter = NostrFilter(kinds = listOf(1), limit = 10)
+        val key = service.generateTimelineKey(listOf(relayUrl), filter)
+        service.restoreFromSnapshot(
+            mapOf(
+                key to TimelineService.Timeline(
+                    refs = listOf(TimelineRef("1".repeat(64), 300L)),
+                    filter = filter,
+                    urls = listOf(relayUrl),
+                ),
+            ),
+        )
+
+        val snapshot = service.snapshotData(emptySet())
+
+        assertTrue(snapshot.getValue(key).refs.isEmpty())
+    }
+
     // ── helpers ───────────────────────────────────────────────────────────
 
     private fun makeEvent(id: String, createdAt: Long): NostrEvent {
