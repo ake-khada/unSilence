@@ -31,7 +31,6 @@ import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material.icons.filled.StarBorder
-import androidx.compose.material.icons.filled.Verified
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
@@ -68,8 +67,10 @@ import com.unsilence.app.data.relay.RelayDirectory
 import com.unsilence.app.data.relay.RelayDirectoryEntry
 import com.unsilence.app.data.relay.normalizeRelayUrl
 import com.unsilence.app.ui.feed.AvatarImage
-import com.unsilence.app.ui.feed.parseNip05
 import com.unsilence.app.ui.common.LocalAppSessionKey
+import com.unsilence.app.ui.shared.NostrAddressDisplay
+import com.unsilence.app.ui.shared.SelfDeclaredNostrAddressText
+import com.unsilence.app.ui.shared.selfDeclaredNostrAddressPresentation
 import com.unsilence.app.ui.theme.BorderFaint
 import com.unsilence.app.ui.theme.Brand
 import com.unsilence.app.ui.theme.BrandSoft
@@ -417,9 +418,9 @@ private fun cleanSoftware(software: String): String {
 }
 
 /** Self-declared operator (NIP-11 `pubkey`), depicted like a feed author: avatar + name +
- *  cyan NIP-05 checkmark + domain. Resolves the npub to a profile once the kind-0 lands; taps
- *  open the profile. The checkmark is NIP-05 verification of the profile's own handle — NOT a
- *  claim that this account verifiably operates the relay (self-ID ≠ verification). */
+ *  neutral, self-declared Nostr address. Resolves the npub to a profile once the kind-0 lands;
+ *  taps open the profile. Neither the profile handle nor the NIP-11 self-ID proves that this
+ *  account verifiably operates the relay (self-ID ≠ verification). */
 @Composable
 private fun OperatorRow(pubkeyHex: String, viewModel: RelayManagementViewModel, onOpen: () -> Unit) {
     val profile by viewModel.operatorProfileFlow(pubkeyHex).collectAsStateWithLifecycle(initialValue = null)
@@ -429,8 +430,8 @@ private fun OperatorRow(pubkeyHex: String, viewModel: RelayManagementViewModel, 
         ?: profile?.name?.takeIf { it.isNotBlank() }
         ?: npub?.let { shortNpub(it) }
         ?: shortNpub(pubkeyHex)
-    val parsedNip05 = remember(profile?.nip05) {
-        profile?.nip05?.takeIf { it.isNotBlank() }?.let { parseNip05(it) }
+    val nostrAddress = remember(profile?.nip05) {
+        selfDeclaredNostrAddressPresentation(profile?.nip05, NostrAddressDisplay.DOMAIN)
     }
     Row(
         modifier = Modifier.fillMaxWidth().clickable(onClick = onOpen).padding(vertical = 8.dp),
@@ -449,11 +450,13 @@ private fun OperatorRow(pubkeyHex: String, viewModel: RelayManagementViewModel, 
             overflow = TextOverflow.Ellipsis,
             modifier = Modifier.widthIn(max = 150.dp),
         )
-        if (parsedNip05 != null) {
+        if (nostrAddress != null) {
             Spacer(Modifier.width(4.dp))
-            Icon(Icons.Filled.Verified, contentDescription = "NIP-05 verified", tint = Brand, modifier = Modifier.size(13.dp))
-            Spacer(Modifier.width(3.dp))
-            Text(parsedNip05.second, color = TextSecondary, fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.widthIn(max = 130.dp))
+            SelfDeclaredNostrAddressText(
+                presentation = nostrAddress,
+                fontSize = 13.sp,
+                modifier = Modifier.widthIn(max = 130.dp),
+            )
         }
     }
 }
