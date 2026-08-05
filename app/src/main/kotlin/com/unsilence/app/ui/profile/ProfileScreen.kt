@@ -24,7 +24,6 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.ContentCopy
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Settings
-import androidx.compose.material.icons.filled.Verified
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -83,6 +82,9 @@ import com.unsilence.app.ui.feed.toCompactSats
 import com.unsilence.app.ui.shared.EngagementSnapshot
 import com.unsilence.app.ui.shared.EventActionCallbacks
 import com.unsilence.app.ui.shared.CardRole
+import com.unsilence.app.ui.shared.NostrAddressDisplay
+import com.unsilence.app.ui.shared.SelfDeclaredNostrAddressText
+import com.unsilence.app.ui.shared.selfDeclaredNostrAddressPresentation
 import com.unsilence.app.ui.shared.PostActionsHost
 import com.unsilence.app.ui.shared.WotInlineLabel
 import com.unsilence.app.ui.shared.WotBreakdownProvenance
@@ -96,7 +98,6 @@ import androidx.compose.material.icons.outlined.Chat
 import com.unsilence.app.ui.common.EmptyState
 import com.unsilence.app.ui.theme.AppType
 import com.unsilence.app.ui.theme.Black
-import com.unsilence.app.ui.theme.Brand
 import com.unsilence.app.ui.theme.Sizing
 import com.unsilence.app.ui.theme.Spacing
 import com.unsilence.app.ui.theme.Surface1
@@ -404,23 +405,16 @@ fun ProfileScreen(
                     Spacer(Modifier.height(Spacing.micro))
                 }
 
-                // NIP-05 badge
-                val nip05 = user?.nip05?.takeIf { it.isNotBlank() }
-                if (nip05 != null) {
+                val nostrAddress = remember(user?.nip05) {
+                    selfDeclaredNostrAddressPresentation(user?.nip05, NostrAddressDisplay.FULL)
+                }
+                if (nostrAddress != null) {
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
                         modifier          = Modifier.padding(bottom = Spacing.micro),
                     ) {
-                        Icon(
-                            imageVector        = Icons.Filled.Verified,
-                            contentDescription = "NIP-05 verified",
-                            tint               = Brand,
-                            modifier           = Modifier.size(14.dp),
-                        )
-                        Spacer(Modifier.width(4.dp))
-                        Text(
-                            text     = nip05,
-                            color    = TextSecondary,
+                        SelfDeclaredNostrAddressText(
+                            presentation = nostrAddress,
                             fontSize = AppType.bodySmall,
                         )
                     }

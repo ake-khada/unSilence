@@ -13,9 +13,6 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Verified
-import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -31,18 +28,21 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.unsilence.app.ui.theme.AppType
 import com.unsilence.app.ui.theme.Black
-import com.unsilence.app.ui.theme.Brand
 import com.unsilence.app.data.memory.UserEntity
 import com.unsilence.app.data.memory.WotLookup
 import com.unsilence.app.data.relay.FeedWotDisplayMode
+import com.unsilence.app.ui.shared.NostrAddressDisplay
+import com.unsilence.app.ui.shared.NostrAddressPresentation
+import com.unsilence.app.ui.shared.SelfDeclaredNostrAddressText
 import com.unsilence.app.ui.shared.WotFeedMetaTimestamp
+import com.unsilence.app.ui.shared.selfDeclaredNostrAddressPresentation
 import kotlinx.coroutines.flow.StateFlow
 import com.unsilence.app.ui.theme.Sizing
 import com.unsilence.app.ui.theme.Spacing
 import com.unsilence.app.ui.theme.TextSecondary
 
 /**
- * Avatar + display name + NIP-05 badge + timestamp row.
+ * Avatar + display name + self-declared Nostr address + timestamp row.
  *
  * Tapping the avatar+name zone navigates to the author's profile.
  * Timestamp is a separate click zone that navigates to the note.
@@ -67,8 +67,8 @@ internal fun AuthorHeader(
 ) {
     val authorLabel = displayName
         ?: "${pubkey.take(6)}…${pubkey.takeLast(4)}"
-    val parsedNip05 = remember(nip05) {
-        if (nip05.isNullOrBlank()) null else parseNip05(nip05)
+    val nostrAddress = remember(nip05) {
+        selfDeclaredNostrAddressPresentation(nip05, NostrAddressDisplay.DOMAIN)
     }
     val reposterPubkey = repostSourcePubkey?.takeIf { it.isNotBlank() && it != pubkey }
     val reposterLabel = reposterPubkey?.let { key ->
@@ -82,7 +82,7 @@ internal fun AuthorHeader(
             pubkey = pubkey,
             picture = picture,
             authorLabel = authorLabel,
-            parsedNip05 = parsedNip05,
+            nostrAddress = nostrAddress,
             reposterPubkey = reposterPubkey,
             reposterLabel = reposterLabel,
             reposterPicture = repostSourceProfile?.picture,
@@ -130,23 +130,13 @@ internal fun AuthorHeader(
                     fontSize   = AppType.body,
                     maxLines   = 1,
                     overflow   = TextOverflow.Ellipsis,
-                    modifier   = Modifier.weight(if (parsedNip05 != null) 0.45f else 1f, fill = false),
+                    modifier   = Modifier.weight(if (nostrAddress != null) 0.45f else 1f, fill = false),
                 )
-                if (parsedNip05 != null) {
+                if (nostrAddress != null) {
                     Spacer(Modifier.width(4.dp))
-                    Icon(
-                        imageVector        = Icons.Filled.Verified,
-                        contentDescription = "NIP-05 verified",
-                        tint               = Brand,
-                        modifier           = Modifier.size(14.dp),
-                    )
-                    Spacer(Modifier.width(3.dp))
-                    Text(
-                        text     = parsedNip05.second,
-                        color    = TextSecondary,
+                    SelfDeclaredNostrAddressText(
+                        presentation = nostrAddress,
                         fontSize = AppType.caption,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
                         modifier = Modifier.weight(0.55f, fill = false),
                     )
                 }
@@ -167,7 +157,7 @@ private fun RepostAuthorHeader(
     pubkey: String,
     picture: String?,
     authorLabel: String,
-    parsedNip05: Pair<String, String>?,
+    nostrAddress: NostrAddressPresentation?,
     reposterPubkey: String,
     reposterLabel: String,
     reposterPicture: String?,
@@ -227,7 +217,7 @@ private fun RepostAuthorHeader(
                 ) {
                     AuthorNameRow(
                         authorLabel = authorLabel,
-                        parsedNip05 = parsedNip05,
+                        nostrAddress = nostrAddress,
                     )
                 }
             }
@@ -293,7 +283,7 @@ internal fun RepostCompositeAvatar(
 @Composable
 private fun RowScope.AuthorNameRow(
     authorLabel: String,
-    parsedNip05: Pair<String, String>?,
+    nostrAddress: NostrAddressPresentation?,
 ) {
     Text(
         text       = authorLabel,
@@ -302,23 +292,13 @@ private fun RowScope.AuthorNameRow(
         fontSize   = AppType.body,
         maxLines   = 1,
         overflow   = TextOverflow.Ellipsis,
-        modifier   = Modifier.weight(if (parsedNip05 != null) 0.45f else 1f, fill = false),
+        modifier   = Modifier.weight(if (nostrAddress != null) 0.45f else 1f, fill = false),
     )
-    if (parsedNip05 != null) {
+    if (nostrAddress != null) {
         Spacer(Modifier.width(4.dp))
-        Icon(
-            imageVector        = Icons.Filled.Verified,
-            contentDescription = "NIP-05 verified",
-            tint               = Brand,
-            modifier           = Modifier.size(14.dp),
-        )
-        Spacer(Modifier.width(3.dp))
-        Text(
-            text     = parsedNip05.second,
-            color    = TextSecondary,
+        SelfDeclaredNostrAddressText(
+            presentation = nostrAddress,
             fontSize = AppType.caption,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
             modifier = Modifier.weight(0.55f, fill = false),
         )
     }
