@@ -1,8 +1,10 @@
 package com.unsilence.app.ui.shared
 
+import com.unsilence.app.data.network.Nip05VerificationStatus
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class NostrAddressPresentationTest {
@@ -47,5 +49,42 @@ class NostrAddressPresentationTest {
     fun `blank address has no presentation`() {
         assertNull(selfDeclaredNostrAddressPresentation("   ", NostrAddressDisplay.FULL))
         assertNull(selfDeclaredNostrAddressPresentation(null, NostrAddressDisplay.DOMAIN))
+    }
+
+    @Test
+    fun `root identifier displays as its bare domain`() {
+        assertEquals(
+            "example.com",
+            selfDeclaredNostrAddressPresentation(
+                "_@example.com",
+                NostrAddressDisplay.FULL,
+            )?.visibleText,
+        )
+        assertEquals(
+            "example.com",
+            selfDeclaredNostrAddressPresentation(
+                "example.com",
+                NostrAddressDisplay.FULL,
+            )?.visibleText,
+        )
+    }
+
+    @Test
+    fun `only a verified resolution earns the badge and verified semantics`() {
+        val presentation = requireNotNull(
+            selfDeclaredNostrAddressPresentation("alice@example.com", NostrAddressDisplay.FULL),
+        )
+
+        assertTrue(shouldShowNip05VerifiedBadge(Nip05VerificationStatus.VERIFIED))
+        assertFalse(shouldShowNip05VerifiedBadge(Nip05VerificationStatus.UNVERIFIED))
+        assertFalse(shouldShowNip05VerifiedBadge(Nip05VerificationStatus.UNKNOWN))
+        assertEquals(
+            "Verified Nostr address: alice@example.com",
+            nip05AccessibilityLabel(presentation, Nip05VerificationStatus.VERIFIED),
+        )
+        assertEquals(
+            "Nostr address: alice@example.com",
+            nip05AccessibilityLabel(presentation, Nip05VerificationStatus.UNVERIFIED),
+        )
     }
 }

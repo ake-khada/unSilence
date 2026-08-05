@@ -453,6 +453,7 @@ private fun OperatorRow(pubkeyHex: String, viewModel: RelayManagementViewModel, 
         if (nostrAddress != null) {
             Spacer(Modifier.width(4.dp))
             SelfDeclaredNostrAddressText(
+                pubkey = pubkeyHex,
                 presentation = nostrAddress,
                 fontSize = 13.sp,
                 modifier = Modifier.widthIn(max = 130.dp),

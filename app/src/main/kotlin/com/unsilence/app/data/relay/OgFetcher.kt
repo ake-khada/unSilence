@@ -3,6 +3,8 @@ package com.unsilence.app.data.relay
 import android.util.Log
 import android.content.Context
 import com.unsilence.app.data.BROWSER_USER_AGENT
+import com.unsilence.app.data.network.UntrustedHttpNetworkGuard
+import com.unsilence.app.data.network.isAllowedUntrustedHttpUrl
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlin.coroutines.cancellation.CancellationException
 import kotlin.coroutines.resume
@@ -22,9 +24,6 @@ import okhttp3.Request
 import okhttp3.Response
 import java.io.IOException
 import java.io.File
-import java.net.Inet4Address
-import java.net.Inet6Address
-import java.net.InetAddress
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.TimeUnit
@@ -50,14 +49,7 @@ class OgFetcher @Inject constructor(
         .connectTimeout(5, TimeUnit.SECONDS)
         .readTimeout(5, TimeUnit.SECONDS)
         .followRedirects(true)
-        .addNetworkInterceptor { chain ->
-            val host = chain.request().url.host.lowercase()
-            val address = chain.connection()?.socket()?.inetAddress
-            if (!host.endsWith(".onion") && address != null && !address.isPublicPreviewAddress()) {
-                throw IOException("blocked non-public preview address")
-            }
-            chain.proceed(chain.request())
-        }
+        .addNetworkInterceptor(UntrustedHttpNetworkGuard)
         .build()
 
     private val cache = ConcurrentHashMap<String, OgMetadata>()
@@ -150,24 +142,7 @@ class OgFetcher @Inject constructor(
 
     private fun isAllowedPreviewUrl(url: String): Boolean {
         val parsed = url.toHttpUrlOrNull() ?: return false
-        val host = parsed.host.lowercase()
-        return parsed.scheme == "https" || (parsed.scheme == "http" && host.endsWith(".onion"))
-    }
-
-    private fun InetAddress.isPublicPreviewAddress(): Boolean {
-        if (isAnyLocalAddress || isLoopbackAddress || isLinkLocalAddress ||
-            isSiteLocalAddress || isMulticastAddress) {
-            return false
-        }
-        if (this is Inet4Address) {
-            val b = address.map { it.toInt() and 0xff }
-            if (b[0] == 100 && b[1] in 64..127) return false
-        }
-        if (this is Inet6Address) {
-            val first = address[0].toInt() and 0xff
-            if ((first and 0xfe) == 0xfc) return false
-        }
-        return true
+        return isAllowedUntrustedHttpUrl(parsed)
     }
 
     /**

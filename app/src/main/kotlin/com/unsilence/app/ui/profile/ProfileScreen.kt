@@ -71,6 +71,7 @@ import com.unsilence.app.data.memory.toEventModel
 import com.unsilence.app.data.relay.formatFollowerCount
 import com.unsilence.app.ui.common.IdentIcon
 import com.unsilence.app.ui.common.LocalAppSessionKey
+import com.unsilence.app.ui.common.LocalNip05VerificationController
 import com.unsilence.app.ui.common.LocalShowSnackbar
 import com.unsilence.app.ui.common.ShimmerNoteCard
 import com.unsilence.app.ui.feed.ArticleReaderScreen
@@ -128,6 +129,10 @@ fun ProfileScreen(
     ),
 ) {
     LaunchedEffect(viewModel) { viewModel.refreshFollowingCount() }
+    val nip05Verifier = LocalNip05VerificationController.current
+    LaunchedEffect(nip05Verifier, viewModel.pubkeyHex) {
+        viewModel.pubkeyHex?.let(nip05Verifier::markProfileOpened)
+    }
 
     val user            by viewModel.userFlow.collectAsStateWithLifecycle(initialValue = null)
     val posts           by viewModel.tabPostsFlow.collectAsStateWithLifecycle(initialValue = emptyList())
@@ -414,6 +419,7 @@ fun ProfileScreen(
                         modifier          = Modifier.padding(bottom = Spacing.micro),
                     ) {
                         SelfDeclaredNostrAddressText(
+                            pubkey = viewModel.pubkeyHex.orEmpty(),
                             presentation = nostrAddress,
                             fontSize = AppType.bodySmall,
                         )

@@ -135,6 +135,7 @@ internal fun AuthorHeader(
                 if (nostrAddress != null) {
                     Spacer(Modifier.width(4.dp))
                     SelfDeclaredNostrAddressText(
+                        pubkey = pubkey,
                         presentation = nostrAddress,
                         fontSize = AppType.caption,
                         modifier = Modifier.weight(0.55f, fill = false),
@@ -216,6 +217,7 @@ private fun RepostAuthorHeader(
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     AuthorNameRow(
+                        pubkey = pubkey,
                         authorLabel = authorLabel,
                         nostrAddress = nostrAddress,
                     )
@@ -282,6 +284,7 @@ internal fun RepostCompositeAvatar(
 
 @Composable
 private fun RowScope.AuthorNameRow(
+    pubkey: String,
     authorLabel: String,
     nostrAddress: NostrAddressPresentation?,
 ) {
@@ -297,6 +300,7 @@ private fun RowScope.AuthorNameRow(
     if (nostrAddress != null) {
         Spacer(Modifier.width(4.dp))
         SelfDeclaredNostrAddressText(
+            pubkey = pubkey,
             presentation = nostrAddress,
             fontSize = AppType.caption,
             modifier = Modifier.weight(0.55f, fill = false),
