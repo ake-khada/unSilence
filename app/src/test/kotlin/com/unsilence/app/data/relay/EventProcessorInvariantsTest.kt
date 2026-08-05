@@ -196,7 +196,7 @@ class EventProcessorInvariantsTest {
             size in 9000..10000,
         )
 
-        // MES eviction caps kind-1 at 5000, so only the newest 5000 survive
+        // MES eviction caps kind-1 at 5000, so only the newest pool survives.
         val allEvents = store.eventsByIds((1..11000).map { eventId(it) }.toSet())
         assertTrue(
             "Expected ~5000 events after eviction, got ${allEvents.size}",

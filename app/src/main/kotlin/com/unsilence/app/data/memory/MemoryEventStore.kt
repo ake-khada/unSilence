@@ -150,6 +150,78 @@ private val NOTIFICATION_KINDS = setOf(1, 6, 7, 1018, 9735, 16, 1111)
 private val DERIVED_ONLY_KINDS = setOf(30166, 30382)
 private val COUNTED_NIP22_PARENT_KINDS = setOf(21, 22, 34235, 34236, 1111)
 
+/** Live-memory caps. Snapshot persistence has separate, lower bounds. */
+internal val CONTENT_EVENT_KIND_CAPS = mapOf(
+    1 to 5_000,      // notes (roots + replies combined)
+    6 to 1_000,      // reposts
+    16 to 1_000,     // generic reposts (NIP-18)
+    7 to 1_000,      // reactions (reconstructible)
+    1018 to 1_000,   // poll responses (reconstructible)
+    20 to 500,       // pictures
+    21 to 500,       // videos
+    22 to 500,       // short-form videos
+    34235 to 500,    // addressable videos
+    34236 to 500,    // addressable short-form videos
+    9734 to 250,     // zap requests (reconstructible)
+    9735 to 250,     // zap receipts (reconstructible)
+    30023 to 500,    // articles
+)
+
+/** Bounded protection tiers. Every tier still converges to its kind cap. */
+internal enum class ContentEvictionTier(val number: Int) {
+    FOLLOWED_AUTHOR(1),
+    TIMELINE_REFERENCED(2),
+    ORDINARY(3),
+}
+
+internal data class ContentEvictionCandidate(
+    val entry: EventEntry,
+    val tier: ContentEvictionTier,
+    val lastTouchedAt: Long,
+)
+
+/**
+ * Chooses the excess entries to evict. All mutable inputs must be snapshots.
+ * Candidate fields are materialized before sorting so the comparator never
+ * reads a concurrently-mutated map (which can violate TimSort's contract).
+ */
+internal fun selectContentEvictionCandidates(
+    entries: List<EventEntry>,
+    cap: Int,
+    authorsByEventId: Map<String, String>,
+    followedPubkeys: Set<String>,
+    timelineReferencedIds: Set<String>,
+    lastTouchedAt: Map<String, Long>,
+): List<ContentEvictionCandidate> {
+    require(cap >= 0)
+    val excess = entries.size - cap
+    if (excess <= 0) return emptyList()
+
+    val materialized = entries.map { entry ->
+        val author = authorsByEventId[entry.id]
+        val tier = when {
+            author != null && author in followedPubkeys -> ContentEvictionTier.FOLLOWED_AUTHOR
+            entry.id in timelineReferencedIds -> ContentEvictionTier.TIMELINE_REFERENCED
+            else -> ContentEvictionTier.ORDINARY
+        }
+        ContentEvictionCandidate(
+            entry = entry,
+            tier = tier,
+            lastTouchedAt = lastTouchedAt[entry.id] ?: 0L,
+        )
+    }
+
+    // Evict ordinary first, then timeline-backed, then followed-author;
+    // least-recently-touched first within each tier. ID is a stable final key.
+    return materialized
+        .sortedWith(
+            compareByDescending<ContentEvictionCandidate> { it.tier.number }
+                .thenBy { it.lastTouchedAt }
+                .thenBy { it.entry.id },
+        )
+        .take(excess)
+}
+
 internal data class SnapshotEventSelection(
     val nonContentEvents: List<NostrEvent>,
     val contentEvents: List<NostrEvent>,
@@ -600,10 +672,23 @@ class MemoryEventStore @Inject constructor(
      *  partitioning. Cleared on logout via [clear]. */
     val profileAnchoredIds: MutableSet<String> = ConcurrentHashMap.newKeySet()
 
-    // Cumulative eviction anchor counters (reset on snapshot via snapshotEvictionAnchors)
-    private val evictionAnchoredOwn = AtomicLong(0)
-    private val evictionAnchoredMentioned = AtomicLong(0)
-    private val evictionAnchoredViewed = AtomicLong(0)
+    private data class EvictionAnchorSnapshot(
+        val own: Long = 0,
+        val mentioned: Long = 0,
+        val viewed: Long = 0,
+        val profileRefs: Long = 0,
+        val liveTimelineRefs: Long = 0,
+    )
+
+    // Interval eviction work is reset by the 60-second release probe.
+    private val evictionPasses = AtomicLong(0)
+    private val evictionEvicted = AtomicLong(0)
+    private val evictionTier1 = AtomicLong(0)
+    private val evictionTier2 = AtomicLong(0)
+    private val evictionTier3 = AtomicLong(0)
+    private val evictionByKind = ConcurrentHashMap<Int, AtomicLong>()
+    // Anchors are unique counts from one complete pass, not cumulative visits.
+    @Volatile private var lastEvictionAnchors = EvictionAnchorSnapshot()
 
     // ─── Profile + relay routing (kind-derived state) ───────────────────────
     private val profilesByPubkey = ConcurrentHashMap<String, NostrEvent>()
@@ -2579,25 +2664,15 @@ class MemoryEventStore @Inject constructor(
      * Recently-displayed events survive regardless of how old their created_at is.
      * An ancient quoted post being viewed today outranks a fresh flood-feed reaction.
      */
-    private fun evictOldContentEvents() {
-        val kindCaps = mapOf(
-            1 to 5000,      // notes (roots + replies combined)
-            6 to 1000,      // reposts
-            16 to 1000,     // generic reposts (NIP-18) — same cap as kind-6
-            7 to 1000,      // reactions (reconstructible)
-            1018 to 1000,   // poll responses (reconstructible)
-            20 to 500,      // pictures
-            21 to 500,      // videos
-            22 to 500,      // short-form videos
-            34235 to 500,   // addressable videos
-            34236 to 500,   // addressable short-form videos
-            9734 to 250,    // zap requests (reconstructible)
-            9735 to 250,    // zap receipts (reconstructible)
-            30023 to 500,   // articles
-        )
-
+    private fun evictOldContentEvents(kindCaps: Map<Int, Int> = CONTENT_EVENT_KIND_CAPS) {
         val ownPubkeyAnchor = ownPubkey
         val viewed = viewedPubkey
+        val followedPubkeysSnapshot =
+            ownPubkeyAnchor?.let { followsByPubkey[it]?.toSet() }.orEmpty()
+        val profileAnchoredIdsSnapshot = profileAnchoredIds.toSet()
+        // One immutable union per pass. Never consult TimelineService from a
+        // candidate comparator: its refs change as subscriptions deliver.
+        val timelineReferencedIds = timelineServiceProvider.get().liveReferencedIds()
 
         // Own-mention lookup built once from the notification recipient index —
         // replaces a per-candidate tag scan for notification kinds (1/6/7/9735).
@@ -2610,11 +2685,12 @@ class MemoryEventStore @Inject constructor(
 
         // Pass 1: bucket events by kind. Anchored events are excluded entirely —
         // they don't count against the cap and can't be evicted.
-        val toEvict = mutableListOf<EventEntry>()
+        val toEvict = mutableListOf<ContentEvictionCandidate>()
         val candidatesByKind = mutableMapOf<Int, MutableList<EventEntry>>()
         var anchoredOwn = 0
         var anchoredMentioned = 0
         var anchoredViewed = 0
+        var anchoredProfileRefs = 0
 
         for (entry in recentByCreatedAt) {
             val event = eventsById[entry.id] ?: continue
@@ -2624,7 +2700,6 @@ class MemoryEventStore @Inject constructor(
             // Band A: own pubkey — never evicted, never counted
             if (ownPubkeyAnchor != null && event.pubkey == ownPubkeyAnchor) {
                 anchoredOwn++
-                evictionAnchoredOwn.incrementAndGet()
                 continue
             }
             // Band A: events mentioning own pubkey (notifications)
@@ -2636,29 +2711,27 @@ class MemoryEventStore @Inject constructor(
                 }
                 if (mentionsOwn) {
                     anchoredMentioned++
-                    evictionAnchoredMentioned.incrementAndGet()
                     continue
                 }
             }
             // Band A: events authored by currently viewed profile
             if (viewed != null && event.pubkey == viewed) {
                 anchoredViewed++
-                evictionAnchoredViewed.incrementAndGet()
                 continue
             }
             // Band A: ref events anchored by own-profile pipeline (quoted notes,
             // repost targets, thread parents of own-authored events)
-            if (entry.id in profileAnchoredIds) {
-                anchoredOwn++ // counted under "own" since they protect own-profile refs
-                evictionAnchoredOwn.incrementAndGet()
+            if (entry.id in profileAnchoredIdsSnapshot) {
+                anchoredProfileRefs++
                 continue
             }
 
             candidatesByKind.getOrPut(kind) { mutableListOf() }.add(entry)
         }
 
-        // Pass 2: for each kind over its cap, sort candidates by lastTouchedAt
-        // ascending and evict the least-recently-touched excess.
+        // Pass 2: for each kind over its cap, materialize all mutable policy
+        // inputs, then choose ordinary LRU first, timeline refs second, and
+        // followed-author content only when those pools are exhausted.
         //
         // CRITICAL: snapshot lastTouchedAt values before sorting. The map is
         // concurrently mutated by the hot drainer (insertCore), CardHydrator
@@ -2669,39 +2742,38 @@ class MemoryEventStore @Inject constructor(
         for ((kind, candidates) in candidatesByKind) {
             val cap = kindCaps[kind] ?: continue
             if (candidates.size <= cap) continue
-            val excess = candidates.size - cap
             val touchSnapshot = HashMap<String, Long>(candidates.size)
-            for (c in candidates) touchSnapshot[c.id] = lastTouchedAt[c.id] ?: 0L
-            candidates.sortBy { touchSnapshot[it.id] ?: 0L }
-            for (i in 0 until excess) {
-                toEvict.add(candidates[i])
+            val authorSnapshot = HashMap<String, String>(candidates.size)
+            for (candidate in candidates) {
+                touchSnapshot[candidate.id] = lastTouchedAt[candidate.id] ?: 0L
+                eventsById[candidate.id]?.pubkey?.let { authorSnapshot[candidate.id] = it }
             }
-        }
-
-        if (toEvict.isEmpty()) {
-            if (anchoredOwn + anchoredMentioned + anchoredViewed > 0) {
-                Log.d("MES", "Eviction: 0 removed, anchored own=$anchoredOwn mentioned=$anchoredMentioned viewed=$anchoredViewed")
-                // Diagnostic: log when own-anchored count is unexpectedly high.
-                // Field captures show own=1758/4242 events for one user — investigating
-                // whether the test account really posts that much, ownPubkey is
-                // matching too aggressively, or some import path is loading other
-                // users' events under the own pubkey.
-                if (anchoredOwn > 500 && ownPubkeyAnchor != null) {
-                    val sampleAuthors = eventsById.values
-                        .asSequence()
-                        .filter { it.pubkey == ownPubkeyAnchor }
-                        .take(3)
-                        .map { "${it.kind}:${it.id.take(8)}" }
-                        .toList()
-                    Log.d("MES", "Eviction diag: ownPubkey=${ownPubkeyAnchor.take(8)}… (full=${ownPubkeyAnchor.length}ch) anchoredOwn=$anchoredOwn samples=$sampleAuthors")
-                }
-            }
-            return
+            toEvict += selectContentEvictionCandidates(
+                entries = candidates,
+                cap = cap,
+                authorsByEventId = authorSnapshot,
+                followedPubkeys = followedPubkeysSnapshot,
+                timelineReferencedIds = timelineReferencedIds,
+                lastTouchedAt = touchSnapshot,
+            )
         }
 
         val invalidatedReplyTargets = mutableSetOf<String>()
-        for (entry in toEvict) {
+        val removedIds = HashSet<String>(toEvict.size)
+        var evictedTier1 = 0
+        var evictedTier2 = 0
+        var evictedTier3 = 0
+        val evictedByKind = mutableMapOf<Int, Int>()
+        for (candidate in toEvict) {
+            val entry = candidate.entry
             val event = eventsById.remove(entry.id) ?: continue
+            removedIds.add(entry.id)
+            when (candidate.tier) {
+                ContentEvictionTier.FOLLOWED_AUTHOR -> evictedTier1++
+                ContentEvictionTier.TIMELINE_REFERENCED -> evictedTier2++
+                ContentEvictionTier.ORDINARY -> evictedTier3++
+            }
+            evictedByKind[event.kind] = (evictedByKind[event.kind] ?: 0) + 1
             deindexNotificationRecipients(event)
             recentByCreatedAt.remove(entry)
             idsByKind[event.kind]?.remove(entry.id)
@@ -2733,30 +2805,83 @@ class MemoryEventStore @Inject constructor(
         }
 
         // Clean up aggregates + contributor indexes that reference removed events
-        val removeIds = toEvict.map { it.id }.toSet()
-        repostCounts.keys.removeAll(removeIds)
-        zapStatsByEventId.keys.removeAll(removeIds)
-        statsUpdatedAt.keys.removeAll(removeIds)
-        repostPubkeysByTarget.keys.removeAll(removeIds)
-        reactionsByTarget.keys.removeAll(removeIds)
-        zapDetailsByTarget.keys.removeAll(removeIds)
+        repostCounts.keys.removeAll(removedIds)
+        zapStatsByEventId.keys.removeAll(removedIds)
+        statsUpdatedAt.keys.removeAll(removedIds)
+        repostPubkeysByTarget.keys.removeAll(removedIds)
+        reactionsByTarget.keys.removeAll(removedIds)
+        zapDetailsByTarget.keys.removeAll(removedIds)
 
-        invalidatedReplyTargets.removeAll(removeIds)
+        invalidatedReplyTargets.removeAll(removedIds)
         if (invalidatedReplyTargets.isNotEmpty()) {
             val updatedAt = System.currentTimeMillis()
             invalidatedReplyTargets.forEach { statsUpdatedAt[it] = updatedAt }
             _statsInvalidations.tryEmit(StatsInvalidation.Targeted(invalidatedReplyTargets))
         }
 
-        val summary = candidatesByKind
-            .filter { (kind, candidates) -> candidates.size > (kindCaps[kind] ?: Int.MAX_VALUE) }
-            .toSortedMap()
-            .entries
-            .joinToString(", ") { (kind, candidates) ->
-                val cap = kindCaps[kind] ?: 0
-                "k$kind: ${candidates.size - cap} evicted"
-            }
-        Log.d("MES", "Eviction: ${toEvict.size} removed (LRU-by-touch), anchored own=$anchoredOwn mentioned=$anchoredMentioned viewed=$anchoredViewed [$summary]")
+        recordEvictionPass(
+            evictedTier1 = evictedTier1,
+            evictedTier2 = evictedTier2,
+            evictedTier3 = evictedTier3,
+            evictedByKind = evictedByKind,
+            anchoredOwn = anchoredOwn,
+            anchoredMentioned = anchoredMentioned,
+            anchoredViewed = anchoredViewed,
+            anchoredProfileRefs = anchoredProfileRefs,
+            liveTimelineRefs = timelineReferencedIds.size,
+        )
+        Log.d(
+            "MES",
+            "Eviction: ${removedIds.size} removed " +
+                "tier1=$evictedTier1 tier2=$evictedTier2 tier3=$evictedTier3; " +
+                "byKind=${evictedByKind.toSortedMap()} " +
+                "anchored own=$anchoredOwn mentioned=$anchoredMentioned " +
+                "viewed=$anchoredViewed profileRefs=$anchoredProfileRefs " +
+                "liveTimelineRefs=${timelineReferencedIds.size}",
+        )
+    }
+
+    private fun recordEvictionPass(
+        evictedTier1: Int,
+        evictedTier2: Int,
+        evictedTier3: Int,
+        evictedByKind: Map<Int, Int>,
+        anchoredOwn: Int,
+        anchoredMentioned: Int,
+        anchoredViewed: Int,
+        anchoredProfileRefs: Int,
+        liveTimelineRefs: Int,
+    ) {
+        evictionPasses.incrementAndGet()
+        evictionEvicted.addAndGet((evictedTier1 + evictedTier2 + evictedTier3).toLong())
+        evictionTier1.addAndGet(evictedTier1.toLong())
+        evictionTier2.addAndGet(evictedTier2.toLong())
+        evictionTier3.addAndGet(evictedTier3.toLong())
+        for ((kind, count) in evictedByKind) {
+            evictionByKind.computeIfAbsent(kind) { AtomicLong(0) }.addAndGet(count.toLong())
+        }
+        lastEvictionAnchors = EvictionAnchorSnapshot(
+            own = anchoredOwn.toLong(),
+            mentioned = anchoredMentioned.toLong(),
+            viewed = anchoredViewed.toLong(),
+            profileRefs = anchoredProfileRefs.toLong(),
+            liveTimelineRefs = liveTimelineRefs.toLong(),
+        )
+    }
+
+    private fun resetEvictionMetrics() {
+        evictionPasses.set(0)
+        evictionEvicted.set(0)
+        evictionTier1.set(0)
+        evictionTier2.set(0)
+        evictionTier3.set(0)
+        evictionByKind.clear()
+        lastEvictionAnchors = EvictionAnchorSnapshot()
+    }
+
+    /** Small-cap entry point for deterministic policy integration tests. */
+    internal fun evictOldContentEventsForTest(kindCaps: Map<Int, Int>) {
+        evictOldContentEvents(kindCaps)
     }
 
     // ─── Query API ──────────────────────────────────────────────────────────
@@ -5470,9 +5595,28 @@ class MemoryEventStore @Inject constructor(
         )
     }
 
-    /** Snapshot + reset cumulative eviction anchor counters (for MesMetricsLogger). */
-    fun snapshotEvictionAnchors(): Triple<Long, Long, Long> =
-        Triple(evictionAnchoredOwn.getAndSet(0), evictionAnchoredMentioned.getAndSet(0), evictionAnchoredViewed.getAndSet(0))
+    /** Snapshot + reset interval work; anchors come from the latest complete pass. */
+    fun snapshotEvictionMetrics(): MesEvictionSnapshot {
+        val anchors = lastEvictionAnchors
+        val byKind = evictionByKind.entries
+            .mapNotNull { (kind, count) ->
+                count.getAndSet(0).takeIf { it > 0 }?.let { kind to it }
+            }
+            .toMap()
+        return MesEvictionSnapshot(
+            passes = evictionPasses.getAndSet(0),
+            evicted = evictionEvicted.getAndSet(0),
+            tier1 = evictionTier1.getAndSet(0),
+            tier2 = evictionTier2.getAndSet(0),
+            tier3 = evictionTier3.getAndSet(0),
+            evictedByKind = byKind,
+            anchoredOwn = anchors.own,
+            anchoredMentioned = anchors.mentioned,
+            anchoredViewed = anchors.viewed,
+            anchoredProfileRefs = anchors.profileRefs,
+            liveTimelineRefs = anchors.liveTimelineRefs,
+        )
+    }
 
     // ─── Snapshot persistence ───────────────────────────────────────────────
 
@@ -6979,7 +7123,8 @@ class MemoryEventStore @Inject constructor(
     // ─── Maintenance ────────────────────────────────────────────────────────
 
     fun trimToLast(events: Int = 5000) {
-        evictOldContentEvents()
+        require(events >= 0)
+        evictOldContentEvents(CONTENT_EVENT_KIND_CAPS + (1 to events))
     }
 
     /**
@@ -7033,6 +7178,10 @@ class MemoryEventStore @Inject constructor(
     }
 
     fun clear() {
+        // Metrics are account-scoped evidence. Carrying interval work or the
+        // last pass's anchors across logout would corrupt the next session's
+        // release probe even though the underlying store has been cleared.
+        resetEvictionMetrics()
         eventsById.clear()
         pendingRelays.clear()
         idsByKind.clear()

@@ -1,5 +1,6 @@
 package com.unsilence.app.data.memory
 
+import android.os.Debug
 import android.util.Log
 import androidx.lifecycle.DefaultLifecycleObserver
 import androidx.lifecycle.LifecycleOwner
@@ -23,7 +24,8 @@ private const val INTERVAL_MS = 60_000L
  * Periodic logger for MemoryEventStore + media cache sizes.
  *
  * Runs every 60s while foregrounded (ProcessLifecycleOwner ON_START → ON_STOP).
- * Emits to logcat only — no new dependencies, no measurable overhead.
+ * Emits release-visible warning-level probes to logcat. The one-minute cadence
+ * keeps field overhead bounded while retaining evidence through R8.
  */
 @Singleton
 class MesMetricsLogger @Inject constructor(
@@ -62,6 +64,11 @@ class MesMetricsLogger @Inject constructor(
     private fun log() {
         val s = memoryEventStore.snapshotSize()
         val totalMb = s.totalEstimatedBytes / (1024.0 * 1024.0)
+        val runtime = Runtime.getRuntime()
+        val heapUsedBytes = runtime.totalMemory() - runtime.freeMemory()
+        val heapCommittedBytes = runtime.totalMemory()
+        val heapMaxBytes = runtime.maxMemory()
+        val nativeHeapBytes = Debug.getNativeHeapAllocatedSize()
 
         // Video thumbnail cache
         val vtEntries = videoThumbnailCache.entryCount
@@ -71,24 +78,26 @@ class MesMetricsLogger @Inject constructor(
         val idcEntries = imageDimensionCache.entryCount
 
         // Summary line
-        Log.d(
+        Log.w(
             TAG,
             "events=${s.eventCount} (~${mb(s.eventBytes)}) " +
                 "profiles=${s.profileCount} (~${mb(s.profileBytes)}) " +
                 "videoRM=${s.videoRenderModelEntries} imetaDims=${s.imetaImageDimEntries} " +
                 "eventModels=${s.eventModelEntries} " +
                 "feedRowCache=${s.feedRowCacheEntries} " +
-                "total~${String.format("%.1f", totalMb)}mb",
+                "mesTotal~${String.format("%.1f", totalMb)}mb " +
+                "heapUsed=${mb(heapUsedBytes)} heapCommitted=${mb(heapCommittedBytes)} " +
+                "heapMax=${mb(heapMaxBytes)} nativeHeap=${mb(nativeHeapBytes)}",
         )
 
         // Per-kind breakdown
         val kindStr = s.eventsByKind.entries
             .sortedByDescending { it.value }
             .joinToString(" ") { (k, v) -> "k$k=$v" }
-        Log.d(TAG, "kinds: $kindStr")
+        Log.w(TAG, "kinds: $kindStr")
 
         // Actor indexes
-        Log.d(
+        Log.w(
             TAG,
             "actors: reacted=${s.reactedActors}/${s.reactedTargetsTotal} " +
                 "reposted=${s.repostedActors}/${s.repostedTargetsTotal} " +
@@ -96,7 +105,7 @@ class MesMetricsLogger @Inject constructor(
         )
 
         // External caches
-        Log.d(
+        Log.w(
             TAG,
             "caches: videoThumb=${vtEntries} (~${String.format("%.1f", vtMb)}mb) " +
                 "imgDim=${idcEntries} " +
@@ -106,15 +115,29 @@ class MesMetricsLogger @Inject constructor(
                 "relaySets=${s.relaySetEntries}",
         )
 
-        // Eviction anchor counters (cumulative since last snapshot, then reset)
-        val (anchoredOwn, anchoredMentioned, anchoredViewed) = memoryEventStore.snapshotEvictionAnchors()
-        if (anchoredOwn + anchoredMentioned + anchoredViewed > 0) {
-            Log.d(TAG, "eviction: anchored own=$anchoredOwn mentioned=$anchoredMentioned viewed=$anchoredViewed profileAnchoredRefs=${s.profileAnchoredRefEntries}")
-        }
+        // Interval work plus the last pass's live-ref union. Tier 1 is the
+        // strongest bounded protection; tier 3 is the expected eviction pool.
+        val eviction = memoryEventStore.snapshotEvictionMetrics()
+        val evictionKindStr = eviction.evictedByKind.entries
+            .sortedBy { it.key }
+            .joinToString(",") { (kind, count) -> "k$kind:$count" }
+            .ifEmpty { "none" }
+        Log.w(
+            TAG,
+            "eviction: passes=${eviction.passes} evicted=${eviction.evicted} " +
+                "tier1=${eviction.tier1} tier2=${eviction.tier2} tier3=${eviction.tier3} " +
+                "evictedByKind=$evictionKindStr " +
+                "lastPassAnchoredOwn=${eviction.anchoredOwn} " +
+                "lastPassAnchoredMentioned=${eviction.anchoredMentioned} " +
+                "lastPassAnchoredViewed=${eviction.anchoredViewed} " +
+                "lastPassAnchoredProfileRefs=${eviction.anchoredProfileRefs} " +
+                "profileAnchorSet=${s.profileAnchoredRefEntries} " +
+                "liveTimelineRefs=${eviction.liveTimelineRefs}",
+        )
 
         // Relay fetch dedup metrics (resets peaks/counters on each snapshot)
         val rm = relayPool.snapshotRelayMetrics()
-        Log.d(
+        Log.w(
             TAG,
             "relay: inFlightPeak=${rm.eventFetchInFlightPeak} " +
                 "missingRefCache=${rm.missingRefCacheSize} " +

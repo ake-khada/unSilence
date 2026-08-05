@@ -758,12 +758,9 @@ class MemoryEventStoreInvariantsTest {
 
         store.statsFlow(parentId).test {
             assertEquals(1, awaitItem().replyCount)
-            repeat(4_998) { i ->
-                store.insert(event(id = "eviction-fill-a-$i", pubkey = "fill-a", kind = 1))
-            }
-            repeat(500) { i ->
-                store.insert(event(id = "eviction-fill-b-$i", pubkey = "fill-b", kind = 1))
-            }
+            store.insert(event(id = "eviction-fill-a", pubkey = "fill-a", kind = 1))
+            store.insert(event(id = "eviction-fill-b", pubkey = "fill-b", kind = 1))
+            store.evictOldContentEventsForTest(mapOf(1 to 0))
 
             assertEquals(0, awaitItem().replyCount)
             assertNull(store.getNostrEvent(replyId))
