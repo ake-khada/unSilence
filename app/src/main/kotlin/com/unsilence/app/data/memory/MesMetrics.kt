@@ -84,8 +84,14 @@ data class MesEvictionSnapshot(
     val tier2: Long,
     /** Ordinary events; evicted before tiers 2 and 1. */
     val tier3: Long,
+    /** Existing indexed events replaced at the admission boundary. */
+    val admissionReplaced: Long,
+    /** Novel events rejected before secondary indexing because they were the victim. */
+    val admissionRejected: Long,
     /** Interval removals grouped by event kind. */
     val evictedByKind: Map<Int, Long>,
+    /** Interval admission rejections grouped by incoming event kind. */
+    val admissionRejectedByKind: Map<Int, Long>,
     /** Unique anchor counts observed by the latest completed eviction pass. */
     val anchoredOwn: Long,
     val anchoredMentioned: Long,
