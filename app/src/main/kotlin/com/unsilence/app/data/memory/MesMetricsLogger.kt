@@ -122,11 +122,19 @@ class MesMetricsLogger @Inject constructor(
             .sortedBy { it.key }
             .joinToString(",") { (kind, count) -> "k$kind:$count" }
             .ifEmpty { "none" }
+        val rejectedKindStr = eviction.admissionRejectedByKind.entries
+            .sortedBy { it.key }
+            .joinToString(",") { (kind, count) -> "k$kind:$count" }
+            .ifEmpty { "none" }
         Log.w(
             TAG,
             "eviction: passes=${eviction.passes} evicted=${eviction.evicted} " +
                 "tier1=${eviction.tier1} tier2=${eviction.tier2} tier3=${eviction.tier3} " +
+                "admitReplaced=${eviction.admissionReplaced} " +
+                "admitRejected=${eviction.admissionRejected} " +
+                "sweepEvicted=${eviction.evicted - eviction.admissionReplaced} " +
                 "evictedByKind=$evictionKindStr " +
+                "rejectedByKind=$rejectedKindStr " +
                 "lastPassAnchoredOwn=${eviction.anchoredOwn} " +
                 "lastPassAnchoredMentioned=${eviction.anchoredMentioned} " +
                 "lastPassAnchoredViewed=${eviction.anchoredViewed} " +

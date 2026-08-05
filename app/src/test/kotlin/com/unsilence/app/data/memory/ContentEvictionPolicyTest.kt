@@ -5,10 +5,20 @@ import com.unsilence.app.data.relay.NostrFilter
 import com.unsilence.app.data.relay.TimelineRef
 import com.unsilence.app.data.relay.TimelineService
 import com.unsilence.app.data.relay.stubTimelineServiceProvider
+import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import java.io.ByteArrayInputStream
+import java.io.ByteArrayOutputStream
+import java.io.DataInputStream
+import java.io.DataOutputStream
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 
 class ContentEvictionPolicyTest {
     private fun event(
@@ -197,6 +207,184 @@ class ContentEvictionPolicyTest {
     }
 
     @Test
+    fun `admission replaces oldest ordinary before secondary pool exceeds cap`() {
+        val provider = stubTimelineServiceProvider()
+        val store = MemoryEventStore(object : MuteKeyProvider {}, provider)
+        repeat(500) { index ->
+            assertTrue(store.insert(event("picture-$index", "author-$index", index.toLong(), kind = 20)))
+        }
+
+        assertTrue(store.insert(event("picture-500", "author-500", 500L, kind = 20)))
+
+        assertNull(store.getNostrEvent("picture-0"))
+        assertNotNull(store.getNostrEvent("picture-500"))
+        val retained = (0..500).count { store.getNostrEvent("picture-$it") != null }
+        assertEquals(500, retained)
+        val metrics = store.snapshotEvictionMetrics()
+        assertEquals(1L, metrics.evicted)
+        assertEquals(1L, metrics.admissionReplaced)
+        assertEquals(0L, metrics.admissionRejected)
+        assertEquals(1L, metrics.tier3)
+        assertEquals(mapOf(20 to 1L), metrics.evictedByKind)
+    }
+
+    @Test
+    fun `ordinary arrival is rejected at door when capped pool is followed`() {
+        val provider = stubTimelineServiceProvider()
+        val store = MemoryEventStore(object : MuteKeyProvider {}, provider)
+        val followedAuthors = (0 until 500).mapTo(linkedSetOf()) { "followed-$it" }
+        store.ownPubkey = "owner"
+        store.updateFollows("owner", followedAuthors, createdAt = 1L)
+        followedAuthors.forEachIndexed { index, author ->
+            assertTrue(store.insert(event("followed-picture-$index", author, index.toLong(), kind = 20)))
+        }
+
+        val inserted = store.insert(event("ordinary-picture", "ordinary", 501L, kind = 20))
+
+        assertFalse(inserted)
+        assertNull(store.getNostrEvent("ordinary-picture"))
+        store.putImetaImageDims("ordinary-picture", mapOf("https://example.com/orphan.jpg" to 1f))
+        assertTrue(store.getImetaImageDims("ordinary-picture").isEmpty())
+        assertTrue(
+            (0 until 500).all { store.getNostrEvent("followed-picture-$it") != null },
+        )
+        val metrics = store.snapshotEvictionMetrics()
+        assertEquals(0L, metrics.evicted)
+        assertEquals(0L, metrics.admissionReplaced)
+        assertEquals(1L, metrics.admissionRejected)
+        assertEquals(mapOf(20 to 1L), metrics.admissionRejectedByKind)
+    }
+
+    @Test
+    fun `concurrent same-kind admissions cannot reserve an event before indexing completes`() {
+        val provider = stubTimelineServiceProvider()
+        val store = MemoryEventStore(object : MuteKeyProvider {}, provider)
+        val followedAuthors = (0 until 500).mapTo(linkedSetOf()) { "followed-$it" }
+        store.ownPubkey = "owner"
+        store.updateFollows("owner", followedAuthors, createdAt = 1L)
+        followedAuthors.forEachIndexed { index, author ->
+            assertTrue(store.insert(event("protected-$index", author, index.toLong(), kind = 20)))
+        }
+
+        val start = CountDownLatch(1)
+        val executor = Executors.newFixedThreadPool(8)
+        try {
+            val futures = (0 until 64).map { index ->
+                executor.submit<Boolean> {
+                    start.await()
+                    store.insert(
+                        event(
+                            id = "concurrent-ordinary-$index",
+                            pubkey = "ordinary-$index",
+                            createdAt = 1_000L + index,
+                            kind = 20,
+                        ),
+                    )
+                }
+            }
+            start.countDown()
+            val inserted = futures.map { it.get(10, TimeUnit.SECONDS) }
+
+            assertTrue(inserted.none { it })
+            assertTrue(
+                (0 until 64).all { store.getNostrEvent("concurrent-ordinary-$it") == null },
+            )
+            assertTrue((0 until 500).all { store.getNostrEvent("protected-$it") != null })
+        } finally {
+            executor.shutdownNow()
+            assertTrue(executor.awaitTermination(10, TimeUnit.SECONDS))
+        }
+    }
+
+    @Test
+    fun `kind-5 deletion removes its event from admission accounting`() {
+        val provider = stubTimelineServiceProvider()
+        val store = MemoryEventStore(object : MuteKeyProvider {}, provider)
+        repeat(500) { index ->
+            assertTrue(
+                store.insert(event("picture-$index", "author-$index", index.toLong(), kind = 20)),
+            )
+        }
+
+        assertTrue(
+            store.insert(
+                event(
+                    id = "delete-newest-picture",
+                    pubkey = "author-499",
+                    createdAt = 500L,
+                    kind = 5,
+                    tags = listOf(listOf("e", "picture-499"), listOf("k", "20")),
+                ),
+            ),
+        )
+        assertNull(store.getNostrEvent("picture-499"))
+        assertTrue(store.insert(event("picture-500", "author-500", 501L, kind = 20)))
+
+        assertNotNull(store.getNostrEvent("picture-0"))
+        assertNotNull(store.getNostrEvent("picture-500"))
+        assertEquals(
+            500,
+            (0..500).count { store.getNostrEvent("picture-$it") != null },
+        )
+        assertEquals(0L, store.snapshotEvictionMetrics().admissionReplaced)
+    }
+
+    @Test
+    fun `binary snapshot restore rebuilds complete admission accounting`() = runTest {
+        val source = MemoryEventStore(object : MuteKeyProvider {}, stubTimelineServiceProvider())
+        repeat(500) { index ->
+            assertTrue(
+                source.insert(event("picture-$index", "author-$index", index.toLong(), kind = 20)),
+            )
+        }
+        val bytes = ByteArrayOutputStream()
+        DataOutputStream(bytes).use { source.saveSnapshotBinary(it) }
+
+        val restored = MemoryEventStore(object : MuteKeyProvider {}, stubTimelineServiceProvider())
+        DataInputStream(ByteArrayInputStream(bytes.toByteArray())).use {
+            restored.restoreSnapshotBinary(it)
+        }
+        assertTrue(restored.insert(event("picture-500", "author-500", 501L, kind = 20)))
+
+        assertNull(restored.getNostrEvent("picture-0"))
+        assertNotNull(restored.getNostrEvent("picture-500"))
+        assertEquals(
+            500,
+            (0..500).count { restored.getNostrEvent("picture-$it") != null },
+        )
+        assertEquals(1L, restored.snapshotEvictionMetrics().admissionReplaced)
+    }
+
+    @Test
+    fun `admission lazily promotes a newly followed stale ordinary candidate`() {
+        val index = ContentAdmissionIndex()
+        index.track("became-followed", 1, ContentEvictionTier.ORDINARY)
+        index.track("still-ordinary", 1, ContentEvictionTier.ORDINARY)
+
+        val victim = index.pollVictim(kind = 1, cap = 1) { eventId ->
+            if (eventId == "became-followed") ContentEvictionTier.FOLLOWED_AUTHOR
+            else ContentEvictionTier.ORDINARY
+        }
+
+        assertEquals("still-ordinary", victim?.eventId)
+        assertEquals(ContentEvictionTier.ORDINARY, victim?.tier)
+    }
+
+    @Test
+    fun `admission touch moves an ordinary candidate behind its peer`() {
+        val index = ContentAdmissionIndex()
+        index.track("oldest", 1, ContentEvictionTier.ORDINARY)
+        index.track("newer", 1, ContentEvictionTier.ORDINARY)
+        index.touch("oldest", 1)
+
+        val victim = index.pollVictim(kind = 1, cap = 1) {
+            ContentEvictionTier.ORDINARY
+        }
+
+        assertEquals("newer", victim?.eventId)
+    }
+
+    @Test
     fun `restored caps retain original content bounds`() {
         assertEquals(5_000, CONTENT_EVENT_KIND_CAPS.getValue(1))
         assertEquals(1_000, CONTENT_EVENT_KIND_CAPS.getValue(6))
@@ -244,7 +432,10 @@ class ContentEvictionPolicyTest {
         assertEquals(0L, metrics.tier1)
         assertEquals(0L, metrics.tier2)
         assertEquals(0L, metrics.tier3)
+        assertEquals(0L, metrics.admissionReplaced)
+        assertEquals(0L, metrics.admissionRejected)
         assertTrue(metrics.evictedByKind.isEmpty())
+        assertTrue(metrics.admissionRejectedByKind.isEmpty())
         assertEquals(0L, metrics.anchoredOwn)
         assertEquals(0L, metrics.anchoredMentioned)
         assertEquals(0L, metrics.anchoredViewed)
@@ -267,6 +458,42 @@ class ContentEvictionPolicyTest {
         assertTrue("first-499" in referenced)
         assertTrue("first-500" !in referenced)
         assertTrue("second" in referenced)
+        assertTrue(timelineService.isLiveReferenced("first-0"))
+        assertFalse(timelineService.isLiveReferenced("first-500"))
+    }
+
+    @Test
+    fun `live timeline reverse index removes replaced refs but preserves shared refs`() {
+        val provider = stubTimelineServiceProvider()
+        val timelineService = provider.get()
+        restoreTimeline(
+            timelineService,
+            refs = listOf(TimelineRef("shared", 3L), TimelineRef("first-only", 2L)),
+            relayUrl = "wss://first.example",
+        )
+        restoreTimeline(
+            timelineService,
+            refs = listOf(TimelineRef("shared", 3L), TimelineRef("second-only", 2L)),
+            relayUrl = "wss://second.example",
+        )
+
+        restoreTimeline(
+            timelineService,
+            refs = listOf(TimelineRef("first-new", 4L)),
+            relayUrl = "wss://first.example",
+        )
+
+        assertFalse(timelineService.isLiveReferenced("first-only"))
+        assertTrue(timelineService.isLiveReferenced("shared"))
+        assertTrue(timelineService.isLiveReferenced("second-only"))
+        assertTrue(timelineService.isLiveReferenced("first-new"))
+
+        restoreTimeline(
+            timelineService,
+            refs = listOf(TimelineRef("second-new", 5L)),
+            relayUrl = "wss://second.example",
+        )
+        assertFalse(timelineService.isLiveReferenced("shared"))
     }
 
     private fun restoreTimeline(

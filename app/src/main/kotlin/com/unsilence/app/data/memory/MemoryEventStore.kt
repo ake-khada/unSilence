@@ -26,6 +26,7 @@ import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.onStart
+import kotlinx.coroutines.flow.onSubscription
 import kotlinx.coroutines.flow.sample
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonNull
@@ -137,6 +138,7 @@ private const val PROFILE_ANCHOR_RECENT_EVENTS = 500
  *  livelock (7.5min cold restore on a 37MB snapshot, validated on device). */
 private const val PROFILE_TRIM_NOOP_BACKOFF_MS = 60_000L
 private const val MAX_FUTURE_DRIFT_SECONDS = 60L
+private const val EVICTION_SAFETY_SWEEP_INTERVAL = 5_000
 private const val WOT_ASSERTION_CAP = 5_000
 private const val WOT_ASSERTION_TRIM = 500
 private val CONTENT_KINDS = setOf(
@@ -179,6 +181,129 @@ internal data class ContentEvictionCandidate(
     val tier: ContentEvictionTier,
     val lastTouchedAt: Long,
 )
+
+internal data class ContentAdmissionVictim(
+    val eventId: String,
+    val tier: ContentEvictionTier,
+)
+
+/**
+ * Bounded access-order index used to choose one victim before a novel content
+ * event is fully indexed. Tier membership is revalidated lazily at removal,
+ * so follows and timeline changes cannot evict a newly-protected event.
+ */
+internal class ContentAdmissionIndex {
+    private class KindQueues {
+        val tierById = HashMap<String, ContentEvictionTier>()
+        val followed = java.util.LinkedHashMap<String, Unit>(16, 0.75f, true)
+        val timeline = java.util.LinkedHashMap<String, Unit>(16, 0.75f, true)
+        val ordinary = java.util.LinkedHashMap<String, Unit>(16, 0.75f, true)
+
+        fun queue(tier: ContentEvictionTier): java.util.LinkedHashMap<String, Unit> =
+            when (tier) {
+                ContentEvictionTier.FOLLOWED_AUTHOR -> followed
+                ContentEvictionTier.TIMELINE_REFERENCED -> timeline
+                ContentEvictionTier.ORDINARY -> ordinary
+            }
+
+        fun track(eventId: String, tier: ContentEvictionTier) {
+            val previous = tierById.put(eventId, tier)
+            if (previous != null && previous != tier) queue(previous).remove(eventId)
+            queue(tier)[eventId] = Unit
+        }
+
+        fun remove(eventId: String) {
+            tierById.remove(eventId)?.let { queue(it).remove(eventId) }
+        }
+    }
+
+    private val lock = Any()
+    private val queuesByKind = HashMap<Int, KindQueues>()
+
+    fun track(eventId: String, kind: Int, tier: ContentEvictionTier?) {
+        synchronized(lock) {
+            val queues = queuesByKind[kind]
+            if (tier == null) {
+                queues?.remove(eventId)
+                return
+            }
+            (queues ?: KindQueues().also { queuesByKind[kind] = it }).track(eventId, tier)
+        }
+    }
+
+    fun touch(eventId: String, kind: Int) {
+        synchronized(lock) {
+            val queues = queuesByKind[kind] ?: return
+            val tier = queues.tierById[eventId] ?: return
+            // Access-order LinkedHashMap.get relinks without allocating a node.
+            queues.queue(tier)[eventId]
+        }
+    }
+
+    fun remove(eventId: String, kind: Int) {
+        synchronized(lock) { queuesByKind[kind]?.remove(eventId) }
+    }
+
+    fun clear() {
+        synchronized(lock) { queuesByKind.clear() }
+    }
+
+    fun size(kind: Int): Int = synchronized(lock) {
+        queuesByKind[kind]?.tierById?.size ?: 0
+    }
+
+    /**
+     * Reserve the next victim and remove it from the index. [classify] returns
+     * null for missing or currently-untouchable events. A stale tier is moved
+     * once and selection restarts at ordinary, making reclassification O(1)
+     * amortized without eagerly walking the store when timelines change.
+     */
+    fun pollVictim(
+        kind: Int,
+        cap: Int,
+        classify: (String) -> ContentEvictionTier?,
+    ): ContentAdmissionVictim? {
+        require(cap >= 0)
+        synchronized(lock) {
+            val queues = queuesByKind[kind] ?: return null
+            while (queues.tierById.size > cap) {
+                var reclassified = false
+                for (tier in EVICTION_ORDER) {
+                    val queue = queues.queue(tier)
+                    val eventId = queue.entries.iterator().let { iterator ->
+                        if (iterator.hasNext()) iterator.next().key else null
+                    } ?: continue
+                    val currentTier = classify(eventId)
+                    when {
+                        currentTier == null -> {
+                            queues.remove(eventId)
+                            reclassified = true
+                        }
+                        currentTier != tier -> {
+                            queues.track(eventId, currentTier)
+                            reclassified = true
+                        }
+                        else -> {
+                            queues.remove(eventId)
+                            return ContentAdmissionVictim(eventId, tier)
+                        }
+                    }
+                    break
+                }
+                if (!reclassified) return null
+            }
+            return null
+        }
+    }
+
+    private companion object {
+        val EVICTION_ORDER = listOf(
+            ContentEvictionTier.ORDINARY,
+            ContentEvictionTier.TIMELINE_REFERENCED,
+            ContentEvictionTier.FOLLOWED_AUTHOR,
+        )
+    }
+}
 
 /**
  * Chooses the excess entries to evict. All mutable inputs must be snapshots.
@@ -481,6 +606,14 @@ class MemoryEventStore @Inject constructor(
      * Eviction sorts candidates ascending by this value — least-recently-touched first.
      */
     private val lastTouchedAt = ConcurrentHashMap<String, Long>()
+    private val contentAdmissionIndex = ContentAdmissionIndex()
+    /**
+     * Admission and secondary indexing form one mutation transaction. Hot and
+     * cold EventProcessor drainers run concurrently; without a per-kind lock,
+     * one drainer can reserve another drainer's just-tracked event before that
+     * event has reached its secondary indexes, leaving orphan index entries.
+     */
+    private val contentMutationLocks = CONTENT_EVENT_KIND_CAPS.keys.associateWith { Any() }
 
     // ─── Derived aggregates (incrementally maintained) ──────────────────────
     private val repostCounts = ConcurrentHashMap<String, Int>()
@@ -665,6 +798,12 @@ class MemoryEventStore @Inject constructor(
     /** Currently viewed profile — single-slot anchor for content eviction.
      *  Set by UserProfileViewModel on loadProfile(), cleared on onCleared(). */
     @Volatile var viewedPubkey: String? = null
+        set(value) {
+            val previous = field
+            if (previous == value) return
+            field = value
+            reconcileAdmissionForAuthors(previous, value)
+        }
 
     /** Ref IDs anchored by the OWN profile pipeline — quoted notes, repost targets,
      *  thread parents of own-authored events. OWN-scope only (populated at cold-start,
@@ -686,7 +825,10 @@ class MemoryEventStore @Inject constructor(
     private val evictionTier1 = AtomicLong(0)
     private val evictionTier2 = AtomicLong(0)
     private val evictionTier3 = AtomicLong(0)
+    private val evictionAdmissionReplaced = AtomicLong(0)
+    private val evictionAdmissionRejected = AtomicLong(0)
     private val evictionByKind = ConcurrentHashMap<Int, AtomicLong>()
+    private val evictionAdmissionRejectedByKind = ConcurrentHashMap<Int, AtomicLong>()
     // Anchors are unique counts from one complete pass, not cumulative visits.
     @Volatile private var lastEvictionAnchors = EvictionAnchorSnapshot()
 
@@ -819,7 +961,14 @@ class MemoryEventStore @Inject constructor(
         videoRenderModelsByEventId[eventId] ?: emptyList()
 
     fun putVideoRenderModels(eventId: String, models: List<com.unsilence.app.data.model.VideoRenderModel>) {
-        if (models.isNotEmpty()) videoRenderModelsByEventId[eventId] = models
+        // Admission can reject or concurrently evict a content event before
+        // the relay drainer finishes deriving its sidecars. Never retain an
+        // orphan sidecar for a payload the store does not own.
+        if (models.isEmpty()) return
+        eventsById.computeIfPresent(eventId) { _, retained ->
+            videoRenderModelsByEventId[eventId] = models
+            retained
+        }
     }
 
     // Image aspect ratios from imeta, keyed by event ID → (url → aspect ratio)
@@ -829,7 +978,11 @@ class MemoryEventStore @Inject constructor(
         imetaImageDimsByEventId[eventId] ?: emptyMap()
 
     fun putImetaImageDims(eventId: String, dims: Map<String, Float>) {
-        if (dims.isNotEmpty()) imetaImageDimsByEventId[eventId] = dims
+        if (dims.isEmpty()) return
+        eventsById.computeIfPresent(eventId) { _, retained ->
+            imetaImageDimsByEventId[eventId] = dims
+            retained
+        }
     }
 
     // ─── EventModel sidecar cache (populated at insert time by ContentParser) ─
@@ -962,6 +1115,7 @@ class MemoryEventStore @Inject constructor(
         var relayMonitor = false
         var relaySet = false
         var emojiSet = false
+        var admissionRejected = 0
         val invalidatedStatsIds: MutableSet<String> = mutableSetOf()
     }
 
@@ -983,6 +1137,84 @@ class MemoryEventStore @Inject constructor(
                 StatsInvalidation.Targeted(d.invalidatedStatsIds.toSet())
             )
         }
+    }
+
+    private fun reconcileAdmissionForAuthors(vararg pubkeys: String?) {
+        for (pubkey in pubkeys.filterNotNull().distinct()) {
+            val eventIds = idsByPubkey[pubkey]?.toList().orEmpty()
+            for (eventId in eventIds) {
+                val event = eventsById[eventId] ?: continue
+                if (event.kind !in CONTENT_EVENT_KIND_CAPS) continue
+                contentAdmissionIndex.track(
+                    eventId = event.id,
+                    kind = event.kind,
+                    tier = contentAdmissionTier(event),
+                )
+            }
+        }
+    }
+
+    private fun contentAdmissionTier(event: NostrEvent): ContentEvictionTier? {
+        if (event.kind !in CONTENT_EVENT_KIND_CAPS) return null
+        val owner = ownPubkey
+        if (owner != null) {
+            if (event.pubkey == owner) return null
+            val mentionsOwner = if (event.kind in NOTIFICATION_KINDS) {
+                owner in notificationRecipients(event)
+            } else {
+                event.tags.any { it.size >= 2 && it[0] == "p" && it[1] == owner }
+            }
+            if (mentionsOwner) return null
+        }
+        if (event.pubkey == viewedPubkey) return null
+        if (event.id in profileAnchoredIds) return null
+        val followed = owner?.let { followsByPubkey[it] }.orEmpty()
+        return when {
+            event.pubkey in followed -> ContentEvictionTier.FOLLOWED_AUTHOR
+            timelineServiceProvider.get().isLiveReferenced(event.id) ->
+                ContentEvictionTier.TIMELINE_REFERENCED
+            else -> ContentEvictionTier.ORDINARY
+        }
+    }
+
+    private fun currentContentAdmissionTier(eventId: String): ContentEvictionTier? =
+        eventsById[eventId]?.let(::contentAdmissionTier)
+
+    /**
+     * Reserve space before the event reaches secondary indexes and handlers.
+     * If the novel event itself is the lowest-priority LRU victim, reject it at
+     * the door; otherwise remove the reserved existing victim first.
+     */
+    private fun admitNovelContent(event: NostrEvent, dirty: InsertDirty): Boolean {
+        val cap = CONTENT_EVENT_KIND_CAPS[event.kind] ?: return true
+        contentAdmissionIndex.track(event.id, event.kind, contentAdmissionTier(event))
+        val invalidatedTargets = mutableSetOf<String>()
+        val removedIds = mutableSetOf<String>()
+
+        while (contentAdmissionIndex.size(event.kind) > cap) {
+            val victim = contentAdmissionIndex.pollVictim(
+                kind = event.kind,
+                cap = cap,
+                classify = ::currentContentAdmissionTier,
+            ) ?: break
+            if (victim.eventId == event.id) {
+                eventsById.remove(event.id, event)
+                dirty.admissionRejected++
+                recordAdmissionRejected(event.kind)
+                publishEvictionInvalidations(invalidatedTargets, removedIds)
+                return false
+            }
+            val removed = removeContentEventForEviction(
+                eventId = victim.eventId,
+                invalidatedReplyTargets = invalidatedTargets,
+            ) ?: continue
+            removedIds += removed.id
+            markKindDirty(removed.kind, dirty)
+            recordAdmissionReplacement(victim.tier, removed.kind)
+        }
+
+        publishEvictionInvalidations(invalidatedTargets, removedIds)
+        return true
     }
 
     // ─── Relay provenance (called by EventProcessor for seenIds duplicates) ──
@@ -1031,8 +1263,8 @@ class MemoryEventStore @Inject constructor(
         val inserted = insertCore(event, dirty)
         if (inserted) {
             markKindDirty(event.kind, dirty)
-            evictionTickAfterInsert()
         }
+        evictionTickAfterInsert((if (inserted) 1 else 0) + dirty.admissionRejected)
         flushDirty(dirty)
         return inserted
     }
@@ -1061,7 +1293,7 @@ class MemoryEventStore @Inject constructor(
         }
 
         flushDirty(dirty)
-        if (inserted > 0) evictionTickAfterInsert(inserted)
+        evictionTickAfterInsert(inserted + dirty.admissionRejected)
         return inserted
     }
 
@@ -1103,7 +1335,7 @@ class MemoryEventStore @Inject constructor(
         }
 
         flushDirty(dirty)
-        if (inserted > 0) evictionTickAfterInsert(inserted)
+        evictionTickAfterInsert(inserted + dirty.admissionRejected)
         return inserted
     }
 
@@ -1128,12 +1360,16 @@ class MemoryEventStore @Inject constructor(
      * _relayMonitorSignal / _relaySetSignal set the corresponding flag
      * here instead. The caller (insert / insertBatch) flushes once at end.
      */
-    private fun insertCore(event: NostrEvent, dirty: InsertDirty): Boolean =
-        if (event.kind == 10000) {
+    private fun insertCore(event: NostrEvent, dirty: InsertDirty): Boolean {
+        contentMutationLocks[event.kind]?.let { lock ->
+            return synchronized(lock) { insertCoreUnlocked(event, dirty) }
+        }
+        return if (event.kind == 10000) {
             synchronized(muteStateLock) { insertCoreUnlocked(event, dirty) }
         } else {
             insertCoreUnlocked(event, dirty)
         }
+    }
 
     /** Caller holds [muteStateLock] for kind-10000 so publish snapshots cannot
      * observe the raw event index before its materialized mute state is ready. */
@@ -1161,6 +1397,8 @@ class MemoryEventStore @Inject constructor(
         pendingRelays.remove(event.id)?.let { pending ->
             event.relaysSeen.addAll(pending)
         }
+
+        if (!admitNovelContent(event, dirty)) return false
 
         // 2. Update indexes
         idsByKind.getOrPut(event.kind) { ConcurrentHashMap.newKeySet() }.add(event.id)
@@ -1229,7 +1467,8 @@ class MemoryEventStore @Inject constructor(
     }
 
     private fun evictionTickAfterInsert(count: Int = 1) {
-        if (insertsSinceLastEviction.addAndGet(count) >= 500) {
+        if (count <= 0) return
+        if (insertsSinceLastEviction.addAndGet(count) >= EVICTION_SAFETY_SWEEP_INTERVAL) {
             insertsSinceLastEviction.set(0)
             evictOldContentEvents()
         }
@@ -2637,6 +2876,7 @@ class MemoryEventStore @Inject constructor(
     }
 
     private fun removeFromIndexes(event: NostrEvent) {
+        contentAdmissionIndex.remove(event.id, event.kind)
         deindexNotificationRecipients(event)
         eventsById.remove(event.id)
         idsByKind[event.kind]?.remove(event.id)
@@ -2765,59 +3005,20 @@ class MemoryEventStore @Inject constructor(
         var evictedTier3 = 0
         val evictedByKind = mutableMapOf<Int, Int>()
         for (candidate in toEvict) {
-            val entry = candidate.entry
-            val event = eventsById.remove(entry.id) ?: continue
-            removedIds.add(entry.id)
+            val event = removeContentEventForEviction(
+                eventId = candidate.entry.id,
+                invalidatedReplyTargets = invalidatedReplyTargets,
+            ) ?: continue
+            removedIds.add(event.id)
             when (candidate.tier) {
                 ContentEvictionTier.FOLLOWED_AUTHOR -> evictedTier1++
                 ContentEvictionTier.TIMELINE_REFERENCED -> evictedTier2++
                 ContentEvictionTier.ORDINARY -> evictedTier3++
             }
             evictedByKind[event.kind] = (evictedByKind[event.kind] ?: 0) + 1
-            deindexNotificationRecipients(event)
-            recentByCreatedAt.remove(entry)
-            idsByKind[event.kind]?.remove(entry.id)
-            idsByPubkey[event.pubkey]?.remove(entry.id)
-            lastTouchedAt.remove(entry.id)
-            forEachReplyIndexTarget(event) { targetId ->
-                if (removeReplyIndexEntry(targetId, entry.id)) {
-                    invalidatedReplyTargets += targetId
-                }
-            }
-            // Article comment index: drop this id from each coord it referenced.
-            if (event.kind == 1 || event.kind == 1111) {
-                for (tag in event.tags) {
-                    if (tag.size >= 2 && (tag[0] == "a" || tag[0] == "A")) {
-                        val coord = tag[1]
-                        if (commentIdsByCoord[coord]?.remove(entry.id) == true) {
-                            invalidatedReplyTargets += coord
-                            articleIdByCoord[coord]?.let(invalidatedReplyTargets::add)
-                        }
-                    }
-                }
-            }
-            // Clean up caches and sidecar data
-            feedRowCache.remove(entry.id)
-            feedRowAccessedAt.remove(entry.id)
-            videoRenderModelsByEventId.remove(entry.id)
-            imetaImageDimsByEventId.remove(entry.id)
-            eventModelsByEventId.remove(entry.id)
         }
 
-        // Clean up aggregates + contributor indexes that reference removed events
-        repostCounts.keys.removeAll(removedIds)
-        zapStatsByEventId.keys.removeAll(removedIds)
-        statsUpdatedAt.keys.removeAll(removedIds)
-        repostPubkeysByTarget.keys.removeAll(removedIds)
-        reactionsByTarget.keys.removeAll(removedIds)
-        zapDetailsByTarget.keys.removeAll(removedIds)
-
-        invalidatedReplyTargets.removeAll(removedIds)
-        if (invalidatedReplyTargets.isNotEmpty()) {
-            val updatedAt = System.currentTimeMillis()
-            invalidatedReplyTargets.forEach { statsUpdatedAt[it] = updatedAt }
-            _statsInvalidations.tryEmit(StatsInvalidation.Targeted(invalidatedReplyTargets))
-        }
+        publishEvictionInvalidations(invalidatedReplyTargets, removedIds)
 
         recordEvictionPass(
             evictedTier1 = evictedTier1,
@@ -2839,6 +3040,100 @@ class MemoryEventStore @Inject constructor(
                 "viewed=$anchoredViewed profileRefs=$anchoredProfileRefs " +
                 "liveTimelineRefs=${timelineReferencedIds.size}",
         )
+    }
+
+    private fun removeContentEventForEviction(
+        eventId: String,
+        invalidatedReplyTargets: MutableSet<String>,
+    ): NostrEvent? {
+        val kind = eventsById[eventId]?.kind ?: return null
+        val lock = contentMutationLocks[kind]
+        return if (lock == null) {
+            removeContentEventForEvictionUnlocked(eventId, invalidatedReplyTargets)
+        } else {
+            synchronized(lock) {
+                removeContentEventForEvictionUnlocked(eventId, invalidatedReplyTargets)
+            }
+        }
+    }
+
+    private fun removeContentEventForEvictionUnlocked(
+        eventId: String,
+        invalidatedReplyTargets: MutableSet<String>,
+    ): NostrEvent? {
+        val event = eventsById.remove(eventId) ?: return null
+        contentAdmissionIndex.remove(event.id, event.kind)
+        deindexNotificationRecipients(event)
+        recentByCreatedAt.remove(EventEntry(event.id, event.createdAt))
+        idsByKind[event.kind]?.remove(event.id)
+        idsByPubkey[event.pubkey]?.remove(event.id)
+        lastTouchedAt.remove(event.id)
+        forEachReplyIndexTarget(event) { targetId ->
+            if (removeReplyIndexEntry(targetId, event.id)) {
+                invalidatedReplyTargets += targetId
+            }
+        }
+        // Article comment index: drop this id from each coord it referenced.
+        if (event.kind == 1 || event.kind == 1111) {
+            for (tag in event.tags) {
+                if (tag.size >= 2 && (tag[0] == "a" || tag[0] == "A")) {
+                    val coord = tag[1]
+                    if (commentIdsByCoord[coord]?.remove(event.id) == true) {
+                        invalidatedReplyTargets += coord
+                        articleIdByCoord[coord]?.let(invalidatedReplyTargets::add)
+                    }
+                }
+            }
+        }
+        // Addressable coordinate maps must not retain an ID whose payload was
+        // removed at admission; otherwise readers observe a permanent dead ref.
+        articleCoordById.remove(event.id)?.let { coord ->
+            articleIdByCoord.remove(coord, event.id)
+        }
+        if (event.kind in 30000..39999) {
+            val dTag = event.tags
+                .firstOrNull { it.size >= 2 && it[0] == "d" }
+                ?.getOrNull(1)
+                .orEmpty()
+            replaceableByCoordinate.remove("${event.pubkey}:${event.kind}:$dTag", event.id)
+        }
+        feedRowCache.remove(event.id)
+        feedRowAccessedAt.remove(event.id)
+        videoRenderModelsByEventId.remove(event.id)
+        imetaImageDimsByEventId.remove(event.id)
+        eventModelsByEventId.remove(event.id)
+        repostCounts.remove(event.id)
+        zapStatsByEventId.remove(event.id)
+        statsUpdatedAt.remove(event.id)
+        repostPubkeysByTarget.remove(event.id)
+        reactionsByTarget.remove(event.id)
+        zapDetailsByTarget.remove(event.id)
+        return event
+    }
+
+    private fun publishEvictionInvalidations(
+        invalidatedReplyTargets: MutableSet<String>,
+        removedIds: Set<String>,
+    ) {
+        invalidatedReplyTargets.removeAll(removedIds)
+        if (invalidatedReplyTargets.isEmpty()) return
+        val updatedAt = System.currentTimeMillis()
+        invalidatedReplyTargets.forEach { statsUpdatedAt[it] = updatedAt }
+        _statsInvalidations.tryEmit(StatsInvalidation.Targeted(invalidatedReplyTargets))
+    }
+
+    /** Rebuild access order after snapshot records arrive in persistence order. */
+    private fun rebuildContentAdmissionIndex() {
+        val candidates = eventsById.values
+            .asSequence()
+            .filter { it.kind in CONTENT_EVENT_KIND_CAPS }
+            .map { event -> Triple(event, contentAdmissionTier(event), lastTouchedAt[event.id] ?: 0L) }
+            .sortedWith(compareBy<Triple<NostrEvent, ContentEvictionTier?, Long>> { it.third }.thenBy { it.first.id })
+            .toList()
+        contentAdmissionIndex.clear()
+        for ((event, tier) in candidates) {
+            contentAdmissionIndex.track(event.id, event.kind, tier)
+        }
     }
 
     private fun recordEvictionPass(
@@ -2869,13 +3164,34 @@ class MemoryEventStore @Inject constructor(
         )
     }
 
+    private fun recordAdmissionReplacement(tier: ContentEvictionTier, kind: Int) {
+        evictionAdmissionReplaced.incrementAndGet()
+        evictionEvicted.incrementAndGet()
+        when (tier) {
+            ContentEvictionTier.FOLLOWED_AUTHOR -> evictionTier1.incrementAndGet()
+            ContentEvictionTier.TIMELINE_REFERENCED -> evictionTier2.incrementAndGet()
+            ContentEvictionTier.ORDINARY -> evictionTier3.incrementAndGet()
+        }
+        evictionByKind.computeIfAbsent(kind) { AtomicLong(0) }.incrementAndGet()
+    }
+
+    private fun recordAdmissionRejected(kind: Int) {
+        evictionAdmissionRejected.incrementAndGet()
+        evictionAdmissionRejectedByKind
+            .computeIfAbsent(kind) { AtomicLong(0) }
+            .incrementAndGet()
+    }
+
     private fun resetEvictionMetrics() {
         evictionPasses.set(0)
         evictionEvicted.set(0)
         evictionTier1.set(0)
         evictionTier2.set(0)
         evictionTier3.set(0)
+        evictionAdmissionReplaced.set(0)
+        evictionAdmissionRejected.set(0)
         evictionByKind.clear()
+        evictionAdmissionRejectedByKind.clear()
         lastEvictionAnchors = EvictionAnchorSnapshot()
     }
 
@@ -3117,12 +3433,14 @@ class MemoryEventStore @Inject constructor(
         val now = System.currentTimeMillis()
         for (id in eventIds) {
             lastTouchedAt[id] = now
+            eventsById[id]?.let { contentAdmissionIndex.touch(id, it.kind) }
         }
     }
 
     /** Convenience overload for single id. */
     fun markTouched(eventId: String) {
         lastTouchedAt[eventId] = System.currentTimeMillis()
+        eventsById[eventId]?.let { contentAdmissionIndex.touch(eventId, it.kind) }
     }
 
     /** Local cache freshness — when this profile was last updated in MemoryEventStore (epoch ms).
@@ -4648,6 +4966,12 @@ class MemoryEventStore @Inject constructor(
      */
     fun statsFlow(eventId: String): Flow<EventStats> =
         _statsInvalidations
+            // Register with the hot invalidation stream before reading the
+            // initial value. onStart reads first and subscribes second, leaving
+            // a gap where an admission/eviction invalidation can be lost.
+            .onSubscription {
+                emit(StatsInvalidation.Targeted(setOf(eventId)))
+            }
             .filter { inv ->
                 when (inv) {
                     is StatsInvalidation.Targeted -> eventId in inv.ids
@@ -4655,7 +4979,6 @@ class MemoryEventStore @Inject constructor(
                 }
             }
             .map { currentStats(eventId) }
-            .onStart { emit(currentStats(eventId)) }
             .distinctUntilChanged()
             .flowOn(Dispatchers.Default)
 
@@ -5603,13 +5926,21 @@ class MemoryEventStore @Inject constructor(
                 count.getAndSet(0).takeIf { it > 0 }?.let { kind to it }
             }
             .toMap()
+        val rejectedByKind = evictionAdmissionRejectedByKind.entries
+            .mapNotNull { (kind, count) ->
+                count.getAndSet(0).takeIf { it > 0 }?.let { kind to it }
+            }
+            .toMap()
         return MesEvictionSnapshot(
             passes = evictionPasses.getAndSet(0),
             evicted = evictionEvicted.getAndSet(0),
             tier1 = evictionTier1.getAndSet(0),
             tier2 = evictionTier2.getAndSet(0),
             tier3 = evictionTier3.getAndSet(0),
+            admissionReplaced = evictionAdmissionReplaced.getAndSet(0),
+            admissionRejected = evictionAdmissionRejected.getAndSet(0),
             evictedByKind = byKind,
+            admissionRejectedByKind = rejectedByKind,
             anchoredOwn = anchors.own,
             anchoredMentioned = anchors.mentioned,
             anchoredViewed = anchors.viewed,
@@ -5796,6 +6127,7 @@ class MemoryEventStore @Inject constructor(
 
         // Evict old content events from snapshot (may contain stale data)
         evictOldContentEvents()
+        rebuildContentAdmissionIndex()
 
         Log.d("MES", "Snapshot restore complete (EventModel parsing deferred to first read)")
     }
@@ -6563,6 +6895,7 @@ class MemoryEventStore @Inject constructor(
         _statsInvalidations.tryEmit(StatsInvalidation.Broadcast)
 
         evictOldContentEvents()
+        rebuildContentAdmissionIndex()
 
         Log.d("MES", "Snapshot restore complete (binary V$version, $declaredEventsCount events declared, EventModel parsing deferred)")
     }
@@ -6880,6 +7213,11 @@ class MemoryEventStore @Inject constructor(
         if (event.kind != 5 && isDeletedByTombstone(event)) return
 
         eventsById[event.id] = event
+        contentAdmissionIndex.track(
+            eventId = event.id,
+            kind = event.kind,
+            tier = contentAdmissionTier(event),
+        )
         idsByKind.getOrPut(event.kind) { ConcurrentHashMap.newKeySet() }.add(event.id)
         idsByPubkey.getOrPut(event.pubkey) { ConcurrentHashMap.newKeySet() }.add(event.id)
         recentByCreatedAt.add(EventEntry(event.id, event.createdAt))
@@ -7182,6 +7520,7 @@ class MemoryEventStore @Inject constructor(
         // last pass's anchors across logout would corrupt the next session's
         // release probe even though the underlying store has been cleared.
         resetEvictionMetrics()
+        insertsSinceLastEviction.set(0)
         eventsById.clear()
         pendingRelays.clear()
         idsByKind.clear()
@@ -7192,6 +7531,7 @@ class MemoryEventStore @Inject constructor(
         commentIdsByCoord.clear()
         recentByCreatedAt.clear()
         lastTouchedAt.clear()
+        contentAdmissionIndex.clear()
         repostCounts.clear()
         zapStatsByEventId.clear()
         statsUpdatedAt.clear()

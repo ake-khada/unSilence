@@ -94,6 +94,36 @@ class TimelineService @Inject constructor(
     private val multiKeys = ConcurrentHashMap<String, List<String>>()
     private val seqCounter = AtomicLong(0)
     private val payloadMismatchLoggedKeys = ConcurrentHashMap.newKeySet<String>()
+    private val liveReferenceLock = Any()
+    private val liveReferenceIdsByTimeline = HashMap<String, Set<String>>()
+    private val liveReferenceCounts = HashMap<String, Int>()
+
+    /**
+     * Replace a timeline and its bounded reverse-reference index atomically.
+     * Admission control asks [isLiveReferenced] on its hot path; rebuilding a
+     * union of every timeline for every event would cost more than the sweep it
+     * replaces. Reference counts preserve IDs shared by multiple timelines.
+     */
+    private fun putTimeline(key: String, timeline: Timeline) {
+        val newIds = timeline.refs
+            .asSequence()
+            .take(PERSISTED_REFS_CAP)
+            .mapTo(HashSet()) { it.id }
+        synchronized(liveReferenceLock) {
+            val oldIds = liveReferenceIdsByTimeline.put(key, newIds).orEmpty()
+            for (id in oldIds) {
+                if (id in newIds) continue
+                val remaining = (liveReferenceCounts[id] ?: 1) - 1
+                if (remaining <= 0) liveReferenceCounts.remove(id)
+                else liveReferenceCounts[id] = remaining
+            }
+            for (id in newIds) {
+                if (id in oldIds) continue
+                liveReferenceCounts[id] = (liveReferenceCounts[id] ?: 0) + 1
+            }
+            timelines[key] = timeline
+        }
+    }
 
     private data class CachedRefCandidate(
         val ref: TimelineRef,
@@ -354,17 +384,20 @@ class TimelineService @Inject constructor(
                     val existing = timelines[key]
                     if (existing == null || existing.refs.isEmpty()) {
                         // No cache yet — Jumble line 678
-                        timelines[key] = Timeline(newRefs, subRequest.filter, subRequest.urls)
+                        putTimeline(key, Timeline(newRefs, subRequest.filter, subRequest.urls))
                     } else {
                         // Merge with existing — Jumble lines 687-703
                         val firstExistingCreatedAt = existing.refs.first().createdAt
                         val freshRefs = newRefs.filter { it.createdAt > firstExistingCreatedAt }
                         if (limit != null && freshRefs.size >= limit) {
                             // New refs fully replace old — Jumble line 694
-                            timelines[key] = Timeline(freshRefs, subRequest.filter, subRequest.urls)
+                            putTimeline(key, Timeline(freshRefs, subRequest.filter, subRequest.urls))
                         } else {
                             // Merge new + old — Jumble line 701
-                            timelines[key] = Timeline(freshRefs + existing.refs, subRequest.filter, subRequest.urls)
+                            putTimeline(
+                                key,
+                                Timeline(freshRefs + existing.refs, subRequest.filter, subRequest.urls),
+                            )
                         }
                     }
                 }
@@ -398,7 +431,7 @@ class TimelineService @Inject constructor(
 
         val newRefs = refs.toMutableList()
         newRefs.add(idx, TimelineRef(evt.id, evt.createdAt))
-        timelines[key] = timeline.copy(refs = newRefs)
+        putTimeline(key, timeline.copy(refs = newRefs))
     }
 
     /**
@@ -567,7 +600,7 @@ class TimelineService @Inject constructor(
                 val existingIds = existing.refs.map { it.id }.toSet()
                 val deduped = newRefs.filter { it.id !in existingIds }
                 if (deduped.isNotEmpty()) {
-                    timelines[k] = existing.copy(refs = existing.refs + deduped)
+                    putTimeline(k, existing.copy(refs = existing.refs + deduped))
                 }
             }
         }
@@ -620,16 +653,11 @@ class TimelineService @Inject constructor(
      * unbounded memory anchor.
      */
     internal fun liveReferencedIds(): Set<String> {
-        val timelineSnapshot = timelines.values.toList()
-        val referencedIds = HashSet<String>()
-        for (timeline in timelineSnapshot) {
-            val limit = minOf(timeline.refs.size, PERSISTED_REFS_CAP)
-            for (index in 0 until limit) {
-                referencedIds.add(timeline.refs[index].id)
-            }
-        }
-        return referencedIds
+        return synchronized(liveReferenceLock) { liveReferenceCounts.keys.toSet() }
     }
+
+    internal fun isLiveReferenced(eventId: String): Boolean =
+        synchronized(liveReferenceLock) { eventId in liveReferenceCounts }
 
     /**
      * Snapshot reader entry. Validates each entry's key by recomputing
@@ -642,22 +670,24 @@ class TimelineService @Inject constructor(
                 Log.w(TAG, "timeline key mismatch persisted=${key.take(8)} recomputed=${recomputed.take(8)} — skipping")
                 continue
             }
-            timelines[key] = timeline
+            putTimeline(key, timeline)
         }
         Log.d(TAG, "restored ${timelines.size} timelines from snapshot")
     }
 
     fun clear() {
-        timelines.clear()
+        synchronized(liveReferenceLock) {
+            timelines.clear()
+            liveReferenceIdsByTimeline.clear()
+            liveReferenceCounts.clear()
+        }
         multiKeys.clear()
         payloadMismatchLoggedKeys.clear()
     }
 
     // ── Test helpers ────────────────────────────────────────────────────────
     internal fun resetForTest() {
-        timelines.clear()
-        multiKeys.clear()
-        payloadMismatchLoggedKeys.clear()
+        clear()
     }
 
     internal fun timelineForTest(key: String): List<TimelineRef>? = timelines[key]?.refs
