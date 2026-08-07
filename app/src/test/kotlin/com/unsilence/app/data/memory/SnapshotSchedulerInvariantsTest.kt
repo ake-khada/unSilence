@@ -311,7 +311,7 @@ class SnapshotSchedulerInvariantsTest {
         // Populate the store with enough data to make the save non-trivial.
         for (i in 1..100) {
             store.insert(event(id = "ev-$i", kind = 1, createdAt = i.toLong()))
-            // Reactions populate reactionCounts + zapStatsByEventId paths.
+            // Reactions populate engagement-index paths while snapshots are written.
             store.insert(
                 event(
                     id = "react-$i",

@@ -1054,7 +1054,7 @@ class MemoryEventStoreInvariantsTest {
     // ── Zap stats ───────────────────────────────────────────────────────────
 
     @Test
-    fun `zapStats accumulates count and sats from kind 9735`() {
+    fun `unverified kind 9735 fields cannot alter zapStats`() {
         val targetId = "zap-target"
         store.insert(event(id = targetId, kind = 1))
 
@@ -1075,12 +1075,12 @@ class MemoryEventStoreInvariantsTest {
         }
 
         val stats = store.zapStats(targetId)
-        assertEquals(3, stats.count)
-        assertEquals(1121L, stats.totalSats)
+        assertEquals(0, stats.count)
+        assertEquals(0L, stats.totalSats)
     }
 
     @Test
-    fun `zapStats parses real bolt11 invoice for 21 sats`() {
+    fun `malformed bolt11 cannot alter zapStats`() {
         val targetId = "bolt11-target"
         store.insert(event(id = targetId, kind = 1))
 
@@ -1098,8 +1098,8 @@ class MemoryEventStoreInvariantsTest {
         )
 
         val stats = store.zapStats(targetId)
-        assertEquals(1, stats.count)
-        assertEquals(21L, stats.totalSats)
+        assertEquals(0, stats.count)
+        assertEquals(0L, stats.totalSats)
     }
 
     // ── Kind 0 profile (replaceable) ────────────────────────────────────────
@@ -3841,23 +3841,14 @@ class MemoryEventStoreInvariantsTest {
     }
 
     @Test
-    fun `incrementZapStats updates zapStatsByEventId atomically`() {
-        // No existing stats
-        val before = store.zapStats("note-z")
-        assertEquals(0, before.count)
-        assertEquals(0L, before.totalSats)
+    fun `optimistic drawer row does not masquerade as authenticated receipt stats`() {
+        store.addOptimisticZapDetail("note-z", "me", 1_000L, "sent")
 
-        // Increment
-        store.incrementZapStats("note-z", 1000L)
-        val after = store.zapStats("note-z")
-        assertEquals(1, after.count)
-        assertEquals(1000L, after.totalSats)
-
-        // Second increment accumulates
-        store.incrementZapStats("note-z", 500L)
-        val after2 = store.zapStats("note-z")
-        assertEquals(2, after2.count)
-        assertEquals(1500L, after2.totalSats)
+        assertEquals(ZapAggregate.EMPTY, store.zapStats("note-z"))
+        val row = store.zapDetailsForEvent("note-z").single()
+        assertEquals("me", row.senderPubkey)
+        assertEquals(1_000L, row.sats)
+        assertNull(row.eventId)
     }
 
     // ── Tier 3: Search APIs ─────────────────────────────────────────────────
@@ -4971,7 +4962,7 @@ class MemoryEventStoreInvariantsTest {
     }
 
     @Test
-    fun `kind-9735 zap receipt with p-tag appears as zap notification`() = runTest {
+    fun `unauthenticated kind-9735 does not appear as zap notification`() = runTest {
         store.insert(event(id = "my-note", pubkey = myPubkey, kind = 1, content = "zap me", createdAt = 100))
         store.insert(event(
             id = "zap-1", pubkey = "zap-provider", kind = 9735, content = "", createdAt = 200,
@@ -4980,14 +4971,7 @@ class MemoryEventStoreInvariantsTest {
         ))
 
         val notifs = store.getNotifications(myPubkey, limit = 50)
-        assertEquals(1, notifs.size)
-        val g = notifs[0] as NotificationRow.Grouped
-        assertEquals("zap", g.notifType)
-        assertEquals("my-note", g.targetNoteId)
-        // no description tag → anonymous aggregate; bolt11 lnbc10u = 1000 sats
-        assertEquals(1, g.anonymousCount)
-        assertEquals(0, g.actors.size)
-        assertEquals(1000L, g.sumSats)
+        assertTrue(notifs.isEmpty())
     }
 
     @Test

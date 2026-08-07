@@ -130,6 +130,7 @@ class AppBootstrapper @Inject constructor(
     private val cardHydrator: CardHydrator,
     private val profilePipeline: com.unsilence.app.data.relay.ProfilePipeline,
     private val privateZapRepository: com.unsilence.app.data.repository.PrivateZapRepository,
+    private val ownZapReceiptAuthorityCoordinator: com.unsilence.app.data.zap.OwnZapReceiptAuthorityCoordinator,
     private val outboxRelayResolver: com.unsilence.app.data.relay.OutboxRelayResolver,
     private val feedRelayWarmer: com.unsilence.app.data.relay.FeedRelayWarmer,
     private val trendingClient: TrendingClient,
@@ -219,6 +220,7 @@ class AppBootstrapper @Inject constructor(
         // Phase 1 (0ms): Feed connections — user sees content ASAP
         // ═══════════════════════════════════════════════════════════════════
         claimAccountOwner(pubkeyHex)
+        ownZapReceiptAuthorityCoordinator.start(pubkeyHex)
         muteRecoveryJob?.cancel()
         muteRecoveryJob = null
         muteBootstrapSettledForPubkey = null
@@ -767,6 +769,7 @@ class AppBootstrapper @Inject constructor(
             relayPool.closeLiveNotifSub()
             relayPool.clearCaches()
             privateZapRepository.stop()
+            ownZapReceiptAuthorityCoordinator.stop()
 
             // 2. Disconnect all WebSockets
             relayPool.disconnectAll()

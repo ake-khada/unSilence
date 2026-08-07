@@ -1,5 +1,6 @@
 package com.unsilence.app.data.relay
 
+import com.unsilence.app.data.auth.verifyNostrEventFields
 import com.unsilence.app.data.memory.NostrEvent
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
@@ -20,6 +21,40 @@ internal data class EventDto(
     val tags: List<List<String>>,
     val sig: String,
 )
+
+internal const val MAX_SIGNED_EVENT_TAGS = 2_000
+internal const val MAX_SIGNED_EVENT_TAG_PARTS = 100
+private val SIGNED_EVENT_HEX_64 = Regex("^[0-9a-f]{64}$")
+private val SIGNED_EVENT_HEX_128 = Regex("^[0-9a-f]{128}$")
+
+/**
+ * Shared structural boundary for complete signed events embedded inside another
+ * protocol payload. Shape checks deliberately run before native crypto so an
+ * authenticated wrapper cannot buy unbounded allocation or verification work.
+ */
+internal fun EventDto.hasValidSignedEventShape(
+    allowedKinds: IntRange = 0..65_535,
+): Boolean =
+    SIGNED_EVENT_HEX_64.matches(id) &&
+        SIGNED_EVENT_HEX_64.matches(pubkey) &&
+        SIGNED_EVENT_HEX_128.matches(sig) &&
+        createdAt >= 0L &&
+        kind in allowedKinds &&
+        tags.size <= MAX_SIGNED_EVENT_TAGS &&
+        tags.all { it.isNotEmpty() && it.size <= MAX_SIGNED_EVENT_TAG_PARTS }
+
+/** One canonical-id + BIP-340 implementation for every embedded-event trust boundary. */
+internal fun EventDto.hasValidCanonicalSignature(): Boolean = runCatching {
+    verifyNostrEventFields(
+        id = id,
+        pubkey = pubkey,
+        createdAt = createdAt,
+        kind = kind,
+        tags = tags,
+        content = content,
+        sig = sig,
+    )
+}.getOrDefault(false)
 
 /** Build the raw outer event. Embedded repost data is attached only after outer verification. */
 internal fun EventDto.toNostrEvent(relayUrl: String): NostrEvent {

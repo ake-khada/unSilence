@@ -1,6 +1,5 @@
 package com.unsilence.app.data.relay
 
-import com.unsilence.app.data.auth.verifyNostrEventFields
 import com.unsilence.app.data.memory.NostrEvent
 import com.unsilence.app.data.model.RepostInfo
 import com.unsilence.app.data.model.RepostPayload
@@ -15,10 +14,7 @@ import kotlinx.serialization.json.jsonPrimitive
  * attacker-controlled JSON before either a tree parse or native crypto.
  */
 internal const val MAX_EMBEDDED_EVENT_JSON_CHARS = 256 * 1024
-private const val MAX_EMBEDDED_TAGS = 2_000
-private const val MAX_EMBEDDED_TAG_PARTS = 100
 private val HEX_64 = Regex("^[0-9a-f]{64}$")
-private val HEX_128 = Regex("^[0-9a-f]{128}$")
 
 /**
  * Parses NIP-18 exactly once and makes its trust state explicit.
@@ -89,24 +85,9 @@ internal fun parseRepostInfo(
     )
 }
 
-private fun verifyEmbeddedEvent(event: EventDto): Boolean = verifyNostrEventFields(
-    id = event.id,
-    pubkey = event.pubkey,
-    createdAt = event.createdAt,
-    kind = event.kind,
-    tags = event.tags,
-    content = event.content,
-    sig = event.sig,
-)
+private fun verifyEmbeddedEvent(event: EventDto): Boolean = event.hasValidCanonicalSignature()
 
-private fun hasValidEmbeddedShape(event: EventDto): Boolean =
-    HEX_64.matches(event.id) &&
-        HEX_64.matches(event.pubkey) &&
-        HEX_128.matches(event.sig) &&
-        event.createdAt >= 0L &&
-        event.kind in 0..65_535 &&
-        event.tags.size <= MAX_EMBEDDED_TAGS &&
-        event.tags.all { it.isNotEmpty() && it.size <= MAX_EMBEDDED_TAG_PARTS }
+private fun hasValidEmbeddedShape(event: EventDto): Boolean = event.hasValidSignedEventShape()
 
 private fun embeddedMatchesWrapper(
     event: EventDto,
