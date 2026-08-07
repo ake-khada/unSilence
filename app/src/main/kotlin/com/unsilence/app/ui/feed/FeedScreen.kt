@@ -554,9 +554,12 @@ fun FeedScreen(
     articleRow?.let { row ->
         // Effective engagement target: for a kind-6/16 reposted article these route
         // to the ORIGINAL event (model.engagementId/pubkey), not the wrapper.
-        val model = remember(row.id, row.content, row.tags) { row.toEventModel() }
+        val model = remember(row.id) {
+            actionsViewModel.getEventModel(row.id) ?: row.toEventModel()
+        }
         ArticleReaderScreen(
             row             = row,
+            model           = model,
             onDismiss       = { articleRow = null },
             onNoteClick     = onNoteClick,
             onReact         = { actionsViewModel.react(model.engagementId, model.pubkey) },
@@ -606,6 +609,7 @@ fun FeedScreen(
         onMuteUser = actionsViewModel::muteUser,
         onReport = { row, type -> actionsViewModel.reportEvent(row.id, row.pubkey, type) },
         onDelete = { row -> actionsViewModel.deleteEvent(row.id, row.pubkey, row.relayUrl) },
+        eventModelProvider = actionsViewModel::getEventModel,
         relayProvenance = actionsViewModel::relayProvenance,
         onDismiss = { actionsRow = null },
     )
@@ -705,17 +709,4 @@ private fun FeedContentTabs(
             }
         }
     }
-}
-
-/**
- * Extract the first playable video URL from a FeedRow.
- * Uses imeta tags (MIME-based) then falls back to regex content extraction.
- */
-internal fun extractVideoUrl(row: FeedRow): String? {
-    // 1. Check imeta tags for video MIME types
-    val imetaVideo = com.unsilence.app.data.relay.ImetaParser.videos(row.tags).firstOrNull()?.url
-    if (imetaVideo != null) return imetaVideo
-
-    // 2. Fall back to regex match on content
-    return VIDEO_URL_REGEX.find(row.content)?.value
 }

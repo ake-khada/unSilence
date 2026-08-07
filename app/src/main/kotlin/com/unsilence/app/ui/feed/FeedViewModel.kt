@@ -34,6 +34,7 @@ import com.unsilence.app.data.relay.normalizeRelayUrl
 import com.unsilence.app.data.relay.wotLookupSnapshot
 import com.unsilence.app.data.relay.wotSubjectsForFeedRows
 import com.unsilence.app.data.model.ReportType
+import com.unsilence.app.data.model.RepostPayload
 import com.unsilence.app.data.repository.MuteListRepository
 import com.unsilence.app.data.repository.MuteResult
 import com.unsilence.app.data.repository.ReportRepository
@@ -282,8 +283,8 @@ class FeedViewModel @Inject constructor(
             val nowSec = System.currentTimeMillis() / 1000L
             val baseCandidates = events.asSequence()
                 .filterNot { memoryEventStore.isDeleted(it) }
-                .filter { !isMuted(it, safety.muteList) }
-                .filter { !exceedsHashtagCap(it, safety.hashtagCap) }
+                .filter { !isMuted(it, safety.muteList, memoryEventStore::getNostrEvent) }
+                .filter { !exceedsHashtagCap(it, safety.hashtagCap, memoryEventStore::getNostrEvent) }
                 .filter { matchesFeedFilterBeforeActivity(it, filter, nowSec) }
                 .filter { matchesContentFilter(it, cf) }
                 .filter { !hideSensitive || !it.hasContentWarning }
@@ -946,7 +947,10 @@ class FeedViewModel @Inject constructor(
                 val hideSensitive = sensitiveContentMode.value == SensitiveContentMode.HIDE
                 memoryEventStore.recentEventsWithDisplayableFloor(
                     kinds = kinds,
-                    isDisplayable = { e -> !isMuted(e, muteList) && (!hideSensitive || !e.hasContentWarning) },
+                    isDisplayable = { e ->
+                        !isMuted(e, muteList, memoryEventStore::getNostrEvent) &&
+                            (!hideSensitive || !e.hasContentWarning)
+                    },
                 )
             }
             is FeedType.SingleRelay -> memoryEventStore.eventsByRelay(type.url, kinds)
@@ -1080,7 +1084,7 @@ class FeedViewModel @Inject constructor(
             specificShowFilter &&
             (evt.kind == 6 || evt.kind == 16) &&
             repostInfo != null &&
-            (repostInfo.embeddedJson == null || !repostInfo.resolvedFromInner)
+            repostInfo.payload is RepostPayload.ReferenceOnly
         ) {
             val targetId = repostInfo.targetId ?: evt.rootId
             val targetEvent = targetId?.let(memoryEventStore::getNostrEvent)

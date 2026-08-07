@@ -1,6 +1,7 @@
 package com.unsilence.app.ui.feed
 
 import com.unsilence.app.data.model.EventModel
+import com.unsilence.app.data.model.RepostPayload
 import com.unsilence.app.data.model.Segment
 import com.unsilence.app.data.memory.EventStats
 import com.unsilence.app.domain.model.FeedFilter
@@ -48,8 +49,8 @@ internal fun matchesShowTypes(
 
     if (kind == 6 || kind == 16) {
         val repost = model?.repost ?: return false
-        val effective = if (repost.embeddedJson != null && repost.resolvedFromInner) {
-            // ContentParser already unwrapped the embedded event into this model.
+        val effective = if (repost.payload is RepostPayload.VerifiedEmbedded) {
+            // ContentParser unwrapped only a cryptographically verified inner event.
             ResolvedRepostTarget(content = "", model = model)
         } else {
             // A k/e/a tag alone only describes a reference. Until its target is

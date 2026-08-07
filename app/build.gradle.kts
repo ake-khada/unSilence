@@ -64,6 +64,17 @@ kotlin {
     }
 }
 
+// Quartz 1.05.1 contains Java-21 test/runtime classes. Keep AGP, compilation,
+// lint, R8, and the shipped bytecode on Java 17; only fork JVM Test workers
+// with the repo-local Java 21 toolchain so crypto boundaries are executable.
+val unitTestJavaLauncher = javaToolchains.launcherFor {
+    languageVersion.set(JavaLanguageVersion.of(21))
+}
+
+tasks.withType<Test>().configureEach {
+    javaLauncher.set(unitTestJavaLauncher)
+}
+
 dependencies {
     // Compose
     implementation(platform(libs.compose.bom))
@@ -131,4 +142,7 @@ dependencies {
     testImplementation("junit:junit:4.13.2")
     testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.9.0")
     testImplementation("app.cash.turbine:turbine:1.2.0")
+    // Quartz resolves the Android JNI binding for the APK. JVM crypto tests
+    // additionally need ACINQ's desktop natives at test runtime only.
+    testRuntimeOnly("fr.acinq.secp256k1:secp256k1-kmp-jni-jvm:0.22.0")
 }

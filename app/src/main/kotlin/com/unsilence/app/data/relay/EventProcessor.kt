@@ -10,8 +10,6 @@ import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
-import kotlinx.serialization.SerialName
-import kotlinx.serialization.Serializable
 import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
@@ -20,54 +18,6 @@ import com.unsilence.app.data.model.buildVideoRenderModels
 import java.util.concurrent.ConcurrentHashMap
 import javax.inject.Inject
 import javax.inject.Singleton
-
-/**
- * Wire DTO for the inner event object inside `["EVENT", subId, {...}]`.
- *
- * Decoded via kotlinx-serialization's streaming decoder
- * ([NostrJson.decodeFromString]) directly into final-shape primitives —
- * no intermediate JsonObject / JsonArray tree, no per-field jsonPrimitive
- * allocation, no second pass to convert tags from JsonArray to
- * List<List<String>>.
- *
- * NostrJson has ignoreUnknownKeys = true so relay-specific extras (e.g.
- * NIP-19 'a' tags, custom moderation flags) don't break decode.
- */
-@Serializable
-internal data class EventDto(
-    val id: String,
-    val pubkey: String,
-    val kind: Int,
-    val content: String,
-    @SerialName("created_at") val createdAt: Long,
-    val tags: List<List<String>> = emptyList(),
-    val sig: String,
-)
-
-internal fun EventDto.toNostrEvent(relayUrl: String): NostrEvent {
-    val (replyToId, rootId) = when (kind) {
-        1111 -> parseNip22Threading(tags)
-        1, 6, 16, 9734, 9735, 20, 21, 22, 34235, 34236, 30023 -> parseNip10Threading(tags)
-        else -> Pair(null, null)
-    }
-    val (hasCw, cwReason) = effectiveContentWarning(kind, content, tags)
-    return NostrEvent(
-        id = id,
-        pubkey = pubkey,
-        kind = kind,
-        content = content,
-        createdAt = createdAt,
-        tags = tags,
-        sig = sig,
-        relayUrl = relayUrl,
-        replyToId = replyToId,
-        rootId = rootId,
-        hasContentWarning = hasCw,
-        contentWarningReason = cwReason,
-        firstSeenAt = System.currentTimeMillis(),
-        relaysSeen = ConcurrentHashMap.newKeySet<String>().apply { add(relayUrl) },
-    )
-}
 
 private fun NostrEvent.forRelay(relayUrl: String): NostrEvent {
     if (this.relayUrl == relayUrl) return this
@@ -380,8 +330,9 @@ class EventProcessor @Inject constructor(
         // Schnorr signature + id-hash verification happens before either
         // consumer sees the event. A bad copy cannot poison the cache or dedup.
         if (!verifySig(event)) return
+        val trustedEvent = event.withParsedRepostMetadata()
 
-        val canonical = verifiedEvents.putIfAbsent(event.id, event) ?: event
+        val canonical = verifiedEvents.putIfAbsent(trustedEvent.id, trustedEvent) ?: trustedEvent
         trimVerifiedCacheIfNeeded()
         val relayed = canonical.forRelay(relayUrl)
         if (subscriptionId != null) {
@@ -422,7 +373,7 @@ class EventProcessor @Inject constructor(
         }
         if (dto.id != eventId) return null
         val event = dto.toNostrEvent(relayUrl)
-        return if (verifySig(event)) event else null
+        return if (verifySig(event)) event.withParsedRepostMetadata() else null
     }
 
     // ── Dedup helpers ─────────────────────────────────────────────────────────
@@ -656,7 +607,12 @@ class EventProcessor @Inject constructor(
             if (memoryEventStore.getNostrEvent(event.id) == null) continue
             if (event.kind in setOf(1, 6, 16, 20, 21, 22, 34235, 34236)) {
                 val imetaMedia = ImetaParser.parseFromList(event.tags)
-                val models = buildVideoRenderModels(event.kind, event.content, event.tags)
+                val models = buildVideoRenderModels(
+                    event.kind,
+                    event.content,
+                    event.tags,
+                    event.repostInfo,
+                )
                 memoryEventStore.putVideoRenderModels(event.id, models)
                 val imageDims = imetaMedia
                     .filter { it.mimeType?.startsWith("image/") == true && it.width != null && it.height != null && it.height != 0 }
@@ -731,39 +687,4 @@ internal fun parseNip22Threading(tags: List<List<String>>): Pair<String?, String
         parentKind == 1111 -> Pair(parentId, null)
         else -> Pair(parentId, null)
     }
-}
-
-// ── NIP-36: content-warning (top-level — shared by EventProcessor + Subscription) ──
-
-internal fun parseContentWarning(tags: List<List<String>>): Pair<Boolean, String?> {
-    val cwTag = tags.firstOrNull { it.isNotEmpty() && it[0] == "content-warning" }
-        ?: return Pair(false, null)
-    val reason = cwTag.getOrNull(1)?.takeIf { it.isNotBlank() }
-    return Pair(true, reason)
-}
-
-/**
- * Effective NIP-36 content-warning, repost-aware. For kind-6/16 reposts that
- * embed the target event as JSON in `content`, the wrapper's own tags carry no
- * `content-warning` (it lives on the inner event), so [parseContentWarning] on
- * the wrapper would miss a sensitive target. This ORs the inner event's warning
- * in so a repost of sensitive content is itself flagged sensitive — the flag the
- * feed hide-filter and card blur/hide gates consume. Wrapper reason wins, else
- * inner. Shared by EventProcessor + Subscription (same package, top-level).
- */
-internal fun effectiveContentWarning(
-    kind: Int,
-    content: String,
-    tags: List<List<String>>,
-): Pair<Boolean, String?> {
-    val (wrapperCw, wrapperReason) = parseContentWarning(tags)
-    if ((kind != 6 && kind != 16) || content.isBlank()) return wrapperCw to wrapperReason
-    val inner = runCatching {
-        val obj = NostrJson.parseToJsonElement(content).jsonObject
-        val innerTags = obj["tags"]?.jsonArray?.map { tagEl ->
-            tagEl.jsonArray.map { it.jsonPrimitive.content }
-        } ?: emptyList()
-        parseContentWarning(innerTags)
-    }.getOrNull() ?: (false to null)
-    return (wrapperCw || inner.first) to (wrapperReason ?: inner.second)
 }

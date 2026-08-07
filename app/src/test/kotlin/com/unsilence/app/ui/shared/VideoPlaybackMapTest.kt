@@ -176,11 +176,12 @@ class VideoPlaybackMapTest {
     }
 
     @Test
-    fun `embedded repost (non-blank content) contributes no rootId candidate`() {
-        // Embedded-JSON reposts render their target inline; their own models are
-        // built from the embedded content, so they must not borrow via rootId.
+    fun `non-blank reference envelope still contributes its rootId candidate`() {
+        // A structurally JSON-looking envelope may still be reference-only
+        // after signature verification. Candidate discovery must not key trust
+        // off whether the wrapper content happens to be non-blank.
         val ids = videoSourceCandidateIds(repostRow(6, """{"kind":1}""", "target-id"), cachedModel = null)
-        assertTrue(ids.isEmpty())
+        assertEquals(listOf("target-id"), ids)
     }
 
     @Test

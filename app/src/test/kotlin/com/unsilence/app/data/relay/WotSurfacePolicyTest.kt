@@ -519,6 +519,7 @@ class WotSurfacePolicyTest {
             sourcePubkey = pubkey,
             kind = 1,
             effectiveKind = 1,
+            displayContent = "",
             articleContent = null,
             createdAt = 1,
             sourceCreatedAt = 1,

@@ -42,6 +42,7 @@ import com.unsilence.app.data.model.ContentParser
 import com.unsilence.app.data.model.EventModel
 import com.unsilence.app.data.model.Segment
 import com.unsilence.app.data.model.VideoRenderModel
+import com.unsilence.app.data.model.resolveDisplayModel
 import com.unsilence.app.data.relay.FeedWotDisplayMode
 import com.unsilence.app.data.relay.OgMetadata
 import com.unsilence.app.ui.shared.CardRole
@@ -118,10 +119,9 @@ internal fun QuoteCard(
             value = QuoteResolution(unresolved = true)
             return@produceState
         }
-        val auth = lookupProfile?.invoke(ev.pubkey)
         // Try cached EventModel first, fall back to on-the-fly parse
         val cachedModel = lookupModel?.invoke(ev.id)
-        val model = cachedModel ?: runCatching {
+        val sourceModel = cachedModel ?: runCatching {
             ContentParser.parse(
                 id = ev.id,
                 pubkey = ev.pubkey,
@@ -136,16 +136,25 @@ internal fun QuoteCard(
                 contentWarningReason = ev.contentWarningReason,
             )
         }.getOrNull()
+        // A quoted event may itself be a reference-only repost. Resolve only
+        // independently verified models already in MES; cycles/missing targets
+        // become the existing unavailable state, never blank protocol cards.
+        val model = sourceModel?.resolveDisplayModel { id -> lookupModel?.invoke(id) }
+        val auth = model?.pubkey?.let { lookupProfile?.invoke(it) }
+            ?: lookupProfile?.invoke(ev.pubkey)
         value = QuoteResolution(ev, auth, model)
     }
 
     // NIP-36: the quoted TARGET's own content-warning (separate resolved event).
-    val targetSensitive = quoteData.event?.hasContentWarning == true
+    val targetSensitive = quoteData.event?.hasContentWarning == true ||
+        quoteData.model?.warnings?.hasContentWarning == true
     val targetReason = quoteData.event?.contentWarningReason
+        ?: quoteData.model?.warnings?.reason
 
     // A quoted event that resolves to a long-form → render the canonical article
     // card (not the embedded markdown body). Same component as feed/naddr quotes.
     val resolvedModel = quoteData.model
+    val quoteNavigationId = resolvedModel?.navigateId ?: segment.eventId
     val resolvedDTag = resolvedModel?.article?.dTag
     if (resolvedModel?.effectiveKind == 30023 && resolvedDTag != null && nestDepth < 1) {
         // EmbeddedArticleCard self-gates via its own EventCard (using the
@@ -185,33 +194,36 @@ internal fun QuoteCard(
             .fillMaxWidth()
             .border(0.5.dp, Color.White.copy(alpha = 0.08f), RoundedCornerShape(quoteCornerRadius))
             .clip(RoundedCornerShape(quoteCornerRadius))
-            .pointerInput(segment.eventId) {
+            .pointerInput(quoteNavigationId) {
                 awaitEachGesture {
                     awaitFirstDown(requireUnconsumed = false)
                     val up = waitForUpOrCancellation()
                     if (up != null && !up.isConsumed) {
                         up.consume()
-                        onNoteClick(segment.eventId)
+                        onNoteClick(quoteNavigationId)
                     }
                 }
             }
             .padding(quotePadding),
     ) {
         val loadedEvent = quoteData.event
-        val liveAuthor = loadedEvent?.pubkey?.let { pubkey ->
+        val eventModel = quoteData.model
+        val resolvedPubkey = eventModel?.pubkey ?: loadedEvent?.pubkey
+        val liveAuthor = resolvedPubkey?.let { pubkey ->
             collectProfileAsState(pubkey, profileFlow)
         }
         val author = liveAuthor ?: quoteData.author
-        val eventModel = quoteData.model
         if (loadedEvent != null) {
-            LaunchedEffect(loadedEvent.pubkey) {
-                onWotSubjectsVisible(listOf(loadedEvent.pubkey))
+            val displayPubkey = requireNotNull(resolvedPubkey)
+            val displayCreatedAt = eventModel?.createdAt ?: loadedEvent.createdAt
+            LaunchedEffect(displayPubkey) {
+                onWotSubjectsVisible(listOf(displayPubkey))
             }
             Column {
                 // Header: avatar + name + timestamp
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     AvatarImage(
-                        pubkey        = loadedEvent.pubkey,
+                        pubkey        = displayPubkey,
                         picture       = author?.picture,
                         modifier      = Modifier.size(avatarSize),
                         sizeDp        = avatarSize,
@@ -222,7 +234,7 @@ internal fun QuoteCard(
                     Text(
                         text     = author?.displayName?.takeIf { it.isNotBlank() }
                             ?: author?.name?.takeIf { it.isNotBlank() && !looksLikeHexPubkey(it) }
-                            ?: "${loadedEvent.pubkey.take(6)}…${loadedEvent.pubkey.takeLast(4)}",
+                            ?: "${displayPubkey.take(6)}…${displayPubkey.takeLast(4)}",
                         color    = Color.White.copy(alpha = 0.7f),
                         fontWeight = FontWeight.SemiBold,
                         fontSize = AppType.bodySmall,
@@ -232,9 +244,9 @@ internal fun QuoteCard(
                     )
                     Spacer(Modifier.width(6.dp))
                     WotFeedMetaTimestamp(
-                        lookup = wotLookup?.invoke(loadedEvent.pubkey),
+                        lookup = wotLookup?.invoke(displayPubkey),
                         mode = feedWotDisplayMode,
-                        timestamp = relativeTime(loadedEvent.createdAt),
+                        timestamp = relativeTime(displayCreatedAt),
                         timestampColor = TextSecondary,
                     )
                 }
@@ -265,7 +277,7 @@ internal fun QuoteCard(
                         // Inline autoplay is wired, but fullscreen is intentionally not:
                         // the parent row's openFullscreen(row.id) would bind to the
                         // parent's own URL for own+quote rows. Documented, not "fixed".
-                        onOpenFullscreen    = { onNoteClick(segment.eventId) },
+                        onOpenFullscreen    = { onNoteClick(eventModel.navigateId) },
                         isMuted             = isMuted,
                         onToggleMute        = onToggleMute,
                         thumbnailCache      = thumbnailCache,
@@ -296,7 +308,7 @@ internal fun QuoteCard(
                             segments      = textSegments,
                             lookupProfile = lookupProfile,
                             onAuthorClick = onAuthorClick,
-                            onTextClick   = { onNoteClick(segment.eventId) },
+                            onTextClick   = { onNoteClick(eventModel.navigateId) },
                             maxLines      = 2,
                             overflow      = TextOverflow.Ellipsis,
                         )
@@ -307,8 +319,10 @@ internal fun QuoteCard(
                             onClick = { onNoteClick(segment.eventId) },
                         )
                     }
-                } else {
-                    // EventModel parse failed — show raw content as fallback
+                } else if (loadedEvent.kind != 6 && loadedEvent.kind != 16) {
+                    // A verified native event may safely fall back to its signed
+                    // body if model construction failed. A repost envelope is
+                    // protocol JSON, never user-visible content.
                     if (loadedEvent.content.isNotBlank()) {
                         NostrRichText(
                             content       = loadedEvent.content,
@@ -319,6 +333,12 @@ internal fun QuoteCard(
                             overflow      = TextOverflow.Ellipsis,
                         )
                     }
+                } else {
+                    Text(
+                        text = "Reposted post unavailable",
+                        color = TextSecondary,
+                        fontSize = AppType.footnote,
+                    )
                 }
                 }
             }

@@ -1,5 +1,10 @@
 package com.unsilence.app.data.model
 
+import com.unsilence.app.data.relay.NostrJson
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.long
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
@@ -30,6 +35,7 @@ class ContentParserTest {
         rootId: String? = null,
         hasContentWarning: Boolean = false,
         contentWarningReason: String? = null,
+        trustedEmbedded: Boolean = false,
     ): EventModel = ContentParser.parse(
         id = id,
         pubkey = pubkey,
@@ -42,7 +48,41 @@ class ContentParserTest {
         rootId = rootId,
         hasContentWarning = hasContentWarning,
         contentWarningReason = contentWarningReason,
+        preparsedRepost = if (trustedEmbedded) trustedRepost(content, tagsJson) else null,
     )
+
+    /** Existing rendering fixtures deliberately avoid native crypto. */
+    private fun trustedRepost(content: String, wrapperTagsJson: String): RepostInfo {
+        val inner = NostrJson.parseToJsonElement(content).jsonObject
+        val innerId = inner["id"]?.jsonPrimitive?.content ?: "inner"
+        val innerPubkey = inner["pubkey"]!!.jsonPrimitive.content
+        val innerTags = inner["tags"]?.jsonArray?.map { row ->
+            row.jsonArray.map { it.jsonPrimitive.content }
+        }.orEmpty()
+        val wrapperTags = NostrJson.parseToJsonElement(wrapperTagsJson).jsonArray.map { row ->
+            row.jsonArray.map { it.jsonPrimitive.content }
+        }
+        val e = wrapperTags.firstOrNull { it.getOrNull(0) == "e" }
+        val a = wrapperTags.firstOrNull { it.getOrNull(0) == "a" || it.getOrNull(0) == "A" }
+        return RepostInfo(
+            targetId = e?.getOrNull(1) ?: innerId,
+            relayHint = e?.getOrNull(2)?.takeIf { it.isNotBlank() },
+            addressCoordinate = a?.getOrNull(1),
+            addressRelayHint = a?.getOrNull(2)?.takeIf { it.isNotBlank() },
+            targetAuthorHint = innerPubkey,
+            proxyUrl = null,
+            payload = RepostPayload.VerifiedEmbedded(
+                VerifiedRepostEvent(
+                    id = innerId,
+                    pubkey = innerPubkey,
+                    kind = inner["kind"]?.jsonPrimitive?.content?.toIntOrNull() ?: 1,
+                    content = inner["content"]?.jsonPrimitive?.content.orEmpty(),
+                    createdAt = inner["created_at"]?.jsonPrimitive?.long ?: 0L,
+                    tags = innerTags,
+                ),
+            ),
+        )
+    }
 
     private fun parseStructured(
         content: String,
@@ -391,23 +431,95 @@ class ContentParserTest {
             content = embeddedJson,
             kind = 6,
             tagsJson = """[["e","target-id","wss://hint.relay"]]""",
+            trustedEmbedded = true,
         )
         assertNotNull(model.repost)
         assertEquals(innerPk, model.pubkey)
         assertEquals(999L, model.createdAt)
+        assertEquals("reposted text", model.displayContent)
         assertTrue(model.segments.any { it is Segment.Text && it.text == "reposted text" })
     }
 
     @Test
     fun `kind 6 with empty content produces repost from e-tag`() {
+        val targetId = "e".repeat(64)
         val model = parse(
             content = "",
             kind = 6,
-            tagsJson = """[["e","target-abc","wss://relay.hint"]]""",
+            tagsJson = """[["e","$targetId","wss://relay.hint"]]""",
         )
         assertNotNull(model.repost)
-        assertEquals("target-abc", model.repost!!.targetId)
+        assertEquals(targetId, model.repost!!.targetId)
         assertEquals("wss://relay.hint", model.repost!!.relayHint)
+    }
+
+    @Test
+    fun `id-only repost JSON is a reference and never visible post text`() {
+        val targetId = "d".repeat(64)
+        val claimedAuthor = "b".repeat(64)
+        val wrapperAuthor = "a".repeat(64)
+        val model = parse(
+            content = """{"id":"$targetId"}""",
+            kind = 6,
+            pubkey = wrapperAuthor,
+            tagsJson = """[["e","$targetId","wss://relay.hint"],["p","$claimedAuthor"]]""",
+        )
+
+        assertEquals(RepostPayload.ReferenceOnly, model.repost?.payload)
+        assertEquals(targetId, model.navigateId)
+        assertEquals(wrapperAuthor, model.pubkey)
+        assertEquals("", model.displayContent)
+        assertTrue(model.segments.isEmpty())
+        assertFalse(model.segments.filterIsInstance<Segment.Text>().any { it.text.contains("\"id\"") })
+    }
+
+    @Test
+    fun `reference-only display model resolves verified target and fails closed on cycles`() {
+        val targetId = "e".repeat(64)
+        val wrapper = parse(
+            content = """{"id":"$targetId"}""",
+            kind = 6,
+            id = "wrapper",
+            tagsJson = """[["e","$targetId"]]""",
+        )
+        val target = parse(content = "trusted target text", id = targetId)
+
+        assertEquals(target, wrapper.resolveDisplayModel { id -> target.takeIf { it.id == id } })
+        assertEquals("trusted target text", wrapper.resolveDisplayModel { target }?.displayContent)
+        assertNull(wrapper.resolveDisplayModel { wrapper })
+        assertNull(wrapper.resolveDisplayModel { null })
+    }
+
+    @Test
+    fun `reference-only display resolution is bounded across nested reposts`() {
+        val middleId = "c".repeat(64)
+        val targetId = "d".repeat(64)
+        val wrapper = parse(
+            content = "",
+            kind = 16,
+            id = "outer-wrapper",
+            tagsJson = """[["e","$middleId"],["k","16"]]""",
+        )
+        val middle = parse(
+            content = "",
+            kind = 16,
+            id = middleId,
+            tagsJson = """[["e","$targetId"],["k","1"]]""",
+        )
+        val target = parse(content = "authenticated final target", id = targetId)
+        val models = mapOf(middleId to middle, targetId to target)
+
+        assertEquals(target, wrapper.resolveDisplayModel(maxDepth = 3, models::get))
+        assertNull(wrapper.resolveDisplayModel(maxDepth = 2, models::get))
+        assertNull(
+            middle.resolveDisplayModel { id ->
+                when (id) {
+                    targetId -> wrapper
+                    middleId -> middle
+                    else -> null
+                }
+            },
+        )
     }
 
     @Test
@@ -502,7 +614,7 @@ class ContentParserTest {
     fun `kind 6 wrapping a 30023 detects article from inner tags`() {
         val innerTags = """[["title","Wrapped Long-form"],["summary","sum"],["image","https://i/x.jpg"],["d","wrapped-d"]]"""
         val embedded = """{"id":"inner","pubkey":"${"b".repeat(64)}","kind":30023,"created_at":999,"content":"# Heading\n\nbody","tags":$innerTags}"""
-        val model = parse(content = embedded, kind = 6, tagsJson = """[["e","target-id"]]""")
+        val model = parse(content = embedded, kind = 6, tagsJson = """[["e","target-id"]]""", trustedEmbedded = true)
         assertEquals(30023, model.effectiveKind)
         assertNotNull(model.article)
         assertEquals("Wrapped Long-form", model.article!!.title)
@@ -519,7 +631,7 @@ class ContentParserTest {
         val innerPk = "b".repeat(64)
         val innerTags = """[["title","T"],["d","wrapped-d"]]"""
         val embedded = """{"id":"inner","pubkey":"$innerPk","kind":30023,"created_at":999,"content":"body","tags":$innerTags}"""
-        val model = parse(content = embedded, kind = 6, rootId = "target-id", tagsJson = """[["e","target-id"]]""")
+        val model = parse(content = embedded, kind = 6, rootId = "target-id", tagsJson = """[["e","target-id"]]""", trustedEmbedded = true)
         assertEquals(30023, model.effectiveKind)
         assertEquals(innerPk, model.pubkey)               // target author (not reposter)
         assertEquals("target-id", model.engagementId)     // rootId for a repost
@@ -531,7 +643,7 @@ class ContentParserTest {
     fun `kind 16 wrapping a 30023 detects article from inner tags`() {
         val innerTags = """[["title","Generic Reposted Article"],["d","gen-d"]]"""
         val embedded = """{"id":"inner","pubkey":"${"b".repeat(64)}","kind":30023,"created_at":999,"content":"body","tags":$innerTags}"""
-        val model = parse(content = embedded, kind = 16, tagsJson = """[["e","target-id"],["k","30023"]]""")
+        val model = parse(content = embedded, kind = 16, tagsJson = """[["e","target-id"],["k","30023"]]""", trustedEmbedded = true)
         assertEquals(30023, model.effectiveKind)
         assertNotNull(model.article)
         assertEquals("Generic Reposted Article", model.article!!.title)
@@ -541,7 +653,7 @@ class ContentParserTest {
     @Test
     fun `kind 16 wrapping a kind-1 is a note repost not an article`() {
         val embedded = """{"id":"inner","pubkey":"${"b".repeat(64)}","kind":1,"created_at":999,"content":"just a note","tags":[]}"""
-        val model = parse(content = embedded, kind = 16, tagsJson = """[["e","target-id"],["k","1"]]""")
+        val model = parse(content = embedded, kind = 16, tagsJson = """[["e","target-id"],["k","1"]]""", trustedEmbedded = true)
         assertEquals(1, model.effectiveKind)
         assertNull(model.article)
         assertNotNull(model.repost)
@@ -550,15 +662,26 @@ class ContentParserTest {
 
     @Test
     fun `kind 16 with no embedded JSON but k=30023 tag has no blank article shell`() {
-        val model = parse(content = "", kind = 16, tagsJson = """[["e","target-abc","wss://hint"],["k","30023"]]""")
+        val targetId = "e".repeat(64)
+        val model = parse(content = "", kind = 16, tagsJson = """[["e","$targetId","wss://hint"],["k","30023"]]""")
         assertEquals(30023, model.effectiveKind) // kind still resolved from the k tag
         assertNotNull(model.repost)
-        assertEquals("target-abc", model.repost!!.targetId)
+        assertEquals(targetId, model.repost!!.targetId)
         // No embedded JSON and no inner article tags → no real article data → must NOT
         // emit a blank ArticleInfo shell (which would route an empty card to
         // ArticleLayout). Falls through to the repost note stub until the a-tag/naddr
         // resolver (#5) can fetch the real article.
         assertNull(model.article)
+    }
+
+    @Test
+    fun `out-of-range reference kind hint falls back to a note`() {
+        val targetId = "e".repeat(64)
+        val negative = parse("", kind = 16, tagsJson = """[["e","$targetId"],["k","-1"]]""")
+        val oversized = parse("", kind = 16, tagsJson = """[["e","$targetId"],["k","65536"]]""")
+
+        assertEquals(1, negative.effectiveKind)
+        assertEquals(1, oversized.effectiveKind)
     }
 
     @Test
@@ -578,7 +701,7 @@ class ContentParserTest {
     @Test
     fun `kind 6 note-repost without inner kind resolves effective kind 1`() {
         val embedded = """{"id":"inner","pubkey":"${"b".repeat(64)}","content":"reposted text","created_at":999,"tags":[]}"""
-        val model = parse(content = embedded, kind = 6, tagsJson = """[["e","target-id"]]""")
+        val model = parse(content = embedded, kind = 6, tagsJson = """[["e","target-id"]]""", trustedEmbedded = true)
         assertEquals(1, model.effectiveKind)
         assertNull(model.article)
         assertNotNull(model.repost)
@@ -719,7 +842,7 @@ class ContentParserTest {
 
         assertNull(model.repost?.targetId)
         assertEquals("34236:$author:clip", model.repost?.addressCoordinate)
-        assertEquals(author, model.repost?.targetAuthorPubkey)
+        assertEquals(author, model.repost?.targetAuthorHint)
     }
 
     @Test
@@ -742,7 +865,7 @@ class ContentParserTest {
         val innerPk = "b".repeat(64)
         val embedded = """{"id":"inner","pubkey":"$innerPk","kind":21,"content":"","created_at":900,""" +
             """"tags":[["imeta","url https://vid.host/clip.mp4","m video/mp4","dim 1920x1080","image https://vid.host/poster.jpg"]]}"""
-        val model = parse(content = embedded, kind = 6, tagsJson = """[["e","inner"]]""")
+        val model = parse(content = embedded, kind = 6, tagsJson = """[["e","inner"]]""", trustedEmbedded = true)
         assertEquals(21, model.effectiveKind)
         val video = model.segments.filterIsInstance<Segment.Video>().firstOrNull()
         assertNotNull("reposted kind-21 must surface its inner imeta video", video)
@@ -756,7 +879,7 @@ class ContentParserTest {
         val innerPk = "c".repeat(64)
         val embedded = """{"id":"inner","pubkey":"$innerPk","kind":21,"content":"","created_at":900,""" +
             """"tags":[["imeta","url https://vid.host/clip.mp4","m video/mp4","dim 1280x720"]]}"""
-        val model = parse(content = embedded, kind = 16, tagsJson = """[["e","inner"],["k","21"]]""")
+        val model = parse(content = embedded, kind = 16, tagsJson = """[["e","inner"],["k","21"]]""", trustedEmbedded = true)
         assertEquals(21, model.effectiveKind)
         val video = model.segments.filterIsInstance<Segment.Video>().firstOrNull()
         assertNotNull("generic-reposted kind-21 must surface its inner imeta video", video)
@@ -769,7 +892,7 @@ class ContentParserTest {
         val innerPk = "d".repeat(64)
         val embedded = """{"id":"inner","pubkey":"$innerPk","kind":20,"content":"","created_at":900,""" +
             """"tags":[["imeta","url https://img.host/photo.jpg","dim 800x600"]]}"""
-        val model = parse(content = embedded, kind = 16, tagsJson = """[["e","inner"],["k","20"]]""")
+        val model = parse(content = embedded, kind = 16, tagsJson = """[["e","inner"],["k","20"]]""", trustedEmbedded = true)
         assertEquals(20, model.effectiveKind)
         val image = model.segments.filterIsInstance<Segment.Image>().firstOrNull()
         assertNotNull("generic-reposted kind-20 must surface its inner imeta image", image)
@@ -803,13 +926,14 @@ class ContentParserTest {
 
     @Test
     fun `navigateId is targetId for kind 6`() {
+        val originalId = "f".repeat(64)
         val model = parse(
             content = "",
             kind = 6,
             id = "repost-wrapper",
-            tagsJson = """[["e","original-id"]]""",
+            tagsJson = """[["e","$originalId"]]""",
         )
-        assertEquals("original-id", model.navigateId)
+        assertEquals(originalId, model.navigateId)
     }
 
     @Test
@@ -927,7 +1051,7 @@ class ContentParserTest {
     @Test
     fun `reposted kind-1 note with a quote line emits BlockQuote`() {
         val embedded = """{"id":"inner","pubkey":"${"b".repeat(64)}","kind":1,"created_at":999,"content":"> quoted","tags":[]}"""
-        val model = parse(content = embedded, kind = 6, tagsJson = """[["e","target-id"]]""")
+        val model = parse(content = embedded, kind = 6, tagsJson = """[["e","target-id"]]""", trustedEmbedded = true)
         assertEquals(1, model.effectiveKind)
         assertTrue("reposted kind-1 supports blockquotes", model.segments.any { it is Segment.BlockQuote })
     }

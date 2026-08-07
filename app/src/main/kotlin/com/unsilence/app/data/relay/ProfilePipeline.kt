@@ -375,8 +375,9 @@ class ProfilePipeline @Inject constructor(
             extractETagIds(event.tags).forEach {
                 if (anchored.add(it)) count++
             }
-            // nostr:nevent/note URIs in content (quoted notes)
-            extractQuotedEventIds(event.content).forEach {
+            // Only authenticated user content may drive reference hydration.
+            // A signed repost wrapper can contain arbitrary unverified JSON.
+            event.authenticatedContentOrNull()?.let(::extractQuotedEventIds).orEmpty().forEach {
                 if (anchored.add(it)) count++
             }
             // Thread parent/root IDs
@@ -506,8 +507,10 @@ class ProfilePipeline @Inject constructor(
                     addReference(id, listOfNotNull(extractRepostTargetRelay(event.tags)))
                 }
             }
-            // Quoted event IDs from nostr:nevent/note URIs in content
-            extractQuotedEventIds(event.content).forEach { addReference(it) }
+            // Quoted IDs from authenticated content only. Never let an invalid
+            // embedded envelope manufacture arbitrary fetches.
+            event.authenticatedContentOrNull()?.let(::extractQuotedEventIds).orEmpty()
+                .forEach { addReference(it) }
             // Thread parent/root IDs
             event.replyToId?.let { addReference(it) }
             event.rootId?.let { addReference(it) }

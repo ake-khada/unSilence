@@ -34,8 +34,7 @@ class EventProcessorInvariantsTest {
     private lateinit var store: MemoryEventStore
     private lateinit var processor: EventProcessor
 
-    /** Always-pass stub — tests verify state machine behavior, not crypto.
-     *  Real signature verification is covered by SignatureVerifierTest. */
+    /** Always-pass stub: these fixtures isolate processor state-machine behavior. */
     private val passVerifier = object : SignatureVerifier() {
         override fun verify(event: NostrEvent): Boolean = true
     }

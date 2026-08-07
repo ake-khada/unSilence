@@ -9,9 +9,11 @@ import androidx.compose.runtime.Immutable
  * cache. Composables read this directly — no per-recomposition parsing.
  *
  * The pubkey/createdAt fields are EFFECTIVE values:
- *   - For kind != 6: same as the raw event
- *   - For kind == 6: the boosted author's pubkey/createdAt (from embedded JSON
- *     or fetched target event)
+ *   - For kind != 6/16: same as the raw event
+ *   - For a verified embedded repost: the signed inner event's values
+ *   - For a reference-only repost: the wrapper values until the independently
+ *     fetched target is available. Unverified `p` tags are routing hints, never
+ *     author identity.
  *
  * sourcePubkey/sourceCreatedAt preserve the wrapper values for displaying the
  * "X boosted · 2h ago" header on reposts.
@@ -19,10 +21,21 @@ import androidx.compose.runtime.Immutable
 @Immutable
 data class EventModel(
     val id: String,
-    val pubkey: String,                  // EFFECTIVE: kind-6 unwraps to inner author
+    val pubkey: String,                  // EFFECTIVE: verified 6/16 unwraps to inner author
     val sourcePubkey: String,            // RAW: kind-6 = the reposter
     val kind: Int,                       // RAW outer kind (provenance: 6/16 for reposts)
     val effectiveKind: Int,              // wrapped target's kind for 6/16; else == kind. Drives detection/routing
+    /**
+     * Authenticated user-visible body. For ordinary events this is the outer
+     * content; for a verified repost it is the signed inner content; for a
+     * reference-only repost it is empty until the independently verified
+     * target is resolved. This is the single seam for copy/preview/summary UI:
+     * callers must never fall back to a kind-6/16 envelope's raw JSON.
+     *
+     * This retains the same String instance already owned by the source event;
+     * it does not allocate a second copy of note bodies.
+     */
+    val displayContent: String,
     val articleContent: String?,         // unwrapped inner markdown for the article reader body; null for non-articles (avoids a 3rd copy of every note's text)
     val createdAt: Long,                 // EFFECTIVE
     val sourceCreatedAt: Long,           // RAW: kind-6 wrapper createdAt
@@ -40,6 +53,27 @@ data class EventModel(
     val poll: PollInfo? = null,
     val truncated: Boolean = false,      // content/segments capped (spam-post DoS bound) → show chip
 )
+
+/**
+ * Follows reference-only reposts through independently verified MES models.
+ * A cycle, missing target, or excessive nesting fails closed instead of ever
+ * exposing the wrapper envelope as content.
+ */
+fun EventModel.resolveDisplayModel(
+    maxDepth: Int = 8,
+    modelProvider: (String) -> EventModel?,
+): EventModel? {
+    var current = this
+    val visited = HashSet<String>(maxDepth.coerceAtLeast(1))
+    repeat(maxDepth.coerceAtLeast(1)) {
+        if (!visited.add(current.id)) return null
+        val repostInfo = current.repost
+        if (repostInfo?.payload !is RepostPayload.ReferenceOnly) return current
+        val targetId = repostInfo.targetId ?: return null
+        current = modelProvider(targetId) ?: return null
+    }
+    return null
+}
 
 @Immutable
 data class PollOption(
@@ -133,15 +167,38 @@ data class ThreadRefs(
     val rootId: String?,
 )
 
+/** A complete inner event whose canonical id and Schnorr signature were verified. */
+@Immutable
+data class VerifiedRepostEvent(
+    val id: String,
+    val pubkey: String,
+    val kind: Int,
+    val content: String,
+    val createdAt: Long,
+    val tags: List<List<String>>,
+)
+
 /**
- * Metadata about a kind-6 repost.
+ * The trust state of a NIP-18 payload. This sealed shape prevents the previous
+ * impossible state where arbitrary JSON was marked both "embedded" and
+ * "resolved" even though required event fields were absent.
+ */
+@Immutable
+sealed interface RepostPayload {
+    @Immutable
+    data class VerifiedEmbedded(val event: VerifiedRepostEvent) : RepostPayload
+
+    /** Empty, malformed, oversized, mismatched, or cryptographically invalid content. */
+    data object ReferenceOnly : RepostPayload
+}
+
+/**
+ * Metadata about a kind-6/16 repost.
  *
- * - [embeddedJson]: present when the repost includes the inner event's JSON in
- *   `content` (NIP-18 standard). null for bridge events (mostr.pub) that use
- *   only an e-tag reference.
- * - [resolvedFromInner]: true when pubkey/createdAt came from the embedded
- *   JSON. False means we fell back to the wrapper's pubkey (rare, shouldn't
- *   happen for properly-formed reposts).
+ * [targetAuthorHint] may come from a wrapper `p`/`a` tag. It is useful only for
+ * outbox routing and target lookup; it must never be displayed or scored as a
+ * verified identity. A trusted author is available only through
+ * [RepostPayload.VerifiedEmbedded.event].
  */
 @Immutable
 data class RepostInfo(
@@ -149,10 +206,9 @@ data class RepostInfo(
     val relayHint: String?,
     val addressCoordinate: String?,
     val addressRelayHint: String?,
-    val targetAuthorPubkey: String?,
+    val targetAuthorHint: String?,
     val proxyUrl: String?,
-    val embeddedJson: String?,
-    val resolvedFromInner: Boolean,
+    val payload: RepostPayload,
 )
 
 /** kind-30023 (NIP-23 long-form article) metadata extracted from tags. */

@@ -173,7 +173,9 @@ fun ComposeScreen(
     val isReply = effectiveReplyToEventId != null || effectiveArticleTarget != null
     val isQuote = effectiveQuoteEventId != null
     val replyToRow = viewModel.replyToRow
+    val replyToModel = viewModel.replyToModel
     val quoteRow = viewModel.quoteRow
+    val quoteModel = viewModel.quoteModel
     val isConfirming = sendState is SendState.Confirming
     val isPublishing = sendState is SendState.Publishing
     val isFailed = sendState is SendState.Failed
@@ -310,9 +312,15 @@ fun ComposeScreen(
 
             // ── Reply context strip (cyan left border) ────────────────────────
             if (isReply && replyToRow != null && !isConfirming) {
-                val parentName = replyToRow.authorDisplayName?.takeIf { it.isNotBlank() }
-                    ?: replyToRow.authorName?.takeIf { it.isNotBlank() }
-                    ?: "${replyToRow.pubkey.take(6)}…${replyToRow.pubkey.takeLast(4)}"
+                val parentPubkey = replyToModel?.pubkey ?: replyToRow.pubkey
+                val rowDescribesParent = replyToRow.pubkey == parentPubkey
+                val parentName = replyToRow.authorDisplayName
+                    ?.takeIf { rowDescribesParent && it.isNotBlank() }
+                    ?: replyToRow.authorName?.takeIf { rowDescribesParent && it.isNotBlank() }
+                    ?: "${parentPubkey.take(6)}…${parentPubkey.takeLast(4)}"
+                val parentText = replyToModel?.displayContent
+                    ?: replyToRow.content.takeIf { replyToRow.kind != 6 && replyToRow.kind != 16 }
+                    ?: "Post unavailable"
                 val borderColor = BrandDeep
                 Row(
                     modifier = Modifier
@@ -336,8 +344,8 @@ fun ComposeScreen(
                             .size(24.dp)
                             .clip(CircleShape),
                     ) {
-                        IdentIcon(pubkey = replyToRow.pubkey, modifier = Modifier.size(24.dp))
-                        if (!replyToRow.authorPicture.isNullOrBlank()) {
+                        IdentIcon(pubkey = parentPubkey, modifier = Modifier.size(24.dp))
+                        if (rowDescribesParent && !replyToRow.authorPicture.isNullOrBlank()) {
                             AsyncImage(
                                 model              = rememberAvatarImageRequest(replyToRow.authorPicture, 24.dp),
                                 contentDescription = null,
@@ -357,7 +365,7 @@ fun ComposeScreen(
                         )
                         Spacer(Modifier.height(2.dp))
                         Text(
-                            text       = replyToRow.content.take(140),
+                            text       = parentText.take(140),
                             color      = Color.White.copy(alpha = 0.82f),
                             fontSize   = 13.sp,
                             lineHeight = 18.sp,
@@ -494,9 +502,16 @@ fun ComposeScreen(
 
                         // ── Quote preview card ──────────────────────────────
                         if (isQuote && quoteRow != null) {
-                            val quoteName = quoteRow.authorDisplayName?.takeIf { it.isNotBlank() }
-                                ?: quoteRow.authorName?.takeIf { it.isNotBlank() }
-                                ?: "${quoteRow.pubkey.take(6)}…${quoteRow.pubkey.takeLast(4)}"
+                            val quotePubkey = quoteModel?.pubkey ?: quoteRow.pubkey
+                            val rowDescribesQuoteAuthor = quoteRow.pubkey == quotePubkey
+                            val quoteName = quoteRow.authorDisplayName
+                                ?.takeIf { rowDescribesQuoteAuthor && it.isNotBlank() }
+                                ?: quoteRow.authorName
+                                    ?.takeIf { rowDescribesQuoteAuthor && it.isNotBlank() }
+                                ?: "${quotePubkey.take(6)}…${quotePubkey.takeLast(4)}"
+                            val quoteText = quoteModel?.displayContent
+                                ?: quoteRow.content.takeIf { quoteRow.kind != 6 && quoteRow.kind != 16 }
+                                ?: "Post unavailable"
                             val borderColor = BrandDeep
                             Row(
                                 modifier = Modifier
@@ -519,8 +534,8 @@ fun ComposeScreen(
                                         .size(24.dp)
                                         .clip(CircleShape),
                                 ) {
-                                    IdentIcon(pubkey = quoteRow.pubkey, modifier = Modifier.size(24.dp))
-                                    if (!quoteRow.authorPicture.isNullOrBlank()) {
+                                    IdentIcon(pubkey = quotePubkey, modifier = Modifier.size(24.dp))
+                                    if (rowDescribesQuoteAuthor && !quoteRow.authorPicture.isNullOrBlank()) {
                                         AsyncImage(
                                             model              = rememberAvatarImageRequest(quoteRow.authorPicture, 24.dp),
                                             contentDescription = null,
@@ -540,7 +555,7 @@ fun ComposeScreen(
                                     )
                                     Spacer(Modifier.height(2.dp))
                                     Text(
-                                        text       = quoteRow.content.take(200),
+                                        text       = quoteText.take(200),
                                         color      = Color.White.copy(alpha = 0.82f),
                                         fontSize   = 13.sp,
                                         lineHeight = 18.sp,

@@ -4,9 +4,11 @@ import com.unsilence.app.data.model.ContentWarnings
 import com.unsilence.app.data.model.EventModel
 import com.unsilence.app.data.model.MediaManifest
 import com.unsilence.app.data.model.RepostInfo
+import com.unsilence.app.data.model.RepostPayload
 import com.unsilence.app.data.model.Segment
 import com.unsilence.app.data.model.ThreadRefs
 import com.unsilence.app.data.model.VideoRenderModel
+import com.unsilence.app.data.model.VerifiedRepostEvent
 import com.unsilence.app.data.memory.EventStats
 import com.unsilence.app.domain.model.ActivityPreset
 import com.unsilence.app.domain.model.FeedFilter
@@ -196,10 +198,15 @@ class FeedFilterPolicyTest {
         relayHint = null,
         addressCoordinate = null,
         addressRelayHint = null,
-        targetAuthorPubkey = null,
+        targetAuthorHint = null,
         proxyUrl = null,
-        embeddedJson = if (embedded) "{}" else null,
-        resolvedFromInner = embedded,
+        payload = if (embedded) {
+            RepostPayload.VerifiedEmbedded(
+                VerifiedRepostEvent("target", "pubkey", 1, "", 1L, emptyList()),
+            )
+        } else {
+            RepostPayload.ReferenceOnly
+        },
     )
 
     private fun modelWith(
@@ -213,6 +220,7 @@ class FeedFilterPolicyTest {
         sourcePubkey = "pubkey",
         kind = kind,
         effectiveKind = effectiveKind,
+        displayContent = "",
         articleContent = null,
         createdAt = 1L,
         sourceCreatedAt = 1L,

@@ -5,6 +5,7 @@ import com.unsilence.app.data.relay.ImetaMedia
 import com.unsilence.app.data.relay.ImetaParser
 import com.unsilence.app.data.relay.Nip19FailureCache
 import com.unsilence.app.data.relay.NostrJson
+import com.unsilence.app.data.relay.parseRepostInfo
 import com.vitorpamplona.quartz.nip19Bech32.Nip19Parser
 import com.vitorpamplona.quartz.nip19Bech32.entities.NAddress
 import com.vitorpamplona.quartz.nip19Bech32.entities.NEvent
@@ -12,9 +13,7 @@ import com.vitorpamplona.quartz.nip19Bech32.entities.NNote
 import com.vitorpamplona.quartz.nip19Bech32.entities.NProfile
 import com.vitorpamplona.quartz.nip19Bech32.entities.NPub
 import kotlinx.serialization.json.jsonArray
-import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
-import kotlinx.serialization.json.longOrNull
 
 private const val TAG = "ContentParser"
 
@@ -94,20 +93,33 @@ object ContentParser {
         hasContentWarning: Boolean,
         contentWarningReason: String?,
         preparsedImeta: List<ImetaMedia>? = null,
-    ): EventModel = parse(
-        id = id,
-        pubkey = pubkey,
-        kind = kind,
-        content = content,
-        tags = parseTagLists(tagsJson),
-        createdAt = createdAt,
-        relayUrl = relayUrl,
-        replyToId = replyToId,
-        rootId = rootId,
-        hasContentWarning = hasContentWarning,
-        contentWarningReason = contentWarningReason,
-        preparsedImeta = preparsedImeta,
-    )
+        preparsedRepost: RepostInfo? = null,
+    ): EventModel {
+        val parsedTags = parseTagLists(tagsJson)
+        // This overload is used by flattened UI projections. They no longer
+        // carry the outer event's verified-ingest context, so fail closed to a
+        // reference rather than performing native Schnorr work during render.
+        val safeRepost = preparsedRepost ?: if (kind == 6 || kind == 16) {
+            parseRepostInfo(kind, content, parsedTags, verifyEmbedded = { false })
+        } else {
+            null
+        }
+        return parse(
+            id = id,
+            pubkey = pubkey,
+            kind = kind,
+            content = content,
+            tags = parsedTags,
+            createdAt = createdAt,
+            relayUrl = relayUrl,
+            replyToId = replyToId,
+            rootId = rootId,
+            hasContentWarning = hasContentWarning,
+            contentWarningReason = contentWarningReason,
+            preparsedImeta = preparsedImeta,
+            preparsedRepost = safeRepost,
+        )
+    }
 
     /**
      * Structured-tag entry point for [com.unsilence.app.data.memory.NostrEvent].
@@ -126,21 +138,35 @@ object ContentParser {
         hasContentWarning: Boolean,
         contentWarningReason: String?,
         preparsedImeta: List<ImetaMedia>? = null,
+        preparsedRepost: RepostInfo? = null,
     ): EventModel {
         // ── Step 1: Repost unwrap ─────────────────────────────────────────
         // Both kind-6 (note repost) and kind-16 (NIP-18 generic repost) wrap a
         // target event; parseRepostInfo is generic over embedded-JSON + e-tag.
-        val repost = if (kind == 6 || kind == 16) parseRepostInfo(content, tags) else null
+        val repost = if (kind == 6 || kind == 16) {
+            preparsedRepost ?: parseRepostInfo(kind, content, tags)
+        } else null
+        val verifiedInner = (repost?.payload as? RepostPayload.VerifiedEmbedded)?.event
 
         // Effective kind drives detection/routing: a 6/16 wrapping a 30023 must be
         // detected and rendered as an article, not raw markdown. Resolved from the
         // wrapped target's kind (embedded JSON, kind-16 `k` tag, else note=1).
-        val effectiveKind = resolveEffectiveKind(kind, repost, tags)
+        val effectiveKind = resolveEffectiveKind(kind, verifiedInner, tags)
 
-        val effectiveContent = if (repost != null) extractEffectiveContent(repost, content) else content
-        val effectiveTags = if (repost != null) extractEffectiveTags(repost, tags) else tags
-        val effectivePubkey = if (repost != null) effectivePubkey(repost, pubkey, content, tags) else pubkey
-        val effectiveCreatedAt = if (repost != null) effectiveCreatedAt(repost, createdAt) else createdAt
+        // Protocol JSON is never user-authored text. A reference-only repost
+        // stays empty until its independently verified target is hydrated.
+        val effectiveContent = when {
+            verifiedInner != null -> verifiedInner.content
+            repost != null -> ""
+            else -> content
+        }
+        val effectiveTags = when {
+            verifiedInner != null -> verifiedInner.tags
+            repost != null -> emptyList()
+            else -> tags
+        }
+        val effectivePubkey = verifiedInner?.pubkey ?: pubkey
+        val effectiveCreatedAt = verifiedInner?.createdAt ?: createdAt
 
         // ── Step 2: Imeta + q-tag relay hints ────────────────────────────
         // Reuse preparsed imeta when available — but for kind-6 reposts,
@@ -218,6 +244,7 @@ object ContentParser {
             sourcePubkey = pubkey,
             kind = kind,
             effectiveKind = effectiveKind,
+            displayContent = effectiveContent,
             // Only articles carry the body string — notes leave it null so we don't
             // duplicate every note's content (MES already holds raw; model holds segments).
             articleContent = if (article != null) effectiveContent else null,
@@ -277,8 +304,8 @@ object ContentParser {
      * Effective NIP-36 warning for the model. For kind-6/16 reposts the inner
      * (effective) tags carry the target's content-warning, which the wrapper's
      * passed-in flag misses. ORs them so [EventModel.warnings] is honest for any
-     * consumer. Mirrors EventProcessor.effectiveContentWarning (which sets the
-     * FeedRow flag that actually gates feed hide + card blur/hide).
+     * consumer. Mirrors the verified-ingest effectiveContentWarning helper
+     * (which sets the FeedRow flag that gates feed hide + card blur/hide).
      */
     private fun effectiveWarnings(
         repost: RepostInfo?,
@@ -293,51 +320,6 @@ object ContentParser {
         return ContentWarnings(wrapperHasCw || inner.first, wrapperReason ?: inner.second)
     }
 
-    // ── Repost parsing ───────────────────────────────────────────────────
-
-    /**
-     * Parse repost info. Bridge events (mostr.pub) have empty content but
-     * an e-tag — we still produce a RepostInfo so the renderer can show a
-     * stub until lookupModel resolves the target.
-     */
-    private fun parseRepostInfo(content: String, tags: List<List<String>>): RepostInfo? {
-        val embeddedJson = if (content.isNotBlank()) {
-            runCatching { NostrJson.parseToJsonElement(content).jsonObject.toString() }
-                .getOrNull()
-        } else null
-
-        val targetId = extractFirstETagId(tags)
-        val relayHint = extractFirstETagRelay(tags)
-        val addressCoordinate = extractFirstAddressTagValue(tags)
-        val addressRelayHint = extractFirstAddressTagRelay(tags)
-        val coordinateAuthor = addressCoordinate
-            ?.split(':', limit = 3)
-            ?.getOrNull(1)
-            ?.takeIf { it.isNotBlank() }
-        val targetAuthorPubkey = extractRepostAuthorPubkey(content, tags) ?: coordinateAuthor
-        val proxyUrl = extractActivityPubProxyUrl(tags)
-
-        if (embeddedJson == null && targetId == null && addressCoordinate == null) return null
-
-        return RepostInfo(
-            targetId = targetId,
-            relayHint = relayHint,
-            addressCoordinate = addressCoordinate,
-            addressRelayHint = addressRelayHint,
-            targetAuthorPubkey = targetAuthorPubkey,
-            proxyUrl = proxyUrl,
-            embeddedJson = embeddedJson,
-            resolvedFromInner = embeddedJson != null,
-        )
-    }
-
-    private fun extractActivityPubProxyUrl(tags: List<List<String>>): String? =
-        tags.firstOrNull { tag ->
-            tag.getOrNull(0) == "proxy" && tag.getOrNull(2) == "activitypub"
-        }
-            ?.getOrNull(1)
-            ?.takeIf { it.startsWith("https://") || it.startsWith("http://") }
-
     /**
      * The kind that drives detection/routing. A kind-6/16 repost wraps a target
      * event; resolve the target's kind so a reposted long-form (30023) is parsed
@@ -349,13 +331,13 @@ object ContentParser {
      * resolves to 1 and renders as a note stub until a-tag/naddr resolution lands.
      * Non-reposts return their own kind.
      */
-    private fun resolveEffectiveKind(rawKind: Int, repost: RepostInfo?, wrapperTags: List<List<String>>): Int {
-        if (repost == null) return rawKind
-        repost.embeddedJson?.let { json ->
-            runCatching {
-                NostrJson.parseToJsonElement(json).jsonObject["kind"]?.jsonPrimitive?.content?.toIntOrNull()
-            }.getOrNull()?.let { return it }
-        }
+    private fun resolveEffectiveKind(
+        rawKind: Int,
+        verifiedInner: VerifiedRepostEvent?,
+        wrapperTags: List<List<String>>,
+    ): Int {
+        if (rawKind != 6 && rawKind != 16) return rawKind
+        verifiedInner?.let { return it.kind }
         if (rawKind == 16) extractKTagKind(wrapperTags)?.let { return it }
         return 1
     }
@@ -365,63 +347,7 @@ object ContentParser {
         tags.firstOrNull { it.getOrNull(0) == "k" }
             ?.getOrNull(1)
             ?.toIntOrNull()
-
-    private fun effectivePubkey(
-        repost: RepostInfo,
-        wrapperPk: String,
-        content: String,
-        tags: List<List<String>>,
-    ): String {
-        if (repost.embeddedJson != null) {
-            runCatching {
-                NostrJson.parseToJsonElement(repost.embeddedJson).jsonObject["pubkey"]
-                    ?.jsonPrimitive?.content
-            }.getOrNull()?.let { return it }
-        }
-        return extractRepostAuthorPubkey(content, tags) ?: wrapperPk
-    }
-
-    private fun effectiveCreatedAt(repost: RepostInfo, wrapperTs: Long): Long {
-        if (repost.embeddedJson != null) {
-            runCatching {
-                NostrJson.parseToJsonElement(repost.embeddedJson).jsonObject["created_at"]
-                    ?.jsonPrimitive?.longOrNull
-            }.getOrNull()?.let { return it }
-        }
-        return wrapperTs
-    }
-
-    private fun extractEffectiveContent(repost: RepostInfo, wrapperContent: String): String {
-        if (repost.embeddedJson == null) return wrapperContent
-        return runCatching {
-            NostrJson.parseToJsonElement(repost.embeddedJson).jsonObject["content"]
-                ?.jsonPrimitive?.content
-        }.getOrNull() ?: wrapperContent
-    }
-
-    private fun extractEffectiveTags(
-        repost: RepostInfo,
-        wrapperTags: List<List<String>>,
-    ): List<List<String>> {
-        if (repost.embeddedJson == null) return wrapperTags
-        return runCatching {
-            val element = NostrJson.parseToJsonElement(repost.embeddedJson).jsonObject["tags"]
-            element?.let(::parseTagLists)
-        }.getOrNull() ?: wrapperTags
-    }
-
-    private fun extractRepostAuthorPubkey(
-        content: String,
-        tags: List<List<String>>,
-    ): String? {
-        if (content.isNotBlank()) {
-            runCatching {
-                NostrJson.parseToJsonElement(content).jsonObject["pubkey"]
-                    ?.jsonPrimitive?.content
-            }.getOrNull()?.let { return it }
-        }
-        return tags.firstOrNull { it.getOrNull(0) == "p" }?.getOrNull(1)
-    }
+            ?.takeIf { it in 0..65_535 }
 
     // ── Tokenization ─────────────────────────────────────────────────────
 
@@ -843,24 +769,6 @@ object ContentParser {
             }
         }
     }
-
-    private fun extractFirstETagId(tags: List<List<String>>): String? =
-        tags.firstOrNull { it.getOrNull(0) == "e" }?.getOrNull(1)
-
-    private fun extractFirstETagRelay(tags: List<List<String>>): String? =
-        tags.firstOrNull { it.getOrNull(0) == "e" }
-            ?.getOrNull(2)
-            ?.takeIf { it.isNotBlank() }
-
-    private fun extractFirstAddressTagValue(tags: List<List<String>>): String? =
-        tags.firstOrNull { it.getOrNull(0) == "a" || it.getOrNull(0) == "A" }
-            ?.getOrNull(1)
-            ?.takeIf { it.isNotBlank() }
-
-    private fun extractFirstAddressTagRelay(tags: List<List<String>>): String? =
-        tags.firstOrNull { it.getOrNull(0) == "a" || it.getOrNull(0) == "A" }
-            ?.getOrNull(2)
-            ?.takeIf { it.isNotBlank() }
 
     private fun extractQTagHints(tags: List<List<String>>): Map<String, List<String>> {
         val result = mutableMapOf<String, MutableList<String>>()

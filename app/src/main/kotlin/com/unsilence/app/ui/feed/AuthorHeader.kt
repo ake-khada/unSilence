@@ -3,6 +3,7 @@ package com.unsilence.app.ui.feed
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.Spacer
@@ -64,6 +65,7 @@ internal fun AuthorHeader(
     repostSourcePubkey: String? = null,
     repostSourceProfile: UserEntity? = null,
     repostSourceCreatedAt: Long? = null,
+    referenceRepost: Boolean = false,
 ) {
     val authorLabel = displayName
         ?: "${pubkey.take(6)}…${pubkey.takeLast(4)}"
@@ -119,26 +121,31 @@ internal fun AuthorHeader(
                 profileFlow   = profileFlow,
             )
             Spacer(Modifier.width(Spacing.small))
-            Row(
-                modifier          = Modifier.weight(1f),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Text(
-                    text       = authorLabel,
-                    color      = MaterialTheme.colorScheme.onSurface,
-                    fontWeight = FontWeight.SemiBold,
-                    fontSize   = AppType.body,
-                    maxLines   = 1,
-                    overflow   = TextOverflow.Ellipsis,
-                    modifier   = Modifier.weight(if (nostrAddress != null) 0.45f else 1f, fill = false),
-                )
-                if (nostrAddress != null) {
-                    Spacer(Modifier.width(4.dp))
-                    SelfDeclaredNostrAddressText(
+            if (referenceRepost) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = "↻ Reposted",
+                        color = TextSecondary,
+                        fontSize = 9.5.sp,
+                        lineHeight = 11.sp,
+                    )
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        AuthorNameRow(
+                            pubkey = pubkey,
+                            authorLabel = authorLabel,
+                            nostrAddress = nostrAddress,
+                        )
+                    }
+                }
+            } else {
+                Row(
+                    modifier = Modifier.weight(1f),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    AuthorNameRow(
                         pubkey = pubkey,
-                        presentation = nostrAddress,
-                        fontSize = AppType.caption,
-                        modifier = Modifier.weight(0.55f, fill = false),
+                        authorLabel = authorLabel,
+                        nostrAddress = nostrAddress,
                     )
                 }
             }

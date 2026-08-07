@@ -52,6 +52,7 @@ import com.unsilence.app.data.memory.FeedRow
 import com.unsilence.app.data.memory.UserEntity
 import com.unsilence.app.data.memory.WotLookup
 import com.unsilence.app.data.model.EventModel
+import com.unsilence.app.data.model.RepostPayload
 import com.unsilence.app.data.model.VideoRenderModel
 import com.unsilence.app.data.relay.FeedWotDisplayMode
 import com.unsilence.app.data.relay.OgMetadata
@@ -347,6 +348,7 @@ fun EventCard(
             repostSourcePubkey = if (isRepost) model.sourcePubkey else null,
             repostSourceProfile = if (isRepost) sourceProfile else null,
             repostSourceCreatedAt = repostTimestamp,
+            referenceRepost = model.repost?.payload is RepostPayload.ReferenceOnly,
         )
 
         // Thread parent card (Conversations tab)
@@ -437,13 +439,12 @@ fun EventCard(
                     )
                 }
 
-                // Empty-content repost fallback (mostr.pub bridge style):
-                // kind-6 with empty wrapper content + targetId — render the target inline.
-                // Routes via target author's outbox relays for bridge content.
+                // Reference-only repost fallback (empty, id-only, malformed,
+                // oversized, mismatched, or bad-signature envelope). Protocol
+                // JSON is never rendered; resolve the independently verified
+                // target or show a stable unavailable placeholder.
                 if (model.repost != null &&
-                    model.repost.embeddedJson == null &&
-                    (model.repost.targetId != null || model.repost.addressCoordinate != null) &&
-                    (lookupEventReference != null || lookupEventWithAuthor != null)
+                    model.repost.payload is RepostPayload.ReferenceOnly
                 ) {
                     EmptyRepostBody(
                         targetId = model.repost.targetId,
@@ -453,7 +454,7 @@ fun EventCard(
                             model.repost.addressRelayHint,
                             model.relayUrl,
                         ).distinct(),
-                        targetAuthorPubkey = model.repost.targetAuthorPubkey,
+                        targetAuthorPubkey = model.repost.targetAuthorHint,
                         proxyUrl = model.repost.proxyUrl,
                         lookupEventWithAuthor = lookupEventWithAuthor,
                         lookupEventReference = lookupEventReference,
@@ -688,7 +689,7 @@ private fun ArticleLayout(
 
             // Summary
             val summary = article?.summary
-                ?: row.content.take(150).replace('\n', ' ').ifBlank { null }
+                ?: model.displayContent.take(150).replace('\n', ' ').ifBlank { null }
             if (!summary.isNullOrBlank()) {
                 Text(
                     text     = summary,

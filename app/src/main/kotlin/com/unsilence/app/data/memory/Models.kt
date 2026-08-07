@@ -26,6 +26,8 @@ data class NostrEvent(
     /** Wall-clock when this event was first inserted, in epoch milliseconds. */
     val firstSeenAt: Long,
     val relaysSeen: MutableSet<String>,
+    /** Parsed only after the outer event is trusted; null for non-reposts. */
+    val repostInfo: com.unsilence.app.data.model.RepostInfo? = null,
 )
 
 data class ZapAggregate(val count: Int, val totalSats: Long) {
