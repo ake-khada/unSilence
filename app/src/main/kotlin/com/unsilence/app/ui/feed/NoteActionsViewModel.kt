@@ -696,8 +696,8 @@ class NoteActionsViewModel @Inject constructor(
             if (result.isSuccess) {
                 val signed = result.getOrThrow()
                 // Optimistic insert → MES actor-index updates → zappedEventIdsFlow re-emits
-                // Icon lights up immediately; sats display waits for kind-9735 receipt
-                // from relays (handleZapReceipt is the sole path into zapStatsByEventId).
+                // Icon lights up immediately; sats display waits for a kind-9735 receipt
+                // that passes the receipt-authority, request-signature, and amount gates.
                 val nostrEvent = signedEventToNostrEvent(signed, rootId = eventId)
                 // Private zaps are signed by a one-shot anon keypair. Override pubkey
                 // to own so MES actor indexes correctly track "has zapped" state.
@@ -723,8 +723,8 @@ class NoteActionsViewModel @Inject constructor(
             withContext(Dispatchers.Main) {
                 _zapLoading.value = _zapLoading.value - eventId
                 if (result.isSuccess) {
-                    // Optimistic sats overlay — instant display until kind-9735 receipt
-                    // arrives and handleZapReceipt bumps zapStatsByEventId. At that point
+                    // Optimistic sats overlay — instant display until an authenticated
+                    // kind-9735 receipt lands. At that point
                     // clearOptimisticOnReceipt removes the overlay so there's no double-count.
                     _optimisticZapSats.value = _optimisticZapSats.value +
                         (eventId to ((_optimisticZapSats.value[eventId] ?: 0L) + amountSats))

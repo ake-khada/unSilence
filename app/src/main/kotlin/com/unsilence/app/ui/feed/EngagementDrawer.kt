@@ -41,6 +41,7 @@ import com.unsilence.app.data.memory.ReactionContent
 import com.unsilence.app.data.memory.ReactionInfo
 import com.unsilence.app.data.memory.UserEntity
 import com.unsilence.app.data.memory.ZapDetail
+import com.unsilence.app.data.memory.ZapAttribution
 import com.unsilence.app.ui.theme.AppType
 import com.unsilence.app.ui.theme.Like
 import com.unsilence.app.ui.theme.Sizing
@@ -64,8 +65,13 @@ private data class ReactionGroup(
     val pubkeys: List<String>,
 )
 
+private data class IdentifiedZap(
+    val attribution: ZapAttribution.Identified,
+    val sats: Long,
+)
+
 private data class DrawerData(
-    val zaps: List<ZapDetail> = emptyList(),
+    val zaps: List<IdentifiedZap> = emptyList(),
     val anonymousZapSats: Long = 0L,
     val reposts: List<String> = emptyList(),
     val reactionGroups: List<ReactionGroup> = emptyList(),
@@ -97,7 +103,10 @@ internal fun EngagementDrawer(
 
     val drawerData = produceState(DrawerData(), eventId, stats) {
         val rawZaps = zapDetailsForEvent?.invoke(eventId) ?: emptyList()
-        val (namedZaps, anonZaps) = rawZaps.partition { it.senderPubkey != null }
+        val namedZaps = rawZaps.mapNotNull { zap ->
+            (zap.attribution as? ZapAttribution.Identified)?.let { IdentifiedZap(it, zap.sats) }
+        }
+        val anonZaps = rawZaps.filter { it.attribution is ZapAttribution.Anonymous }
         val zaps = namedZaps.sortedByDescending { it.sats }
         val anonymousZapSats = anonZaps.sumOf { it.sats }
         val reposts = repostPubkeysForEvent?.invoke(eventId) ?: emptyList()
@@ -142,9 +151,10 @@ internal fun EngagementDrawer(
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.End,
                     ) {
-                        if (!zap.comment.isNullOrBlank()) {
+                        val comment = zap.attribution.comment
+                        if (!comment.isNullOrBlank()) {
                             Text(
-                                text = zap.comment,
+                                text = comment,
                                 color = TextSecondary,
                                 fontSize = AppType.footnote,
                                 maxLines = 2,
@@ -157,7 +167,7 @@ internal fun EngagementDrawer(
                             zap = zap,
                             profileFlow = profileFlow,
                             lookupProfile = lookupProfile,
-                            onTap = { zap.senderPubkey?.let { onProfileTap(it) } },
+                            onTap = { onProfileTap(zap.attribution.pubkey) },
                         )
                     }
 
@@ -350,43 +360,27 @@ private fun AvatarChip(
  */
 @Composable
 private fun ZapChip(
-    zap: ZapDetail,
+    zap: IdentifiedZap,
     profileFlow: ((String) -> StateFlow<UserEntity?>)?,
     lookupProfile: (suspend (String) -> UserEntity?)?,
     onTap: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    val sender = zap.senderPubkey
+    val sender = zap.attribution.pubkey
     Box(
         modifier = modifier
             .size(Sizing.avatar)
             .clip(CircleShape)
-            .then(if (sender != null) Modifier.clickable(onClick = onTap) else Modifier),
+            .clickable(onClick = onTap),
     ) {
-        if (sender != null) {
-            AvatarImage(
-                pubkey = sender,
-                picture = null,
-                sizeDp = Sizing.avatar,
-                profileFlow = profileFlow,
-                lookupProfile = lookupProfile,
-                modifier = Modifier.size(Sizing.avatar),
-            )
-        } else {
-            Box(
-                modifier = Modifier
-                    .size(Sizing.avatar)
-                    .background(Color(0xFF1A1A1A), CircleShape),
-                contentAlignment = Alignment.Center,
-            ) {
-                Icon(
-                    imageVector = Icons.Filled.QuestionMark,
-                    contentDescription = "Anonymous",
-                    tint = TextSecondary,
-                    modifier = Modifier.size(16.dp),
-                )
-            }
-        }
+        AvatarImage(
+            pubkey = sender,
+            picture = null,
+            sizeDp = Sizing.avatar,
+            profileFlow = profileFlow,
+            lookupProfile = lookupProfile,
+            modifier = Modifier.size(Sizing.avatar),
+        )
         // Dark gradient covering lower 65% — strong enough for sats readability at 32dp
         Box(
             modifier = Modifier

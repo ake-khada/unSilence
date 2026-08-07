@@ -5,6 +5,7 @@ import com.unsilence.app.data.relay.RelayPool
 import com.unsilence.app.data.relay.NostrJson
 import com.unsilence.app.data.relay.toEventJson
 import com.unsilence.app.data.repository.UserRepository
+import com.unsilence.app.data.zap.OwnZapServiceAuthority
 import com.vitorpamplona.quartz.nip01Core.core.Event
 import com.vitorpamplona.quartz.nip01Core.core.hexToByteArray
 import com.vitorpamplona.quartz.nip01Core.crypto.KeyPair
@@ -12,6 +13,7 @@ import com.vitorpamplona.quartz.nip01Core.signers.EventTemplate
 import com.vitorpamplona.quartz.nip01Core.signers.NostrSignerInternal
 import com.vitorpamplona.quartz.nip57Zaps.PrivateZapEncryption
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.JsonObject
@@ -67,6 +69,9 @@ class ZapRepository @Inject constructor(
 ) {
     /** LNURL metadata cache: lud16 → (metadata, expiresAtMs). Saves an HTTP round-trip on repeat zaps. */
     private val lnurlCache = java.util.concurrent.ConcurrentHashMap<String, Pair<LnurlMeta, Long>>()
+    /** Same-address requests coalesce; unrelated recipients must never block each other. */
+    private val lnurlMetaInFlight =
+        java.util.concurrent.ConcurrentHashMap<String, CompletableDeferred<Result<LnurlMeta>>>()
 
     /** Plain LNURL HTTP must not inherit the app's WebSocket-tuned readTimeout(0). */
     private val lnurlClient by lazy {
@@ -109,15 +114,7 @@ class ZapRepository @Inject constructor(
         }
 
         // ── 2. Resolve LNURL metadata (cached for 5 min per lud16) ───────────
-        val meta = getCachedMeta(lud16) ?: run {
-            val lnurlEndpoint = lud16ToUrl(lud16)
-                ?: return Result.failure(ZapException("Invalid lightning address"))
-            val fetched = fetchLnurlMeta(lnurlEndpoint).getOrElse {
-                return Result.failure(it)
-            }
-            lnurlCache[lud16] = fetched to (System.currentTimeMillis() + LNURL_CACHE_TTL_MS)
-            fetched
-        }
+        val meta = resolveLnurlMeta(lud16).getOrElse { return Result.failure(it) }
 
         // ── 3. Build kind-9734 zap request event ─────────────────────────────
         val msats = runCatching { Math.multiplyExact(amountSats, 1000L) }
@@ -246,6 +243,61 @@ class ZapRepository @Inject constructor(
     }
 
     // ── Helpers ──────────────────────────────────────────────────────────────
+
+    /**
+     * Resolve the signed-in user's LNURL receipt signer through the same cache
+     * and HTTP path used when sending a zap. Network failure remains unknown;
+     * a successful response without valid NIP-57 support is known-unsupported.
+     */
+    internal suspend fun resolveOwnZapServiceAuthority(lud16: String): OwnZapServiceAuthority {
+        val meta = resolveLnurlMeta(lud16).getOrElse {
+            return OwnZapServiceAuthority.Unavailable
+        }
+        val zapper = meta.nostrPubkey
+        return if (meta.allowsNostr && zapper != null && isHexPubkey(zapper)) {
+            OwnZapServiceAuthority.Trusted(zapper)
+        } else {
+            OwnZapServiceAuthority.Unsupported
+        }
+    }
+
+    /** Per-address single-flight prevents duplicate HTTP without serializing unrelated zaps. */
+    private suspend fun resolveLnurlMeta(lud16: String): Result<LnurlMeta> {
+        val cacheKey = lud16.trim().lowercase()
+        getCachedMeta(cacheKey)?.let { return Result.success(it) }
+        val mine = CompletableDeferred<Result<LnurlMeta>>()
+        lnurlMetaInFlight.putIfAbsent(cacheKey, mine)?.let { return it.await() }
+        return try {
+            getCachedMeta(cacheKey)?.let {
+                val cached = Result.success(it)
+                mine.complete(cached)
+                return cached
+            }
+            val endpoint = lud16ToUrl(cacheKey)
+            val result = if (endpoint == null) {
+                Result.failure(ZapException("Invalid lightning address"))
+            } else {
+                fetchLnurlMeta(endpoint)
+            }.onSuccess { fetched ->
+                lnurlCache[cacheKey] = fetched to (System.currentTimeMillis() + LNURL_CACHE_TTL_MS)
+            }
+            mine.complete(result)
+            result
+        } catch (cancelled: CancellationException) {
+            // The leader belongs to one caller (often the lifecycle coordinator).
+            // Its cancellation must not cancel unrelated zap callers that merely
+            // joined the same-address single-flight. They receive a normal failed
+            // lookup and may retry; only the leader preserves cancellation.
+            mine.complete(Result.failure(cancelled))
+            throw cancelled
+        } catch (failure: Exception) {
+            val result = Result.failure<LnurlMeta>(failure)
+            mine.complete(result)
+            result
+        } finally {
+            lnurlMetaInFlight.remove(cacheKey, mine)
+        }
+    }
 
     /**
      * Convert a lightning address (user@domain.com) to its LNURL-pay metadata URL.

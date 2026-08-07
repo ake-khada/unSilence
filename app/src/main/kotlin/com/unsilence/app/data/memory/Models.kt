@@ -36,18 +36,42 @@ data class ZapAggregate(val count: Int, val totalSats: Long) {
     }
 }
 
-/**
- * Per-zap breakdown for the engagement drawer.
- * senderPubkey is null when the description tag is missing, malformed,
- * or the zap was sent anonymously (one-time keypair, no resolvable actor).
- * Anonymous entries are grouped into a single chip by the drawer.
- */
+/** Cryptographically-established sender state. An unverified pubkey cannot inhabit this type. */
+sealed interface ZapAttribution {
+    data class Identified(
+        val pubkey: String,
+        val comment: String?,
+    ) : ZapAttribution
+
+    sealed interface Anonymous : ZapAttribution
+    data object IntentionallyAnonymous : Anonymous
+    data object Unverified : Anonymous
+}
+
+/** Per-zap breakdown for the engagement drawer. */
 data class ZapDetail(
-    val senderPubkey: String?,
+    val attribution: ZapAttribution,
     val sats: Long,
-    val comment: String?,
-    val eventId: String? = null,  // kind-9735 receipt id; null on V10 entries
-)
+    val eventId: String? = null,  // kind-9735 receipt id; null for a local optimistic row
+) {
+    val senderPubkey: String?
+        get() = (attribution as? ZapAttribution.Identified)?.pubkey
+
+    val comment: String?
+        get() = (attribution as? ZapAttribution.Identified)?.comment
+
+    companion object {
+        fun identified(
+            pubkey: String,
+            sats: Long,
+            comment: String?,
+            eventId: String? = null,
+        ) = ZapDetail(ZapAttribution.Identified(pubkey, comment), sats, eventId)
+
+        fun anonymous(sats: Long, eventId: String? = null) =
+            ZapDetail(ZapAttribution.IntentionallyAnonymous, sats, eventId)
+    }
+}
 
 /** Reaction content — Unicode emoji (or "+"/"-") vs NIP-30 custom emoji with image URL. */
 sealed interface ReactionContent {
@@ -437,14 +461,11 @@ data class EmojiSetRef(
 // ── NIP-57 Private Zap ────────────────────────────────────────────────────
 
 /**
- * Decrypted contents of a NIP-57 private zap. Populated asynchronously
- * by PrivateZapRepository after decrypt (NIP-44 attempted then NIP-04
- * fallback) succeeds against the kind-9734's anon-tag ciphertext.
- *
- * senderPubkey is the recovered real sender (from the encrypted payload),
- * NOT the kind-9734 signer (which is the one-time anon keypair).
+ * Canonical-id and Schnorr-verified contents of a decrypted NIP-57 private zap.
+ * Decryption alone is not authentication; only ZapReceiptAuthenticator creates
+ * this after the inner kind, recipient, target, id and signature all match.
  */
-data class DecryptedPrivateZap(
+internal data class VerifiedPrivateZap(
     val senderPubkey: String,
     val comment: String?,
 )
@@ -454,6 +475,9 @@ data class PendingPrivateZapDecrypt(
     val zapReceiptId: String,    // kind-9735 event id (sidecar key)
     val anonCiphertext: String,  // Encrypted ciphertext (NIP-04 wire format)
     val anonSignerPubkey: String, // publicKey_a — pass as peerPubkey to decrypt
+    val recipientPubkey: String, // expected p-tag of the signed inner event
+    val targetTagName: String,   // e or a — must be reproduced by the signed inner event
+    val targetId: String,        // expected e/a target of the signed inner event
 )
 
 /** Parse an [EventModel] from a [FeedRow]'s fields. Pure function — equivalent to MES-parsed model. */

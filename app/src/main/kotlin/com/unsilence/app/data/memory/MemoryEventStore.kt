@@ -56,6 +56,11 @@ import com.unsilence.app.data.relay.parseNip65RelayTags
 import com.unsilence.app.data.relay.profileDerivedBridgeOutbox
 import com.unsilence.app.data.relay.shouldAcceptProfileRelayEvent
 import com.unsilence.app.data.relay.wotProviderDescriptorFromTags
+import com.unsilence.app.data.zap.AuthenticatedZapReceipt
+import com.unsilence.app.data.zap.OwnZapServiceAuthority
+import com.unsilence.app.data.zap.ZapReceiptDecision
+import com.unsilence.app.data.zap.ZapReceiptRejection
+import com.unsilence.app.data.zap.authenticateZapReceipt
 import com.vitorpamplona.quartz.nip01Core.core.hexToByteArray
 import com.vitorpamplona.quartz.nip04Dm.crypto.Nip04
 import com.vitorpamplona.quartz.nip44Encryption.Nip44
@@ -85,6 +90,8 @@ internal val SNAPSHOT_BINARY_MAGIC = byteArrayOf(0x55, 0x53, 0x4E, 0x53) // "USN
 private const val SNAPSHOT_BINARY_VERSION = 19
 /** Max retained own outgoing private-zap anon pubkeys (bounded, insertion-order eviction). */
 private const val OWN_ANON_ZAP_CAP = 500
+private const val ZAP_AUTH_RECORDED_IDS_MAX = 8_192
+private const val ZAP_AUTH_RECORDED_IDS_TRIM = 2_048
 private const val RELAY_IDENTITY_CAP = 3_000
 private const val PENDING_MUTE_OWNER_CAP = 4
 private const val PENDING_MUTE_CHANGE_CAP = 100_000
@@ -617,8 +624,15 @@ class MemoryEventStore @Inject constructor(
 
     // ─── Derived aggregates (incrementally maintained) ──────────────────────
     private val repostCounts = ConcurrentHashMap<String, Int>()
-    private val zapStatsByEventId = ConcurrentHashMap<String, ZapAggregate>()
     private val statsUpdatedAt = ConcurrentHashMap<String, Long>()
+
+    /** The sole receipt sidecar consumed by totals, drawers, and notifications. */
+    private val authenticatedZapReceiptsById = ConcurrentHashMap<String, AuthenticatedZapReceipt>()
+    @Volatile private var ownZapServiceAuthority: OwnZapServiceAuthority =
+        OwnZapServiceAuthority.Unavailable
+    private val zapAuthRecordedIds = ConcurrentHashMap.newKeySet<String>()
+    private val zapAuthFinalized = AtomicLong(0)
+    private val zapAuthGate2Rejected = AtomicLong(0)
 
     // ─── Engagement contributor indexes (per-target breakdowns for drawer) ──
     private val repostPubkeysByTarget = ConcurrentHashMap<String, MutableSet<String>>()
@@ -630,7 +644,8 @@ class MemoryEventStore @Inject constructor(
     // ours; we record it here so handleZapReceipt can promote that receipt's
     // sender → own (sender-local only; never published). Bounded, insertion-order
     // eviction, persisted (V15) since the optimistic drawer row also persists and
-    // the receipt can arrive in a later session. Entries are removed once matched.
+    // the receipt can arrive in a later session. Matched entries remain bounded so
+    // self-recognition is stable when an authenticated receipt is restored later.
     private val ownAnonZapPubkeys = java.util.Collections.synchronizedSet(LinkedHashSet<String>())
 
     private fun addOwnAnonZap(anon: String) {
@@ -642,9 +657,8 @@ class MemoryEventStore @Inject constructor(
         }
     }
 
-    /** Check-and-consume: true (and removes) if [anon] is one of our pending own anon zaps. */
-    private fun consumeOwnAnonZap(anon: String): Boolean =
-        synchronized(ownAnonZapPubkeys) { ownAnonZapPubkeys.remove(anon) }
+    private fun isOwnAnonZap(anon: String): Boolean =
+        synchronized(ownAnonZapPubkeys) { anon in ownAnonZapPubkeys }
 
     // ─── Notification recipient index (M4) ────────────────────────────────
 
@@ -709,6 +723,7 @@ class MemoryEventStore @Inject constructor(
         event: NostrEvent,
         backfillPollResponses: Boolean = true,
     ) {
+        if (event.kind == 9735 && !authenticatedZapReceiptsById.containsKey(event.id)) return
         // Responses can arrive before their poll. Once the poll lands, backfill
         // those response indexes so e-tag-only vote notifications are not lost.
         if (event.kind == 1068 && backfillPollResponses) {
@@ -748,6 +763,7 @@ class MemoryEventStore @Inject constructor(
         notifIdsByRecipient.clear()
         for ((_, event) in eventsById) {
             if (event.kind !in NOTIFICATION_KINDS) continue
+            if (event.kind == 9735 && !authenticatedZapReceiptsById.containsKey(event.id)) continue
             for (recipient in notificationRecipients(event)) {
                 notifIdsByRecipient
                     .computeIfAbsent(recipient) { ConcurrentSkipListSet() }
@@ -761,13 +777,13 @@ class MemoryEventStore @Inject constructor(
 
     // ─── NIP-57 private zap decrypt sidecar ─────────────────────────────────
     /**
-     * Decrypted NIP-57 private zaps, keyed by kind-9735 event id.
-     * Populated by PrivateZapRepository after async decrypt completes.
+     * Decrypted and inner-signature-verified NIP-57 private zaps, keyed by
+     * kind-9735 event id. Populated after async decrypt + authentication.
      * Memory-only — re-decrypted on cold start via rescanPendingPrivateZapDecrypts.
      */
-    private val privateZapDecryptedById = ConcurrentHashMap<String, DecryptedPrivateZap>()
+    private val verifiedPrivateZapsById = ConcurrentHashMap<String, VerifiedPrivateZap>()
 
-    /** Fires when a kind-9735 with anon tag arrives addressed to own pubkey. */
+    /** Fires only for an authenticated own receipt carrying a verified anon request. */
     private val _pendingPrivateZapDecrypts = MutableSharedFlow<PendingPrivateZapDecrypt>(
         replay = 0,
         extraBufferCapacity = 64,
@@ -1160,7 +1176,10 @@ class MemoryEventStore @Inject constructor(
         val owner = ownPubkey
         if (owner != null) {
             if (event.pubkey == owner) return null
-            val mentionsOwner = if (event.kind in NOTIFICATION_KINDS) {
+            val mentionsOwner = if (event.kind == 9735) {
+                authenticatedZapReceiptsById.containsKey(event.id) &&
+                    owner in notificationRecipients(event)
+            } else if (event.kind in NOTIFICATION_KINDS) {
                 owner in notificationRecipients(event)
             } else {
                 event.tags.any { it.size >= 2 && it[0] == "p" && it[1] == owner }
@@ -1403,6 +1422,20 @@ class MemoryEventStore @Inject constructor(
             event.relaysSeen.addAll(pending)
         }
 
+        // Authenticate receipts before admission or secondary indexing. A final
+        // rejection has no future value and must not become an owner-mention
+        // anchor (an attacker could otherwise retain unlimited forged receipts).
+        // Authority-pending own receipts remain in the bounded kind-9735 bucket
+        // so the coordinator can reconcile them after its one LNURL lookup.
+        val zapDecision = if (event.kind == 9735) {
+            authenticateZapReceipt(event, ownPubkey, ownZapServiceAuthority)
+        } else null
+        if (zapDecision is ZapReceiptDecision.Rejected) {
+            recordZapAuthDecision(event.id, zapDecision)
+            eventsById.remove(event.id, event)
+            return false
+        }
+
         if (!admitNovelContent(event, dirty)) return false
 
         // 2. Update indexes
@@ -1428,8 +1461,14 @@ class MemoryEventStore @Inject constructor(
         // 2b. Index relay hints from e-tags (provenance + explicit NIP-10/18 hints)
         indexRelayHints(event)
 
-        // 2c. Notification recipient index (M4)
-        indexNotificationRecipients(event)
+        // 2c. A zap receipt reaches any aggregate or notification index only
+        // after all applicable NIP-57 trust gates have accepted it.
+        val indexForNotifications = if (event.kind == 9735) {
+            handleZapReceipt(event, dirty, decision = zapDecision)
+        } else {
+            true
+        }
+        if (indexForNotifications) indexNotificationRecipients(event)
 
         // 3. Update derived aggregates based on kind
         when (event.kind) {
@@ -1441,7 +1480,6 @@ class MemoryEventStore @Inject constructor(
             7 -> handleReaction(event, dirty)
             5 -> handleDeletion(event, dirty)
             9734 -> handleZapRequest(event)
-            9735 -> handleZapReceipt(event, dirty)
             10000 -> handleMuteList(event)
             10002 -> handleRelayList(event, dirty)
             10006 -> handleBlocked(event, dirty)
@@ -1841,6 +1879,9 @@ class MemoryEventStore @Inject constructor(
 
     private fun deleteStoredEvent(event: NostrEvent, dirty: InsertDirty) {
         deindexDerivedForDeletion(event, dirty)
+        if (event.kind == 9735) {
+            zapAuthRecordedIds.remove(event.id)
+        }
         removeFromIndexes(event)
         lastTouchedAt.remove(event.id)
         feedRowCache.remove(event.id)
@@ -1930,6 +1971,7 @@ class MemoryEventStore @Inject constructor(
                 removeFromActorIndex(zappedTargetsByActor, event.pubkey, targetId)
                 dirty.action = true
             }
+            9735 -> removeAuthenticatedZapReceipt(event, dirty)
         }
     }
 
@@ -2011,179 +2053,223 @@ class MemoryEventStore @Inject constructor(
         }
     }
 
-    private fun handleZapReceipt(event: NostrEvent, dirty: InsertDirty) {
-        // e-tag target; for a zap to an addressable event (article) there may be no
-        // e-tag — fall back to the a/A coordinate (zapStats merges the coord key).
-        val targetId = (event.tags.firstOrNull { it.size >= 2 && it[0] == "e" }
-            ?: event.tags.firstOrNull { it.size >= 2 && (it[0] == "a" || it[0] == "A") })
-            ?.get(1) ?: return
-
-        val sats = extractSatsFromZap(event)
-        // Parse embedded kind-9734 zap request for sender pubkey + comment.
-        val desc = parseZapDescription(event)
-
-        // Patch-as-own: a private zap WE sent is anon-signed, so this receipt's
-        // embedded sender is the anon pubkey, not ours. If it matches a pending
-        // own-anon mapping, promote the stored sender → own so the existing
-        // (sender, sats) dedup collapses it against the optimistic own row. This is
-        // sender-local only — the receipt on the wire / for other clients stays
-        // anonymous; we never publish or expose the anon→own link.
-        val own = ownPubkey
-        val rawSender = desc?.senderPubkey
-        val promotedToOwn = rawSender != null && own != null && rawSender != own && consumeOwnAnonZap(rawSender)
-        val effectiveSender = if (promotedToOwn) own else rawSender
-
-        // Detail row FIRST and idempotent by receipt id: the per-zap rows are the
-        // durable source of truth (zapStats derives from them, and the restore
-        // repair pass rebuilds them from receipt events). A receipt re-seen across
-        // relays, or replayed by repair, must not add a duplicate row or double-count.
-        val list = zapDetailsByTarget
-            .computeIfAbsent(targetId) { java.util.Collections.synchronizedList(mutableListOf()) }
-        val added = synchronized(list) {
-            if (list.any { it.eventId == event.id }) false
-            else { list.add(ZapDetail(effectiveSender, sats, desc?.comment, eventId = event.id)); true }
+    /** Returns true only when this receipt is safe to expose to notification indexes. */
+    private fun handleZapReceipt(
+        event: NostrEvent,
+        dirty: InsertDirty,
+        decision: ZapReceiptDecision? = null,
+    ): Boolean {
+        return when (val resolved = decision ?: authenticateZapReceipt(event, ownPubkey, ownZapServiceAuthority)) {
+            ZapReceiptDecision.PendingOwnAuthority -> false
+            is ZapReceiptDecision.Rejected -> {
+                recordZapAuthDecision(event.id, resolved)
+                false
+            }
+            is ZapReceiptDecision.Accepted -> {
+                recordZapAuthDecision(event.id, resolved)
+                materializeAuthenticatedZapReceipt(
+                    resolved.receipt,
+                    dirty,
+                )
+                true
+            }
         }
-        if (!added) return  // duplicate receipt — already counted
+    }
 
-        zapStatsByEventId.compute(targetId) { _, existing ->
-            val current = existing ?: ZapAggregate.EMPTY
-            ZapAggregate(current.count + 1, current.totalSats + sats)
-        }
-        statsUpdatedAt[targetId] = System.currentTimeMillis()
-        invalidateStatsForTarget(targetId, dirty)
-
-        // Own-zap detection: signal VM to clear optimistic sats overlay. Uses the
-        // effective sender, so a promoted private zap (anon→own) clears the overlay
-        // just like a public own zap. effectiveSender == null → anonymous, never ours.
-        // When the receipt targets an article COORDINATE, also emit the resolved
-        // article id — the optimistic overlay was placed on the event id, so clearing
-        // only the coord would leave a duplicate. Emit both.
-        if (own != null && effectiveSender == own) {
-            _ownZapReceived.tryEmit(targetId)
-            if (':' in targetId) articleIdByCoord[targetId]?.let { _ownZapReceived.tryEmit(it) }
-        }
-
-        // NIP-57 private zap detection. The embedded kind-9734's anon tag carries
-        // an encrypted blob (NIP-04 wire format from Quartz's PrivateZapRequestBuilder
-        // or PrivateZapEncryption). Decrypting with our key reveals the inner kind-9733
-        // containing the real sender + real message. We only attempt decrypt for
-        // receipts addressed to our own pubkey — private zaps for others can't be
-        // decrypted by us.
-        if (own != null) {
-            val recipientP = event.tags.firstOrNull { it.size >= 2 && it[0] == "p" }?.get(1)
-            if (recipientP == own) {
-                val (anonCt, anonSigner) = parseAnonTagAndSigner(event)
-                if (anonCt != null && anonSigner != null &&
-                    !privateZapDecryptedById.containsKey(event.id)) {
-                    _pendingPrivateZapDecrypts.tryEmit(
-                        PendingPrivateZapDecrypt(event.id, anonCt, anonSigner)
-                    )
+    /**
+     * Called by the lifecycle coordinator after resolving the signed-in user's
+     * LNURL metadata. Pending receipts are retained as raw events and reconciled
+     * under the same kind lock as EventProcessor insertion.
+     */
+    internal fun updateOwnZapServiceAuthority(
+        ownerPubkey: String,
+        authority: OwnZapServiceAuthority,
+    ) {
+        if (ownPubkey != ownerPubkey) return
+        ownZapServiceAuthority = authority
+        // A transport failure is absence of fresh evidence, not evidence that a
+        // receipt previously authenticated with this session's trusted key became
+        // forged. Keep materialized rows stable and leave novel own receipts pending.
+        if (authority == OwnZapServiceAuthority.Unavailable) return
+        val dirty = InsertDirty()
+        val lock = contentMutationLocks.getValue(9735)
+        synchronized(lock) {
+            val receiptIds = idsByKind[9735]?.toList().orEmpty()
+            for (id in receiptIds) {
+                val event = eventsById[id] ?: continue
+                if (event.tags.singleOrNull { it.getOrNull(0) == "p" }?.getOrNull(1) != ownerPubkey) continue
+                if (reconcileStoredZapReceipt(event, dirty)) {
+                    indexNotificationRecipients(event)
                 }
             }
         }
+        flushDirty(dirty)
     }
 
-    private data class ZapDescription(val senderPubkey: String, val comment: String?)
-
-    /** Parse the kind-9734 zap request embedded in a kind-9735 receipt's description tag. */
-    private fun parseZapDescription(event: NostrEvent): ZapDescription? {
-        val descJson = event.tags
-            .firstOrNull { it.size >= 2 && it[0] == "description" }
-            ?.get(1) ?: return null
-        return try {
-            val obj = NostrJson.parseToJsonElement(descJson).jsonObject
-            val pubkey = obj["pubkey"]?.jsonPrimitive?.content
-                ?.takeIf { it.length == 64 } ?: return null
-            val comment = obj["content"]?.jsonPrimitive?.content?.takeIf { it.isNotBlank() }
-            ZapDescription(pubkey, comment)
-        } catch (_: Exception) { null }
-    }
-
-    /**
-     * Extract the encrypted ciphertext from the kind-9734's anon tag, along
-     * with the kind-9734 signer's pubkey (publicKey_a) — needed as the
-     * peerPubkey for decrypt. The wire format is NIP-04, but SigningManager.decrypt
-     * tries NIP-44 first as a defensive fallback for legacy senders.
-     *
-     * Returns (null, null) if no anon tag, no description tag, or malformed JSON.
-     */
-    private fun parseAnonTagAndSigner(event: NostrEvent): Pair<String?, String?> {
-        val descJson = event.tags
-            .firstOrNull { it.size >= 2 && it[0] == "description" }
-            ?.get(1) ?: return null to null
-        return try {
-            val obj = NostrJson.parseToJsonElement(descJson).jsonObject
-            val signerPubkey = obj["pubkey"]?.jsonPrimitive?.content ?: return null to null
-            val tagsArr = obj["tags"]?.jsonArray ?: return null to null
-            val anonTag = tagsArr.firstOrNull { el ->
-                val arr = el as? JsonArray ?: return@firstOrNull false
-                arr.size >= 2 && arr[0].jsonPrimitive.content == "anon"
-            } as? JsonArray ?: return null to null
-            val ct = anonTag[1].jsonPrimitive.content.takeIf { it.isNotBlank() }
-                ?: return null to null
-            ct to signerPubkey
-        } catch (_: Exception) {
-            null to null
-        }
-    }
-
-    /**
-     * Extract sats from a kind-9735 zap receipt.
-     *
-     * Priority: bolt11 tag (parsed via BOLT11 amount spec), then "amount"
-     * tag (millisatoshis, NIP-57).
-     *
-     * Note: Quartz's LnInvoiceUtil.getAmountInSats() is the canonical
-     * parser used by EventProcessor, but it's compiled for Java 21 and
-     * can't run in JVM 17 unit tests (UnsupportedClassVersionError).
-     * This parser implements the same BOLT11 amount extraction:
-     * lnbc<digits><multiplier>1<data> where m=milli, u=micro, n=nano, p=pico.
-     */
-    private fun extractSatsFromZap(event: NostrEvent): Long {
-        // Primary: parse bolt11 tag
-        val bolt11 = event.tags
-            .firstOrNull { it.size >= 2 && it[0] == "bolt11" }
-            ?.get(1)
-        if (bolt11 != null) {
-            val sats = parseBolt11Amount(bolt11)
-            if (sats > 0) return sats
-        }
-
-        // Fallback: "amount" tag in millisatoshis (NIP-57)
-        val amountMsats = event.tags
-            .firstOrNull { it.size >= 2 && it[0] == "amount" }
-            ?.get(1)?.toLongOrNull()
-        if (amountMsats != null) return amountMsats / 1000
-
-        return 0L
-    }
-
-    private fun parseBolt11Amount(bolt11: String): Long {
-        // BOLT11 HRP: lnbc<amount><multiplier>  Separator: 1  Data: bech32
-        val prefix = "lnbc"
-        val lower = bolt11.lowercase()
-        val idx = lower.indexOf(prefix)
-        if (idx < 0) return 0L
-
-        val afterPrefix = lower.substring(idx + prefix.length)
-        val numStr = afterPrefix.takeWhile { it.isDigit() }
-        if (numStr.isEmpty()) return 0L
-        if (numStr.length > 18) return 0L
-
-        val amount = numStr.toLongOrNull() ?: return 0L
-        val multiplier = afterPrefix.getOrNull(numStr.length)
-
-        // BTC multipliers → sats (1 BTC = 100_000_000 sats)
-        return try {
-            when (multiplier) {
-                'm' -> Math.multiplyExact(amount, 100_000L)       // milli-BTC
-                'u' -> Math.multiplyExact(amount, 100L)           // micro-BTC
-                'n' -> amount / 10                                // nano-BTC (1 nBTC = 0.1 sat)
-                'p' -> amount / 10_000                            // pico-BTC
-                else -> Math.multiplyExact(amount, 100_000_000L)  // BTC
+    /** Revalidate a retained/persisted receipt against current own-zapper authority. */
+    private fun reconcileStoredZapReceipt(
+        event: NostrEvent,
+        dirty: InsertDirty,
+    ): Boolean {
+        return when (val decision = authenticateZapReceipt(event, ownPubkey, ownZapServiceAuthority)) {
+            ZapReceiptDecision.PendingOwnAuthority -> false
+            is ZapReceiptDecision.Rejected -> {
+                recordZapAuthDecision(event.id, decision)
+                // A final rejection must not remain as a p-tag owner anchor.
+                removeContentEventForEvictionUnlocked(event.id, dirty.invalidatedStatsIds)
+                false
             }
-        } catch (_: ArithmeticException) {
-            0L
+            is ZapReceiptDecision.Accepted -> {
+                removeAuthenticatedZapReceipt(event, dirty)
+                handleZapReceipt(
+                    event = event,
+                    dirty = dirty,
+                    decision = decision,
+                )
+            }
+        }
+    }
+
+    private fun materializeAuthenticatedZapReceipt(
+        receipt: AuthenticatedZapReceipt,
+        dirty: InsertDirty,
+    ) {
+        val own = ownPubkey
+        val previous = authenticatedZapReceiptsById.put(receipt.receiptId, receipt)
+        eventsById[receipt.receiptId]?.let { event ->
+            contentAdmissionIndex.track(event.id, event.kind, contentAdmissionTier(event))
+        }
+        val targetId = receipt.targetId
+        var attribution = receipt.attribution
+
+        // Sender-local override for our own outgoing private zap. The signed
+        // outer request stays anonymous to every other client. Retaining the
+        // locally-generated anon key mapping keeps this stable after restart.
+        val signer = receipt.requestSignerPubkey
+        if (attribution is ZapAttribution.Anonymous && own != null && signer != null && isOwnAnonZap(signer)) {
+            attribution = ZapAttribution.Identified(own, null)
+        }
+
+        if (previous?.targetId != null && previous.targetId != targetId) {
+            removeZapDetailRow(previous.targetId, receipt.receiptId)
+            invalidateZapAggregate(previous.targetId, dirty)
+        }
+        if (targetId != null) {
+            val list = zapDetailsByTarget.computeIfAbsent(targetId) {
+                java.util.Collections.synchronizedList(mutableListOf())
+            }
+            synchronized(list) {
+                val detail = ZapDetail(attribution, receipt.sats, receipt.receiptId)
+                val index = list.indexOfFirst { it.eventId == receipt.receiptId }
+                if (index >= 0) list[index] = detail else list.add(detail)
+            }
+            invalidateZapAggregate(targetId, dirty)
+
+            val effectiveSender = (attribution as? ZapAttribution.Identified)?.pubkey
+            if (own != null && effectiveSender == own) {
+                _ownZapReceived.tryEmit(targetId)
+                if (':' in targetId) articleIdByCoord[targetId]?.let { _ownZapReceived.tryEmit(it) }
+            }
+        }
+
+        val envelope = receipt.privateEnvelope
+        if (envelope != null && own != null && receipt.recipientPubkey == own &&
+            !verifiedPrivateZapsById.containsKey(receipt.receiptId)
+        ) {
+            _pendingPrivateZapDecrypts.tryEmit(
+                PendingPrivateZapDecrypt(
+                    zapReceiptId = receipt.receiptId,
+                    anonCiphertext = envelope.ciphertext,
+                    anonSignerPubkey = envelope.signerPubkey,
+                    recipientPubkey = envelope.recipientPubkey,
+                    targetTagName = envelope.targetTagName,
+                    targetId = envelope.targetId,
+                )
+            )
+        }
+    }
+
+    private fun removeAuthenticatedZapReceipt(event: NostrEvent, dirty: InsertDirty) {
+        val previous = authenticatedZapReceiptsById.remove(event.id)
+        eventsById[event.id]?.let { retained ->
+            contentAdmissionIndex.track(retained.id, retained.kind, contentAdmissionTier(retained))
+        }
+        verifiedPrivateZapsById.remove(event.id)
+        val targetId = previous?.targetId ?: event.tags
+            .firstOrNull { it.size >= 2 && (it[0] == "e" || it[0] == "a") }
+            ?.getOrNull(1)
+        if (targetId != null && removeZapDetailRow(targetId, event.id)) {
+            invalidateZapAggregate(targetId, dirty)
+        }
+        deindexNotificationRecipients(event)
+    }
+
+    private fun removeZapDetailRow(targetId: String, receiptId: String): Boolean {
+        val list = zapDetailsByTarget[targetId] ?: return false
+        val removed = synchronized(list) { list.removeAll { it.eventId == receiptId } }
+        if (removed && synchronized(list) { list.isEmpty() }) zapDetailsByTarget.remove(targetId, list)
+        return removed
+    }
+
+    private fun invalidateZapAggregate(targetId: String, dirty: InsertDirty) {
+        statsUpdatedAt[targetId] = System.currentTimeMillis()
+        invalidateStatsForTarget(targetId, dirty)
+    }
+
+    private fun recordZapAuthDecision(eventId: String, decision: ZapReceiptDecision) {
+        if (decision == ZapReceiptDecision.PendingOwnAuthority || !zapAuthRecordedIds.add(eventId)) return
+        trimZapAuthRecordedIdsIfNeeded()
+        val finalized = zapAuthFinalized.incrementAndGet()
+        val requestFailure = when (decision) {
+            is ZapReceiptDecision.Accepted -> decision.receipt.requestFailureRenderedAnonymous
+            is ZapReceiptDecision.Rejected -> decision.requestFailure
+            ZapReceiptDecision.PendingOwnAuthority -> null
+        }
+        if (requestFailure != null) zapAuthGate2Rejected.incrementAndGet()
+        val rejected = zapAuthGate2Rejected.get()
+        val client = when (decision) {
+            is ZapReceiptDecision.Accepted -> decision.receipt.selfClaimedClient
+            is ZapReceiptDecision.Rejected -> decision.selfClaimedClient
+            ZapReceiptDecision.PendingOwnAuthority -> null
+        }
+        val outcome = when (decision) {
+            is ZapReceiptDecision.Accepted -> if (requestFailure == null) "accepted" else "anonymous"
+            is ZapReceiptDecision.Rejected -> "rejected:${decision.reason}"
+            ZapReceiptDecision.PendingOwnAuthority -> "pending"
+        }
+        val gate2 = when {
+            requestFailure != null -> requestFailure.toString()
+            decision is ZapReceiptDecision.Accepted -> "verified"
+            decision is ZapReceiptDecision.Rejected &&
+                (decision.reason == ZapReceiptRejection.INVALID_REQUEST_AMOUNT ||
+                    decision.reason == ZapReceiptRejection.AMOUNT_MISMATCH) -> "verified"
+            else -> "not_evaluated"
+        }
+        // Release-visible but bounded: a hostile relay controls event volume and
+        // must not be able to turn rejection telemetry into an unbounded log-I/O
+        // path. The cumulative counters preserve the measurable rejection rate.
+        if (finalized <= 5L || finalized % 25L == 0L ||
+            (requestFailure != null && rejected <= 5L)
+        ) {
+            Log.w(
+                "ZapAuth",
+                "ZAP-AUTH finalized=$finalized gate2Rejected=$rejected outcome=$outcome " +
+                    "gate2=$gate2 claimedClient=${client ?: "unknown"}",
+            )
+        }
+    }
+
+    internal data class ZapAuthStats(val finalized: Long, val gate2Rejected: Long)
+    internal fun zapAuthStatsForTest() = ZapAuthStats(zapAuthFinalized.get(), zapAuthGate2Rejected.get())
+
+    private fun trimZapAuthRecordedIdsIfNeeded() {
+        if (zapAuthRecordedIds.size <= ZAP_AUTH_RECORDED_IDS_MAX) return
+        val iterator = zapAuthRecordedIds.iterator()
+        var removed = 0
+        while (iterator.hasNext() && removed < ZAP_AUTH_RECORDED_IDS_TRIM) {
+            iterator.next()
+            iterator.remove()
+            removed++
         }
     }
 
@@ -3067,6 +3153,12 @@ class MemoryEventStore @Inject constructor(
         invalidatedReplyTargets: MutableSet<String>,
     ): NostrEvent? {
         val event = eventsById.remove(eventId) ?: return null
+        if (event.kind == 9735) {
+            val zapDirty = InsertDirty()
+            removeAuthenticatedZapReceipt(event, zapDirty)
+            invalidatedReplyTargets += zapDirty.invalidatedStatsIds
+            zapAuthRecordedIds.remove(event.id)
+        }
         contentAdmissionIndex.remove(event.id, event.kind)
         deindexNotificationRecipients(event)
         recentByCreatedAt.remove(EventEntry(event.id, event.createdAt))
@@ -3108,7 +3200,6 @@ class MemoryEventStore @Inject constructor(
         imetaImageDimsByEventId.remove(event.id)
         eventModelsByEventId.remove(event.id)
         repostCounts.remove(event.id)
-        zapStatsByEventId.remove(event.id)
         statsUpdatedAt.remove(event.id)
         repostPubkeysByTarget.remove(event.id)
         reactionsByTarget.remove(event.id)
@@ -4105,20 +4196,12 @@ class MemoryEventStore @Inject constructor(
             .take(ARTICLE_COMMENT_CAP)
             .map { toFeedRow(it) }
     fun zapStats(eventId: String): ZapAggregate {
-        // Source of truth = the SAME deduped, receipt-backed rows the drawer shows,
-        // so the action-bar summary and the drawer never disagree. Optimistic rows
-        // are excluded here (extraZapSats overlays those). Fall back to the raw
-        // aggregate only when there are no receipt-backed details (legacy snapshots
-        // that persisted aggregates without per-zap detail rows).
+        // Source of truth = authenticated, receipt-backed rows. Legacy scalar
+        // aggregates are deliberately never a fallback: they carry no receipt id
+        // and therefore cannot be revalidated after an upgrade or restore.
         val receipts = zapDetailsForEvent(eventId).filter { it.eventId != null }
-        if (receipts.isNotEmpty()) {
-            return ZapAggregate(receipts.size, receipts.sumOf { it.sats })
-        }
-        val direct = zapStatsByEventId[eventId] ?: ZapAggregate.EMPTY
-        val coord = articleCoordForEvent(eventId)
-        val viaCoord = if (coord != null) zapStatsByEventId[coord] ?: ZapAggregate.EMPTY else ZapAggregate.EMPTY
-        return if (viaCoord === ZapAggregate.EMPTY) direct
-        else ZapAggregate(direct.count + viaCoord.count, direct.totalSats + viaCoord.totalSats)
+        return if (receipts.isEmpty()) ZapAggregate.EMPTY
+        else ZapAggregate(receipts.size, receipts.sumOf { it.sats })
     }
     fun statsLastUpdated(eventId: String): Long = statsUpdatedAt[eventId] ?: 0L
 
@@ -4169,22 +4252,11 @@ class MemoryEventStore @Inject constructor(
      *  self-zap shows ONE row, not an optimistic + receipt duplicate. */
     fun zapDetailsForEvent(eventId: String): List<ZapDetail> {
         val coord = articleCoordForEvent(eventId)
-        val direct = zapDetailsByTarget[eventId]?.toList() ?: emptyList()
-        val viaCoord = if (coord != null) zapDetailsByTarget[coord]?.toList() ?: emptyList() else emptyList()
-        val deduped = dedupeZapDetails(direct + viaCoord)
-        if (deduped.isNotEmpty()) return deduped
-        // Legacy/bad-snapshot fallback: a raw aggregate persisted without detail
-        // rows and no surviving receipt event to repair from → synthesize one
-        // anonymous row so the drawer is never empty while the summary shows sats.
-        // eventId == null keeps it out of zapStats' receipt-backed path, so it
-        // never double-counts; a real receipt row always supersedes it.
-        val agg = zapStatsByEventId[eventId]
-            ?: coord?.let { zapStatsByEventId[it] }
-            ?: ZapAggregate.EMPTY
-        if (agg.count > 0 || agg.totalSats > 0L) {
-            return listOf(ZapDetail(senderPubkey = null, sats = agg.totalSats, comment = null, eventId = null))
+        fun snapshot(key: String?): List<ZapDetail> {
+            val list = key?.let(zapDetailsByTarget::get) ?: return emptyList()
+            return synchronized(list) { list.toList() }
         }
-        return deduped
+        return dedupeZapDetails(snapshot(eventId) + snapshot(coord))
     }
 
     /** De-dup zap rows: first by receipt id (a receipt merged from both the id and
@@ -4210,21 +4282,23 @@ class MemoryEventStore @Inject constructor(
         return receipts + keptOptimistic
     }
 
-    /** Lookup decrypted private-zap result. Returns null if not (yet) decrypted. */
-    fun getDecryptedPrivateZap(zapReceiptId: String): DecryptedPrivateZap? =
-        privateZapDecryptedById[zapReceiptId]
+    /** Lookup a decrypted and inner-signature-verified private zap. */
+    internal fun getVerifiedPrivateZap(zapReceiptId: String): VerifiedPrivateZap? =
+        verifiedPrivateZapsById[zapReceiptId]
 
     /**
      * Called by PrivateZapRepository when async decrypt completes successfully.
      * Writes the result and bumps stats so the affected event's notification
      * flow re-emits (notification row rebuilds with real sender).
      */
-    fun updateDecryptedPrivateZap(
+    internal fun acceptVerifiedPrivateZap(
         zapReceiptId: String,
-        decrypted: DecryptedPrivateZap,
+        verified: VerifiedPrivateZap,
         targetId: String,
     ) {
-        privateZapDecryptedById[zapReceiptId] = decrypted
+        val authenticated = authenticatedZapReceiptsById[zapReceiptId] ?: return
+        if (authenticated.targetId != targetId || authenticated.privateEnvelope == null) return
+        verifiedPrivateZapsById[zapReceiptId] = verified
 
         // Patch the drawer entry — swap anon pubkey for real sender,
         // upgrade comment from "" to the decrypted content. Matched by
@@ -4237,8 +4311,10 @@ class MemoryEventStore @Inject constructor(
                 if (idx >= 0) {
                     val old = list[idx]
                     list[idx] = old.copy(
-                        senderPubkey = decrypted.senderPubkey,
-                        comment = decrypted.comment ?: old.comment,
+                        attribution = ZapAttribution.Identified(
+                            verified.senderPubkey,
+                            verified.comment ?: old.comment,
+                        ),
                     )
                 }
             }
@@ -4263,16 +4339,20 @@ class MemoryEventStore @Inject constructor(
         val own = ownPubkey ?: return
         val zapReceiptIds = idsByKind[9735] ?: return
         for (id in zapReceiptIds) {
-            if (privateZapDecryptedById.containsKey(id)) continue
-            val event = eventsById[id] ?: continue
-            val recipientP = event.tags.firstOrNull { it.size >= 2 && it[0] == "p" }?.get(1)
-            if (recipientP != own) continue
-            val (anonCt, anonSigner) = parseAnonTagAndSigner(event)
-            if (anonCt != null && anonSigner != null) {
-                _pendingPrivateZapDecrypts.tryEmit(
-                    PendingPrivateZapDecrypt(id, anonCt, anonSigner)
+            if (verifiedPrivateZapsById.containsKey(id)) continue
+            val receipt = authenticatedZapReceiptsById[id] ?: continue
+            if (receipt.recipientPubkey != own) continue
+            val envelope = receipt.privateEnvelope ?: continue
+            _pendingPrivateZapDecrypts.tryEmit(
+                PendingPrivateZapDecrypt(
+                    zapReceiptId = id,
+                    anonCiphertext = envelope.ciphertext,
+                    anonSignerPubkey = envelope.signerPubkey,
+                    recipientPubkey = envelope.recipientPubkey,
+                    targetTagName = envelope.targetTagName,
+                    targetId = envelope.targetId,
                 )
-            }
+            )
         }
     }
 
@@ -4526,23 +4606,6 @@ class MemoryEventStore @Inject constructor(
     }
 
     /**
-     * Compatibility shim: optimistic zap sats bump.
-     * This mutates recipient-side aggregate state (zapStatsByEventId)
-     * for immediate UX feedback. The canonical recipient-side path is
-     * kind-9735 via handleZapReceipt. This shim preserves the pre-Tier-4
-     * behavior where eventStatsDao.incrementZapStats was called on
-     * successful payment. Remove if/when A.5.2 reworks zap aggregation.
-     */
-    fun incrementZapStats(eventId: String, sats: Long) {
-        zapStatsByEventId.compute(eventId) { _, existing ->
-            val current = existing ?: ZapAggregate.EMPTY
-            ZapAggregate(current.count + 1, current.totalSats + sats)
-        }
-        statsUpdatedAt[eventId] = System.currentTimeMillis()
-        _statsInvalidations.tryEmit(StatsInvalidation.Targeted(setOf(eventId)))
-    }
-
-    /**
      * Insert an optimistic zap detail so the engagement drawer shows the
      * user's chip immediately after payment, before the kind-9735 receipt
      * arrives from the LNURL service.
@@ -4550,60 +4613,31 @@ class MemoryEventStore @Inject constructor(
     fun addOptimisticZapDetail(targetId: String, senderPubkey: String, sats: Long, comment: String?) {
         zapDetailsByTarget
             .computeIfAbsent(targetId) { java.util.Collections.synchronizedList(mutableListOf()) }
-            .add(ZapDetail(senderPubkey, sats, comment, eventId = null))
+            .add(ZapDetail.identified(senderPubkey, sats, comment, eventId = null))
         statsUpdatedAt[targetId] = System.currentTimeMillis()
         _statsInvalidations.tryEmit(StatsInvalidation.Targeted(setOf(targetId)))
     }
 
     /**
-     * Restore repair: rebuild per-zap detail rows from retained kind-9735 receipt
-     * events, then recompute the aggregate from those rows. insertFromSnapshot does
-     * NOT run handleZapReceipt, and the detail section persists independently of the
-     * aggregate section, so a restored snapshot can hold a zap aggregate with no
-     * detail rows — the action-bar count shows but the drawer is empty. This pass
-     * makes the receipt events the source of truth and is idempotent (matched by
-     * receipt id). It deliberately does NOT emit ownZapReceived — there is no VM
-     * optimistic overlay to clear during restore. Legacy aggregate-only entries
-     * with no surviving receipt event are left untouched (the drawer fallback in
-     * [zapDetailsForEvent] covers those).
+     * Restore repair: authenticate retained kind-9735 events and rebuild typed
+     * details/totals from those receipts. Snapshot contributor rows are never a
+     * trust source; only local optimistic rows are restored directly. Receipts for
+     * the signed-in user remain hidden while zapper authority is unavailable and
+     * are reconciled by [updateOwnZapServiceAuthority]. Idempotent by receipt id.
      */
     internal fun repairZapDetailsFromReceipts() {
-        val receiptIds = idsByKind[9735]?.toList() ?: emptyList()
-        val touchedTargets = HashSet<String>()
-        for (rid in receiptIds) {
-            val event = eventsById[rid] ?: continue
-            val targetId = (event.tags.firstOrNull { it.size >= 2 && it[0] == "e" }
-                ?: event.tags.firstOrNull { it.size >= 2 && (it[0] == "a" || it[0] == "A") })
-                ?.get(1) ?: continue
-            val list = zapDetailsByTarget
-                .computeIfAbsent(targetId) { java.util.Collections.synchronizedList(mutableListOf()) }
-            synchronized(list) {
-                if (list.none { it.eventId == rid }) {
-                    val sats = extractSatsFromZap(event)
-                    val desc = parseZapDescription(event)
-                    // Promote our own private-zap receipt (anon-signed) → own, same as
-                    // the live path, so a restored-but-lost detail row dedups against
-                    // the persisted optimistic own row instead of doubling.
-                    val rawSender = desc?.senderPubkey
-                    val own = ownPubkey
-                    val effectiveSender =
-                        if (rawSender != null && own != null && rawSender != own && consumeOwnAnonZap(rawSender)) own
-                        else rawSender
-                    list.add(ZapDetail(effectiveSender, sats, desc?.comment, eventId = rid))
+        val dirty = InsertDirty()
+        val lock = contentMutationLocks.getValue(9735)
+        synchronized(lock) {
+            val receiptIds = idsByKind[9735]?.toList().orEmpty()
+            for (rid in receiptIds) {
+                val event = eventsById[rid] ?: continue
+                if (reconcileStoredZapReceipt(event, dirty)) {
+                    indexNotificationRecipients(event)
                 }
             }
-            touchedTargets.add(targetId)
         }
-        // Recompute the aggregate from receipt-backed rows for targets that have
-        // them, so summary == drawer. Targets with only the optimistic/legacy
-        // aggregate (no receipt rows) keep their existing raw aggregate.
-        for (targetId in touchedTargets) {
-            val list = zapDetailsByTarget[targetId] ?: continue
-            val receipts = synchronized(list) { list.filter { it.eventId != null } }
-            if (receipts.isNotEmpty()) {
-                zapStatsByEventId[targetId] = ZapAggregate(receipts.size, receipts.sumOf { it.sats })
-            }
-        }
+        flushDirty(dirty)
     }
 
     /**
@@ -4629,15 +4663,21 @@ class MemoryEventStore @Inject constructor(
                 val it = list.listIterator()
                 while (it.hasNext()) {
                     val row = it.next()
-                    if (row.eventId != null && row.senderPubkey == anonPubkey) {
-                        it.set(row.copy(senderPubkey = own))
+                    val authenticated = row.eventId?.let(authenticatedZapReceiptsById::get)
+                    if (authenticated?.requestSignerPubkey == anonPubkey &&
+                        authenticated.attribution is ZapAttribution.Anonymous
+                    ) {
+                        it.set(
+                            row.copy(
+                                attribution = ZapAttribution.Identified(own, row.comment),
+                            )
+                        )
                         matched = true
                     }
                 }
             }
         }
         if (matched) {
-            consumeOwnAnonZap(anonPubkey) // matched → no longer pending
             statsUpdatedAt[targetId] = System.currentTimeMillis()
             _statsInvalidations.tryEmit(StatsInvalidation.Targeted(setOf(targetId)))
         }
@@ -5478,8 +5518,8 @@ class MemoryEventStore @Inject constructor(
      * Scan-based notification query. Walks idsByKind for notification-eligible
      * Notification query backed by the recipient-pubkey reverse index.
      * Iterates the per-recipient sorted set in createdAt-DESC order until
-     * [limit] items are collected, applying self-exclusion (parses
-     * kind-9735 description for the real sender) and an optional
+     * [limit] items are collected, applying self-exclusion from authenticated
+     * zap attribution and an optional
      * followed-only filter at read time.
      *
      * @param limit Maximum rows to return. null = unlimited.
@@ -5521,15 +5561,16 @@ class MemoryEventStore @Inject constructor(
             val event = eventsById[entry.eventId] ?: continue
             scanned++
 
-            // Resolve kind-9735 zap identity ONCE per event (parseZapDescription is a
-            // JSON parse) — reused for self-exclusion, follows filter, and the actor.
-            val decryptedZap = if (event.kind == 9735) privateZapDecryptedById[event.id] else null
-            val zapDesc = if (event.kind == 9735 && decryptedZap == null) parseZapDescription(event) else null
-            val effectivePubkey = if (event.kind == 9735) {
-                decryptedZap?.senderPubkey ?: zapDesc?.senderPubkey ?: event.pubkey
+            val authenticatedZap = if (event.kind == 9735) {
+                authenticatedZapReceiptsById[event.id] ?: continue
+            } else null
+            val decryptedZap = authenticatedZap?.let { verifiedPrivateZapsById[event.id] }
+            val effectivePubkey = if (authenticatedZap != null) {
+                decryptedZap?.senderPubkey
+                    ?: (authenticatedZap.attribution as? ZapAttribution.Identified)?.pubkey
             } else event.pubkey
-            if (effectivePubkey == recipientPubkey) continue
-            if (follows != null && effectivePubkey !in follows) continue
+            if (effectivePubkey != null && effectivePubkey == recipientPubkey) continue
+            if (follows != null && (effectivePubkey == null || effectivePubkey !in follows)) continue
 
             if (event.kind == 1018) {
                 if (event.id !in latestPollVoteIds) continue
@@ -5558,13 +5599,13 @@ class MemoryEventStore @Inject constructor(
                         g = NotifGroupAcc(notifType, targetId, targetId?.let { eventsById[it]?.content } ?: "")
                         groups[gkey] = g
                     }
-                    val sats = if (event.kind == 9735) extractSatsFromZap(event) else 0L
+                    val sats = authenticatedZap?.sats ?: 0L
                     val actorPubkey: String?
                     val actorFields: Map<String, String?>
                     if (event.kind == 9735) {
                         when {
                             decryptedZap != null -> { actorPubkey = decryptedZap.senderPubkey; actorFields = cachedProfileFields(decryptedZap.senderPubkey) }
-                            zapDesc != null -> { actorPubkey = zapDesc.senderPubkey; actorFields = cachedProfileFields(zapDesc.senderPubkey) }
+                            effectivePubkey != null -> { actorPubkey = effectivePubkey; actorFields = cachedProfileFields(effectivePubkey) }
                             else -> { actorPubkey = null; actorFields = emptyMap() }   // anonymous aggregate
                         }
                     } else {
@@ -5595,10 +5636,11 @@ class MemoryEventStore @Inject constructor(
             if (entry.createdAt <= since) break  // sorted DESC — done
             val event = eventsById[entry.eventId] ?: continue
             if (event.kind == 9735) {
-                val decrypted = privateZapDecryptedById[event.id]
+                val authenticated = authenticatedZapReceiptsById[event.id] ?: continue
+                val decrypted = verifiedPrivateZapsById[event.id]
                 val effectiveSender = decrypted?.senderPubkey
-                    ?: parseZapDescription(event)?.senderPubkey
-                if (effectiveSender == recipientPubkey) continue
+                    ?: (authenticated.attribution as? ZapAttribution.Identified)?.pubkey
+                if (effectiveSender != null && effectiveSender == recipientPubkey) continue
             } else {
                 if (event.pubkey == recipientPubkey) continue
             }
@@ -5897,7 +5939,7 @@ class MemoryEventStore @Inject constructor(
             replyIndexEntries = idsByReplyTarget.values.sumOf { it.size },
             repostCountEntries = repostCounts.size,
             reactionCountEntries = reactionsByTarget.size,
-            zapStatsEntries = zapStatsByEventId.size,
+            zapStatsEntries = zapDetailsByTarget.size,
             statsUpdatedAtEntries = statsUpdatedAt.size,
             reactedActors = reactedTargetsByActor.size,
             reactedTargetsTotal = reactedTotal,
@@ -6040,10 +6082,8 @@ class MemoryEventStore @Inject constructor(
             writer.newLine()
         }
         // reactionCounts no longer written — reactionsByTarget is the source of truth (H10)
-        for ((id, zap) in zapStatsByEventId) {
-            writer.write("zap|$id|${zap.count}|${zap.totalSats}")
-            writer.newLine()
-        }
+        // Legacy scalar zap rows are no longer written; retained receipts are
+        // the only state capable of rebuilding authenticated totals.
         // Write relay health section
         writer.write("---RELAY_HEALTH---")
         writer.newLine()
@@ -6104,8 +6144,8 @@ class MemoryEventStore @Inject constructor(
         reindexReactionsFromEvents()
         rebuildActionEventIndexesFromEvents()
         rebuildNotificationIndex()
-        // V2 aggregates persist zap counts but no per-zap detail rows — rebuild
-        // them from retained kind-9735 events so the drawer matches the summary.
+        // Legacy text snapshots cannot safely authenticate scalar zap totals;
+        // rebuild all visible zap state from retained receipts instead.
         repairZapDetailsFromReceipts()
 
         // Bump all signals once (follows signal fires again — idempotent,
@@ -6253,11 +6293,9 @@ class MemoryEventStore @Inject constructor(
             for ((id, count) in reposts) { d.writeStr(id); d.writeInt(count) }
             // reactionCounts: write 0 entries (legacy field, reactionsByTarget is source of truth)
             d.writeInt(0)
-            val zaps = zapStatsByEventId.toMap()
-            d.writeInt(zaps.size)
-            for ((id, zap) in zaps) {
-                d.writeStr(id); d.writeInt(zap.count); d.writeLong(zap.totalSats)
-            }
+            // Legacy scalar zap aggregates carry no receipt ids and cannot be
+            // authenticated after restore. Keep the wire slot, write no entries.
+            d.writeInt(0)
 
             // V6: Engagement contributor indexes
             val repostContribs = repostPubkeysByTarget.mapValues { it.value.toSet() }
@@ -6285,7 +6323,13 @@ class MemoryEventStore @Inject constructor(
                     }
                 }
             }
-            val zapContribs = zapDetailsByTarget.mapValues { it.value.toList() }
+            // Receipt-backed rows are derived from retained, authenticated 9735
+            // events on restore. Persist only local optimistic placeholders; an
+            // attribution without its receipt can never be revalidated safely.
+            val zapContribs = zapDetailsByTarget.mapNotNull { (id, list) ->
+                val optimistic = synchronized(list) { list.filter { it.eventId == null } }
+                if (optimistic.isEmpty()) null else id to optimistic
+            }.toMap()
             d.writeInt(zapContribs.size)
             for ((id, details) in zapContribs) {
                 d.writeStr(id); d.writeInt(details.size)
@@ -6608,10 +6652,9 @@ class MemoryEventStore @Inject constructor(
         val zapN = input.readInt()
         if (zapN < 0 || zapN > 5_000_000) throw IOException("Invalid zap count: $zapN")
         for (i in 0 until zapN) {
-            val id = input.readStr()
-            val c = input.readInt()
-            val sats = input.readLong()
-            zapStatsByEventId[id] = ZapAggregate(c, sats)
+            input.readStr()
+            input.readInt()
+            input.readLong()
         }
 
         // V6: Engagement contributor indexes (absent in V5 snapshots)
@@ -6658,9 +6701,14 @@ class MemoryEventStore @Inject constructor(
                     val sats = input.readLong()
                     val comment = input.readStrOrNull()
                     val eventId = if (version >= 11) input.readStrOrNull() else null
-                    list.add(ZapDetail(sender, sats, comment, eventId))
+                    if (eventId == null) {
+                        list.add(
+                            if (sender == null) ZapDetail.anonymous(sats)
+                            else ZapDetail.identified(sender, sats, comment)
+                        )
+                    }
                 }
-                zapDetailsByTarget[id] = list
+                if (list.isNotEmpty()) zapDetailsByTarget[id] = list
             }
         }
 
@@ -6868,9 +6916,8 @@ class MemoryEventStore @Inject constructor(
         // Reindex kind-7 reactions from raw events so the widened shortcode regex
         // reclassifies old Standard(":shortcode:") entries as Custom(shortcode, url).
         reindexReactionsFromEvents()
-        // Rebuild zap detail rows from retained kind-9735 events so the drawer
-        // matches the persisted summary (the detail section can drift from the
-        // aggregate section across saves; insertFromSnapshot skips handleZapReceipt).
+        // Rebuild typed zap state from retained receipts; persisted contributor
+        // rows and legacy scalar totals are never attribution/payment evidence.
         repairZapDetailsFromReceipts()
 
         // Notification recipients were rebuilt after the event section so
@@ -7192,7 +7239,10 @@ class MemoryEventStore @Inject constructor(
     }
 
     internal fun insertFromSnapshot(event: NostrEvent) {
-        if (event.kind == 10000) {
+        val contentLock = contentMutationLocks[event.kind]
+        if (contentLock != null) {
+            synchronized(contentLock) { insertFromSnapshotUnlocked(event) }
+        } else if (event.kind == 10000) {
             synchronized(muteStateLock) { insertFromSnapshotUnlocked(event) }
         } else {
             insertFromSnapshotUnlocked(event)
@@ -7234,7 +7284,10 @@ class MemoryEventStore @Inject constructor(
         indexArticleComment(event, null)
 
         indexRelayHints(event)
-        indexNotificationRecipients(event, backfillPollResponses = false)
+        // kind-9735 is indexed only after repair authenticates the retained receipt.
+        if (event.kind != 9735) {
+            indexNotificationRecipients(event, backfillPollResponses = false)
+        }
 
         // Pre-compute media metadata at snapshot-restore time (sidecar caches).
         // ContentParser.parse is LAZY — deferred to first getOrParseEventModel() read.
@@ -7278,13 +7331,7 @@ class MemoryEventStore @Inject constructor(
             "reply" -> { /* legacy scalar: consume and ignore */ }
             "repost" -> repostCounts[parts[1]] = parts[2].toIntOrNull() ?: return
             "reaction" -> { /* legacy: skip, reactionsByTarget is source of truth */ }
-            "zap" -> {
-                if (parts.size >= 4) {
-                    val count = parts[2].toIntOrNull() ?: return
-                    val total = parts[3].toLongOrNull() ?: return
-                    zapStatsByEventId[parts[1]] = ZapAggregate(count, total)
-                }
-            }
+            "zap" -> { /* legacy unauthenticated scalar: consume and ignore */ }
         }
     }
 
@@ -7524,8 +7571,12 @@ class MemoryEventStore @Inject constructor(
         lastTouchedAt.clear()
         contentAdmissionIndex.clear()
         repostCounts.clear()
-        zapStatsByEventId.clear()
         statsUpdatedAt.clear()
+        authenticatedZapReceiptsById.clear()
+        ownZapServiceAuthority = OwnZapServiceAuthority.Unavailable
+        zapAuthRecordedIds.clear()
+        zapAuthFinalized.set(0)
+        zapAuthGate2Rejected.set(0)
         repostPubkeysByTarget.clear()
         reactionsByTarget.clear()
         zapDetailsByTarget.clear()
@@ -7563,7 +7614,7 @@ class MemoryEventStore @Inject constructor(
         actorAccessedAt.clear()
         engagementCapped.clear()
         profileAnchoredIds.clear()
-        privateZapDecryptedById.clear()
+        verifiedPrivateZapsById.clear()
         notifIdsByRecipient.clear()
         notificationSignalByRecipient.clear()
         _feedSignal.value = 0L
