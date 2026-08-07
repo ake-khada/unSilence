@@ -34,17 +34,15 @@ import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.booleanOrNull
-import kotlinx.serialization.json.jsonArray
-import kotlinx.serialization.json.jsonObject
-import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.Response
 import okhttp3.WebSocket
 import okhttp3.WebSocketListener
-import java.util.concurrent.atomic.AtomicReference
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicLong
+import java.util.concurrent.atomic.AtomicReference
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -105,6 +103,7 @@ class NwcManager @Inject constructor(
     @Volatile private var lastBalance: Pair<Long, Long>? = null
     @Volatile private var paymentSession: PaymentSession? = null
     private val paymentSessionLock = Any()
+    private val requestPayloadIds = AtomicLong(System.currentTimeMillis())
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
@@ -242,7 +241,8 @@ class NwcManager @Inject constructor(
     }
 
     private data class PendingPayment(
-        val requestId: String,
+        val requestEventId: String,
+        val requestPayloadId: String,
         val deferred: CompletableDeferred<Result<Unit>>,
         val eventCmd: String,
     )
@@ -288,9 +288,10 @@ class NwcManager @Inject constructor(
 
             val ws = webSocket ?: return@withLock Result.failure(Exception("Wallet relay is not connected"))
             val nowSeconds = System.currentTimeMillis() / 1000L
+            val requestPayloadId = nextRequestPayloadId()
             val plaintext = buildJsonObject {
                 put("method", "pay_invoice")
-                put("id",     nowSeconds.toString())
+                put("id",     requestPayloadId)
                 put("params", buildJsonObject {
                     put("invoice", bolt11)
                     if (amountMsats != null) put("amount", amountMsats)
@@ -315,7 +316,12 @@ class NwcManager @Inject constructor(
                 add(NostrJson.parseToJsonElement(toEventJson(signed)))
             }.toString()
 
-            val payment = PendingPayment(signed.id, CompletableDeferred(), eventCmd)
+            val payment = PendingPayment(
+                requestEventId = signed.id,
+                requestPayloadId = requestPayloadId,
+                deferred = CompletableDeferred(),
+                eventCmd = eventCmd,
+            )
             if (!pending.compareAndSet(null, payment)) {
                 return@withLock Result.failure(IllegalStateException("Another wallet payment is already pending"))
             }
@@ -348,43 +354,38 @@ class NwcManager @Inject constructor(
             }
 
             override fun onMessage(webSocket: WebSocket, text: String) {
-                try {
-                    val msg = NostrJson.parseToJsonElement(text).jsonArray
-                    when (msg.getOrNull(0)?.jsonPrimitive?.content ?: return) {
-                        "AUTH" -> {
-                            val challenge = msg.getOrNull(1)?.jsonPrimitive?.content
-                            if (challenge.isNullOrBlank()) return
-                            scope.launch {
-                                if (sendAuthResponse(webSocket, creds, challenge)) {
-                                    webSocket.send(responseSubscription())
-                                    pending.get()?.eventCmd?.let { webSocket.send(it) }
-                                    if (!ready.isCompleted) ready.complete(Result.success(Unit))
-                                } else {
-                                    fail(Exception("Wallet relay authentication failed"))
-                                }
+                val msg = runCatching {
+                    NostrJson.parseToJsonElement(text) as? JsonArray
+                }.getOrNull() ?: return
+                when ((msg.getOrNull(0) as? JsonPrimitive)?.content ?: return) {
+                    "AUTH" -> {
+                        val challenge = (msg.getOrNull(1) as? JsonPrimitive)?.content
+                        if (challenge.isNullOrBlank()) return
+                        scope.launch {
+                            if (sendAuthResponse(webSocket, creds, challenge)) {
+                                webSocket.send(responseSubscription())
+                                pending.get()?.eventCmd?.let { webSocket.send(it) }
+                                if (!ready.isCompleted) ready.complete(Result.success(Unit))
+                            } else {
+                                fail(Exception("Wallet relay authentication failed"))
                             }
-                            return
                         }
-                        "OK" -> {
-                            handleEventOk(msg)
-                            return
-                        }
-                        "NOTICE" -> {
-                            return
-                        }
-                        "CLOSED" -> {
-                            val reason = msg.getOrNull(2)?.jsonPrimitive?.content.orEmpty()
-                            if (reason.startsWith("auth-required", ignoreCase = true)) {
-                                fail(Exception("Wallet relay requires authentication but did not provide a challenge"))
-                            }
-                            return
-                        }
-                        "EVENT" -> Unit
-                        else -> return
+                        return
                     }
-                    handleResponseEvent(msg)
-                } catch (e: Exception) {
-                    fail(e)
+                    "OK" -> {
+                        handleEventOk(msg)
+                        return
+                    }
+                    "NOTICE" -> return
+                    "CLOSED" -> {
+                        val reason = (msg.getOrNull(2) as? JsonPrimitive)?.content.orEmpty()
+                        if (reason.startsWith("auth-required", ignoreCase = true)) {
+                            fail(Exception("Wallet relay requires authentication but did not provide a challenge"))
+                        }
+                        return
+                    }
+                    "EVENT" -> handleResponseEvent(msg)
+                    else -> return
                 }
             }
 
@@ -409,10 +410,10 @@ class NwcManager @Inject constructor(
 
         private fun handleEventOk(msg: JsonArray) {
             val payment = pending.get() ?: return
-            val eventId = msg.getOrNull(1)?.jsonPrimitive?.content ?: return
-            if (eventId != payment.requestId) return
+            val eventId = (msg.getOrNull(1) as? JsonPrimitive)?.content ?: return
+            if (eventId != payment.requestEventId) return
             val success = (msg.getOrNull(2) as? JsonPrimitive)?.booleanOrNull ?: return
-            val message = msg.getOrNull(3)?.jsonPrimitive?.content.orEmpty()
+            val message = (msg.getOrNull(3) as? JsonPrimitive)?.content.orEmpty()
             if (success) return
 
             if (message.contains("auth", ignoreCase = true)) return
@@ -422,37 +423,23 @@ class NwcManager @Inject constructor(
         }
 
         private fun handleResponseEvent(msg: JsonArray) {
-            if (msg.size < 3) return
-            val obj = msg[2].jsonObject
-            if (obj["kind"]?.jsonPrimitive?.content?.toIntOrNull() != 23195) return
             val payment = pending.get() ?: return
-            if (responseRequestId(obj) != payment.requestId) return
-
-            val encContent = obj["content"]?.jsonPrimitive?.content ?: return
-            val decrypted = runCatching {
-                Nip04.decrypt(encContent, creds.nwcPrivKeyBytes, creds.walletPubBytes)
-            }.getOrNull()
-            if (decrypted == null) {
-                return
-            }
-
-            val resp = NostrJson.parseToJsonElement(decrypted).jsonObject
-            val errorElement = resp["error"]
-            val result = if (errorElement != null && errorElement !is kotlinx.serialization.json.JsonNull) {
-                val errObj = errorElement.jsonObject
-                val code = errObj["code"]?.jsonPrimitive?.content
-                val rawMsg = errObj["message"]?.jsonPrimitive?.content
-                val userMsg = when (code) {
-                    "PAYMENT_FAILED"      -> "No route found — recipient may be unreachable"
-                    "INSUFFICIENT_BALANCE" -> "Insufficient wallet balance"
-                    "QUOTA_EXCEEDED"       -> "Wallet spending limit reached"
-                    "NOT_FOUND"            -> "Invoice expired or not found"
-                    else                   -> rawMsg?.take(80) ?: "Payment failed"
-                }
-                Result.failure(Exception(userMsg))
-            } else {
-                Result.success(Unit)
-            }
+            val event = msg.getOrNull(2) as? JsonObject ?: return
+            val response = authenticateNwcResponse(
+                event = event,
+                expected = NwcResponseExpectation(
+                    walletPubkey = creds.conn.walletPubkey,
+                    requestEventId = payment.requestEventId,
+                    requestPayloadId = payment.requestPayloadId,
+                    resultType = NWC_PAY_INVOICE,
+                ),
+                decrypt = { encrypted ->
+                    runCatching {
+                        Nip04.decrypt(encrypted, creds.nwcPrivKeyBytes, creds.walletPubBytes)
+                    }.getOrNull()
+                },
+            ) ?: return
+            val result = payInvoiceResult(response)
 
             if (pending.compareAndSet(payment, null)) {
                 payment.deferred.complete(result)
@@ -499,10 +486,11 @@ class NwcManager @Inject constructor(
         val nwcPubkeyHex    = creds.nwcPubkeyHex
         val walletPubBytes  = creds.walletPubBytes
         val nowSeconds      = nowMs / 1000L
+        val requestPayloadId = nextRequestPayloadId()
 
         val plaintext = buildJsonObject {
             put("method", "get_balance")
-            put("id",     nowSeconds.toString())
+            put("id",     requestPayloadId)
             put("params", buildJsonObject {})
         }.toString()
 
@@ -541,64 +529,59 @@ class NwcManager @Inject constructor(
                 webSocket.send(eventCmd)
             }
             override fun onMessage(webSocket: WebSocket, text: String) {
-                try {
-                    val msg = NostrJson.parseToJsonElement(text).jsonArray
-                    when (val type = msg.getOrNull(0)?.jsonPrimitive?.content ?: return) {
-                        "AUTH" -> {
-                            val challenge = msg.getOrNull(1)?.jsonPrimitive?.content
-                            if (challenge.isNullOrBlank()) return
-                            scope.launch {
-                                if (sendAuthResponse(webSocket, creds, challenge)) {
-                                    webSocket.send(reqCmd)
-                                    webSocket.send(eventCmd)
-                                } else if (!deferred.isCompleted) {
-                                    deferred.complete(null)
-                                }
+                val msg = runCatching {
+                    NostrJson.parseToJsonElement(text) as? JsonArray
+                }.getOrNull() ?: return
+                when ((msg.getOrNull(0) as? JsonPrimitive)?.content ?: return) {
+                    "AUTH" -> {
+                        val challenge = (msg.getOrNull(1) as? JsonPrimitive)?.content
+                        if (challenge.isNullOrBlank()) return
+                        scope.launch {
+                            if (sendAuthResponse(webSocket, creds, challenge)) {
+                                webSocket.send(reqCmd)
+                                webSocket.send(eventCmd)
+                            } else if (!deferred.isCompleted) {
+                                deferred.complete(null)
                             }
-                            return
                         }
-                        "OK" -> {
-                            val eventId = msg.getOrNull(1)?.jsonPrimitive?.content
-                            val success = (msg.getOrNull(2) as? JsonPrimitive)?.booleanOrNull
-                            val message = msg.getOrNull(3)?.jsonPrimitive?.content.orEmpty()
-                            if (eventId == signed.id && success == false) {
-                                if (!message.contains("auth", ignoreCase = true) && !deferred.isCompleted) {
-                                    deferred.complete(null)
-                                }
+                        return
+                    }
+                    "OK" -> {
+                        val eventId = (msg.getOrNull(1) as? JsonPrimitive)?.content
+                        val success = (msg.getOrNull(2) as? JsonPrimitive)?.booleanOrNull
+                        val message = (msg.getOrNull(3) as? JsonPrimitive)?.content.orEmpty()
+                        if (eventId == signed.id && success == false) {
+                            if (!message.contains("auth", ignoreCase = true) && !deferred.isCompleted) {
+                                deferred.complete(null)
                             }
-                            return
                         }
-                        "NOTICE" -> {
-                            return
-                        }
-                        "CLOSED" -> {
-                            if (!deferred.isCompleted) deferred.complete(null)
-                            return
-                        }
-                        "EVENT" -> Unit
-                        else -> {
-                            return
-                        }
+                        return
                     }
-                    if (msg.size < 3) return
-                    val obj = msg[2].jsonObject
-                    if (obj["kind"]?.jsonPrimitive?.content?.toIntOrNull() != 23195) return
-                    if (responseRequestId(obj) != signed.id) return
-                    val encContent = obj["content"]?.jsonPrimitive?.content ?: return
-                    val decrypted = runCatching {
-                        Nip04.decrypt(encContent, nwcPrivKeyBytes, walletPubBytes)
-                    }.getOrNull() ?: return
-                    val resp = NostrJson.parseToJsonElement(decrypted).jsonObject
-                    if (resp["error"] != null && resp["error"] !is kotlinx.serialization.json.JsonNull) {
-                        deferred.complete(null)
-                    } else {
-                        val msats = resp["result"]?.jsonObject?.get("balance")
-                            ?.jsonPrimitive?.content?.toLongOrNull()
-                        deferred.complete(msats)
+                    "NOTICE" -> return
+                    "CLOSED" -> {
+                        if (!deferred.isCompleted) deferred.complete(null)
+                        return
                     }
+                    "EVENT" -> Unit
+                    else -> return
+                }
+                val event = msg.getOrNull(2) as? JsonObject ?: return
+                val response = authenticateNwcResponse(
+                    event = event,
+                    expected = NwcResponseExpectation(
+                        walletPubkey = creds.conn.walletPubkey,
+                        requestEventId = signed.id,
+                        requestPayloadId = requestPayloadId,
+                        resultType = NWC_GET_BALANCE,
+                    ),
+                    decrypt = { encrypted ->
+                        runCatching {
+                            Nip04.decrypt(encrypted, nwcPrivKeyBytes, walletPubBytes)
+                        }.getOrNull()
+                    },
+                ) ?: return
+                if (deferred.complete(balanceMsats(response))) {
                     webSocket.close(1000, "done")
-                } catch (_: Exception) {
-                    if (!deferred.isCompleted) deferred.complete(null)
                 }
             }
             override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
@@ -621,6 +604,15 @@ class NwcManager @Inject constructor(
     // ── Helpers ──────────────────────────────────────────────────────────────
 
     /**
+     * Keep the legacy numeric-string payload id while making it unique across
+     * concurrent payment and balance requests in this process. This also makes
+     * the signed request event id unique for otherwise-identical rapid retries.
+     */
+    private fun nextRequestPayloadId(): String = requestPayloadIds.updateAndGet { previous ->
+        maxOf(System.currentTimeMillis(), previous + 1L)
+    }.toString()
+
+    /**
      * Parses a nostr+walletconnect:// or nostrwalletconnect:// URI.
      * Normalises the scheme so Android's Uri parser can handle it.
      */
@@ -634,17 +626,6 @@ class NwcManager @Inject constructor(
         val secret = uri.getQueryParameter("secret")?.takeIf { it.length == 64 } ?: return null
         NwcConnection(walletPubkey = pubkey, relayUrl = relay, secret = secret)
     }.getOrNull()
-
-    private fun responseRequestId(obj: JsonObject): String? {
-        val tags = obj["tags"]?.jsonArray ?: return null
-        for (tag in tags) {
-            val values = tag.jsonArray
-            if (values.getOrNull(0)?.jsonPrimitive?.content == "e") {
-                return values.getOrNull(1)?.jsonPrimitive?.content
-            }
-        }
-        return null
-    }
 
     private suspend fun sendAuthResponse(
         webSocket: WebSocket,
@@ -663,23 +644,6 @@ class NwcManager @Inject constructor(
             add(NostrJson.parseToJsonElement(toEventJson(signed)))
         }.toString()
         return webSocket.send(authCmd)
-    }
-
-    private fun handlePaymentOk(
-        msg: JsonArray,
-        expectedRequestId: String?,
-        deferred: CompletableDeferred<Result<Unit>>,
-    ) {
-        val eventId = msg.getOrNull(1)?.jsonPrimitive?.content ?: return
-        val success = (msg.getOrNull(2) as? JsonPrimitive)?.booleanOrNull ?: return
-        val message = msg.getOrNull(3)?.jsonPrimitive?.content.orEmpty()
-        if (eventId != expectedRequestId) return
-
-        if (!success) {
-            if (!message.contains("auth", ignoreCase = true) && !deferred.isCompleted) {
-                deferred.complete(Result.failure(Exception("Wallet relay rejected payment request: ${message.take(120)}")))
-            }
-        }
     }
 
 }
