@@ -337,7 +337,6 @@ internal fun wotSubjectsForFeedRows(
     fun addModelSubjects(model: EventModel) {
         normalizeWotPubkey(model.pubkey)?.let(subjects::add)
         normalizeWotPubkey(model.sourcePubkey)?.let(subjects::add)
-        normalizeWotPubkey(model.repost?.targetAuthorPubkey)?.let(subjects::add)
         for (segment in model.segments) {
             when (segment) {
                 is Segment.QuoteEvent -> {
@@ -345,7 +344,6 @@ internal fun wotSubjectsForFeedRows(
                     modelProvider?.invoke(segment.eventId)?.let { quoted ->
                         normalizeWotPubkey(quoted.pubkey)?.let(subjects::add)
                         normalizeWotPubkey(quoted.sourcePubkey)?.let(subjects::add)
-                        normalizeWotPubkey(quoted.repost?.targetAuthorPubkey)?.let(subjects::add)
                     }
                 }
                 is Segment.QuoteAddress -> normalizeWotPubkey(segment.author)?.let(subjects::add)

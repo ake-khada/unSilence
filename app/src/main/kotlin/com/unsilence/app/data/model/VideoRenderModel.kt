@@ -4,7 +4,9 @@ import com.unsilence.app.data.memory.FeedRow
 import com.unsilence.app.data.relay.ImetaMedia
 import com.unsilence.app.data.relay.ImetaParser
 import com.unsilence.app.data.relay.NostrJson
-import kotlinx.serialization.json.jsonObject
+import com.unsilence.app.data.relay.parseRepostInfo
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonPrimitive
 
 /**
@@ -135,46 +137,47 @@ fun buildVideoRenderModels(
     kind: Int,
     content: String,
     tags: List<List<String>>,
+    preparsedRepost: RepostInfo? = null,
 ): List<VideoRenderModel> {
-    val (effectiveContent, imetaMedia, effectiveKind) = if ((kind == 6 || kind == 16) && content.isNotBlank()) {
-        runCatching {
-            val inner = NostrJson.parseToJsonElement(content).jsonObject
-            val innerContent = inner["content"]?.jsonPrimitive?.content ?: content
-            val innerTags = inner["tags"]?.toString()?.let { ImetaParser.parse(it) } ?: emptyList()
-            Triple(
-                innerContent,
-                innerTags,
-                inner["kind"]?.jsonPrimitive?.content?.toIntOrNull() ?: kind,
-            )
-        }.getOrElse { Triple(content, ImetaParser.parseFromList(tags), kind) }
-    } else {
-        Triple(content, ImetaParser.parseFromList(tags), kind)
+    val repost = if (kind == 6 || kind == 16) {
+        preparsedRepost ?: parseRepostInfo(kind, content, tags)
+    } else null
+    val verified = (repost?.payload as? RepostPayload.VerifiedEmbedded)?.event
+    val effectiveContent = when {
+        verified != null -> verified.content
+        repost != null -> ""
+        else -> content
     }
+    val effectiveTags = when {
+        verified != null -> verified.tags
+        repost != null -> emptyList()
+        else -> tags
+    }
+    val effectiveKind = verified?.kind ?: kind
+    val imetaMedia = ImetaParser.parseFromList(effectiveTags)
 
     return buildBoundedVideoRenderModels(effectiveContent, imetaMedia, effectiveKind)
 }
 
 fun buildVideoRenderModels(row: FeedRow): List<VideoRenderModel> {
-    // For kind-6 / kind-16 reposts, extract effective content AND tags from the
-    // embedded inner event JSON.  The outer wrapper's tags have no imeta; using
-    // them would produce zero video metadata (wrong aspect ratio, no poster URL).
-    val (effectiveContent, imetaMedia, effectiveKind) = if ((row.kind == 6 || row.kind == 16) && row.content.isNotBlank()) {
-        runCatching {
-            val inner = NostrJson.parseToJsonElement(row.content).jsonObject
-            val content = inner["content"]?.jsonPrimitive?.content ?: row.content
-            val tags = inner["tags"]?.toString()?.let { ImetaParser.parse(it) } ?: emptyList()
-            Triple(
-                content,
-                tags,
-                inner["kind"]?.jsonPrimitive?.content?.toIntOrNull() ?: row.kind,
-            )
-        }.getOrElse { Triple(row.content, ImetaParser.parse(row.tags), row.kind) }
+    val tags = parseTagLists(row.tags)
+    // FeedRow is a flattened UI projection and cannot prove that embedded
+    // fields passed verified ingest. Never run crypto on the composition path;
+    // reference-only video is adopted from the independently verified target.
+    val safeRepost = if (row.kind == 6 || row.kind == 16) {
+        parseRepostInfo(row.kind, row.content, tags, verifyEmbedded = { false })
     } else {
-        Triple(row.content, ImetaParser.parse(row.tags), row.kind)
+        null
     }
-
-    return buildBoundedVideoRenderModels(effectiveContent, imetaMedia, effectiveKind)
+    return buildVideoRenderModels(row.kind, row.content, tags, safeRepost)
 }
+
+private fun parseTagLists(tagsJson: String): List<List<String>> = runCatching {
+    NostrJson.parseToJsonElement(tagsJson).jsonArray.mapNotNull { element ->
+        val row = element as? JsonArray ?: return@mapNotNull null
+        row.mapNotNull { part -> runCatching { part.jsonPrimitive.content }.getOrNull() }
+    }
+}.getOrDefault(emptyList())
 
 private fun buildModelForUrl(
     url: String,

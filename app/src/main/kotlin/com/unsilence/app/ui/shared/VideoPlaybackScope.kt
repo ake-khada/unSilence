@@ -179,8 +179,9 @@ internal fun resolveRowVideoModels(
 /**
  * Event ids whose video models a row may adopt when it has none of its own,
  * in priority order:
- *   1. Empty kind-6/16 repost target (NIP-10 rootId) — discoverable straight
- *      from the FeedRow, so we don't need the parent model to be parsed/cached.
+ *   1. Kind-6/16 repost target (NIP-10 rootId) — discoverable straight from
+ *      the FeedRow. Verified embedded media wins through [ownModels]; a
+ *      reference-only JSON envelope can still adopt the fetched target.
  *   2. Quote-event ids from the (cached) parent model, in source order.
  *
  * [cachedModel] is cache-only (may be null); the rootId path covers the common
@@ -188,7 +189,7 @@ internal fun resolveRowVideoModels(
  */
 internal fun videoSourceCandidateIds(row: FeedRow, cachedModel: EventModel?): List<String> {
     val ids = ArrayList<String>(2)
-    if ((row.kind == 6 || row.kind == 16) && row.content.isBlank()) {
+    if (row.kind == 6 || row.kind == 16) {
         row.rootId?.let { ids.add(it) }
     }
     cachedModel?.segments

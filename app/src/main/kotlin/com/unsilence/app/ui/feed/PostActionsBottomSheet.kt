@@ -55,7 +55,7 @@ fun PostActionsBottomSheet(
     authorPubkey: String,
     authorProfile: UserEntity?,
     onDismiss: () -> Unit,
-    onCopyText: () -> Unit,
+    onCopyText: (() -> Unit)?,
     onCopyLink: () -> Unit,
     onShare: () -> Unit,
     relayItemsProvider: () -> List<RelayProvenanceItem> = { emptyList() },
@@ -109,7 +109,9 @@ fun PostActionsBottomSheet(
 
             HorizontalDivider(color = Color.White.copy(alpha = 0.1f))
 
-            SheetActionRow(Icons.Default.ContentCopy, "Copy text") { onCopyText(); onDismiss() }
+            if (onCopyText != null) {
+                SheetActionRow(Icons.Default.ContentCopy, "Copy text") { onCopyText(); onDismiss() }
+            }
             SheetActionRow(Icons.Default.Link, "Copy link") { onCopyLink(); onDismiss() }
             SheetActionRow(Icons.Default.Share, "Share") { onShare(); onDismiss() }
 

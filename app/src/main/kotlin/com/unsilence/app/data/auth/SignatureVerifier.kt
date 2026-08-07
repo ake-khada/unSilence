@@ -78,20 +78,41 @@ open class SignatureVerifier @Inject constructor() {
      * id-hash (sha256 of canonical serialization) and Schnorr signature.
      */
     private fun quartzVerify(event: NostrEvent): Boolean {
-        val quartzTags: Array<Array<String>> = event.tags
-            .map { it.toTypedArray() }
-            .toTypedArray()
-
-        val quartzEvent = Event(
+        return verifyNostrEventFields(
             id = event.id,
-            pubKey = event.pubkey,
+            pubkey = event.pubkey,
             createdAt = event.createdAt,
             kind = event.kind,
-            tags = quartzTags,
+            tags = event.tags,
             content = event.content,
             sig = event.sig,
         )
-
-        return quartzEvent.verify()
     }
+}
+
+/**
+ * Pure verification seam shared by outer relay events and NIP-18 embedded
+ * events. Keeping canonical-id and Schnorr verification in one implementation
+ * prevents the renderer from drifting into a weaker notion of "valid".
+ * Callers must catch malformed/native-library failures at their trust boundary.
+ */
+internal fun verifyNostrEventFields(
+    id: String,
+    pubkey: String,
+    createdAt: Long,
+    kind: Int,
+    tags: List<List<String>>,
+    content: String,
+    sig: String,
+): Boolean {
+    val quartzTags = tags.map { it.toTypedArray() }.toTypedArray()
+    return Event(
+        id = id,
+        pubKey = pubkey,
+        createdAt = createdAt,
+        kind = kind,
+        tags = quartzTags,
+        content = content,
+        sig = sig,
+    ).verify()
 }

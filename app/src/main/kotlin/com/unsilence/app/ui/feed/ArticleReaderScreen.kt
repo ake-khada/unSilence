@@ -79,6 +79,7 @@ import com.unsilence.app.ui.shared.pollActionCallbacks
 import com.unsilence.app.ui.shared.rememberVideoPlaybackScope
 import com.unsilence.app.data.memory.FeedRow
 import com.unsilence.app.data.memory.toEventModel
+import com.unsilence.app.data.model.EventModel
 import com.unsilence.app.data.relay.wotSubjectsForFeedRows
 import com.unsilence.app.data.model.markdown.MarkdownDocument
 import com.unsilence.app.data.model.markdown.MdBlock
@@ -101,6 +102,7 @@ import kotlinx.serialization.json.jsonPrimitive
 @Composable
 fun ArticleReaderScreen(
     row: FeedRow,
+    model: EventModel,
     onDismiss: () -> Unit,
     onNoteClick: (String) -> Unit = {},
     onReact: () -> Unit = {},
@@ -134,12 +136,10 @@ fun ArticleReaderScreen(
         key = "note-actions-${LocalAppSessionKey.current}",
     ),
 ) {
-    // Unwrap reposts: for a kind-6/16 wrapper the FeedRow's tags/content belong to
-    // the wrapper (embedded JSON string + wrapper tags). Parse to the EventModel so
-    // title/image come from the INNER article tags and the body is the inner
-    // markdown — not the raw embedded-JSON dump. For non-reposts these resolve to
-    // the same values as the raw row.
-    val model = remember(row.id, row.content, row.tags) { row.toEventModel() }
+    // [model] comes from MES's verified-ingest sidecar. A flattened FeedRow no
+    // longer carries enough trust context to authenticate an embedded repost,
+    // so reparsing row.content here would either expose wire JSON or lose a
+    // legitimate verified article on open.
     val title = model.article?.title ?: articleTagValue(row.tags, "title")
     val image = model.article?.image ?: articleTagValue(row.tags, "image")
     val hashtags = model.article?.hashtags ?: emptyList()
@@ -723,6 +723,7 @@ fun ArticleReaderScreen(
         onMuteUser = commentActionsVm::muteUser,
         onReport = { activeRow, type -> commentActionsVm.reportEvent(activeRow.id, activeRow.pubkey, type) },
         onDelete = { activeRow -> commentActionsVm.deleteEvent(activeRow.id, activeRow.pubkey, activeRow.relayUrl) },
+        eventModelProvider = commentActionsVm::getEventModel,
         relayProvenance = commentActionsVm::relayProvenance,
         onDismiss = { commentActionsRow = null },
     )

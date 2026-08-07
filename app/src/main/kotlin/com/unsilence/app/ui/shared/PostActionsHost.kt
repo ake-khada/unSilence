@@ -16,7 +16,9 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.AnnotatedString
 import com.unsilence.app.data.memory.FeedRow
 import com.unsilence.app.data.memory.UserEntity
+import com.unsilence.app.data.model.EventModel
 import com.unsilence.app.data.model.ReportType
+import com.unsilence.app.data.model.resolveDisplayModel
 import com.unsilence.app.data.repository.MuteResult
 import com.unsilence.app.ui.common.LocalShowSnackbar
 import com.unsilence.app.ui.common.LocalOpenRelayDetail
@@ -30,6 +32,25 @@ import com.vitorpamplona.quartz.nip01Core.relay.normalizer.NormalizedRelayUrl
 import com.vitorpamplona.quartz.nip19Bech32.entities.NEvent
 import kotlinx.coroutines.flow.StateFlow
 
+/**
+ * Text exposed by the action sheet. Repost envelopes are never copyable:
+ * verified embedded content or an independently verified referenced model is
+ * required. Native events may use their signed FeedRow body as a fallback.
+ */
+internal fun copyablePostText(
+    row: FeedRow,
+    eventModelProvider: ((String) -> EventModel?)?,
+): String? {
+    val displayModel = eventModelProvider?.let { provider ->
+        provider(row.id)?.resolveDisplayModel(modelProvider = provider)
+    }
+    return when {
+        displayModel != null -> displayModel.displayContent
+        row.kind != 6 && row.kind != 16 -> row.content
+        else -> null
+    }?.takeIf { it.isNotBlank() }
+}
+
 @Composable
 fun PostActionsHost(
     row: FeedRow?,
@@ -38,6 +59,7 @@ fun PostActionsHost(
     onMuteUser: (String) -> MuteResult,
     onReport: (FeedRow, ReportType) -> Unit,
     onDelete: (FeedRow) -> Unit,
+    eventModelProvider: ((String) -> EventModel?)? = null,
     relayProvenance: (String) -> List<RelayProvenanceItem> = { emptyList() },
     onDismiss: () -> Unit,
     showModerationActions: Boolean = true,
@@ -51,11 +73,22 @@ fun PostActionsHost(
 
     row?.let { activeRow ->
         val authorProfile = collectProfileAsState(activeRow.pubkey, profileFlow)
+        // Never copy a kind-6/16 wire envelope. Prefer the authenticated inner
+        // model, then follow a reference to an independently verified target.
+        // Native events can safely fall back to their signed outer content.
+        val copyText = remember(activeRow.id, activeRow.kind, activeRow.content, eventModelProvider) {
+            copyablePostText(activeRow, eventModelProvider)
+        }
         key(activeRow.id) { PostActionsBottomSheet(
             authorPubkey = activeRow.pubkey,
             authorProfile = authorProfile,
             onDismiss = onDismiss,
-            onCopyText = { clipboard.setText(AnnotatedString(activeRow.content)) },
+            onCopyText = copyText?.let { trustedText ->
+                {
+                    clipboard.setText(AnnotatedString(trustedText))
+                    showSnackbar("Text copied")
+                }
+            },
             onCopyLink = {
                 val nevent = NEvent.create(activeRow.id, null, null, null as NormalizedRelayUrl?)
                 clipboard.setText(AnnotatedString("nostr:$nevent"))

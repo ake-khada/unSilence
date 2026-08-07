@@ -36,6 +36,7 @@ import com.unsilence.app.data.memory.toEventModel
 import com.unsilence.app.data.model.ContentParser
 import com.unsilence.app.data.model.EventModel
 import com.unsilence.app.data.model.VideoRenderModel
+import com.unsilence.app.data.model.resolveDisplayModel
 import com.unsilence.app.data.relay.FeedWotDisplayMode
 import com.unsilence.app.data.relay.OgMetadata
 import com.unsilence.app.ui.common.ShimmerNoteCard
@@ -321,7 +322,7 @@ internal fun ThreadParentCard(
     onWotSubjectsVisible: (Collection<String>) -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
-    val model = remember(event.id) {
+    val sourceModel = remember(event.id) {
         lookupModel?.invoke(event.id) ?: runCatching {
             ContentParser.parse(
                 id = event.id, pubkey = event.pubkey, kind = event.kind,
@@ -333,10 +334,15 @@ internal fun ThreadParentCard(
             )
         }.getOrNull()
     }
-    val liveAuthor = collectProfileAsState(event.pubkey, profileFlow)
-    val effectiveAuthor = liveAuthor ?: author
-    LaunchedEffect(event.pubkey) {
-        onWotSubjectsVisible(listOf(event.pubkey))
+    val model = remember(sourceModel, lookupModel) {
+        sourceModel?.resolveDisplayModel { id -> lookupModel?.invoke(id) }
+    }
+    val displayPubkey = model?.pubkey ?: event.pubkey
+    val displayCreatedAt = model?.createdAt ?: event.createdAt
+    val liveAuthor = collectProfileAsState(displayPubkey, profileFlow)
+    val effectiveAuthor = liveAuthor ?: author.takeIf { displayPubkey == event.pubkey }
+    LaunchedEffect(displayPubkey) {
+        onWotSubjectsVisible(listOf(displayPubkey))
     }
 
     Column(
@@ -349,13 +355,13 @@ internal fun ThreadParentCard(
                 shape = RoundedCornerShape(12.dp),
             )
             .clip(RoundedCornerShape(12.dp))
-            .clickable { onNoteClick(event.id) }
+            .clickable { onNoteClick(model?.navigateId ?: event.id) }
             .padding(12.dp),
     ) {
         // Compact header: avatar + name + timestamp
         Row(verticalAlignment = Alignment.CenterVertically) {
             AvatarImage(
-                pubkey = event.pubkey,
+                pubkey = displayPubkey,
                 picture = effectiveAuthor?.picture,
                 modifier = Modifier.size(24.dp),
                 sizeDp = 24.dp,
@@ -366,7 +372,7 @@ internal fun ThreadParentCard(
             Text(
                 text = effectiveAuthor?.displayName?.takeIf { it.isNotBlank() }
                     ?: effectiveAuthor?.name?.takeIf { it.isNotBlank() && !looksLikeHexPubkey(it) }
-                    ?: "${event.pubkey.take(6)}…${event.pubkey.takeLast(4)}",
+                    ?: "${displayPubkey.take(6)}…${displayPubkey.takeLast(4)}",
                 color = Color.White.copy(alpha = 0.7f),
                 fontWeight = FontWeight.SemiBold,
                 fontSize = AppType.bodySmall,
@@ -374,12 +380,12 @@ internal fun ThreadParentCard(
                 overflow = TextOverflow.Ellipsis,
                 modifier = Modifier.weight(1f),
             )
-            val lookup = wotLookup?.invoke(event.pubkey)
+            val lookup = wotLookup?.invoke(displayPubkey)
             Spacer(Modifier.width(6.dp))
             WotFeedMetaTimestamp(
                 lookup = lookup,
                 mode = feedWotDisplayMode,
-                timestamp = relativeTime(event.createdAt),
+                timestamp = relativeTime(displayCreatedAt),
                 timestampColor = Color.White.copy(alpha = 0.4f),
             )
         }
@@ -389,8 +395,8 @@ internal fun ThreadParentCard(
             // NIP-36: gate on the parent's own content-warning.
             EmbeddedSensitiveGate(
                 mode = sensitiveMode,
-                sensitive = event.hasContentWarning,
-                reason = event.contentWarningReason,
+                sensitive = event.hasContentWarning || model.warnings.hasContentWarning,
+                reason = event.contentWarningReason ?: model.warnings.reason,
             ) {
                 ContentFlow(
                     model               = model,
@@ -418,6 +424,13 @@ internal fun ThreadParentCard(
                     nestDepth           = 1,
                 )
             }
+        } else if (event.kind == 6 || event.kind == 16) {
+            Spacer(Modifier.height(4.dp))
+            Text(
+                text = "Reposted post unavailable",
+                color = com.unsilence.app.ui.theme.TextSecondary,
+                fontSize = AppType.footnote,
+            )
         }
     }
 }

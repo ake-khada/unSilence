@@ -11,11 +11,8 @@ import com.unsilence.app.data.memory.MemoryEventStore
 import com.unsilence.app.data.memory.toEventModel
 import com.unsilence.app.data.model.EventModel
 import com.unsilence.app.data.model.Segment
-import com.unsilence.app.data.model.buildVideoRenderModels
 import com.unsilence.app.data.repository.UserRepository
-import com.unsilence.app.ui.feed.IMAGE_URL_REGEX
 import com.unsilence.app.ui.feed.ImageDimensionCache
-import com.unsilence.app.ui.feed.VIDEO_URL_REGEX
 import com.unsilence.app.ui.feed.VideoThumbnailCache
 import dagger.hilt.android.qualifiers.ApplicationContext
 import com.vitorpamplona.quartz.nip19Bech32.Nip19Parser
@@ -502,8 +499,12 @@ class CardHydrator @Inject constructor(
         add(row.pubkey)
         add(model.pubkey)
         add(model.sourcePubkey)
-        model.repost?.targetAuthorPubkey?.let(::add)
-        extractPTagPubkeys(row.tags).forEach(::add)
+        // Repost wrapper p-tags are assertions by the reposter, not verified
+        // target identity. The verified embedded author is already model.pubkey;
+        // a reference target contributes its author only after target fetch.
+        if (model.repost == null) {
+            extractPTagPubkeys(row.tags).forEach(::add)
+        }
         for (segment in model.segments) {
             when (segment) {
                 is Segment.MentionPubkey -> add(segment.pubkeyHex)
@@ -544,7 +545,7 @@ class CardHydrator @Inject constructor(
                             model.repost.addressRelayHint,
                         ),
                     ),
-                    authorPubkey = model.repost.targetAuthorPubkey,
+                    authorPubkey = model.repost.targetAuthorHint,
                 ),
             )
         }
@@ -832,9 +833,8 @@ class CardHydrator @Inject constructor(
         val imageUrls = mutableListOf<String>()
         for (event in novelEvents) {
             if (event.kind == 30023) continue
-            val content = event.content
-            val afterVideos = VIDEO_URL_REGEX.replace(content, "")
-            IMAGE_URL_REGEX.findAll(afterVideos).forEach { imageUrls.add(it.value) }
+            val model = memoryEventStore.getOrParseEventModel(event.id) ?: event.toEventModel()
+            model.media.images.forEach { imageUrls.add(it.url) }
         }
         val uniqueImageUrls = imageUrls.distinct().filter { imageDimensionCache.getCached(it) == null }
         if (uniqueImageUrls.isNotEmpty()) {
@@ -848,7 +848,10 @@ class CardHydrator @Inject constructor(
             for (event in novelEvents) {
                 if (thumbnailCount >= mmrCap) break
                 if (event.kind == 30023) continue
-                val models = buildVideoRenderModels(event)
+                val models = memoryEventStore.getVideoRenderModels(event.id).ifEmpty {
+                    val parsed = memoryEventStore.getOrParseEventModel(event.id) ?: event.toEventModel()
+                    parsed.media.videos.map { it.model }
+                }
                 for (model in models) {
                     if (thumbnailCount >= mmrCap) break
                     // A known poster or dimensions do not make the first frame

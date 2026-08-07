@@ -3,6 +3,7 @@ package com.unsilence.app.ui.feed
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -30,6 +31,7 @@ import com.unsilence.app.data.memory.WotLookup
 import com.unsilence.app.data.model.ContentParser
 import com.unsilence.app.data.model.EventModel
 import com.unsilence.app.data.model.VideoRenderModel
+import com.unsilence.app.data.model.resolveDisplayModel
 import com.unsilence.app.data.relay.FeedWotDisplayMode
 import com.unsilence.app.data.relay.OgMetadata
 import com.unsilence.app.ui.shared.CardRole
@@ -112,7 +114,16 @@ fun EmptyRepostBody(
                     contentWarningReason = ev.contentWarningReason,
                 )
             }.getOrNull()
-            value = EmptyRepostState(event = ev, model = model, loading = false)
+            // A fetched id can itself be another reference-only repost. Follow
+            // only already-verified MES models, with the shared cycle/depth
+            // guard; otherwise show the stable unavailable state instead of a
+            // header followed by an inexplicably blank body.
+            val displayModel = model?.resolveDisplayModel { id -> lookupModel?.invoke(id) }
+            value = if (displayModel != null) {
+                EmptyRepostState(event = ev, model = displayModel, loading = false)
+            } else {
+                EmptyRepostState(loading = false, unresolved = true)
+            }
         } else {
             value = EmptyRepostState(loading = false, unresolved = true)
         }
@@ -124,42 +135,61 @@ fun EmptyRepostBody(
             Box(modifier = Modifier.fillMaxWidth().height(2.dp))
         }
         state.event != null && state.model != null -> {
+            val resolvedModel = state.model!!
+            val targetProfile = collectProfileAsState(resolvedModel.pubkey, profileFlow)
             // Render inline using ContentFlow — same pipeline as native posts.
-            // No bordered box because the whole card IS the quote.
+            // The target header is sourced from the independently verified
+            // fetched event, never from the wrapper's untrusted p-tag hint.
             // NIP-36: gate on the reposted TARGET's own content-warning.
-            com.unsilence.app.ui.shared.EmbeddedSensitiveGate(
-                mode = sensitiveMode,
-                sensitive = state.event!!.hasContentWarning,
-                reason = state.event!!.contentWarningReason,
-            ) {
-                ContentFlow(
-                    model               = state.model!!,
-                    role                = CardRole.Embedded,
-                    onNoteClick         = onNoteClick,
-                    onAuthorClick       = onAuthorClick,
-                    lookupProfile       = lookupProfile,
-                    profileFlow         = profileFlow,
-                    lookupEvent         = lookupEventWithAuthor?.let { lookup ->
-                        { id, hints -> lookup(id, hints, null) }
-                    },
-                    lookupModel         = lookupModel,
-                    fetchOgMetadata     = fetchOgMetadata,
-                    hasCachedOgMetadata = hasCachedOgMetadata,
-                    imageDimensionCache = imageDimensionCache,
-                    thumbnailCache      = thumbnailCache,
-                    exoPlayer           = exoPlayer,
-                    isActiveVideo       = isActiveVideo,
-                    activeVideoUrl      = activeVideoUrl,
-                    isFullscreen        = isFullscreen,
-                    onOpenFullscreen    = onOpenFullscreen,
-                    isMuted             = isMuted,
-                    onToggleMute        = onToggleMute,
-                    onVideoModelsResolved = onVideoModelsResolved,
-                    wotLookup           = wotLookup,
-                    feedWotDisplayMode  = feedWotDisplayMode,
-                    onWotSubjectsVisible = onWotSubjectsVisible,
-                    nestDepth           = 0,
+            Column {
+                AuthorHeader(
+                    pubkey = resolvedModel.pubkey,
+                    picture = targetProfile?.picture,
+                    displayName = targetProfile?.displayName?.takeIf { it.isNotBlank() }
+                        ?: targetProfile?.name?.takeIf { it.isNotBlank() && !looksLikeHexPubkey(it) },
+                    nip05 = targetProfile?.nip05,
+                    createdAt = resolvedModel.createdAt,
+                    onAuthorClick = onAuthorClick,
+                    onNoteClick = { onNoteClick(resolvedModel.navigateId) },
+                    lookupProfile = lookupProfile,
+                    profileFlow = profileFlow,
+                    wotLookup = wotLookup,
+                    feedWotDisplayMode = feedWotDisplayMode,
                 )
+                com.unsilence.app.ui.shared.EmbeddedSensitiveGate(
+                    mode = sensitiveMode,
+                    sensitive = resolvedModel.warnings.hasContentWarning,
+                    reason = resolvedModel.warnings.reason,
+                ) {
+                    ContentFlow(
+                        model               = resolvedModel,
+                        role                = CardRole.Embedded,
+                        onNoteClick         = onNoteClick,
+                        onAuthorClick       = onAuthorClick,
+                        lookupProfile       = lookupProfile,
+                        profileFlow         = profileFlow,
+                        lookupEvent         = lookupEventWithAuthor?.let { lookup ->
+                            { id, hints -> lookup(id, hints, null) }
+                        },
+                        lookupModel         = lookupModel,
+                        fetchOgMetadata     = fetchOgMetadata,
+                        hasCachedOgMetadata = hasCachedOgMetadata,
+                        imageDimensionCache = imageDimensionCache,
+                        thumbnailCache      = thumbnailCache,
+                        exoPlayer           = exoPlayer,
+                        isActiveVideo       = isActiveVideo,
+                        activeVideoUrl      = activeVideoUrl,
+                        isFullscreen        = isFullscreen,
+                        onOpenFullscreen    = onOpenFullscreen,
+                        isMuted             = isMuted,
+                        onToggleMute        = onToggleMute,
+                        onVideoModelsResolved = onVideoModelsResolved,
+                        wotLookup           = wotLookup,
+                        feedWotDisplayMode  = feedWotDisplayMode,
+                        onWotSubjectsVisible = onWotSubjectsVisible,
+                        nestDepth           = 0,
+                    )
+                }
             }
         }
         state.unresolved -> {
@@ -194,18 +224,6 @@ fun EmptyRepostBody(
                 )
             }
         }
-        else -> {
-            // Event resolved but model parse failed — show raw content
-            val ev = state.event
-            if (ev != null && ev.content.isNotBlank()) {
-                NostrRichText(
-                    content = ev.content,
-                    lookupProfile = lookupProfile,
-                    onAuthorClick = onAuthorClick,
-                    onTextClick = { targetId?.let(onNoteClick) },
-                    maxLines = 6,
-                )
-            }
-        }
+        else -> Unit
     }
 }

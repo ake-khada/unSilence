@@ -425,14 +425,29 @@ class SearchViewModel @Inject constructor(
                             followedPubkeys = safety.followedPubkeys,
                         )
                     }.collect { results ->
-                        val localNotes = filterSearchNoteRows(results.localNotes, results.muteList, results.hashtagCap)
-                        val relayNotes = filterSearchNoteRows(results.relayNotes, results.muteList, results.hashtagCap)
+                        val localNotes = filterSearchNoteRows(
+                            results.localNotes,
+                            results.muteList,
+                            results.hashtagCap,
+                            memoryEventStore::getNostrEvent,
+                        )
+                        val relayNotes = filterSearchNoteRows(
+                            results.relayNotes,
+                            results.muteList,
+                            results.hashtagCap,
+                            memoryEventStore::getNostrEvent,
+                        )
                         val people = filterSearchPeople(results.people, results.muteList)
                         val mergedNotes = (localNotes + relayNotes)
                             .distinctBy { it.id }
                             .sortedByDescending { it.createdAt }
                         val tagRelayNotes = if (explicitHashtagTag != null) relayNotes else emptyList()
-                        val localTagNotes = filterSearchNoteRows(results.tagNotes, results.muteList, results.hashtagCap)
+                        val localTagNotes = filterSearchNoteRows(
+                            results.tagNotes,
+                            results.muteList,
+                            results.hashtagCap,
+                            memoryEventStore::getNostrEvent,
+                        )
                         val tagResults = (localTagNotes + tagRelayNotes)
                             .distinctBy { it.id }
                             .sortedByDescending { it.createdAt }
@@ -592,8 +607,14 @@ internal fun filterSearchNoteRows(
     rows: List<FeedRow>,
     muteList: MuteList?,
     hashtagCap: Int?,
+    eventProvider: ((String) -> com.unsilence.app.data.memory.NostrEvent?)? = null,
 ): List<FeedRow> = rows.filterNot { row ->
-    isMuted(row, muteList) || exceedsHashtagCap(row, hashtagCap)
+    val event = eventProvider?.invoke(row.id)
+    if (event != null) {
+        isMuted(event, muteList, eventProvider) || exceedsHashtagCap(event, hashtagCap, eventProvider)
+    } else {
+        isMuted(row, muteList) || exceedsHashtagCap(row, hashtagCap)
+    }
 }
 
 internal fun filterSearchPeople(

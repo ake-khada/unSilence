@@ -31,6 +31,8 @@ import com.unsilence.app.data.memory.MemoryEventStore
 import com.unsilence.app.data.memory.UserEntity
 import com.unsilence.app.data.memory.WotLookup
 import com.unsilence.app.data.memory.NostrEvent
+import com.unsilence.app.data.model.EventModel
+import com.unsilence.app.data.model.resolveDisplayModel
 import com.unsilence.app.data.settings.SettingsStore
 import com.unsilence.app.data.relay.RelayPool
 import com.unsilence.app.data.relay.WotHydrationCoalescer
@@ -938,7 +940,9 @@ class ComposeViewModel @Inject constructor(
         publishError = null
         replyToEventId = null
         replyToRow = null
+        replyToModel = null
         quoteRow = null
+        quoteModel = null
         quoteEventId = null
         articleCommentTarget = null
         _sendState.value = SendState.Composing
@@ -963,10 +967,20 @@ class ComposeViewModel @Inject constructor(
     var replyToRow by mutableStateOf<com.unsilence.app.data.memory.FeedRow?>(null)
         private set
 
+    /** Authenticated target model used by the reply preview; never wrapper JSON. */
+    var replyToModel by mutableStateOf<EventModel?>(null)
+        private set
+
+    private fun displayModelFor(eventId: String): EventModel? {
+        val source = memoryEventStore.getOrParseEventModel(eventId) ?: return null
+        return source.resolveDisplayModel(modelProvider = memoryEventStore::getOrParseEventModel)
+    }
+
     fun loadReplyTo(eventId: String) {
         replyToEventId = eventId
         val rows = memoryEventStore.feedRowsByIds(setOf(eventId))
         replyToRow = rows.firstOrNull()
+        replyToModel = displayModelFor(eventId)
     }
 
     // ── Article comment mode (NIP-22 kind-1111) ──────────────────────────────
@@ -982,6 +996,7 @@ class ComposeViewModel @Inject constructor(
         val previewId = target.parentId ?: target.articleId
         if (previewId != null) {
             replyToRow = memoryEventStore.feedRowsByIds(setOf(previewId)).firstOrNull()
+            replyToModel = displayModelFor(previewId)
         }
     }
 
@@ -989,6 +1004,10 @@ class ComposeViewModel @Inject constructor(
 
     /** Quoted note preview, looked up from MES. */
     var quoteRow by mutableStateOf<com.unsilence.app.data.memory.FeedRow?>(null)
+        private set
+
+    /** Authenticated target model used by the quote preview; never wrapper JSON. */
+    var quoteModel by mutableStateOf<EventModel?>(null)
         private set
 
     /** Raw event ID for the nevent reference appended at publish time. */
@@ -999,6 +1018,7 @@ class ComposeViewModel @Inject constructor(
         quoteEventId = eventId
         val rows = memoryEventStore.feedRowsByIds(setOf(eventId))
         quoteRow = rows.firstOrNull()
+        quoteModel = displayModelFor(eventId)
     }
 
     private fun currentContext(): DraftContext {

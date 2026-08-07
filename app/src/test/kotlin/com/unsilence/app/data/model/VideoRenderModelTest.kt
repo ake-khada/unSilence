@@ -17,6 +17,24 @@ import org.junit.Test
  */
 class VideoRenderModelTest {
 
+    private fun verifiedRepost(
+        kind: Int,
+        content: String = "",
+        tags: List<List<String>> = emptyList(),
+        id: String = "e".repeat(64),
+        pubkey: String = "b".repeat(64),
+    ): RepostInfo = RepostInfo(
+        targetId = id,
+        relayHint = null,
+        addressCoordinate = null,
+        addressRelayHint = null,
+        targetAuthorHint = pubkey,
+        proxyUrl = null,
+        payload = RepostPayload.VerifiedEmbedded(
+            VerifiedRepostEvent(id, pubkey, kind, content, 900L, tags),
+        ),
+    )
+
     private fun row(content: String, tags: String = "[]") = FeedRow(
         id = "row",
         pubkey = "a".repeat(64),
@@ -46,7 +64,15 @@ class VideoRenderModelTest {
 
     @Test
     fun `kind 16 embedded repost derives inner video metadata from embedded json`() {
-        val models = buildVideoRenderModels(kind = 16, content = innerVideoEvent, tags = emptyList())
+        val innerTags = listOf(
+            listOf("imeta", "url https://vid.host/clip.mp4", "m video/mp4", "dim 1920x1080", "image https://vid.host/poster.jpg"),
+        )
+        val models = buildVideoRenderModels(
+            kind = 16,
+            content = innerVideoEvent,
+            tags = emptyList(),
+            preparsedRepost = verifiedRepost(21, tags = innerTags),
+        )
         assertEquals(1, models.size)
         val m = models[0]
         assertEquals("https://vid.host/clip.mp4", m.videoUrl)
@@ -58,7 +84,15 @@ class VideoRenderModelTest {
 
     @Test
     fun `kind 6 embedded repost derives inner video metadata from embedded json`() {
-        val models = buildVideoRenderModels(kind = 6, content = innerVideoEvent, tags = emptyList())
+        val innerTags = listOf(
+            listOf("imeta", "url https://vid.host/clip.mp4", "m video/mp4", "dim 1920x1080", "image https://vid.host/poster.jpg"),
+        )
+        val models = buildVideoRenderModels(
+            kind = 6,
+            content = innerVideoEvent,
+            tags = emptyList(),
+            preparsedRepost = verifiedRepost(21, tags = innerTags),
+        )
         assertEquals(1, models.size)
         assertEquals("https://vid.host/clip.mp4", models[0].videoUrl)
         assertEquals("https://vid.host/poster.jpg", models[0].posterUrl)
@@ -82,7 +116,12 @@ class VideoRenderModelTest {
         )
         val native = buildVideoRenderModels(kind = 22, content = "", tags = tags)
         val embedded = """{"id":"short","pubkey":"${"c".repeat(64)}","kind":22,"content":"","tags":[["imeta","url https://vid.host/short.mp4","m video/mp4","dim 720x1280"]]}"""
-        val repost = buildVideoRenderModels(kind = 16, content = embedded, tags = emptyList())
+        val repost = buildVideoRenderModels(
+            kind = 16,
+            content = embedded,
+            tags = emptyList(),
+            preparsedRepost = verifiedRepost(22, tags = tags),
+        )
 
         assertTrue(native.single().shortForm)
         assertTrue(repost.single().shortForm)
@@ -92,7 +131,16 @@ class VideoRenderModelTest {
     fun `kind 16 embedded repost of addressable short keeps short-form model`() {
         val embedded = """{"id":"short","pubkey":"${"d".repeat(64)}","kind":34236,"content":"","tags":[["d","clip"],["imeta","url https://media.divine.video/${"e".repeat(64)}","m video/mp4","dim 1080x1920"]]}"""
 
-        val model = buildVideoRenderModels(kind = 16, content = embedded, tags = emptyList()).single()
+        val innerTags = listOf(
+            listOf("d", "clip"),
+            listOf("imeta", "url https://media.divine.video/${"e".repeat(64)}", "m video/mp4", "dim 1080x1920"),
+        )
+        val model = buildVideoRenderModels(
+            kind = 16,
+            content = embedded,
+            tags = emptyList(),
+            preparsedRepost = verifiedRepost(34236, tags = innerTags),
+        ).single()
 
         assertTrue(model.shortForm)
         assertEquals(1080f / 1920f, model.aspectRatio, 0.01f)
@@ -153,7 +201,7 @@ class VideoRenderModelTest {
     }
 
     @Test
-    fun `repost with no inner video yields no models`() {
+    fun `unverified repost inner video cannot create media models`() {
         val embedded = """{"id":"inner","pubkey":"${"b".repeat(64)}","kind":1,"content":"just text","tags":[]}"""
         val models = buildVideoRenderModels(kind = 16, content = embedded, tags = emptyList())
         assertTrue(models.isEmpty())

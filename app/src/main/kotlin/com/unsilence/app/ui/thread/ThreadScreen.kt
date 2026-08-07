@@ -427,9 +427,12 @@ fun ThreadScreen(
 
     articleRow?.let { row ->
         // Effective engagement target (kind-6/16 reposts → original event).
-        val model = remember(row.id, row.content, row.tags) { row.toEventModel() }
+        val model = remember(row.id) {
+            actionsViewModel.getEventModel(row.id) ?: row.toEventModel()
+        }
         ArticleReaderScreen(
             row             = row,
+            model           = model,
             onDismiss       = { articleRow = null },
             onQuote         = onQuote,
             onReact         = { actionsViewModel.react(model.engagementId, model.pubkey) },
@@ -478,6 +481,7 @@ fun ThreadScreen(
         onMuteUser = actionsViewModel::muteUser,
         onReport = { row, type -> actionsViewModel.reportEvent(row.id, row.pubkey, type) },
         onDelete = { row -> actionsViewModel.deleteEvent(row.id, row.pubkey, row.relayUrl) },
+        eventModelProvider = actionsViewModel::getEventModel,
         relayProvenance = actionsViewModel::relayProvenance,
         onDismiss = { actionsRow = null },
     )

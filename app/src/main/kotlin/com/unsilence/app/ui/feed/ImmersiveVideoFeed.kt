@@ -386,6 +386,7 @@ internal fun ImmersiveVideoFeed(
             ImmersiveAuthorBar(
                 item = item,
                 callbacks = callbacks,
+                eventModelProvider = eventModelProvider,
                 playing = !paused && !settledItemBlocked,
                 onOpenSheet = { sheetEventId = item.contentId },
                 modifier = Modifier.align(Alignment.BottomCenter),
@@ -624,6 +625,7 @@ private fun VideoCornerMasks(
 private fun ImmersiveAuthorBar(
     item: ImmersiveVideoItem,
     callbacks: EventActionCallbacks,
+    eventModelProvider: (String) -> EventModel?,
     playing: Boolean,
     onOpenSheet: () -> Unit,
     modifier: Modifier = Modifier,
@@ -638,9 +640,13 @@ private fun ImmersiveAuthorBar(
         ?: profile?.name?.takeIf { it.isNotBlank() && !looksLikeHexPubkey(it) }
         ?: row.displayName.takeIf { rowDescribesAuthor }
         ?: "${authorPubkey.take(6)}…${authorPubkey.takeLast(4)}"
-    val caption = remember(row.kind, row.content, item.video.videoUrl) {
-        if (row.kind == 6 || row.kind == 16) ""
-        else row.content.replace(item.video.videoUrl, "").trim().replace('\n', ' ')
+    val caption = remember(item.contentId, row.id, item.video.videoUrl) {
+        val displayModel = eventModelProvider(item.contentId) ?: eventModelProvider(row.id)
+        displayModel?.displayContent
+            ?.replace(item.video.videoUrl, "")
+            ?.trim()
+            ?.replace('\n', ' ')
+            .orEmpty()
     }
     var dragAmount by remember(item.contentId) { mutableFloatStateOf(0f) }
 

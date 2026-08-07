@@ -44,7 +44,7 @@ import java.io.IOException
 import com.unsilence.app.data.auth.MuteKeyProvider
 import com.unsilence.app.data.relay.NostrFilter
 import com.unsilence.app.data.relay.PROFILE_NOTE_REPLY_EVENT_KIND_SET
-import com.unsilence.app.data.relay.effectiveContentWarning
+import com.unsilence.app.data.relay.withParsedRepostMetadata
 import com.unsilence.app.data.relay.TimelineRef
 import com.unsilence.app.data.relay.TimelineService
 import com.unsilence.app.data.relay.boundedSeenRelayHints
@@ -1017,6 +1017,7 @@ class MemoryEventStore @Inject constructor(
                 rootId = event.rootId,
                 hasContentWarning = event.hasContentWarning,
                 contentWarningReason = event.contentWarningReason,
+                preparsedRepost = event.repostInfo,
             )
             putVideoRenderModels(eventId, model.media.videos.map { video -> video.model })
             model
@@ -1361,13 +1362,17 @@ class MemoryEventStore @Inject constructor(
      * here instead. The caller (insert / insertBatch) flushes once at end.
      */
     private fun insertCore(event: NostrEvent, dirty: InsertDirty): Boolean {
-        contentMutationLocks[event.kind]?.let { lock ->
-            return synchronized(lock) { insertCoreUnlocked(event, dirty) }
+        // One storage-boundary invariant for every source (relay, snapshot,
+        // optimistic local insert): repost protocol JSON is parsed and any
+        // embedded event is verified before indexes or UI projections see it.
+        val normalizedEvent = event.withParsedRepostMetadata()
+        contentMutationLocks[normalizedEvent.kind]?.let { lock ->
+            return synchronized(lock) { insertCoreUnlocked(normalizedEvent, dirty) }
         }
-        return if (event.kind == 10000) {
-            synchronized(muteStateLock) { insertCoreUnlocked(event, dirty) }
+        return if (normalizedEvent.kind == 10000) {
+            synchronized(muteStateLock) { insertCoreUnlocked(normalizedEvent, dirty) }
         } else {
-            insertCoreUnlocked(event, dirty)
+            insertCoreUnlocked(normalizedEvent, dirty)
         }
     }
 
@@ -6967,11 +6972,6 @@ class MemoryEventStore @Inject constructor(
         val relaysSeen = ConcurrentHashMap.newKeySet<String>()
         for (i in 0 until seenCount) relaysSeen.add(readStr())
 
-        // Migration: recompute effective CW for kind-6/16 so embedded-repost
-        // wrappers persisted before the effective-warning fix get flagged.
-        val (effHasCw, effCwReason) = if (kind == 6 || kind == 16)
-            effectiveContentWarning(kind, content, tags) else (hasCW to cwReason)
-
         return NostrEvent(
             id = id,
             pubkey = pubkey,
@@ -6983,11 +6983,11 @@ class MemoryEventStore @Inject constructor(
             relayUrl = relayUrl,
             replyToId = replyToId,
             rootId = rootId,
-            hasContentWarning = effHasCw,
-            contentWarningReason = effCwReason,
+            hasContentWarning = hasCW,
+            contentWarningReason = cwReason,
             firstSeenAt = firstSeenAt,
             relaysSeen = relaysSeen,
-        )
+        ).withParsedRepostMetadata()
     }
 
     private fun DataOutputStream.writePendingMutePublish(pending: PendingMutePublish) {
@@ -7241,7 +7241,7 @@ class MemoryEventStore @Inject constructor(
         if (event.kind in setOf(1, 6, 16, 20, 21, 22, 34235, 34236)) {
             val imetaMedia = com.unsilence.app.data.relay.ImetaParser.parseFromList(event.tags)
             val models = com.unsilence.app.data.model.buildVideoRenderModels(
-                event.kind, event.content, event.tags,
+                event.kind, event.content, event.tags, event.repostInfo,
             )
             if (models.isNotEmpty()) videoRenderModelsByEventId[event.id] = models
             val imageDims = imetaMedia
@@ -7366,10 +7366,6 @@ class MemoryEventStore @Inject constructor(
         val tags = deserializeTags(parts[5])
         val evKind = parts[2].toIntOrNull() ?: return null
         val evContent = unescapeContent(parts[3])
-        // Migration: recompute effective CW for kind-6/16 (see binary path).
-        val (effHasCw, effCwReason) = if (evKind == 6 || evKind == 16)
-            effectiveContentWarning(evKind, evContent, tags)
-            else ((parts[10].toBooleanStrictOrNull() ?: false) to parts[11].ifEmpty { null })
         return NostrEvent(
             id = parts[0],
             pubkey = parts[1],
@@ -7381,13 +7377,13 @@ class MemoryEventStore @Inject constructor(
             relayUrl = parts[7],
             replyToId = parts[8].ifEmpty { null },
             rootId = parts[9].ifEmpty { null },
-            hasContentWarning = effHasCw,
-            contentWarningReason = effCwReason,
+            hasContentWarning = parts[10].toBooleanStrictOrNull() ?: false,
+            contentWarningReason = parts[11].ifEmpty { null },
             firstSeenAt = parts[12].toLongOrNull() ?: 0L,
             relaysSeen = ConcurrentHashMap.newKeySet<String>().apply {
                 addAll(parts[13].split(",").filter { it.isNotEmpty() })
             },
-        )
+        ).withParsedRepostMetadata()
     }
 
     private fun serializeTags(tags: List<List<String>>): String {
