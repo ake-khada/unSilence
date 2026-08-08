@@ -5,6 +5,7 @@ import android.content.Context
 import com.unsilence.app.data.BROWSER_USER_AGENT
 import com.unsilence.app.data.network.UntrustedHttpNetworkGuard
 import com.unsilence.app.data.network.isAllowedUntrustedHttpUrl
+import com.unsilence.app.data.network.parseAllowedUntrustedHttpUrl
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlin.coroutines.cancellation.CancellationException
 import kotlin.coroutines.resume
@@ -18,7 +19,6 @@ import kotlinx.coroutines.withContext
 import okhttp3.Call
 import okhttp3.Cache
 import okhttp3.Callback
-import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.Response
@@ -141,8 +141,7 @@ class OgFetcher @Inject constructor(
     private fun cacheKey(url: String): String = url.substringBefore('#')
 
     private fun isAllowedPreviewUrl(url: String): Boolean {
-        val parsed = url.toHttpUrlOrNull() ?: return false
-        return isAllowedUntrustedHttpUrl(parsed)
+        return parseAllowedUntrustedHttpUrl(url) != null
     }
 
     /**
@@ -265,26 +264,12 @@ class OgFetcher @Inject constructor(
                 .toString()
                 .trim()
 
-        /** Resolve a potentially relative URL against the page's base URL. */
-        private fun resolveUrl(raw: String, pageUrl: String): String {
-            val decoded = decodeHtmlEntities(raw).trim()
-            return when {
-                decoded.startsWith("http://") || decoded.startsWith("https://") -> decoded
-                decoded.startsWith("//") -> "https:$decoded"
-                decoded.startsWith("/") -> {
-                    // Prepend scheme + host from page URL
-                    runCatching {
-                        val uri = java.net.URI(pageUrl)
-                        "${uri.scheme}://${uri.host}$decoded"
-                    }.getOrDefault(decoded)
-                }
-                else -> {
-                    // Relative path — resolve against page URL directory
-                    runCatching {
-                        java.net.URI(pageUrl).resolve(decoded).toString()
-                    }.getOrDefault(decoded)
-                }
-            }
+        /** Resolve an OG image through OkHttp's HTTP(S)-only URL model, then
+         *  apply the same cheap policy used at every untrusted fetch boundary. */
+        internal fun resolveAllowedImageUrl(raw: String, pageUrl: String): String? {
+            val base = parseAllowedUntrustedHttpUrl(pageUrl) ?: return null
+            val resolved = base.resolve(raw.trim()) ?: return null
+            return resolved.takeIf(::isAllowedUntrustedHttpUrl)?.toString()
         }
 
         /** Extract key and value from a 6-group OG/Twitter regex match. */
@@ -321,7 +306,7 @@ class OgFetcher @Inject constructor(
             val title = ogTags["title"] ?: twitterTags["title"]
                 ?: TITLE_TAG_REGEX.find(html)?.groupValues?.get(1)?.let { decodeHtmlEntities(it) }
             val image = (ogTags["image"] ?: twitterTags["image"])
-                ?.let { resolveUrl(it, originalUrl) }
+                ?.let { resolveAllowedImageUrl(it, originalUrl) }
             val description = ogTags["description"] ?: twitterTags["description"]
             val siteName = ogTags["site_name"]
 

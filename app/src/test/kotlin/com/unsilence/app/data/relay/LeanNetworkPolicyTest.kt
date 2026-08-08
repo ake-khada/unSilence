@@ -2,6 +2,7 @@ package com.unsilence.app.data.relay
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -49,6 +50,16 @@ class LeanNetworkPolicyTest {
         assertFalse(hasUsableAspectMetadata(null))
         assertFalse(hasUsableAspectMetadata(0f))
         assertFalse(hasUsableAspectMetadata(Float.NaN))
+    }
+
+    @Test
+    fun `private image prefetch is rejected before Coil enqueue`() {
+        assertNull(allowedImagePrefetchUrl("https://192.168.1.1/poster.jpg"))
+        assertNull(allowedImagePrefetchUrl("http://cdn.example/poster.jpg"))
+        assertEquals(
+            "https://cdn.example/poster.jpg",
+            allowedImagePrefetchUrl("https://cdn.example/poster.jpg"),
+        )
     }
 
     @Test

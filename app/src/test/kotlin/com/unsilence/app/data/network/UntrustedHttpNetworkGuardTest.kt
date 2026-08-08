@@ -1,7 +1,11 @@
 package com.unsilence.app.data.network
 
+import com.unsilence.app.di.AppModule
 import okhttp3.HttpUrl.Companion.toHttpUrl
+import okhttp3.OkHttpClient
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -14,6 +18,43 @@ class UntrustedHttpNetworkGuardTest {
         assertTrue(isAllowedUntrustedHttpUrl("https://example.com/".toHttpUrl()))
         assertFalse(isAllowedUntrustedHttpUrl("http://example.com/".toHttpUrl()))
         assertTrue(isAllowedUntrustedHttpUrl("http://example.onion/".toHttpUrl()))
+    }
+
+    @Test
+    fun `literal private destinations are rejected before connection`() {
+        val rejected = listOf(
+            "https://127.0.0.1/image.jpg",
+            "https://169.254.169.254/latest/meta-data/",
+            "https://10.0.0.1/image.jpg",
+            "https://172.16.0.1/image.jpg",
+            "https://192.168.1.1/image.jpg",
+            "https://100.64.0.1/image.jpg",
+            "https://[::1]/image.jpg",
+            "https://[fe80::1]/image.jpg",
+            "https://[fd00::1]/image.jpg",
+            "https://localhost/image.jpg",
+        )
+
+        rejected.forEach { raw ->
+            assertNull("expected $raw to be rejected", parseAllowedUntrustedHttpUrl(raw))
+        }
+        assertEquals(
+            "https://8.8.8.8/image.jpg",
+            parseAllowedUntrustedHttpUrl("https://8.8.8.8/image.jpg")?.toString(),
+        )
+    }
+
+    @Test
+    fun `image and media clients install guard only as a network interceptor`() {
+        val clients = listOf(
+            AppModule.provideImageClient(OkHttpClient()),
+            AppModule.provideMediaClient(OkHttpClient()),
+        )
+
+        clients.forEach { client ->
+            assertEquals(1, client.networkInterceptors.count { it === UntrustedHttpNetworkGuard })
+            assertFalse(client.interceptors.any { it === UntrustedHttpNetworkGuard })
+        }
     }
 
     @Test

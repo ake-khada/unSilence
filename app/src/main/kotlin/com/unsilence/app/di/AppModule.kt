@@ -8,6 +8,7 @@ import androidx.media3.datasource.cache.CacheDataSource
 import androidx.media3.datasource.cache.LeastRecentlyUsedCacheEvictor
 import androidx.media3.datasource.cache.SimpleCache
 import androidx.media3.datasource.okhttp.OkHttpDataSource
+import com.unsilence.app.data.network.UntrustedHttpNetworkGuard
 import dagger.Module
 import dagger.Provides
 import dagger.hilt.InstallIn
@@ -60,6 +61,7 @@ object AppModule {
             .readTimeout(30, TimeUnit.SECONDS)
             .callTimeout(0, TimeUnit.SECONDS)  // no overall call timeout for streaming
             .pingInterval(0, TimeUnit.SECONDS) // no keep-alive needed for media HTTP
+            .addNetworkInterceptor(UntrustedHttpNetworkGuard)
             .build()
     }
 
@@ -95,6 +97,7 @@ object AppModule {
             .connectTimeout(10, TimeUnit.SECONDS)
             .readTimeout(15, TimeUnit.SECONDS)
             .pingInterval(0, TimeUnit.SECONDS)
+            .addNetworkInterceptor(UntrustedHttpNetworkGuard)
             .addInterceptor { chain ->
                 chain.proceed(
                     chain.request().newBuilder()

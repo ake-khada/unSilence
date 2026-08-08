@@ -3,6 +3,7 @@ package com.unsilence.app.ui.feed
 import okhttp3.OkHttpClient
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertNotNull
 import org.junit.Before
 import org.junit.Test
 
@@ -104,5 +105,13 @@ class ImageDimensionCacheTest {
         assertEquals(512, cache.entryCount)
         assertNull(cache.getCached("https://example.com/0.jpg"))
         assertEquals(1f, cache.getCached("https://example.com/512.jpg")!!, 0.001f)
+    }
+
+    @Test
+    fun `dimension probe rejects unsafe destination before request`() {
+        assertNull(allowedImageDimensionUrl("https://169.254.169.254/image.jpg"))
+        assertNull(allowedImageDimensionUrl("file:///tmp/image.jpg"))
+        assertNull(allowedImageDimensionUrl("http://example.com/image.jpg"))
+        assertNotNull(allowedImageDimensionUrl("https://cdn.example/image.jpg"))
     }
 }

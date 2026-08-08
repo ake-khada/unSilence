@@ -2,9 +2,12 @@ package com.unsilence.app.ui.feed
 
 import android.graphics.BitmapFactory
 import android.util.Log
+import com.unsilence.app.data.network.parseAllowedUntrustedHttpUrl
+import com.unsilence.app.di.ImageClient
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
+import okhttp3.HttpUrl
 import okhttp3.Request
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ConcurrentLinkedQueue
@@ -33,7 +36,7 @@ private const val MAX_ASPECT_RATIO = 5.0f  // widest allowed  (5:1)
 @Singleton
 @androidx.compose.runtime.Stable
 class ImageDimensionCache @Inject constructor(
-    baseClient: OkHttpClient,
+    @ImageClient baseClient: OkHttpClient,
 ) {
     /** url → width/height aspect ratio */
     private val cache = ConcurrentHashMap<String, Float>()
@@ -62,7 +65,11 @@ class ImageDimensionCache @Inject constructor(
      * Result is cached for future reads.
      */
     suspend fun resolve(url: String): Float? {
-        if (!isResolvableUrl(url)) return null
+        val requestUrl = allowedImageDimensionUrl(url)
+        if (requestUrl == null) {
+            Log.d(TAG, "Rejected untrusted URL: ${url.take(40)}")
+            return null
+        }
         val key = cacheKey(url)
         cache[key]?.let { return it }
         if (inFlight.putIfAbsent(key, true) != null) return null
@@ -70,7 +77,7 @@ class ImageDimensionCache @Inject constructor(
         return withContext(Dispatchers.IO) {
             try {
                 val request = Request.Builder()
-                    .url(key)
+                    .url(requestUrl)
                     .header("Range", "bytes=0-32767")
                     .header("User-Agent", com.unsilence.app.data.BROWSER_USER_AGENT)
                     .build()
@@ -137,26 +144,22 @@ class ImageDimensionCache @Inject constructor(
      *  equivalent image references without collapsing meaningful query params. */
     private fun cacheKey(url: String): String = url.substringBefore('#')
 
-    /** Reject non-HTTP URLs and NIP-19 tokens that leaked through content regex matching. */
-    private fun isResolvableUrl(url: String): Boolean {
-        if (!url.startsWith("http://") && !url.startsWith("https://")) {
-            Log.d(TAG, "Rejected non-http: ${url.take(40)}")
-            return false
-        }
-        // NIP-19 bech32 tokens embedded in malformed URLs (e.g. "https://npub1...")
-        val host = url.substring(url.indexOf("://") + 3).substringBefore('/')
-        if (host.startsWith("npub") || host.startsWith("nevent") ||
-            host.startsWith("note") || host.startsWith("naddr") ||
-            host.startsWith("nprofile")
-        ) {
-            Log.d(TAG, "Rejected NIP-19 host: ${url.take(40)}")
-            return false
-        }
-        return true
-    }
-
     private companion object {
         const val MAX_ENTRIES = 512
         const val MAX_PROBE_BYTES = 32 * 1024
     }
+}
+
+/** Reject unsafe destinations and NIP-19 tokens that leaked through content
+ *  matching before a dimension probe is enqueued. */
+internal fun allowedImageDimensionUrl(url: String): HttpUrl? {
+    val parsed = parseAllowedUntrustedHttpUrl(url) ?: return null
+    val host = parsed.host.lowercase()
+    if (host.startsWith("npub") || host.startsWith("nevent") ||
+        host.startsWith("note") || host.startsWith("naddr") ||
+        host.startsWith("nprofile")
+    ) {
+        return null
+    }
+    return parsed
 }

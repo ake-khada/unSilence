@@ -11,6 +11,7 @@ import com.unsilence.app.data.memory.MemoryEventStore
 import com.unsilence.app.data.memory.toEventModel
 import com.unsilence.app.data.model.EventModel
 import com.unsilence.app.data.model.Segment
+import com.unsilence.app.data.network.parseAllowedUntrustedHttpUrl
 import com.unsilence.app.data.repository.UserRepository
 import com.unsilence.app.ui.feed.ImageDimensionCache
 import com.unsilence.app.ui.feed.VideoThumbnailCache
@@ -94,6 +95,11 @@ internal fun assetWarmBudget(
 
 internal fun hasUsableAspectMetadata(aspectRatio: Float?): Boolean =
     aspectRatio?.let { it.isFinite() && it > 0f } == true
+
+/** Front-door policy for speculative Coil work. The ImageClient network
+ *  interceptor remains the per-hop backstop for redirects and DNS rebinding. */
+internal fun allowedImagePrefetchUrl(url: String?): String? =
+    parseAllowedUntrustedHttpUrl(url)?.toString()
 
 private val NOSTR_URI_REGEX = Regex("nostr:[a-z0-9]+", RegexOption.IGNORE_CASE)
 
@@ -766,16 +772,15 @@ class CardHydrator @Inject constructor(
      * @return true if this call consumed one image-prefetch budget slot.
      */
     private fun prefetchSizedImage(url: String?, widthPx: Int, aspectRatio: Float): Boolean {
-        if (url.isNullOrBlank()) return false
-        if (!url.startsWith("http://") && !url.startsWith("https://")) return false
+        val safeUrl = allowedImagePrefetchUrl(url) ?: return false
         val safeWidth = widthPx.coerceIn(1, MAX_PREFETCH_WIDTH_PX)
         val safeAspect = feedSafeAspect(aspectRatio)
         val heightPx = (safeWidth / safeAspect).toInt().coerceIn(100, 4000)
-        val key = "${url.substringBefore('#')}@$safeWidth:$heightPx"
+        val key = "${safeUrl.substringBefore('#')}@$safeWidth:$heightPx"
         if (!markBounded(key, imagePrefetched, imagePrefetchOrder, PREFETCH_KEY_CAP)) return false
 
         val request = ImageRequest.Builder(context)
-            .data(url)
+            .data(safeUrl)
             .size(Size(Dimension.Pixels(safeWidth), Dimension.Pixels(heightPx)))
             .build()
         imageLoader.enqueue(request)
