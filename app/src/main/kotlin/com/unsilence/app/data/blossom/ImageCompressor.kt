@@ -6,6 +6,7 @@ import android.graphics.BitmapFactory
 import android.graphics.Matrix
 import android.net.Uri
 import android.os.Build
+import android.util.Log
 import androidx.core.graphics.scale
 import androidx.exifinterface.media.ExifInterface
 import dagger.hilt.android.qualifiers.ApplicationContext
@@ -19,6 +20,9 @@ import javax.inject.Inject
 import javax.inject.Singleton
 
 internal const val MAX_IMAGE_SOURCE_BYTES = 30L * 1024L * 1024L
+internal const val ORIGINAL_PRIVACY_REENCODE_MAX_DIMENSION = 2_560
+internal const val ORIGINAL_PRIVACY_REENCODE_QUALITY = 95
+private const val TAG = "ImageCompressor"
 
 internal fun calculateImageSampleSize(
     width: Int,
@@ -46,6 +50,17 @@ data class PreparedImage(
 
 class ImageSourceTooLargeException : IOException("Image is larger than 30 MB")
 
+class OriginalImagePrivacyException(cause: Throwable) : IOException(
+    "Original image metadata could not be removed safely. Choose High quality and retry.",
+    cause,
+)
+
+private data class ImageBounds(
+    val width: Int,
+    val height: Int,
+    val mimeType: String?,
+)
+
 @Singleton
 class ImageCompressor @Inject constructor(
     @ApplicationContext private val context: Context,
@@ -54,9 +69,10 @@ class ImageCompressor @Inject constructor(
 
     /**
      * Prepares an image for file-backed upload without retaining the source bytes.
-     * ORIGINAL copies the bounded source stream. Other modes sample-decode at no
-     * more than twice the target, scale once to the exact output size, and compress
-     * directly into a cache file.
+     * ORIGINAL preserves encoded pixels where the container supports a verified,
+     * orientation-only metadata rewrite. Read-only metadata containers are safely
+     * re-encoded. Other modes sample-decode at no more than twice the target, scale
+     * once to the exact output size, and compress directly into a cache file.
      */
     suspend fun prepareImage(
         uri: Uri,
@@ -67,26 +83,99 @@ class ImageCompressor @Inject constructor(
         validateSourceSize(uri)
         val bounds = decodeBounds(uri)
         val orientation = readOrientation(uri)
-        val displayBounds = orientedDimensions(bounds.first, bounds.second, orientation)
+        val displayBounds = orientedDimensions(bounds.width, bounds.height, orientation)
+        val effectiveSourceMime = bounds.mimeType
+            ?.takeIf { it.startsWith("image/") }
+            ?: sourceMime
 
         if (maxDimension <= 0) {
-            val output = createOutputFile(suffixForMime(sourceMime))
-            try {
-                openBoundedStream(uri).use { input ->
-                    output.outputStream().buffered().use { sink -> input.copyTo(sink) }
+            when (originalImageMetadataMode(effectiveSourceMime)) {
+                OriginalImageMetadataMode.REENCODE -> {
+                    return@withContext reencodeForPrivacy(uri, bounds, orientation)
                 }
-                return@withContext PreparedImage(output, sourceMime, displayBounds)
-            } catch (error: Exception) {
-                output.delete()
-                throw error
+                OriginalImageMetadataMode.COPY,
+                OriginalImageMetadataMode.EXIF_ORIENTATION_ONLY,
+                -> {
+                    val output = copyOriginal(uri, effectiveSourceMime)
+                    if (
+                        originalImageMetadataMode(effectiveSourceMime) ==
+                        OriginalImageMetadataMode.EXIF_ORIENTATION_ONLY
+                    ) {
+                        try {
+                            scrubExifToOrientationOnly(output)
+                        } catch (error: Exception) {
+                            Log.w(
+                                TAG,
+                                "Lossless metadata scrub failed; using privacy re-encode",
+                                error,
+                            )
+                            output.delete()
+                            return@withContext reencodeForPrivacy(
+                                uri = uri,
+                                bounds = bounds,
+                                orientation = orientation,
+                                scrubFailure = error,
+                            )
+                        }
+                    }
+                    return@withContext PreparedImage(
+                        file = output,
+                        mimeType = effectiveSourceMime,
+                        dimensions = displayBounds,
+                    )
+                }
             }
         }
 
+        encodeImage(uri, bounds, orientation, maxDimension, quality)
+    }
+
+    private fun copyOriginal(uri: Uri, sourceMime: String): File {
+        val output = createOutputFile(suffixForMime(sourceMime))
+        try {
+            openBoundedStream(uri).use { input ->
+                output.outputStream().buffered().use { sink -> input.copyTo(sink) }
+            }
+            return output
+        } catch (error: Exception) {
+            output.delete()
+            throw error
+        }
+    }
+
+    private fun reencodeForPrivacy(
+        uri: Uri,
+        bounds: ImageBounds,
+        orientation: Int,
+        scrubFailure: Throwable? = null,
+    ): PreparedImage = try {
+        encodeImage(
+            uri = uri,
+            bounds = bounds,
+            orientation = orientation,
+            maxDimension = minOf(
+                maxOf(bounds.width, bounds.height),
+                ORIGINAL_PRIVACY_REENCODE_MAX_DIMENSION,
+            ).coerceAtLeast(1),
+            quality = ORIGINAL_PRIVACY_REENCODE_QUALITY,
+        )
+    } catch (error: Exception) {
+        scrubFailure?.let(error::addSuppressed)
+        throw OriginalImagePrivacyException(error)
+    }
+
+    private fun encodeImage(
+        uri: Uri,
+        bounds: ImageBounds,
+        orientation: Int,
+        maxDimension: Int,
+        quality: Int,
+    ): PreparedImage {
         val options = BitmapFactory.Options().apply {
             inMutable = true
             inSampleSize = calculateImageSampleSize(
-                bounds.first,
-                bounds.second,
+                bounds.width,
+                bounds.height,
                 maxDimension,
             )
         }
@@ -115,7 +204,7 @@ class ImageCompressor @Inject constructor(
             Bitmap.CompressFormat.JPEG
         }
         val output = createOutputFile(if (useWebp) ".webp" else ".jpg")
-        try {
+        return try {
             val dimensions = bitmap.width to bitmap.height
             output.outputStream().buffered().use { sink ->
                 check(bitmap.compress(format, quality.coerceIn(0, 100), sink)) {
@@ -144,11 +233,15 @@ class ImageCompressor @Inject constructor(
         }
     }
 
-    private fun decodeBounds(uri: Uri): Pair<Int, Int> {
+    private fun decodeBounds(uri: Uri): ImageBounds {
         val options = BitmapFactory.Options().apply { inJustDecodeBounds = true }
         openBoundedStream(uri).use { input -> BitmapFactory.decodeStream(input, null, options) }
         if (options.outWidth <= 0 || options.outHeight <= 0) error("Could not decode image")
-        return options.outWidth to options.outHeight
+        return ImageBounds(
+            width = options.outWidth,
+            height = options.outHeight,
+            mimeType = options.outMimeType,
+        )
     }
 
     private fun readOrientation(uri: Uri): Int = runCatching {

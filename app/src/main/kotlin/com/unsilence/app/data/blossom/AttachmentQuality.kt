@@ -2,8 +2,8 @@ package com.unsilence.app.data.blossom
 
 /**
  * Per-attachment upload quality. Maps to ImageCompressor and
- * VideoTranscoder settings. ORIGINAL preserves images and passes through
- * compatible H.264/HEVC MP4 videos.
+ * VideoTranscoder settings. ORIGINAL preserves encoded image/video quality
+ * only where private metadata can be removed or ruled out safely.
  */
 enum class AttachmentQuality {
     SMALL,
@@ -47,7 +47,7 @@ enum class AttachmentQuality {
         SMALL -> "Small - 1280 px / q78"
         STANDARD -> "Standard - 2048 px / q82"
         HIGH -> "High - 2560 px / q87"
-        ORIGINAL -> "Original - untouched"
+        ORIGINAL -> "Original - private metadata removed"
     }
 
     companion object {
