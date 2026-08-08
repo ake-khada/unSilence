@@ -18,6 +18,7 @@ import androidx.media3.transformer.EditedMediaItem
 import androidx.media3.transformer.Effects
 import androidx.media3.transformer.ExportException
 import androidx.media3.transformer.ExportResult
+import androidx.media3.transformer.InAppMuxer
 import androidx.media3.transformer.ProgressHolder
 import androidx.media3.transformer.Transformer
 import androidx.media3.transformer.VideoEncoderSettings
@@ -26,6 +27,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
 import java.io.File
+import java.io.IOException
 import javax.inject.Inject
 import javax.inject.Singleton
 import kotlin.coroutines.resume
@@ -40,6 +42,13 @@ internal const val SAVINGS_THRESHOLD = 0.85
 internal const val MAX_TRANSCODED_SOURCE_BITRATE_RATIO = 0.80
 internal const val OUTPUT_AUDIO_BITRATE_RESERVE_BPS = 160_000
 internal const val MIN_VIDEO_BITRATE_BPS = 250_000
+
+class OriginalVideoPrivacyException(message: String, cause: Throwable? = null) :
+    IOException(message, cause)
+
+private class UnsafeVideoPassthroughException(
+    val inspection: VideoLocationInspection,
+) : IOException("Unsafe video passthrough: $inspection")
 
 // AV1 pass-through avoids a minutes-long software decode/re-encode for already
 // compact sources. This accepts reduced playback coverage on pre-A17 iOS in
@@ -121,7 +130,7 @@ class VideoTranscoder @Inject constructor(
         SMALL("480p - compact", 480, VIDEO_BITRATE_480P),
         STANDARD("720p - balanced", 720, VIDEO_BITRATE_720P),
         HIGH("1080p - high quality", 1080, VIDEO_BITRATE_1080P),
-        ORIGINAL("Original - compatible MP4 pass-through", 1080, VIDEO_BITRATE_1080P),
+        ORIGINAL("Original - privacy-checked MP4 pass-through", 1080, VIDEO_BITRATE_1080P),
     }
 
     data class Result(
@@ -151,8 +160,33 @@ class VideoTranscoder @Inject constructor(
         val source = extractSourceMetadata(uri)
         val compatibleSource = isCompatibleOriginalVideo(source.containerMime, source.videoMime)
         val tierNeedsReencode = needsReencode(source.fileSizeBytes, source.durationMs, quality)
+        var privacyRequiresReencode = false
         if (compatibleSource && (quality == Quality.ORIGINAL || !tierNeedsReencode)) {
-            return@withContext copyOriginal(uri, source)
+            try {
+                return@withContext copyOriginal(uri, source)
+            } catch (unsafe: UnsafeVideoPassthroughException) {
+                when (
+                    videoPassthroughPrivacyAction(
+                        inspection = unsafe.inspection,
+                        originalRequested = quality == Quality.ORIGINAL,
+                    )
+                ) {
+                    VideoPassthroughPrivacyAction.REFUSE ->
+                        throw unsafe.asOriginalPrivacyException()
+                    VideoPassthroughPrivacyAction.TRANSCODE -> {
+                        // Privacy overrides the normal "not enough byte
+                        // savings" passthrough for lower quality tiers.
+                        privacyRequiresReencode = true
+                        Log.w(
+                            TAG,
+                            "Video passthrough rejected by privacy inspection; " +
+                                "forcing transcode (${unsafe.inspection})",
+                        )
+                    }
+                    VideoPassthroughPrivacyAction.ALLOW ->
+                        error("Unsafe passthrough exception reported a clean video")
+                }
+            }
         }
 
         val transcodeQuality = if (quality == Quality.ORIGINAL || !tierNeedsReencode) {
@@ -168,7 +202,7 @@ class VideoTranscoder @Inject constructor(
         val encodeHeight = forcedVideoEncodeHeight(
             targetHeight = targetHeight,
             sourceHeight = source.height,
-            forceEncode = tierNeedsReencode,
+            forceEncode = tierNeedsReencode || privacyRequiresReencode,
         )
         // A resolution or compatibility transcode must not spend more bits than
         // the compact source. Keep room for Transformer's AAC output so the
@@ -188,7 +222,7 @@ class VideoTranscoder @Inject constructor(
             .build()
 
         // Transformer must be built and started on Main (Looper requirement)
-        withContext(Dispatchers.Main) {
+        val transcoded = withContext(Dispatchers.Main) {
             val encoderSettings = VideoEncoderSettings.Builder()
                 .setBitrate(targetVideoBitrate)
                 .build()
@@ -199,6 +233,17 @@ class VideoTranscoder @Inject constructor(
             val transformer = Transformer.Builder(context)
                 .setVideoMimeType(MimeTypes.VIDEO_H264)
                 .setEncoderFactory(encoderFactory)
+                // Transformer otherwise forwards source container metadata to
+                // FrameworkMuxer, including the ISO-6709 location atom. The
+                // in-app muxer's metadata provider is the supported filtering
+                // seam. Drop all source-level metadata; video orientation is
+                // written separately from the output track format by
+                // InAppMuxer and therefore remains intact.
+                .setMuxerFactory(
+                    InAppMuxer.Factory.Builder()
+                        .setMetadataProvider { metadataEntries -> metadataEntries.clear() }
+                        .build(),
+                )
                 .build()
 
             suspendCancellableCoroutine { cont ->
@@ -293,6 +338,18 @@ class VideoTranscoder @Inject constructor(
                 }
             }
         }
+        when (val inspection = inspectPreparedVideoLocation(transcoded.file)) {
+            VideoLocationInspection.CLEAN -> transcoded
+            VideoLocationInspection.LOCATION_PRESENT,
+            VideoLocationInspection.INDETERMINATE,
+            -> {
+                transcoded.file.delete()
+                throw OriginalVideoPrivacyException(
+                    "Video could not be prepared without private location metadata " +
+                        "($inspection).",
+                )
+            }
+        }
     }
 
     private fun copyOriginal(uri: Uri, source: SourceMetadata): Result {
@@ -301,6 +358,10 @@ class VideoTranscoder @Inject constructor(
             context.contentResolver.openInputStream(uri)?.use { stream ->
                 output.outputStream().buffered().use { sink -> stream.copyTo(sink) }
             } ?: error("Could not read video")
+            val inspection = inspectPreparedVideoLocation(output)
+            if (inspection != VideoLocationInspection.CLEAN) {
+                throw UnsafeVideoPassthroughException(inspection)
+            }
             val dimensions = when {
                 source.width > 0 && source.height > 0 -> source.width to source.height
                 else -> extractDisplayDimensions(output) ?: (0 to 0)
@@ -382,6 +443,21 @@ class VideoTranscoder @Inject constructor(
             containerMime = containerMime,
             videoMime = extractVideoTrackMime(uri),
         )
+    }
+
+    private fun inspectPreparedVideoLocation(file: File): VideoLocationInspection {
+        val platformLocation = runCatching {
+            MediaMetadataRetriever().use { retriever ->
+                retriever.setDataSource(file.absolutePath)
+                retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_LOCATION)
+            }
+        }.onFailure { error ->
+            Log.w(TAG, "Platform video location inspection failed; checking ISO metadata", error)
+        }.getOrNull()
+        if (!platformLocation.isNullOrBlank()) {
+            return VideoLocationInspection.LOCATION_PRESENT
+        }
+        return inspectIsoBmffLocationMetadata(file)
     }
 
     private fun extractSourceFileSize(uri: Uri): Long {
@@ -477,4 +553,22 @@ class VideoTranscoder @Inject constructor(
         dir.mkdirs()
         return File.createTempFile(prefix, suffix, dir)
     }
+}
+
+private fun UnsafeVideoPassthroughException.asOriginalPrivacyException():
+    OriginalVideoPrivacyException = when (inspection) {
+    VideoLocationInspection.LOCATION_PRESENT -> OriginalVideoPrivacyException(
+        "Original quality is unavailable because this video contains location data. " +
+            "Choose High quality to remove it.",
+        this,
+    )
+    VideoLocationInspection.INDETERMINATE -> OriginalVideoPrivacyException(
+        "Original quality is unavailable because this video's location metadata " +
+            "could not be checked safely. Choose High quality to remove metadata.",
+        this,
+    )
+    VideoLocationInspection.CLEAN -> OriginalVideoPrivacyException(
+        "Original video privacy inspection failed.",
+        this,
+    )
 }

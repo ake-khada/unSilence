@@ -1,11 +1,92 @@
 package com.unsilence.app.data.blossom
 
+import java.io.ByteArrayOutputStream
+import java.io.DataOutputStream
+import java.io.File
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class VideoTranscoderTest {
+    @Test
+    fun `location atom refuses original passthrough`() {
+        withTempMp4(
+            moviePayload = box(
+                byteArrayOf(0xA9.toByte(), 'x'.code.toByte(), 'y'.code.toByte(), 'z'.code.toByte()),
+                "+51.5007-000.1246/".toByteArray(),
+            ),
+        ) { file ->
+            val inspection = inspectIsoBmffLocationMetadata(file)
+            assertEquals(VideoLocationInspection.LOCATION_PRESENT, inspection)
+            assertEquals(
+                VideoPassthroughPrivacyAction.REFUSE,
+                videoPassthroughPrivacyAction(inspection, originalRequested = true),
+            )
+        }
+    }
+
+    @Test
+    fun `location atom forces a lower quality transcode`() {
+        withTempMp4(moviePayload = "@xyz+51.5-0.1/".toByteArray()) { file ->
+            val inspection = inspectIsoBmffLocationMetadata(file)
+            assertEquals(VideoLocationInspection.LOCATION_PRESENT, inspection)
+            assertEquals(
+                VideoPassthroughPrivacyAction.TRANSCODE,
+                videoPassthroughPrivacyAction(inspection, originalRequested = false),
+            )
+        }
+    }
+
+    @Test
+    fun `apple ISO6709 metadata is detected across scan chunks`() {
+        val prefix = ByteArray(16_377) { 0x5A }
+        val key = "com.apple.quicktime.location.ISO6709".toByteArray()
+        withTempMp4(moviePayload = prefix + key) { file ->
+            assertEquals(
+                VideoLocationInspection.LOCATION_PRESENT,
+                inspectIsoBmffLocationMetadata(file),
+            )
+        }
+    }
+
+    @Test
+    fun `location-free mp4 permits passthrough`() {
+        withTempMp4(moviePayload = box("mvhd", ByteArray(32))) { file ->
+            val inspection = inspectIsoBmffLocationMetadata(file)
+            assertEquals(VideoLocationInspection.CLEAN, inspection)
+            assertEquals(
+                VideoPassthroughPrivacyAction.ALLOW,
+                videoPassthroughPrivacyAction(inspection, originalRequested = true),
+            )
+        }
+    }
+
+    @Test
+    fun `malformed or over-budget metadata refuses original passthrough`() {
+        val malformed = File.createTempFile("video-privacy-malformed-", ".mp4")
+        try {
+            malformed.writeBytes(
+                byteArrayOf(0, 0, 1, 0) + "moov".toByteArray() + ByteArray(8)
+            )
+            val malformedInspection = inspectIsoBmffLocationMetadata(malformed)
+            assertEquals(VideoLocationInspection.INDETERMINATE, malformedInspection)
+            assertEquals(
+                VideoPassthroughPrivacyAction.REFUSE,
+                videoPassthroughPrivacyAction(malformedInspection, originalRequested = true),
+            )
+        } finally {
+            malformed.delete()
+        }
+
+        withTempMp4(moviePayload = ByteArray(128)) { file ->
+            assertEquals(
+                VideoLocationInspection.INDETERMINATE,
+                inspectIsoBmffLocationMetadata(file, scanLimitBytes = 64),
+            )
+        }
+    }
+
     @Test
     fun `quality ladder uses explicit target heights and bitrates`() {
         assertEquals(480, VideoTranscoder.Quality.SMALL.heightPx)
@@ -109,5 +190,34 @@ class VideoTranscoderTest {
         assertEquals(VideoTranscoder.Quality.STANDARD, compatibilityTranscodeQuality(1_500_001L))
         assertEquals(VideoTranscoder.Quality.HIGH, compatibilityTranscodeQuality(3_000_001L))
         assertEquals(VideoTranscoder.Quality.HIGH, compatibilityTranscodeQuality(40_000_000L))
+    }
+
+    private fun withTempMp4(moviePayload: ByteArray, assertion: (File) -> Unit) {
+        val file = File.createTempFile("video-privacy-", ".mp4")
+        try {
+            file.writeBytes(
+                box("ftyp", "isom\u0000\u0000\u0002\u0000isommp42".toByteArray()) +
+                    box("moov", moviePayload) +
+                    box("mdat", ByteArray(64)),
+            )
+            assertion(file)
+        } finally {
+            file.delete()
+        }
+    }
+
+    private fun box(type: String, payload: ByteArray): ByteArray =
+        box(type.toByteArray(Charsets.ISO_8859_1), payload)
+
+    private fun box(type: ByteArray, payload: ByteArray): ByteArray {
+        require(type.size == 4)
+        return ByteArrayOutputStream().use { bytes ->
+            DataOutputStream(bytes).use { output ->
+                output.writeInt(8 + payload.size)
+                output.write(type)
+                output.write(payload)
+            }
+            bytes.toByteArray()
+        }
     }
 }
