@@ -1,6 +1,7 @@
 package com.unsilence.app.data.network
 
 import okhttp3.HttpUrl
+import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.Interceptor
 import java.io.IOException
 import java.net.Inet4Address
@@ -21,9 +22,24 @@ internal object UntrustedHttpNetworkGuard : Interceptor {
     }
 }
 
+/** Parse an untrusted URL without DNS and reject schemes/hosts that are
+ *  definitely unsafe before any client tries to open a connection. */
+internal fun parseAllowedUntrustedHttpUrl(rawUrl: String?): HttpUrl? {
+    val parsed = rawUrl?.trim()?.takeIf(String::isNotEmpty)?.toHttpUrlOrNull() ?: return null
+    return parsed.takeIf(::isAllowedUntrustedHttpUrl)
+}
+
 internal fun isAllowedUntrustedHttpUrl(url: HttpUrl): Boolean {
     val host = url.host.lowercase()
-    return url.scheme == "https" || (url.scheme == "http" && host.endsWith(".onion"))
+    val allowedScheme = url.scheme == "https" || (url.scheme == "http" && host.endsWith(".onion"))
+    if (!allowedScheme) return false
+
+    // Avoid even opening a socket for literal private/special-use addresses.
+    // Hostnames still require the network interceptor below: resolving here
+    // would both block the caller and remain vulnerable to DNS rebinding.
+    if (host == "localhost" || host.endsWith(".localhost") || host.endsWith(".local")) return false
+    val literalAddress = host.toLiteralInetAddressOrNull()
+    return literalAddress?.isPublicInternetAddress() != false
 }
 
 /** Fails closed when OkHttp cannot expose the connected clearnet address. */
@@ -54,4 +70,13 @@ internal fun InetAddress.isPublicInternetAddress(): Boolean {
         if ((first and 0xfe) == 0xfc) return false
     }
     return true
+}
+
+private val IPV4_LITERAL = Regex("""\d{1,3}(?:\.\d{1,3}){3}""")
+
+/** [HttpUrl.host] strips IPv6 brackets. Calling InetAddress only for an
+ *  unmistakable literal avoids accidental DNS on this cheap policy path. */
+private fun String.toLiteralInetAddressOrNull(): InetAddress? {
+    if (':' !in this && !IPV4_LITERAL.matches(this)) return null
+    return runCatching { InetAddress.getByName(this) }.getOrNull()
 }
