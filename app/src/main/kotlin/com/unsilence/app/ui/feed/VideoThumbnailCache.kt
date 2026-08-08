@@ -2,8 +2,12 @@ package com.unsilence.app.ui.feed
 
 import android.graphics.Bitmap
 import android.media.MediaMetadataRetriever
+import android.net.Uri
 import android.os.Build
 import android.util.Log
+import com.unsilence.app.data.media.GuardedRemoteMediaDataSource
+import com.unsilence.app.data.network.parseAllowedUntrustedHttpUrl
+import com.unsilence.app.di.MediaClient
 import dagger.hilt.android.qualifiers.ApplicationContext
 import android.content.Context
 import kotlinx.coroutines.CoroutineScope
@@ -14,6 +18,8 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
+import okhttp3.HttpUrl
+import okhttp3.OkHttpClient
 import java.util.concurrent.ConcurrentHashMap
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -32,12 +38,38 @@ data class VideoThumbnail(
     val aspectRatio: Float,  // width / height
 )
 
+internal sealed interface VideoThumbnailInput {
+    data class Remote(val url: HttpUrl) : VideoThumbnailInput
+    data class LocalUri(val raw: String) : VideoThumbnailInput
+    data class LocalPath(val raw: String) : VideoThumbnailInput
+    data object Rejected : VideoThumbnailInput
+}
+
+/** Classify without resolving DNS. Remote inputs are admitted only through the
+ *  same cheap URL policy whose per-hop backstop lives on [MediaClient]. */
+internal fun classifyVideoThumbnailInput(raw: String): VideoThumbnailInput {
+    val value = raw.trim()
+    if (value.isEmpty() || value.startsWith("//")) return VideoThumbnailInput.Rejected
+    if (value.startsWith('/')) return VideoThumbnailInput.LocalPath(value)
+
+    return when (value.substringBefore(':', missingDelimiterValue = "").lowercase()) {
+        "content", "file", "android.resource" -> VideoThumbnailInput.LocalUri(value)
+        "http", "https" -> parseAllowedUntrustedHttpUrl(value)
+            ?.let(VideoThumbnailInput::Remote)
+            ?: VideoThumbnailInput.Rejected
+        else -> VideoThumbnailInput.Rejected
+    }
+}
+
+internal fun interface VideoThumbnailFrameExtractor {
+    fun extract(input: VideoThumbnailInput): VideoThumbnail?
+}
+
 /**
  * In-memory cache of video first-frame thumbnails extracted via [MediaMetadataRetriever].
  *
- * [MediaMetadataRetriever.setDataSource] with a URL uses HTTP range requests — it fetches
- * ONLY the video headers (moov atom) and first keyframe, typically a few hundred KB,
- * NOT the entire file. This is lightweight enough for scrolling lists.
+ * Remote extraction gives [MediaMetadataRetriever] a bounded [android.media.MediaDataSource]
+ * backed by the guarded media client. The platform never receives the attacker-controlled URL.
  *
  * Each URL is fetched at most once; the result (including null on failure) is cached.
  *
@@ -48,9 +80,18 @@ data class VideoThumbnail(
  */
 @Singleton
 @androidx.compose.runtime.Stable
-class VideoThumbnailCache @Inject constructor(
-    @ApplicationContext private val context: Context,
+class VideoThumbnailCache private constructor(
+    private val frameExtractor: VideoThumbnailFrameExtractor,
 ) {
+    @Inject
+    constructor(
+        @ApplicationContext context: Context,
+        @MediaClient mediaClient: OkHttpClient,
+    ) : this(PlatformVideoThumbnailFrameExtractor(context, mediaClient))
+
+    internal constructor(extractFrame: (VideoThumbnailInput) -> VideoThumbnail?) :
+        this(VideoThumbnailFrameExtractor(extractFrame))
+
     private val cache = ConcurrentHashMap<String, VideoThumbnail?>()
     private val failedUrls = ConcurrentHashMap.newKeySet<String>() // negative cache — skip re-stall
     private val extractionScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -148,8 +189,12 @@ class VideoThumbnailCache @Inject constructor(
     private suspend fun extractThumbnail(videoUrl: String): VideoThumbnail? {
         cache[videoUrl]?.let { return it }
         if (videoUrl in failedUrls) return null
-
-        val isRemote = !videoUrl.startsWith("file://") && !videoUrl.startsWith("/")
+        val input = classifyVideoThumbnailInput(videoUrl)
+        if (input is VideoThumbnailInput.Rejected) {
+            failedUrls.add(videoUrl)
+            return null
+        }
+        val isRemote = input is VideoThumbnailInput.Remote
 
         return withContext(Dispatchers.IO) {
             try {
@@ -160,15 +205,15 @@ class VideoThumbnailCache @Inject constructor(
                     // negative cache before they get a turn.
                     remoteMmrSemaphore.acquire()
                     val result = try {
-                        withTimeoutOrNull(8_000L) { extractFrame(videoUrl) }
+                        withTimeoutOrNull(8_000L) { frameExtractor.extract(input) }
                     } finally {
                         remoteMmrSemaphore.release()
                     }
                     if (result == null) { failedUrls.add(videoUrl) }
-                    result
+                    result?.also { rememberThumbnail(videoUrl, it) }
                 } else {
                     // Local file: no concurrency limit, no timeout
-                    extractFrame(videoUrl)
+                    frameExtractor.extract(input)?.also { rememberThumbnail(videoUrl, it) }
                 }
             } catch (e: kotlin.coroutines.cancellation.CancellationException) {
                 throw e
@@ -179,52 +224,11 @@ class VideoThumbnailCache @Inject constructor(
         }
     }
 
-    private fun extractFrame(videoUrl: String): VideoThumbnail? {
-        MediaMetadataRetriever().use { retriever ->
-            retriever.setDataSource(videoUrl, HashMap<String, String>())
-            val frame = decodeScaledFrame(retriever)
-            if (frame != null) {
-                val ratio = frame.width.toFloat() / frame.height
-                val thumb = VideoThumbnail(bitmap = frame, aspectRatio = ratio)
-                cache[videoUrl] = thumb
-                lastAccessedAt[videoUrl] = System.nanoTime()
-                resolvedAspectRatios[videoUrl] = ratio
-                evictIfNeeded()
-                return thumb
-            }
-        }
-        return null
-    }
-
-    /**
-     * Decode the first keyframe already downsampled. On API 27+ the codec emits the
-     * frame at target size — the full-res bitmap is NEVER allocated (no ~33MB transient
-     * for a 4K source) and there is no JPEG encode/decode round-trip. dstW/dstH are a
-     * bounding box; the result keeps the source aspect ratio, so a transposed box on a
-     * rotated video is still correct. API 26 / missing-metadata path falls back to one
-     * native bilinear downscale — still no round-trip.
-     */
-    private fun decodeScaledFrame(retriever: MediaMetadataRetriever): Bitmap? {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
-            val w = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_WIDTH)?.toIntOrNull() ?: 0
-            val h = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_HEIGHT)?.toIntOrNull() ?: 0
-            if (w > 0 && h > 0) {
-                retriever.getScaledFrameAtTime(
-                    0,
-                    MediaMetadataRetriever.OPTION_CLOSEST_SYNC,
-                    (w / DOWNSAMPLE).coerceAtLeast(1),
-                    (h / DOWNSAMPLE).coerceAtLeast(1),
-                )?.let { return it }
-            }
-        }
-        val full = retriever.getFrameAtTime(0, MediaMetadataRetriever.OPTION_CLOSEST_SYNC) ?: return null
-        if (full.allocationByteCount < 200 * 1024) return full
-        return Bitmap.createScaledBitmap(
-            full,
-            (full.width / DOWNSAMPLE).coerceAtLeast(1),
-            (full.height / DOWNSAMPLE).coerceAtLeast(1),
-            true,
-        ).also { if (it !== full) full.recycle() }
+    private fun rememberThumbnail(videoUrl: String, thumbnail: VideoThumbnail) {
+        cache[videoUrl] = thumbnail
+        lastAccessedAt[videoUrl] = System.nanoTime()
+        resolvedAspectRatios[videoUrl] = thumbnail.aspectRatio
+        evictIfNeeded()
     }
 
     /**
@@ -256,5 +260,69 @@ class VideoThumbnailCache @Inject constructor(
         if (evicted > 0) {
             Log.d(TAG, "Evicted $evicted thumbnails, remaining=${cache.size} (~${bitmapBytes / (1024 * 1024)}mb)")
         }
+    }
+}
+
+private class PlatformVideoThumbnailFrameExtractor(
+    private val context: Context,
+    private val mediaClient: OkHttpClient,
+) : VideoThumbnailFrameExtractor {
+    override fun extract(input: VideoThumbnailInput): VideoThumbnail? {
+        if (input is VideoThumbnailInput.Rejected) return null
+        MediaMetadataRetriever().use { retriever ->
+            when (input) {
+                is VideoThumbnailInput.Remote -> setGuardedRemoteSource(retriever, input.url)
+                is VideoThumbnailInput.LocalUri -> retriever.setDataSource(context, Uri.parse(input.raw))
+                is VideoThumbnailInput.LocalPath -> retriever.setDataSource(input.raw)
+                VideoThumbnailInput.Rejected -> return null
+            }
+            val frame = decodeScaledFrame(retriever) ?: return null
+            return VideoThumbnail(
+                bitmap = frame,
+                aspectRatio = frame.width.toFloat() / frame.height,
+            )
+        }
+    }
+
+    private fun setGuardedRemoteSource(retriever: MediaMetadataRetriever, url: HttpUrl) {
+        val dataSource = GuardedRemoteMediaDataSource(url, mediaClient)
+        try {
+            retriever.setDataSource(dataSource)
+        } catch (failure: Throwable) {
+            dataSource.close()
+            throw failure
+        }
+        // MediaMetadataRetriever owns and closes a successfully attached MediaDataSource.
+    }
+
+    /**
+     * Decode the first keyframe already downsampled. On API 27+ the codec emits the
+     * frame at target size — the full-res bitmap is NEVER allocated (no ~33MB transient
+     * for a 4K source) and there is no JPEG encode/decode round-trip. dstW/dstH are a
+     * bounding box; the result keeps the source aspect ratio, so a transposed box on a
+     * rotated video is still correct. API 26 / missing-metadata path falls back to one
+     * native bilinear downscale — still no round-trip.
+     */
+    private fun decodeScaledFrame(retriever: MediaMetadataRetriever): Bitmap? {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
+            val w = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_WIDTH)?.toIntOrNull() ?: 0
+            val h = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_HEIGHT)?.toIntOrNull() ?: 0
+            if (w > 0 && h > 0) {
+                retriever.getScaledFrameAtTime(
+                    0,
+                    MediaMetadataRetriever.OPTION_CLOSEST_SYNC,
+                    (w / DOWNSAMPLE).coerceAtLeast(1),
+                    (h / DOWNSAMPLE).coerceAtLeast(1),
+                )?.let { return it }
+            }
+        }
+        val full = retriever.getFrameAtTime(0, MediaMetadataRetriever.OPTION_CLOSEST_SYNC) ?: return null
+        if (full.allocationByteCount < 200 * 1024) return full
+        return Bitmap.createScaledBitmap(
+            full,
+            (full.width / DOWNSAMPLE).coerceAtLeast(1),
+            (full.height / DOWNSAMPLE).coerceAtLeast(1),
+            true,
+        ).also { if (it !== full) full.recycle() }
     }
 }

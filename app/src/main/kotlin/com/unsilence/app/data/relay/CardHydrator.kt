@@ -847,7 +847,7 @@ class CardHydrator @Inject constructor(
             Log.d(TAG, "Media: resolved ${uniqueImageUrls.size} image dims")
         }
 
-        // Video thumbnails via MediaMetadataRetriever (REST-only, capped)
+        // Video thumbnails via bounded guarded MediaDataSource (REST-only, capped)
         if (mmrAllowed) {
             var thumbnailCount = 0
             for (event in novelEvents) {
