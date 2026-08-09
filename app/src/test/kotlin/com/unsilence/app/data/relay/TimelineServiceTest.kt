@@ -93,7 +93,7 @@ class TimelineServiceTest {
     fun `multi subRequest emits on each per-sub update`() = runTest {
         val emissions = CopyOnWriteArrayList<Pair<Int, Boolean>>()
         val subRequests = listOf("a", "b", "c", "d").map {
-            SubRequest(urls = listOf("wss://$it"), filter = NostrFilter(kinds = listOf(1), limit = 100))
+            SubRequest(urls = listOf("wss://$it.example"), filter = NostrFilter(kinds = listOf(1), limit = 100))
         }
         service.subscribeTimeline(
             subRequests = subRequests,

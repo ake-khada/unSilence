@@ -672,7 +672,14 @@ class RelayPool @Inject constructor(
     /** Active one-shot sub count per relay URL. */
     private val relayOneShotCount = ConcurrentHashMap<String, AtomicInteger>()
     /** Queued REQs per relay — sent when slots free up. */
-    private val relayReqQueue = ConcurrentHashMap<String, java.util.concurrent.ConcurrentLinkedQueue<String>>()
+    private data class QueuedRelayReq(
+        val payload: String,
+        val requestClass: RelayRequestClass,
+        val bypassCooldown: Boolean,
+    )
+
+    private val relayReqQueue =
+        ConcurrentHashMap<String, java.util.concurrent.ConcurrentLinkedQueue<QueuedRelayReq>>()
 
     // ── Per-relay rate limiter (token bucket + cooldown) ──────────────
     private data class RateLimitState(
@@ -742,14 +749,24 @@ class RelayPool @Inject constructor(
      * relay ecosystem). Without this reservation, prefetch floods all 10 slots
      * and starves profile page content.
      */
-    private fun sendOneShotToRelay(conn: RelayConnection, req: String) {
+    private fun sendOneShotToRelay(
+        conn: RelayConnection,
+        req: String,
+        requestClass: RelayRequestClass = RelayRequestClass.GENERAL,
+        bypassCooldown: Boolean = false,
+    ) {
+        if (relayCapabilitiesStore.shouldSkipRequest(conn.url, requestClass, bypassCooldown)) {
+            extractReqSubId(req)?.let { subId -> recordOneShotRelayCoverage(subId, conn.url) }
+            Log.d(TAG, "One-shot REQ skipped for ${conn.url} ($requestClass)")
+            return
+        }
         val count = relayOneShotCount.computeIfAbsent(conn.url) { AtomicInteger(0) }
         val isPrefetch = req.contains("\"prefetch-")
         val effectiveCap = if (isPrefetch) MAX_CONCURRENT_REQS_PER_RELAY - 2 else MAX_CONCURRENT_REQS_PER_RELAY
         // Queue when at sub cap OR rate-limited (don't drop — flush will retry later)
         if (count.get() >= effectiveCap || !canSendToRelay(conn.url)) {
             val queue = relayReqQueue.computeIfAbsent(conn.url) { java.util.concurrent.ConcurrentLinkedQueue() }
-            queue.add(req)
+            queue.add(QueuedRelayReq(req, requestClass, bypassCooldown))
             Log.d(TAG, "Queued REQ for ${conn.url} (${count.get()}/$MAX_CONCURRENT_REQS_PER_RELAY active)")
             return
         }
@@ -771,6 +788,7 @@ class RelayPool @Inject constructor(
         req: String,
         subId: String,
         timeoutMs: Long = 2_000,
+        requestClass: RelayRequestClass = RelayRequestClass.GENERAL,
     ) {
         // Belt-and-suspenders: callers normalize, but guard here so a malformed URL
         // never reaches openEphemeral → RelayConnection.connect → okhttp crash.
@@ -778,9 +796,13 @@ class RelayPool @Inject constructor(
             Log.w(TAG, "sendOneShotPooledOrEphemeral: skipping invalid relay url: ${url.take(80)}")
             return
         }
+        if (relayCapabilitiesStore.shouldSkipRequest(clean, requestClass)) {
+            recordOneShotRelayCoverage(subId, clean)
+            return
+        }
         val conn = connections[clean]
         if (conn != null) {
-            sendOneShotToRelay(conn, req)
+            sendOneShotToRelay(conn, req, requestClass)
         } else {
             // Outbox allowlist gate: don't open ephemeral connections to relays
             // outside the coverage-ranked set. Shrinks the DNS failure surface.
@@ -789,7 +811,15 @@ class RelayPool @Inject constructor(
                 Log.d(TAG, "Ephemeral skipped (not in outbox allowlist): ${clean.take(60)}")
                 return
             }
-            scope.launch { openEphemeral(clean, listOf(req), setOf(subId), timeoutMs) }
+            scope.launch {
+                openEphemeral(
+                    clean,
+                    listOf(req),
+                    setOf(subId),
+                    timeoutMs,
+                    requestClass = requestClass,
+                )
+            }
         }
     }
 
@@ -802,13 +832,24 @@ class RelayPool @Inject constructor(
         while (count.get() < MAX_CONCURRENT_REQS_PER_RELAY &&
                queue.isNotEmpty() &&
                isRelayOutOfCooldown(conn.url)) {
-            val req = queue.poll() ?: break
+            val queued = queue.poll() ?: break
+            if (relayCapabilitiesStore.shouldSkipRequest(
+                    conn.url,
+                    queued.requestClass,
+                    queued.bypassCooldown,
+                )
+            ) {
+                extractReqSubId(queued.payload)?.let { subId ->
+                    recordOneShotRelayCoverage(subId, conn.url)
+                }
+                continue
+            }
             count.incrementAndGet()
-            if (conn.send(req)) {
+            if (conn.send(queued.payload)) {
                 Log.d(TAG, "Flushed queued REQ on ${conn.url} (${count.get()}/$MAX_CONCURRENT_REQS_PER_RELAY active)")
             } else {
                 count.decrementAndGet()
-                queue.add(req)
+                queue.add(queued)
                 Log.w(TAG, "Queued REQ send failed for ${conn.url}; slot released")
                 break
             }
@@ -1108,6 +1149,7 @@ class RelayPool @Inject constructor(
         relayUrls: List<String>,
         timeoutMs: Long,
         forceEvict: Boolean,
+        requestClass: RelayRequestClass,
     ): Int {
         if (socketTransportSuspended.get()) return 0
         val newConns = mutableListOf<RelayConnection>()
@@ -1117,7 +1159,7 @@ class RelayPool @Inject constructor(
                 Log.d(TAG, "Blocked relay — skipping $url")
                 continue
             }
-            if (relayCapabilitiesStore.shouldSkip(url)) {
+            if (relayCapabilitiesStore.shouldSkipRequest(url, requestClass)) {
                 val caps = relayCapabilitiesStore.get(url)
                 Log.w(TAG, "connectAndAwait GATE-SKIP: $url auth=${caps?.authRequired} restricted=${caps?.restricted} strikes=${caps?.strikes} reason='${caps?.lastReason}'")
                 continue
@@ -1217,6 +1259,7 @@ class RelayPool @Inject constructor(
         timeoutMs: Long = 8_000,
         capabilityBypassRelays: Set<String> = emptySet(),
         includeActiveFeedRelay: Boolean = false,
+        requestClass: RelayRequestClass = RelayRequestClass.GENERAL,
     ) {
         if (socketTransportSuspended.get()) {
             subIds.forEach { subId ->
@@ -1234,12 +1277,17 @@ class RelayPool @Inject constructor(
         )
             .filter { relayUrl ->
                 relayUrl !in blockedUrls &&
-                    (relayUrl in bypassRelays || !relayCapabilitiesStore.shouldSkip(relayUrl))
+                    !relayCapabilitiesStore.shouldSkipRequest(
+                        relayUrl,
+                        requestClass,
+                        bypassCooldown = relayUrl in bypassRelays,
+                    )
             }
         if (logBypass) {
             Log.i(TAG, "sendOneShotBatch: capability bypass relays=${bypassRelays.joinToString(",")}")
         }
         if (normalized.isEmpty() || reqs.isEmpty()) {
+            subIds.forEach { subId -> oneShotEoseCallbacks[subId]?.complete(Unit) }
             if (!includeActiveFeedRelay &&
                 activeFeedRelay != null &&
                 urls.any { normalizeRelayUrl(it) == activeFeedRelay }
@@ -1299,7 +1347,14 @@ class RelayPool @Inject constructor(
                 if (state != RelayState.CONNECTED) continue
             }
             subIds.forEach { _activeOneShotSubs.add(it) }
-            reqs.forEach { sendOneShotToRelay(conn, it) }
+            reqs.forEach { req ->
+                sendOneShotToRelay(
+                    conn,
+                    req,
+                    requestClass,
+                    bypassCooldown = url in bypassRelays,
+                )
+            }
         }
 
         // Ephemeral path: open temporary connections (parallel, bounded by timeout)
@@ -1307,7 +1362,17 @@ class RelayPool @Inject constructor(
 
         coroutineScope {
             ephemeral.map { url ->
-                async { openEphemeral(url, reqs, subIds.toSet(), timeoutMs, logInfo = logBypass) }
+                async {
+                    openEphemeral(
+                        url,
+                        reqs,
+                        subIds.toSet(),
+                        timeoutMs,
+                        logInfo = logBypass,
+                        requestClass = requestClass,
+                        bypassCooldown = url in bypassRelays,
+                    )
+                }
             }.awaitAll()
         }
     }
@@ -1323,7 +1388,13 @@ class RelayPool @Inject constructor(
         subIds: Set<String>,
         timeoutMs: Long,
         logInfo: Boolean = false,
+        requestClass: RelayRequestClass = RelayRequestClass.GENERAL,
+        bypassCooldown: Boolean = false,
     ) {
+        if (relayCapabilitiesStore.shouldSkipRequest(url, requestClass, bypassCooldown)) {
+            subIds.forEach { recordOneShotRelayCoverage(it, url) }
+            return
+        }
         // Rate limit: min 50ms gap per URL
         val lastOpen = ephemeralLastOpenNanos.computeIfAbsent(url) { AtomicLong(0) }
         val now = System.nanoTime()
@@ -1378,9 +1449,29 @@ class RelayPool @Inject constructor(
                                 processor.process(raw, url)
                                 val eoseSubId = extractEoseSubId(raw)
                                 if (eoseSubId != null && eoseSubId in pendingSubs) {
+                                    relayCapabilitiesStore.recordRequestSuccess(url)
                                     conn.send("""["CLOSE","$eoseSubId"]""")
                                     recordOneShotRelayCoverage(eoseSubId, url)
                                     pendingSubs.remove(eoseSubId)
+                                    if (pendingSubs.isEmpty()) return@withTimeoutOrNull
+                                }
+                            }
+                            raw.startsWith("[\"CLOSED\"") -> {
+                                processor.process(raw, url)
+                                val closed = runCatching {
+                                    val arr = NostrJson.parseToJsonElement(raw).jsonArray
+                                    val subId = arr.getOrNull(1)?.jsonPrimitive?.content
+                                    val reason = arr.getOrNull(2)?.jsonPrimitive?.content.orEmpty()
+                                    subId to reason
+                                }.getOrNull()
+                                val closedSubId = closed?.first
+                                val reason = closed?.second.orEmpty()
+                                if (reason.isNotEmpty()) {
+                                    relayCapabilitiesStore.learnFromClosed(url, reason)
+                                }
+                                if (closedSubId != null && closedSubId in pendingSubs) {
+                                    recordOneShotRelayCoverage(closedSubId, url)
+                                    pendingSubs.remove(closedSubId)
                                     if (pendingSubs.isEmpty()) return@withTimeoutOrNull
                                 }
                             }
@@ -1583,6 +1674,11 @@ class RelayPool @Inject constructor(
                         } else {
                             Log.w(TAG, "CLOSED $category sub '$closedSubId' on ${conn.url}: reason='$reason'")
                         }
+                        // Learn synchronously in memory before any resubscribe signal.
+                        // Persistence is conflated off-thread by RelayCapabilitiesStore.
+                        if (reason.isNotEmpty()) {
+                            relayCapabilitiesStore.learnFromClosed(conn.url, reason)
+                        }
                         // Mechanism S: relay closed sub without dropping WS. For live subs
                         // (still active in Subscription), emit reconnect signal so
                         // Subscription.resumeRelay re-issues the REQ. Skip one-shot and
@@ -1601,10 +1697,6 @@ class RelayPool @Inject constructor(
                         if (isOneShot) {
                             releaseOneShotForRelay(closedSubId, conn.url)
                             recordOneShotRelayCoverage(closedSubId, conn.url)
-                        }
-                        // Layer 2: learn from structural rejections for future REQs.
-                        if (reason.isNotEmpty()) {
-                            scope.launch { relayCapabilitiesStore.learnFromClosed(conn.url, reason) }
                         }
                     } catch (e: Exception) {
                         Log.w(TAG, "Failed to parse CLOSED message: ${e.message}")
@@ -1712,6 +1804,8 @@ class RelayPool @Inject constructor(
      */
     private fun handleEose(conn: RelayConnection, raw: String) {
         val subId = extractEoseSubId(raw) ?: return
+        val isTrackedRequest = _activePages.containsKey(subId) || subId in _activeOneShotSubs
+        if (isTrackedRequest) relayCapabilitiesStore.recordRequestSuccess(conn.url)
         // Paginated fetch: signal EOSE without sending CLOSE (pagination loop decides)
         _activePages[subId]?.let { page ->
             page.eoseReceived.complete(Unit)
@@ -1790,6 +1884,9 @@ class RelayPool @Inject constructor(
         timeoutMs: Long = 10_000L,
     ): Nip45CountResult? =
         withContext(Dispatchers.IO) {
+            if (relayCapabilitiesStore.shouldSkipRequest(relayUrl, RelayRequestClass.GENERAL)) {
+                return@withContext null
+            }
             val subId = "count-${System.nanoTime()}"
             try {
                 val countRequest = buildJsonArray {
@@ -2000,6 +2097,13 @@ class RelayPool @Inject constructor(
         if (quoteClose < 0) return null
         return raw.substring(subStart, quoteClose)
     }
+
+    /** Extract the second element from a compact REQ frame for queue cleanup. */
+    private fun extractReqSubId(raw: String): String? = runCatching {
+        val arr = NostrJson.parseToJsonElement(raw).jsonArray
+        if (arr.getOrNull(0)?.jsonPrimitive?.content != "REQ") return@runCatching null
+        arr.getOrNull(1)?.jsonPrimitive?.content
+    }.getOrNull()
 
     /**
      * Subscription IDs are prefixed to encode their lifecycle type.
@@ -2622,6 +2726,9 @@ class RelayPool @Inject constructor(
         maxPages: Int = Int.MAX_VALUE,
         onPage: (pageNum: Int, eventCount: Int) -> Unit = { _, _ -> },
     ): PaginatedFetchResult {
+        if (relayCapabilitiesStore.shouldSkipRequest(conn.url, RelayRequestClass.GENERAL)) {
+            return PaginatedFetchResult(0, 0, 0L, conn.url)
+        }
         var totalEvents = 0
         var totalPages = 0
         var globalOldest = Long.MAX_VALUE
@@ -3546,8 +3653,16 @@ class RelayPool @Inject constructor(
      * Bypasses connection cap for control-plane fetches.
      * Replaces stale/dead connections.
      */
-    private suspend fun getOrCreateConnection(url: String): RelayConnection? {
+    private suspend fun getOrCreateConnection(
+        url: String,
+        requestClass: RelayRequestClass = RelayRequestClass.GENERAL,
+    ): RelayConnection? {
         val normalized = normalizeRelayUrl(url) ?: return null
+        if (normalized in blockedUrls ||
+            relayCapabilitiesStore.shouldSkipRequest(normalized, requestClass)
+        ) {
+            return null
+        }
         val existing = connections[normalized]
         if (existing != null && existing.isConnected) return existing
         if (existing != null) {
@@ -3864,9 +3979,9 @@ class RelayPool @Inject constructor(
         }.toString()
 
         for (url in searchRelayUrls) {
-            if (relayCapabilitiesStore.shouldSkip(url)) continue
+            if (relayCapabilitiesStore.shouldSkipRequest(url, RelayRequestClass.NIP50_SEARCH)) continue
             scope.launch {
-                val conn = getOrCreateConnection(url) ?: return@launch
+                val conn = getOrCreateConnection(url, RelayRequestClass.NIP50_SEARCH) ?: return@launch
                 conn.send(profileReq)
                 conn.send(notesReq)
                 Log.d(TAG, "Search REQs sent to $url")
@@ -3936,9 +4051,9 @@ class RelayPool @Inject constructor(
         }.toString()
 
         for (url in searchRelayUrls) {
-            if (relayCapabilitiesStore.shouldSkip(url)) continue
+            if (relayCapabilitiesStore.shouldSkipRequest(url, RelayRequestClass.GENERAL)) continue
             scope.launch {
-                val conn = getOrCreateConnection(url) ?: return@launch
+                val conn = getOrCreateConnection(url, RelayRequestClass.GENERAL) ?: return@launch
                 conn.send(notesReq)
                 Log.d(TAG, "Hashtag search REQ (#$tag) sent to $url")
             }
