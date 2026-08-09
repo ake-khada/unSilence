@@ -18,13 +18,26 @@ data class RelayCapabilities(
     /** Relay returned `restricted:` indicating permission / whitelist. Same handling as authRequired. */
     val restricted: Boolean = false,
 
-    /** Cumulative count of structural rejections. After MAX_STRIKES, relay is hard-skipped. */
+    /** Transport strike count. At the threshold the transport half-open cooldown applies. */
     val strikes: Int = 0,
 
-    /** Epoch ms of the most recent strike. */
+    /** Consecutive structural CLOSED rejections. Drives capability-specific backoff. */
+    val consecutiveCapabilityFailures: Int = 0,
+
+    /** Epoch ms of the most recent structural CLOSED rejection. */
+    val lastCapabilityStrikeAt: Long = 0L,
+
+    /** Most recent structural CLOSED reason, separate from transport diagnostics. */
+    val lastCapabilityReason: String = "",
+
+    /** Learned from an explicit "search filter is required" CLOSED response.
+     *  Such relays remain valid NIP-50 targets but must not receive general REQs. */
+    val searchOnly: Boolean = false,
+
+    /** Epoch ms of the most recent transport strike. */
     val lastStrikeAt: Long = 0L,
 
-    /** Last CLOSED reason tail — for debugging, doesn't influence behavior. */
+    /** Last transport failure reason — for debugging and retry policy. */
     val lastReason: String = "",
 
     /** Cross-session consecutive connect/DNS failures (NOT during network-down).

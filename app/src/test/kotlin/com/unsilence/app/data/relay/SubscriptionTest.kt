@@ -22,17 +22,19 @@ class SubscriptionTest {
 
     private lateinit var transport: FakeRelayTransport
     private lateinit var tapRegistry: FakeTapRegistration
+    private lateinit var capabilities: FakeRelayCapabilitiesStore
     private lateinit var subscription: Subscription
 
     @Before
     fun setUp() {
         transport = FakeRelayTransport()
         tapRegistry = FakeTapRegistration()
+        capabilities = FakeRelayCapabilitiesStore()
         subscription = Subscription(
             transport,
             tapRegistry,
             FakeReconnectSource(),
-            FakeRelayCapabilitiesStore(),
+            capabilities,
         )
     }
 
@@ -48,6 +50,31 @@ class SubscriptionTest {
             assertTrue("Should contain limit:10", sent.msg.contains("\"limit\":10"))
         }
         assertEquals(setOf("wss://a.example", "wss://b.example"), transport.sends.map { it.url }.toSet())
+    }
+
+    @Test
+    fun `search-only relay is excluded from engagement REQ but selected for NIP-50`() = runTest {
+        val url = "wss://search-only.example"
+        capabilities.markSearchOnly(url)
+
+        subscription.subscribe(
+            listOf(url),
+            NostrFilter(kinds = listOf(1, 7, 9735)),
+            onevent = {},
+        )
+        assertTrue(transport.sends.isEmpty())
+        assertEquals(emptyList<String>(), transport.connectRequests.single().urls)
+        assertEquals(RelayRequestClass.GENERAL, transport.connectRequests.single().requestClass)
+
+        subscription.subscribe(
+            listOf(url),
+            NostrFilter(kinds = listOf(0), search = "odell"),
+            onevent = {},
+        )
+        assertEquals(1, transport.sends.size)
+        assertEquals(url, transport.sends.single().url)
+        assertEquals(listOf(url), transport.connectRequests.last().urls)
+        assertEquals(RelayRequestClass.NIP50_SEARCH, transport.connectRequests.last().requestClass)
     }
 
     @Test
@@ -136,6 +163,7 @@ class SubscriptionTest {
         assertEquals(2, eoseEvents.size)
         assertEquals(false, eoseEvents[0])  // 1 of 2
         assertEquals(true, eoseEvents[1])   // 2 of 2
+        assertEquals(listOf("wss://a.example", "wss://b.example"), capabilities.successfulRequests)
     }
 
     @Test
@@ -168,6 +196,7 @@ class SubscriptionTest {
         assertEquals(1, closes.size)
         assertEquals("wss://a.example", closes[0].first)
         assertEquals("auth-required: pubkey not whitelisted", closes[0].second)
+        assertTrue("synthetic EOSE from CLOSED must not clear failures", capabilities.successfulRequests.isEmpty())
     }
 
     @Test

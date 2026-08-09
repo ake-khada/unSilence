@@ -49,6 +49,8 @@ private const val TRANSPORT_RETRY_MAX_MS  = 30 * 60_000L       // 30 min cap (no
 private const val INTEGRAL_RETRY_COOLDOWN_MS = 60_000L         // 1 min base — integral relays heal fast
 private const val INTEGRAL_ESCALATED_COOLDOWN_MS = 5 * 60_000L // 5 min after a failure streak (H20b)
 private const val INTEGRAL_ESCALATION_THRESHOLD = 5            // consecutive fails before escalating (H20b)
+private const val CAPABILITY_RETRY_BASE_MS = 60_000L
+private const val CAPABILITY_RETRY_MAX_MS = 5 * 60_000L
 
 /** DNS-degraded detection: ≥ THRESHOLD distinct relays failing DNS within WINDOW_MS
  *  means the pipe is down, not the relays. Strikes are suppressed until a relay resolves. */
@@ -89,9 +91,166 @@ enum class SkipReason {
     UNKNOWN_FAILURE,    // Anything else — don't strike aggressively
 }
 
+/** REQ class matters for relays that explicitly require a NIP-50 search filter. */
+enum class RelayRequestClass {
+    GENERAL,
+    NIP50_SEARCH,
+}
+
+internal data class LearnedClosedRejection(
+    val prefix: String,
+    val reason: String,
+    val searchOnly: Boolean,
+)
+
+/** Pure CLOSED classifier. Transient policy responses deliberately teach nothing. */
+internal fun classifyClosedRejection(reason: String): LearnedClosedRejection? {
+    val prefix = reason.substringBefore(':').trim().lowercase()
+    if (prefix in TRANSIENT_PREFIXES) return null
+    val effectivePrefix = if (prefix in STRUCTURAL_PREFIXES) prefix else "error"
+    val tail = reason.substringAfter(':', missingDelimiterValue = "").trim()
+    return LearnedClosedRejection(
+        prefix = effectivePrefix,
+        reason = tail.ifEmpty { reason }.take(120),
+        searchOnly = reason.contains("search filter is required", ignoreCase = true),
+    )
+}
+
+private fun incrementSaturated(value: Int): Int =
+    if (value == Int.MAX_VALUE) Int.MAX_VALUE else value + 1
+
+/** Apply one structural rejection without Android/store dependencies. */
+internal fun applyCapabilityRejection(
+    existing: RelayCapabilities,
+    rejection: LearnedClosedRejection,
+    nowMs: Long,
+): RelayCapabilities {
+    val restricted = existing.restricted ||
+        rejection.prefix == "restricted" ||
+        rejection.reason.contains("white-list", ignoreCase = true)
+    return existing.copy(
+        restricted = restricted,
+        consecutiveCapabilityFailures = incrementSaturated(
+            if (nowMs - existing.lastCapabilityStrikeAt < STRIKE_TTL_MS) {
+                existing.consecutiveCapabilityFailures
+            } else {
+                0
+            },
+        ),
+        lastCapabilityStrikeAt = nowMs,
+        lastCapabilityReason = rejection.reason,
+        searchOnly = existing.searchOnly || rejection.searchOnly,
+    )
+}
+
+/** A successful socket connection heals transport state only. */
+internal fun clearTransportFailures(existing: RelayCapabilities): RelayCapabilities {
+    if (existing.restricted) return existing
+    return existing.copy(
+        strikes = 0,
+        lastStrikeAt = 0L,
+        lastReason = "",
+        deadFailCount = 0,
+        consecutiveFailures = 0,
+    )
+}
+
+/** A genuine EOSE proves that the relay accepted a REQ. Routing facts remain cached. */
+internal fun clearCapabilityFailures(existing: RelayCapabilities): RelayCapabilities {
+    if (existing.restricted) return existing
+    return existing.copy(consecutiveCapabilityFailures = 0)
+}
+
+/** An explicit user retry clears both transient domains and learned request routing. */
+internal fun clearAllRelayFailures(existing: RelayCapabilities): RelayCapabilities {
+    if (existing.restricted) return existing
+    return clearCapabilityFailures(clearTransportFailures(existing)).copy(
+        lastCapabilityStrikeAt = 0L,
+        lastCapabilityReason = "",
+        searchOnly = false,
+    )
+}
+
+/** Learned request compatibility, kept pure so every dispatcher shares one rule. */
+internal fun isRequestClassCompatible(
+    capabilities: RelayCapabilities,
+    requestClass: RelayRequestClass,
+): Boolean = requestClass != RelayRequestClass.GENERAL || !capabilities.searchOnly
+
+/**
+ * The structural rejection that taught us a relay is search-only must not suppress
+ * the request class it explicitly asked for. Other later structural failures still
+ * back off normally, even when the relay remains classified as search-only.
+ */
+internal fun shouldIgnoreCapabilityCooldown(
+    capabilities: RelayCapabilities,
+    requestClass: RelayRequestClass,
+): Boolean =
+    requestClass == RelayRequestClass.NIP50_SEARCH &&
+        capabilities.searchOnly &&
+        capabilities.lastCapabilityReason.contains("search filter is required", ignoreCase = true)
+
+private val TRANSPORT_REASON_NAMES = setOf(
+    SkipReason.DNS_RESOLUTION,
+    SkipReason.CLEARTEXT_BLOCKED,
+    SkipReason.HTTP_UPGRADE_4XX,
+    SkipReason.HTTP_UPGRADE_5XX,
+    SkipReason.SSL_ERROR,
+    SkipReason.CONNECT_TIMEOUT,
+    SkipReason.UNKNOWN_FAILURE,
+).mapTo(mutableSetOf()) { it.name }
+
+/**
+ * Before capability/transport state was split, structural CLOSED strikes occupied
+ * [RelayCapabilities.strikes]/lastReason. Migrate those persisted records once so
+ * an upgrade does not need one more known-losing REQ to learn the same fact again.
+ */
+internal fun migrateLegacyCapabilityState(existing: RelayCapabilities): RelayCapabilities {
+    val isLegacyCapability =
+        existing.lastCapabilityStrikeAt == 0L &&
+            existing.consecutiveCapabilityFailures == 0 &&
+            existing.lastReason.isNotBlank() &&
+            existing.lastReason !in TRANSPORT_REASON_NAMES
+    if (!isLegacyCapability) return existing
+
+    return existing.copy(
+        strikes = 0,
+        lastStrikeAt = 0L,
+        lastReason = "",
+        consecutiveCapabilityFailures = existing.strikes.coerceAtLeast(1),
+        lastCapabilityStrikeAt = existing.lastStrikeAt,
+        lastCapabilityReason = existing.lastReason,
+        searchOnly = existing.searchOnly ||
+            existing.lastReason.contains("search filter is required", ignoreCase = true),
+    )
+}
+
+/** Search-only/restricted are routing facts; only transient failure evidence expires. */
+internal fun shouldRetainPersistedCapabilities(
+    capabilities: RelayCapabilities,
+    nowMs: Long,
+): Boolean {
+    val latestEvidence = maxOf(
+        capabilities.lastStrikeAt,
+        capabilities.lastCapabilityStrikeAt,
+    )
+    return capabilities.restricted ||
+        capabilities.searchOnly ||
+        (nowMs - latestEvidence) < STRIKE_TTL_MS
+}
+
 /** Read-side interface for relay capability checks. Testable without Android context. */
 interface RelaySkipCheck {
     fun shouldSkip(relayUrl: String): Boolean
+
+    fun shouldSkipRequest(
+        relayUrl: String,
+        requestClass: RelayRequestClass,
+        bypassCooldown: Boolean = false,
+    ): Boolean = !bypassCooldown && shouldSkip(relayUrl)
+
+    /** Called only for genuine relay success (EOSE), never synthesized EOSE/CLOSED. */
+    fun recordRequestSuccess(relayUrl: String) = Unit
 }
 
 /**
@@ -232,13 +391,13 @@ class RelayCapabilitiesStore @Inject constructor(
             .onSuccess { map ->
                 // Evict stale entries — transient failures shouldn't poison across sessions
                 val now = System.currentTimeMillis()
-                val fresh = map.filter { (_, c) ->
-                    c.restricted || (now - c.lastStrikeAt) < STRIKE_TTL_MS
-                }
+                val fresh = map.filter { (_, c) -> shouldRetainPersistedCapabilities(c, now) }
                 val evicted = map.size - fresh.size
                 // Clear legacy authRequired flags — auth is handled by the auth pipeline
+                var migratedLegacyState = false
                 val cleaned = fresh.mapValues { (_, c) ->
-                    var fixed = c
+                    var fixed = migrateLegacyCapabilityState(c)
+                    if (fixed != c) migratedLegacyState = true
                     if (fixed.authRequired) fixed = fixed.copy(authRequired = false)
                     // Dead-count policy invariant (H18.4): only DNS_RESOLUTION produces
                     // deadFailCount. Historical data may contain dead entries from
@@ -251,14 +410,25 @@ class RelayCapabilitiesStore @Inject constructor(
                 caps.putAll(cleaned)
                 Log.w(TAG, "Loaded ${cleaned.size} relay capabilities (evicted $evicted stale)")
                 // Dump skippable relays on load for diagnostics
-                val skippable = cleaned.filter { (_, c) -> c.restricted || c.strikes >= MAX_CAPABILITY_STRIKES || c.deadFailCount >= DEAD_RELAY_THRESHOLD }
+                val skippable = cleaned.filter { (_, c) ->
+                    c.restricted || c.searchOnly ||
+                        c.strikes >= MAX_CAPABILITY_STRIKES ||
+                        c.consecutiveCapabilityFailures >= MAX_CAPABILITY_STRIKES ||
+                        c.deadFailCount >= DEAD_RELAY_THRESHOLD
+                }
                 if (skippable.isNotEmpty()) {
                     for ((url, c) in skippable) {
-                        Log.w(TAG, "  WILL-SKIP: $url restricted=${c.restricted} strikes=${c.strikes} dead=${c.deadFailCount} reason='${c.lastReason}'")
+                        Log.w(
+                            TAG,
+                            "  WILL-SKIP: $url restricted=${c.restricted} " +
+                                "transportStrikes=${c.strikes} capFails=${c.consecutiveCapabilityFailures} " +
+                                "searchOnly=${c.searchOnly} dead=${c.deadFailCount} " +
+                                "reason='${c.lastCapabilityReason.ifBlank { c.lastReason }}'",
+                        )
                     }
                 }
                 // Persist cleaned data so stale/fixed entries don't re-load
-                val needsPersist = evicted > 0 ||
+                val needsPersist = evicted > 0 || migratedLegacyState ||
                     fresh.any { (k, v) -> map[k]?.authRequired == true ||
                         (v.deadFailCount > 0 && v.lastReason != SkipReason.DNS_RESOLUTION.name) }
                 if (needsPersist) {
@@ -274,14 +444,45 @@ class RelayCapabilitiesStore @Inject constructor(
         return caps[key]
     }
 
-    /** True when the relay should be skipped for all REQs.
-     *  Half-open: past MAX_CAPABILITY_STRIKES, skip only within a retry cooldown
-     *  since lastStrikeAt. After cooldown, allow one retry — success clears strikes
-     *  (onOpen.clearTransportStrikes), failure re-strikes and extends the window. */
+    /** True when transport or generic capability health suppresses every REQ class. */
     override fun shouldSkip(relayUrl: String): Boolean {
         val c = get(relayUrl) ?: return false
+        if (!isRequestClassCompatible(c, RelayRequestClass.GENERAL)) return true
+        return shouldSkipInternal(relayUrl, c, ignoreCapabilityCooldown = false)
+    }
+
+    override fun shouldSkipRequest(
+        relayUrl: String,
+        requestClass: RelayRequestClass,
+        bypassCooldown: Boolean,
+    ): Boolean {
+        val c = get(relayUrl) ?: return false
+        if (!isRequestClassCompatible(c, requestClass)) {
+            Log.d(TAG, "REQ-SKIP: $relayUrl is learned search-only")
+            return true
+        }
+        // Explicit capability bypasses are used for dedicated registry relays.
+        // They bypass health cooldowns, but never a known-incompatible REQ class
+        // (the search-only check above), because that request cannot succeed.
+        if (bypassCooldown) return false
+        // A structural rejection of a general REQ must not suppress the one
+        // request class the relay explicitly accepts. Restricted/dead and
+        // transport cooldowns remain authoritative.
+        val ignoreCapabilityCooldown = shouldIgnoreCapabilityCooldown(c, requestClass)
+        return shouldSkipInternal(relayUrl, c, ignoreCapabilityCooldown)
+    }
+
+    private fun shouldSkipInternal(
+        relayUrl: String,
+        c: RelayCapabilities,
+        ignoreCapabilityCooldown: Boolean,
+    ): Boolean {
         if (c.restricted) {
-            Log.w(TAG, "shouldSkip=true: $relayUrl restricted=true reason='${c.lastReason}'")
+            Log.w(
+                TAG,
+                "shouldSkip=true: $relayUrl restricted=true " +
+                    "reason='${c.lastCapabilityReason.ifBlank { c.lastReason }}'",
+            )
             return true
         }
         // Dead relay: skip unless weekly reprobe window has elapsed
@@ -294,20 +495,46 @@ class RelayCapabilitiesStore @Inject constructor(
             Log.w(TAG, "shouldSkip=false (dead reprobe): $relayUrl deadFails=${c.deadFailCount}")
             return false
         }
-        if (c.strikes < MAX_CAPABILITY_STRIKES) return false
-
-        // Half-open: struck past threshold, skip only within cooldown
         val now = System.currentTimeMillis()
-        val cooldown = retryCooldownMs(relayUrl, c.strikes)
-        val elapsed = now - c.lastStrikeAt
-        return if (elapsed < cooldown) {
-            Log.w(TAG, "shouldSkip=true: $relayUrl strikes=${c.strikes} reason='${c.lastReason}' " +
-                "(retry in ${(cooldown - elapsed) / 1000}s${if (isIntegral(relayUrl)) ", integral" else ""})")
-            true
-        } else {
-            Log.w(TAG, "shouldSkip=false (half-open): $relayUrl strikes=${c.strikes} — cooldown elapsed, allowing retry")
-            false
+
+        if (c.strikes >= MAX_CAPABILITY_STRIKES) {
+            val cooldown = retryCooldownMs(relayUrl, c.strikes)
+            val elapsed = now - c.lastStrikeAt
+            if (elapsed < cooldown) {
+                Log.w(
+                    TAG,
+                    "shouldSkip=true: $relayUrl transportStrikes=${c.strikes} reason='${c.lastReason}' " +
+                        "(retry in ${(cooldown - elapsed) / 1000}s${if (isIntegral(relayUrl)) ", integral" else ""})",
+                )
+                return true
+            }
+            Log.w(
+                TAG,
+                "shouldSkip=false (transport half-open): $relayUrl strikes=${c.strikes}",
+            )
         }
+
+        if (!ignoreCapabilityCooldown &&
+            c.consecutiveCapabilityFailures >= MAX_CAPABILITY_STRIKES
+        ) {
+            val cooldown = computeCapabilityCooldownMs(c.consecutiveCapabilityFailures)
+            val elapsed = now - c.lastCapabilityStrikeAt
+            if (elapsed < cooldown) {
+                Log.w(
+                    TAG,
+                    "shouldSkip=true: $relayUrl capFails=${c.consecutiveCapabilityFailures} " +
+                        "reason='${c.lastCapabilityReason}' " +
+                        "(retry in ${(cooldown - elapsed) / 1000}s)",
+                )
+                return true
+            }
+            Log.w(
+                TAG,
+                "shouldSkip=false (capability half-open): $relayUrl " +
+                    "capFails=${c.consecutiveCapabilityFailures}",
+            )
+        }
+        return false
     }
 
     /** Cooldown before a struck relay becomes retry-eligible.
@@ -341,36 +568,49 @@ class RelayCapabilitiesStore @Inject constructor(
         }
 
         val weight = strikesForReason(reason)
-        val existing = caps[key] ?: RelayCapabilities()
-        val newStrikes = existing.strikes + weight
-        // Dead-relay increment: DNS only. CONNECT_TIMEOUT is transient (VPN/network
-        // variability) and must not contribute to the permanent denylist.
-        // AFTER the network-down gate — DNS is unreachable above during outages.
-        val newDeadCount = if (reason == SkipReason.DNS_RESOLUTION) {
-            existing.deadFailCount + 1
-        } else {
-            existing.deadFailCount
-        }
         val now = System.currentTimeMillis()
-        val updated = existing.copy(
-            strikes = newStrikes,
-            lastStrikeAt = now,
-            lastReason = reason.name.take(120),
-            deadFailCount = newDeadCount,
-            lastProbeAt = if (newDeadCount >= DEAD_RELAY_THRESHOLD && existing.deadFailCount < DEAD_RELAY_THRESHOLD) {
-                now  // just crossed threshold — set initial probe time
-            } else if (existing.deadFailCount >= DEAD_RELAY_THRESHOLD) {
-                now  // reprobe failed — update probe time
+        var previous = RelayCapabilities()
+        var updated = RelayCapabilities()
+        // CLOSED delivery and OkHttp onFailure can race on different threads. Merge
+        // transport state atomically so it cannot erase capability learning (or vice versa).
+        caps.compute(key) { _, current ->
+            val existing = current ?: RelayCapabilities()
+            previous = existing
+            val newStrikes = (existing.strikes.toLong() + weight)
+                .coerceAtMost(Int.MAX_VALUE.toLong())
+                .toInt()
+            // Dead-relay increment: DNS only. CONNECT_TIMEOUT is transient (VPN/network
+            // variability) and must not contribute to the permanent denylist.
+            // AFTER the network-down gate — DNS is unreachable above during outages.
+            val newDeadCount = if (reason == SkipReason.DNS_RESOLUTION) {
+                incrementSaturated(existing.deadFailCount)
             } else {
-                existing.lastProbeAt
-            },
-            // Escalation counter (H20b): counts every recorded failure (incl. CONNECT_TIMEOUT,
-            // which deadFailCount excludes). Reset on success in clearTransportStrikesInternal.
-            consecutiveFailures = existing.consecutiveFailures + 1,
-        )
-        caps[key] = updated
+                existing.deadFailCount
+            }
+            existing.copy(
+                strikes = newStrikes,
+                lastStrikeAt = now,
+                lastReason = reason.name.take(120),
+                deadFailCount = newDeadCount,
+                lastProbeAt = if (
+                    newDeadCount >= DEAD_RELAY_THRESHOLD &&
+                    existing.deadFailCount < DEAD_RELAY_THRESHOLD
+                ) {
+                    now // just crossed threshold — set initial probe time
+                } else if (existing.deadFailCount >= DEAD_RELAY_THRESHOLD) {
+                    now // reprobe failed — update probe time
+                } else {
+                    existing.lastProbeAt
+                },
+                // Escalation counter (H20b): counts every recorded failure (incl. CONNECT_TIMEOUT,
+                // which deadFailCount excludes). Reset on success in clearTransportStrikesInternal.
+                consecutiveFailures = incrementSaturated(existing.consecutiveFailures),
+            ).also { updated = it }
+        }
+        val newStrikes = updated.strikes
+        val newDeadCount = updated.deadFailCount
 
-        if (newDeadCount >= DEAD_RELAY_THRESHOLD && existing.deadFailCount < DEAD_RELAY_THRESHOLD) {
+        if (newDeadCount >= DEAD_RELAY_THRESHOLD && previous.deadFailCount < DEAD_RELAY_THRESHOLD) {
             Log.w(TAG, "Dead relay: $key ($newDeadCount consecutive failures, reprobe in ${DEAD_RELAY_REPROBE_MS / 86_400_000}d)")
         } else if (newStrikes >= MAX_CAPABILITY_STRIKES) {
             Log.w(TAG, "Transport skip: $key ($reason, $newStrikes strikes, dead=$newDeadCount)")
@@ -389,38 +629,24 @@ class RelayCapabilitiesStore @Inject constructor(
      * @param relayUrl the relay that sent the CLOSED
      * @param reason the full reason string from the CLOSED message
      */
-    suspend fun learnFromClosed(relayUrl: String, reason: String) {
-        val prefix = reason.substringBefore(':').trim().lowercase()
-
-        // Skip transient prefixes — they don't teach us anything reusable.
-        if (prefix in TRANSIENT_PREFIXES) return
-
-        val effectivePrefix = if (prefix in STRUCTURAL_PREFIXES) prefix else "error"
-        val rest = reason.substringAfter(':', missingDelimiterValue = "").trim()
-
+    fun learnFromClosed(relayUrl: String, reason: String) {
+        val rejection = classifyClosedRejection(reason) ?: return
         val key = normalizeRelayUrl(relayUrl) ?: return
-        val existing = caps[key] ?: RelayCapabilities()
-        val updated = applyRejection(existing, effectivePrefix, rest.ifEmpty { reason })
-        if (updated == existing) return
-
-        caps[key] = updated
-        persist()
-        Log.w(TAG, "Learned from $key: prefix='$effectivePrefix' strikes=${updated.strikes} auth=${updated.authRequired} restricted=${updated.restricted} reason='${updated.lastReason}'")
-    }
-
-    private fun applyRejection(
-        existing: RelayCapabilities,
-        prefix: String,
-        reason: String,
-    ): RelayCapabilities {
-        val restricted = existing.restricted ||
-            prefix == "restricted" ||
-            reason.contains("white-list", ignoreCase = true)
-        return existing.copy(
-            restricted = restricted,
-            strikes = existing.strikes + 1,
-            lastStrikeAt = System.currentTimeMillis(),
-            lastReason = reason.take(120),
+        var updated = RelayCapabilities()
+        caps.compute(key) { _, current ->
+            applyCapabilityRejection(
+                existing = current ?: RelayCapabilities(),
+                rejection = rejection,
+                nowMs = System.currentTimeMillis(),
+            ).also { updated = it }
+        }
+        schedulePersist()
+        Log.w(
+            TAG,
+            "Learned from $key: prefix='${rejection.prefix}' " +
+                "capFails=${updated.consecutiveCapabilityFailures} " +
+                "searchOnly=${updated.searchOnly} restricted=${updated.restricted} " +
+                "reason='${updated.lastCapabilityReason}'",
         )
     }
 
@@ -442,14 +668,14 @@ class RelayCapabilitiesStore @Inject constructor(
     fun markStructurallyInvalid(url: String) {
         // normalizeRelayUrl may itself reject url — use raw as key if so
         val key = normalizeRelayUrl(url) ?: url.trim().take(200)
-        val existing = caps[key] ?: RelayCapabilities()
-        val updated = existing.copy(
-            restricted = true,
-            strikes = MAX_CAPABILITY_STRIKES,
-            lastStrikeAt = System.currentTimeMillis(),
-            lastReason = "structurally-invalid-url",
-        )
-        caps[key] = updated
+        caps.compute(key) { _, current ->
+            (current ?: RelayCapabilities()).copy(
+                restricted = true,
+                strikes = MAX_CAPABILITY_STRIKES,
+                lastStrikeAt = System.currentTimeMillis(),
+                lastReason = "structurally-invalid-url",
+            )
+        }
         Log.w(TAG, "Marked structurally invalid: ${key.take(80)}")
         schedulePersist()
     }
@@ -468,13 +694,26 @@ class RelayCapabilitiesStore @Inject constructor(
         healDnsDegraded()
     }
 
+    override fun recordRequestSuccess(relayUrl: String) {
+        val key = normalizeRelayUrl(relayUrl) ?: return
+        clearCapabilityStrikesInternal(key)
+    }
+
     /**
      * Clear cooldown + dead-count for a relay the user explicitly re-added or edited.
      * A manual add is an explicit "try this now" signal — clears everything.
      */
     fun clearCooldownForRelay(url: String) {
         val key = normalizeRelayUrl(url) ?: return
-        clearTransportStrikesInternal(key)
+        var changed = false
+        caps.computeIfPresent(key) { _, current ->
+            if (current.restricted) {
+                current
+            } else {
+                clearAllRelayFailures(current).also { changed = it != current }
+            }
+        }
+        if (changed) schedulePersist()
     }
 
     /**
@@ -484,10 +723,16 @@ class RelayCapabilitiesStore @Inject constructor(
      */
     fun clearDnsDeadOnNetworkChange() {
         var cleared = 0
-        for ((key, c) in caps) {
-            if (c.lastReason == SkipReason.DNS_RESOLUTION.name && (c.strikes > 0 || c.deadFailCount > 0)) {
-                caps[key] = c.copy(strikes = 0, lastReason = "", deadFailCount = 0)
-                cleared++
+        for (key in caps.keys) {
+            caps.computeIfPresent(key) { _, current ->
+                if (current.lastReason == SkipReason.DNS_RESOLUTION.name &&
+                    (current.strikes > 0 || current.deadFailCount > 0)
+                ) {
+                    cleared++
+                    clearTransportFailures(current)
+                } else {
+                    current
+                }
             }
         }
         if (cleared > 0) {
@@ -498,17 +743,45 @@ class RelayCapabilitiesStore @Inject constructor(
 
     /** Internal strike-clear without the degraded-heal trigger (avoids recursion). */
     private fun clearTransportStrikesInternal(key: String, scheduleWrite: Boolean = true) {
-        val existing = caps[key] ?: return
-        if (existing.restricted) return  // policy rejections are permanent
-        if (existing.strikes == 0 && existing.deadFailCount == 0 && existing.consecutiveFailures == 0) return // nothing to clear
-        val cleared = existing.copy(strikes = 0, lastReason = "", deadFailCount = 0, consecutiveFailures = 0)
-        caps[key] = cleared
-        if (existing.deadFailCount >= DEAD_RELAY_THRESHOLD) {
-            Log.w(TAG, "Dead relay revived: $key (was dead with ${existing.deadFailCount} failures)")
-        } else if (existing.strikes > 0) {
-            Log.w(TAG, "Cleared transport strikes for $key (was ${existing.strikes}, reason='${existing.lastReason}')")
+        var existing: RelayCapabilities? = null
+        caps.computeIfPresent(key) { _, current ->
+            if (current.restricted ||
+                (current.strikes == 0 && current.deadFailCount == 0 &&
+                    current.consecutiveFailures == 0)
+            ) {
+                current
+            } else {
+                existing = current
+                clearTransportFailures(current)
+            }
+        }
+        val prior = existing ?: return
+        if (prior.deadFailCount >= DEAD_RELAY_THRESHOLD) {
+            Log.w(TAG, "Dead relay revived: $key (was dead with ${prior.deadFailCount} failures)")
+        } else if (prior.strikes > 0) {
+            Log.w(
+                TAG,
+                "Cleared transport strikes for $key " +
+                    "(was ${prior.strikes}, reason='${prior.lastReason}')",
+            )
         }
         if (scheduleWrite) schedulePersist()
+    }
+
+    /** Clear only protocol rejection cadence after a genuine EOSE. Socket open is insufficient. */
+    private fun clearCapabilityStrikesInternal(key: String) {
+        var priorFailures = 0
+        caps.computeIfPresent(key) { _, current ->
+            if (current.restricted || current.consecutiveCapabilityFailures == 0) {
+                current
+            } else {
+                priorFailures = current.consecutiveCapabilityFailures
+                clearCapabilityFailures(current)
+            }
+        }
+        if (priorFailures == 0) return
+        Log.w(TAG, "Cleared capability failures for $key after accepted REQ (was $priorFailures)")
+        schedulePersist()
     }
 
     /** Current strike count for [url], or 0 if no entry. For diagnostics only. */
@@ -516,9 +789,11 @@ class RelayCapabilitiesStore @Inject constructor(
 
     fun dump(): String =
         caps.entries
-            .sortedByDescending { it.value.strikes }
+            .sortedByDescending { maxOf(it.value.strikes, it.value.consecutiveCapabilityFailures) }
             .joinToString("\n") { (url, c) ->
-                "$url: strikes=${c.strikes} auth=${c.authRequired} restricted=${c.restricted} last='${c.lastReason}'"
+                "$url: transportStrikes=${c.strikes} capFails=${c.consecutiveCapabilityFailures} " +
+                    "searchOnly=${c.searchOnly} auth=${c.authRequired} restricted=${c.restricted} " +
+                    "last='${c.lastCapabilityReason.ifBlank { c.lastReason }}'"
             }
 
     companion object {
@@ -556,6 +831,15 @@ class RelayCapabilitiesStore @Inject constructor(
         internal fun computeIntegralCooldownMs(consecutiveFailures: Int): Long =
             if (consecutiveFailures >= INTEGRAL_ESCALATION_THRESHOLD) INTEGRAL_ESCALATED_COOLDOWN_MS
             else INTEGRAL_RETRY_COOLDOWN_MS
+
+        /** Structural CLOSED retry cadence: 60s through the threshold, then
+         *  2m → 4m → 5m cap. Unlike transport policy this is relay-integral
+         *  independent: the rejection describes the REQ class, not reachability. */
+        internal fun computeCapabilityCooldownMs(consecutiveFailures: Int): Long {
+            val overage = (consecutiveFailures - MAX_CAPABILITY_STRIKES).coerceIn(0, 3)
+            return (CAPABILITY_RETRY_BASE_MS shl overage)
+                .coerceAtMost(CAPABILITY_RETRY_MAX_MS)
+        }
 
         /** Pure decision: is the DNS-degraded latch still active? Armed AND within
          *  [DNS_DEGRADED_TTL_MS] of its onset. Past the TTL the latch is stale and must

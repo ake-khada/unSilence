@@ -13,6 +13,7 @@ interface RelayTransport {
         relayUrls: List<String>,
         timeoutMs: Long = 5_000,
         forceEvict: Boolean = false,
+        requestClass: RelayRequestClass = RelayRequestClass.GENERAL,
     ): Int
 
     /**

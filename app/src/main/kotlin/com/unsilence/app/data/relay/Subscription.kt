@@ -71,6 +71,7 @@ class Subscription @Inject constructor(
     private data class SubState(
         val urls: Set<String>,
         val reqPayload: String,
+        val requestClass: RelayRequestClass,
         val onevent: (NostrEvent) -> Unit,
         val oneose: (allEosed: Boolean) -> Unit,
         val onclose: (url: String, reason: String) -> Unit,
@@ -141,9 +142,15 @@ class Subscription @Inject constructor(
         val urlSet = urls.mapNotNull { normalizeRelayUrl(it) }.toSet()
         val subId = generateSubId(urls)
         val req = buildReqJson(subId, filter)
+        val requestClass = if (filter.search.isNullOrBlank()) {
+            RelayRequestClass.GENERAL
+        } else {
+            RelayRequestClass.NIP50_SEARCH
+        }
         val state = SubState(
             urls = urlSet,
             reqPayload = req,
+            requestClass = requestClass,
             onevent = onevent,
             oneose = oneose,
             onclose = onclose,
@@ -156,13 +163,20 @@ class Subscription @Inject constructor(
             // PERSISTENT-purpose relays (browse / outbox / home feed). For
             // ad-hoc one-off subs we still call connectAndAwait — it's a no-op
             // for already-connected relays.
-            transport.connectAndAwait(urls, timeoutMs = 5_000)
+            val dispatchUrls = urlSet.filterNot { url ->
+                relayCapabilitiesStore.shouldSkipRequest(url, requestClass)
+            }
+            transport.connectAndAwait(
+                dispatchUrls,
+                timeoutMs = 5_000,
+                requestClass = requestClass,
+            )
 
             // Send REQ to each relay, skipping those with known structural rejections.
             val failedUrls = mutableListOf<String>()
             var skippedCount = 0
-            for (url in urls) {
-                if (relayCapabilitiesStore.shouldSkip(url)) {
+            for (url in urlSet) {
+                if (relayCapabilitiesStore.shouldSkipRequest(url, requestClass)) {
                     skippedCount++
                     Log.w(TAG, "SUB-SKIP: $subId skipping $url (cap store)")
                     handleRelayEose(subId, url) // count as done so EOSE threshold isn't blocked
@@ -195,7 +209,13 @@ class Subscription @Inject constructor(
                     if (s == null || s.isPaused) return HandleImpl(subId) // closed or paused during retry
                     val iter = remaining.iterator()
                     while (iter.hasNext()) {
-                        if (transport.sendToRelay(iter.next(), req)) iter.remove()
+                        val url = iter.next()
+                        if (relayCapabilitiesStore.shouldSkipRequest(url, requestClass)) {
+                            iter.remove()
+                            handleRelayEose(subId, url)
+                        } else if (transport.sendToRelay(url, req)) {
+                            iter.remove()
+                        }
                     }
                 }
                 if (remaining.isNotEmpty()) {
@@ -256,8 +276,10 @@ class Subscription @Inject constructor(
             state.eosedRelays.clear()
             state.closedRelays.clear()
             for (url in state.urls) {
-                if (!relayCapabilitiesStore.shouldSkip(url)) {
+                if (!relayCapabilitiesStore.shouldSkipRequest(url, state.requestClass)) {
                     transport.sendToRelay(url, state.reqPayload)
+                } else {
+                    handleRelayEose(subId, url)
                 }
             }
             startEoseWatchdog(subId, state.urls)
@@ -273,7 +295,6 @@ class Subscription @Inject constructor(
      */
     fun resumeRelay(url: String, nowMs: Long = System.currentTimeMillis()) {
         val normalized = normalizeRelayUrl(url) ?: return
-        if (relayCapabilitiesStore.shouldSkip(normalized)) return
         if (transport.isAuthUnavailable(normalized)) return
         if (transport.isRateLimited(normalized)) {
             if (rateLimitSkipLogged.add(normalized)) {
@@ -284,7 +305,9 @@ class Subscription @Inject constructor(
         rateLimitSkipLogged.remove(normalized)
 
         val matching = subs.values.filter { state ->
-            !state.isPaused && normalized in state.urls
+            !state.isPaused &&
+                normalized in state.urls &&
+                !relayCapabilitiesStore.shouldSkipRequest(normalized, state.requestClass)
         }
         if (matching.isEmpty()) {
             Log.d(TAG, "resumeRelay $normalized: 0 subs matched (total subs=${subs.size})")
@@ -343,7 +366,9 @@ class Subscription @Inject constructor(
         when {
             raw.startsWith("[\"EOSE\"") -> {
                 val subId = extractSubId(raw) ?: return
-                handleRelayEose(subId, relayUrl)
+                if (handleRelayEose(subId, relayUrl)) {
+                    relayCapabilitiesStore.recordRequestSuccess(relayUrl)
+                }
             }
             raw.startsWith("[\"CLOSED\"") -> {
                 val subId = extractSubId(raw) ?: return
@@ -373,10 +398,10 @@ class Subscription @Inject constructor(
         }
     }
 
-    private fun handleRelayEose(subId: String, relayUrl: String) {
-        val state = subs[subId] ?: return
-        if (state.isPaused) return  // ignore EOSE during lifecycle pause
-        if (!state.eosedRelays.add(relayUrl)) return  // already EOSE'd this relay
+    private fun handleRelayEose(subId: String, relayUrl: String): Boolean {
+        val state = subs[subId] ?: return false
+        if (state.isPaused || relayUrl !in state.urls) return false
+        if (!state.eosedRelays.add(relayUrl)) return false  // already EOSE'd this relay
         val allEosed = state.eosedRelays.size >= state.urls.size
         Log.d(TAG, "EOSE: $subId from $relayUrl (${state.eosedRelays.size}/${state.urls.size} allEosed=$allEosed events=${state.knownIds.size})")
         try {
@@ -384,6 +409,7 @@ class Subscription @Inject constructor(
         } catch (t: Throwable) {
             Log.w(TAG, "oneose threw for sub=$subId", t)
         }
+        return true
     }
 
     private fun handleRelayClosed(subId: String, relayUrl: String, reason: String) {
