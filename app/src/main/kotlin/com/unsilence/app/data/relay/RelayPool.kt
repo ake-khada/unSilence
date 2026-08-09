@@ -45,7 +45,6 @@ import com.unsilence.app.data.memory.PaginatedFetchResult
 import com.vitorpamplona.quartz.nip01Core.relay.normalizer.NormalizedRelayUrl
 import com.vitorpamplona.quartz.nip01Core.relay.normalizer.RelayUrlNormalizer
 import com.vitorpamplona.quartz.nip42RelayAuth.RelayAuthEvent
-import okhttp3.OkHttpClient
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
@@ -88,6 +87,78 @@ internal fun reconnectPriority(purposes: Set<ConnectionPurpose>): Int = when {
     ConnectionPurpose.BROWSE in purposes -> 2
     ConnectionPurpose.FEED_WARM in purposes -> 3
     else -> 4
+}
+
+internal fun shouldReleaseRelayConnection(
+    purposes: Set<ConnectionPurpose>,
+    hasActiveSubscription: Boolean,
+    lastActivityMs: Long,
+    nowMs: Long,
+    idleThresholdMs: Long = RelayPool.IDLE_EVICTION_THRESHOLD_MS,
+): Boolean = purposes.isEmpty() &&
+    !hasActiveSubscription &&
+    nowMs - lastActivityMs >= idleThresholdMs
+
+internal data class RelayEvictionCandidate(
+    val url: String,
+    val purposes: Set<ConnectionPurpose>,
+    val hasActiveSubscription: Boolean,
+    val lastActivityMs: Long,
+)
+
+/** Prefer expendable browse channels, then the oldest other non-persistent channel. */
+internal fun selectForceEvictionCandidate(
+    candidates: Collection<RelayEvictionCandidate>,
+): RelayEvictionCandidate? {
+    val eligible = candidates.filter {
+        ConnectionPurpose.PERSISTENT !in it.purposes &&
+            ConnectionPurpose.FEED_SUB !in it.purposes &&
+            !it.hasActiveSubscription
+    }
+    return eligible
+        .filter { ConnectionPurpose.BROWSE in it.purposes }
+        .minByOrNull { it.lastActivityMs }
+        ?: eligible.minByOrNull { it.lastActivityMs }
+}
+
+internal fun ensureRelayPoolCapacity(
+    currentSize: () -> Int,
+    cap: Int,
+    forceEvict: Boolean,
+    evictMostIdle: () -> Boolean,
+): Boolean {
+    if (currentSize() < cap) return true
+    return forceEvict && evictMostIdle() && currentSize() < cap
+}
+
+internal fun <T> resetRelayOneShotBookkeeping(
+    url: String,
+    counts: ConcurrentHashMap<String, AtomicInteger>,
+    queues: ConcurrentHashMap<String, java.util.concurrent.ConcurrentLinkedQueue<T>>,
+) {
+    counts.remove(url)
+    queues.remove(url)
+}
+
+internal data class RelayOneShotOwnerKey(val subId: String, val url: String)
+
+internal fun <T : Any> resetRelayOneShotOwners(
+    url: String,
+    owners: ConcurrentHashMap<RelayOneShotOwnerKey, T>,
+) {
+    owners.entries.removeIf { it.key.url == url }
+}
+
+internal fun <T : Any> takeRelayOneShotOwner(
+    subId: String,
+    url: String,
+    sourceOwner: T?,
+    owners: ConcurrentHashMap<RelayOneShotOwnerKey, T>,
+): T? {
+    val key = RelayOneShotOwnerKey(subId, url)
+    val owner = owners[key] ?: return null
+    if (sourceOwner != null && owner !== sourceOwner) return null
+    return if (owners.remove(key, owner)) owner else null
 }
 
 /**
@@ -272,7 +343,7 @@ interface ActiveSubsSource {
  */
 @Singleton
 class RelayPool @Inject constructor(
-    private val okHttpClient: OkHttpClient,
+    private val relayConnectionFactory: RelayConnectionFactory,
     private val processor: EventProcessor,
     private val relayPreferencesStore: dagger.Lazy<RelayPreferencesStore>,
     private val signingManager: com.unsilence.app.data.auth.SigningManager,
@@ -290,6 +361,11 @@ class RelayPool @Inject constructor(
     private val scope = CoroutineScope(SupervisorJob() + wsDispatcher)
     private val connections = ConcurrentHashMap<String, RelayConnection>()
     private val socketLifecycleLock = Any()
+    private val connectionRegistry = RelayConnectionRegistry(
+        connections = connections,
+        lifecycleLock = socketLifecycleLock,
+        createConnection = relayConnectionFactory::create,
+    )
     private val socketTransportSuspended = AtomicBoolean(false)
 
     /** Relay URLs deferred during network-down/DNS-degraded. Drained with jitter
@@ -440,6 +516,13 @@ class RelayPool @Inject constructor(
 
     fun hasAnyPurpose(url: String): Boolean =
         connectionPurposes[url]?.isNotEmpty() == true
+
+    /** Connection cleanup is fail-closed: unknown subscription state means retain. */
+    private fun activeSubUrlsForCleanup(): Set<String>? = runCatching {
+        activeSubsSource.get().activeRelayUrls()
+    }.onFailure {
+        Log.w(TAG, "Unable to snapshot active subscriptions; skipping connection cleanup", it)
+    }.getOrNull()
 
     fun connectionDebugSnapshot(): Map<String, RelayConnectionDebugSnapshot> {
         val activeSubUrls = runCatching { activeSubsSource.get().activeRelayUrls() }
@@ -680,6 +763,71 @@ class RelayPool @Inject constructor(
 
     private val relayReqQueue =
         ConcurrentHashMap<String, java.util.concurrent.ConcurrentLinkedQueue<QueuedRelayReq>>()
+    /** Exact socket that owns each counted one-shot. A URL replacement must not
+     *  let cleanup from the old socket decrement the new socket's counter. */
+    private val relayOneShotOwners =
+        ConcurrentHashMap<RelayOneShotOwnerKey, RelayConnection>()
+
+    /** One-shot state is owned by the current WebSocket instance, never by a URL forever. */
+    private fun resetConnectionScopedState(url: String) {
+        resetRelayOneShotOwners(url, relayOneShotOwners)
+        resetRelayOneShotBookkeeping(url, relayOneShotCount, relayReqQueue)
+    }
+
+    private fun resetRelayAuthState(url: String) {
+        authenticatedRelays.remove(url)
+        authInFlight.remove(url)
+        optimisticAuthUsed.remove(url)
+        pendingChallenges.remove(url)
+        authFailedRelays.remove(url)
+        authRejectionStreak.remove(url)
+        authUnavailableRelays.remove(url)
+        pendingAuthEventIds.values.removeAll { it == url }
+    }
+
+    private fun acquirePooledConnection(
+        url: String,
+        forceEvict: Boolean = false,
+        bypassPoolCap: Boolean = false,
+        resetAuth: Boolean = false,
+    ): RelayConnectionClaim? = connectionRegistry.acquire(
+        url = url,
+        transportAllowed = { !socketTransportSuspended.get() },
+        canCreateNew = {
+            bypassPoolCap || ensurePoolSlot(forceEvict)
+        },
+        beforeInstall = { installedUrl, _ ->
+            // Applies to both first install and replacement. If any stale
+            // URL-scoped state survived an older removal path, it cannot leak
+            // into this socket's one-shot ownership.
+            resetConnectionScopedState(installedUrl)
+            if (resetAuth) resetRelayAuthState(installedUrl)
+            connectionLastActivity[installedUrl] = System.currentTimeMillis()
+        },
+    )
+
+    private fun removePooledConnection(
+        url: String,
+        clearPurposes: Boolean = false,
+    ): RelayConnection? = synchronized(socketLifecycleLock) {
+        val removed = connections.remove(url) ?: return@synchronized null
+        resetConnectionScopedState(url)
+        connectionLastActivity.remove(url)
+        if (clearPurposes) connectionPurposes.remove(url)
+        removed
+    }
+
+    private fun removePooledConnection(
+        url: String,
+        expected: RelayConnection,
+        clearPurposes: Boolean = false,
+    ): RelayConnection? = synchronized(socketLifecycleLock) {
+        if (!connections.remove(url, expected)) return@synchronized null
+        resetConnectionScopedState(url)
+        connectionLastActivity.remove(url)
+        if (clearPurposes) connectionPurposes.remove(url)
+        expected
+    }
 
     // ── Per-relay rate limiter (token bucket + cooldown) ──────────────
     private data class RateLimitState(
@@ -755,25 +903,37 @@ class RelayPool @Inject constructor(
         requestClass: RelayRequestClass = RelayRequestClass.GENERAL,
         bypassCooldown: Boolean = false,
     ) {
-        if (relayCapabilitiesStore.shouldSkipRequest(conn.url, requestClass, bypassCooldown)) {
-            extractReqSubId(req)?.let { subId -> recordOneShotRelayCoverage(subId, conn.url) }
-            Log.d(TAG, "One-shot REQ skipped for ${conn.url} ($requestClass)")
-            return
-        }
-        val count = relayOneShotCount.computeIfAbsent(conn.url) { AtomicInteger(0) }
-        val isPrefetch = req.contains("\"prefetch-")
-        val effectiveCap = if (isPrefetch) MAX_CONCURRENT_REQS_PER_RELAY - 2 else MAX_CONCURRENT_REQS_PER_RELAY
-        // Queue when at sub cap OR rate-limited (don't drop — flush will retry later)
-        if (count.get() >= effectiveCap || !canSendToRelay(conn.url)) {
-            val queue = relayReqQueue.computeIfAbsent(conn.url) { java.util.concurrent.ConcurrentLinkedQueue() }
-            queue.add(QueuedRelayReq(req, requestClass, bypassCooldown))
-            Log.d(TAG, "Queued REQ for ${conn.url} (${count.get()}/$MAX_CONCURRENT_REQS_PER_RELAY active)")
-            return
-        }
-        count.incrementAndGet()
-        if (!conn.send(req)) {
-            count.decrementAndGet()
-            Log.w(TAG, "One-shot send failed for ${conn.url}; slot released")
+        synchronized(socketLifecycleLock) {
+            // A replacement can win after the caller reads the map. Retarget to
+            // the current owner while holding the same lock used by install/remove.
+            val current = connections[conn.url]
+            if (current == null) {
+                extractReqSubId(req)?.let { subId -> recordOneShotRelayCoverage(subId, conn.url) }
+                return@synchronized
+            }
+            if (relayCapabilitiesStore.shouldSkipRequest(current.url, requestClass, bypassCooldown)) {
+                extractReqSubId(req)?.let { subId -> recordOneShotRelayCoverage(subId, current.url) }
+                Log.d(TAG, "One-shot REQ skipped for ${current.url} ($requestClass)")
+                return@synchronized
+            }
+            val count = relayOneShotCount.computeIfAbsent(current.url) { AtomicInteger(0) }
+            val isPrefetch = req.contains("\"prefetch-")
+            val effectiveCap = if (isPrefetch) MAX_CONCURRENT_REQS_PER_RELAY - 2 else MAX_CONCURRENT_REQS_PER_RELAY
+            // Queue when at sub cap OR rate-limited (don't drop — flush will retry later)
+            if (count.get() >= effectiveCap || !canSendToRelay(current.url)) {
+                val queue = relayReqQueue.computeIfAbsent(current.url) { java.util.concurrent.ConcurrentLinkedQueue() }
+                queue.add(QueuedRelayReq(req, requestClass, bypassCooldown))
+                Log.d(TAG, "Queued REQ for ${current.url} (${count.get()}/$MAX_CONCURRENT_REQS_PER_RELAY active)")
+                return@synchronized
+            }
+            count.incrementAndGet()
+            val ownerKey = extractReqSubId(req)?.let { RelayOneShotOwnerKey(it, current.url) }
+            if (ownerKey != null) relayOneShotOwners[ownerKey] = current
+            if (!current.send(req)) {
+                count.decrementAndGet()
+                if (ownerKey != null) relayOneShotOwners.remove(ownerKey, current)
+                Log.w(TAG, "One-shot send failed for ${current.url}; slot released")
+            }
         }
     }
 
@@ -827,43 +987,54 @@ class RelayPool @Inject constructor(
      * Flush queued REQs for a relay after a slot frees up.
      */
     private fun flushRelayQueue(conn: RelayConnection) {
-        val count = relayOneShotCount[conn.url] ?: return
-        val queue = relayReqQueue[conn.url] ?: return
-        while (count.get() < MAX_CONCURRENT_REQS_PER_RELAY &&
-               queue.isNotEmpty() &&
-               isRelayOutOfCooldown(conn.url)) {
-            val queued = queue.poll() ?: break
-            if (relayCapabilitiesStore.shouldSkipRequest(
-                    conn.url,
-                    queued.requestClass,
-                    queued.bypassCooldown,
-                )
-            ) {
-                extractReqSubId(queued.payload)?.let { subId ->
-                    recordOneShotRelayCoverage(subId, conn.url)
+        synchronized(socketLifecycleLock) {
+            if (connections[conn.url] !== conn) return@synchronized
+            val count = relayOneShotCount[conn.url] ?: return@synchronized
+            val queue = relayReqQueue[conn.url] ?: return@synchronized
+            while (count.get() < MAX_CONCURRENT_REQS_PER_RELAY &&
+                   queue.isNotEmpty() &&
+                   isRelayOutOfCooldown(conn.url)) {
+                val queued = queue.poll() ?: break
+                if (relayCapabilitiesStore.shouldSkipRequest(
+                        conn.url,
+                        queued.requestClass,
+                        queued.bypassCooldown,
+                    )
+                ) {
+                    extractReqSubId(queued.payload)?.let { subId ->
+                        recordOneShotRelayCoverage(subId, conn.url)
+                    }
+                    continue
                 }
-                continue
-            }
-            count.incrementAndGet()
-            if (conn.send(queued.payload)) {
-                Log.d(TAG, "Flushed queued REQ on ${conn.url} (${count.get()}/$MAX_CONCURRENT_REQS_PER_RELAY active)")
-            } else {
-                count.decrementAndGet()
-                queue.add(queued)
-                Log.w(TAG, "Queued REQ send failed for ${conn.url}; slot released")
-                break
+                count.incrementAndGet()
+                val ownerKey = extractReqSubId(queued.payload)?.let { RelayOneShotOwnerKey(it, conn.url) }
+                if (ownerKey != null) relayOneShotOwners[ownerKey] = conn
+                if (conn.send(queued.payload)) {
+                    Log.d(TAG, "Flushed queued REQ on ${conn.url} (${count.get()}/$MAX_CONCURRENT_REQS_PER_RELAY active)")
+                } else {
+                    count.decrementAndGet()
+                    if (ownerKey != null) relayOneShotOwners.remove(ownerKey, conn)
+                    queue.add(queued)
+                    Log.w(TAG, "Queued REQ send failed for ${conn.url}; slot released")
+                    break
+                }
             }
         }
     }
 
-    /** Safety rail: reject new connections if pool is at capacity. */
-    private fun canOpenNewConnection(): Boolean {
+    /** Safety rail, with an explicit priority escape hatch for critical callers. */
+    private fun ensurePoolSlot(forceEvict: Boolean): Boolean {
         val size = connections.size
-        if (size >= POOL_SAFETY_CAP) {
-            Log.w(TAG, "Pool safety cap reached ($size/$POOL_SAFETY_CAP) — this shouldn't happen, investigate")
-            return false
-        }
-        return true
+        if (ensureRelayPoolCapacity(
+                currentSize = connections::size,
+                cap = POOL_SAFETY_CAP,
+                forceEvict = forceEvict,
+                evictMostIdle = ::forceEvictMostIdle,
+            )
+        ) return true
+        Log.w(TAG, "Pool safety cap reached ($size/$POOL_SAFETY_CAP) — " +
+            if (forceEvict) "no safe eviction candidate" else "connection refused")
+        return false
     }
 
     private fun logPoolState() {
@@ -888,11 +1059,13 @@ class RelayPool @Inject constructor(
      */
     private fun evictIdleConnection(): Boolean {
         val now = System.currentTimeMillis()
+        val activeSubUrls = activeSubUrlsForCleanup() ?: return false
         // BROWSE and purpose-less (NONE) connections are evictable. PERSISTENT is exempt.
         val candidate = connections.entries
             .filter { (url, _) ->
                 !hasPurpose(url, ConnectionPurpose.PERSISTENT) &&
-                (hasPurpose(url, ConnectionPurpose.BROWSE) || !hasAnyPurpose(url))
+                (hasPurpose(url, ConnectionPurpose.BROWSE) || !hasAnyPurpose(url)) &&
+                url !in activeSubUrls
             }
             .filter { (url, _) ->
                 val lastActive = connectionLastActivity[url] ?: 0L
@@ -905,12 +1078,9 @@ class RelayPool @Inject constructor(
         if (candidate != null) {
             val (url, conn) = candidate
             val idleSec = (now - (connectionLastActivity[url] ?: 0L)) / 1000
-            connections.remove(url)
-            conn.close()
-            connectionPurposes.remove(url)
-            connectionLastActivity.remove(url)
-            relayOneShotCount.remove(url)
-            relayReqQueue.remove(url)
+            val removed = removePooledConnection(url, conn, clearPurposes = true)
+                ?: return false
+            removed.close()
             Log.d(TAG, "Evicted idle connection $url (idle ${idleSec}s, at cap)")
             return true
         }
@@ -925,31 +1095,24 @@ class RelayPool @Inject constructor(
      */
     private fun forceEvictMostIdle(): Boolean {
         val now = System.currentTimeMillis()
-        // Prefer BROWSE-only connections (transient, expendable)
-        val candidate = connections.entries
-            .filter { (url, _) ->
-                hasPurpose(url, ConnectionPurpose.BROWSE) &&
-                !hasPurpose(url, ConnectionPurpose.PERSISTENT)
-            }
-            .maxByOrNull { (url, _) -> now - (connectionLastActivity[url] ?: 0L) }
-            ?: connections.entries
-                .filter { (url, _) ->
-                    !hasPurpose(url, ConnectionPurpose.PERSISTENT)
-                }
-                .maxByOrNull { (url, _) -> now - (connectionLastActivity[url] ?: 0L) }
-        if (candidate != null) {
-            val (url, conn) = candidate
-            val idleSec = (now - (connectionLastActivity[url] ?: 0L)) / 1000
-            connections.remove(url)
-            conn.close()
-            connectionPurposes.remove(url)
-            connectionLastActivity.remove(url)
-            relayOneShotCount.remove(url)
-            relayReqQueue.remove(url)
-            Log.d(TAG, "Force-evicted connection $url (idle ${idleSec}s) for one-shot query")
-            return true
-        }
-        return false
+        val activeSubUrls = activeSubUrlsForCleanup() ?: return false
+        val candidate = selectForceEvictionCandidate(
+            connections.keys.map { url ->
+                RelayEvictionCandidate(
+                    url = url,
+                    purposes = connectionPurposes[url]?.toSet().orEmpty(),
+                    hasActiveSubscription = url in activeSubUrls,
+                    lastActivityMs = connectionLastActivity[url] ?: 0L,
+                )
+            },
+        ) ?: return false
+        val conn = connections[candidate.url] ?: return false
+        val removed = removePooledConnection(candidate.url, conn, clearPurposes = true)
+            ?: return false
+        removed.close()
+        val idleSec = (now - candidate.lastActivityMs) / 1000
+        Log.d(TAG, "Force-evicted connection ${candidate.url} (idle ${idleSec}s) for one-shot query")
+        return true
     }
 
     // Wire EventProcessor relay set ref fetcher
@@ -1011,9 +1174,7 @@ class RelayPool @Inject constructor(
                     val toCloseActual = candidates.size.coerceAtMost(toCloseTarget)
                     for (url in candidates.take(toCloseActual)) {
                         // Map-before-close: remove first so listenForEvents.finally sees identity mismatch
-                        val conn = connections.remove(url) ?: continue
-                        connectionPurposes.remove(url)
-                        connectionLastActivity.remove(url)
+                        val conn = removePooledConnection(url, clearPurposes = true) ?: continue
                         conn.close()
                         Log.w(TAG, "Pool over cap, force-closed: $url")
                     }
@@ -1164,42 +1325,19 @@ class RelayPool @Inject constructor(
                 Log.w(TAG, "connectAndAwait GATE-SKIP: $url auth=${caps?.authRequired} restricted=${caps?.restricted} strikes=${caps?.strikes} reason='${caps?.lastReason}'")
                 continue
             }
-            // Read-decide-write: check existing entry state before creating new
-            val existing = connections[url]
-            if (existing != null) {
-                val s = existing.state.value
-                if (s == RelayState.CONNECTED || s == RelayState.CONNECTING) {
-                    Log.d(TAG, "connectAndAwait REUSE: $url state=$s")
-                    continue
-                }
-                // Stale (DISCONNECTED/FAILED) — evict and replace
-                if (!canOpenNewConnection()) {
-                    // Still counts as evict: we're replacing, not adding
-                }
-                val replacement = RelayConnection(url, okHttpClient, relayCapabilitiesStore)
-                connections[url] = replacement  // map-before-close
-                existing.close()
-                connectionLastActivity[url] = System.currentTimeMillis()
-                if (connectIfTransportActive(replacement)) {
-                    scope.launch { listenForEvents(replacement) }
-                    newConns.add(replacement)
-                }
-                Log.d(TAG, "connectAndAwait REPLACE: $url (was $s, pool=${connections.size})")
-                continue
-            }
-            // No existing entry — create new (subject to pool cap)
-            if (!canOpenNewConnection()) {
+            val claim = acquirePooledConnection(url, forceEvict = forceEvict)
+            if (claim == null) {
                 Log.w(TAG, "connectAndAwait GATE-CAP: $url blocked by pool cap (${connections.size}/$POOL_SAFETY_CAP)")
                 continue
             }
-            val candidate = RelayConnection(url, okHttpClient, relayCapabilitiesStore)
-            connections[url] = candidate
-            connectionLastActivity[url] = System.currentTimeMillis()
-            if (connectIfTransportActive(candidate)) {
-                scope.launch { listenForEvents(candidate) }
-                newConns.add(candidate)
+            if (!claim.installed) {
+                Log.d(TAG, "connectAndAwait REUSE: $url state=${claim.connection.state.value}")
+                continue
             }
-            Log.d(TAG, "connectAndAwait NEW: $url (pool=${connections.size})")
+            scope.launch { listenForEvents(claim.connection) }
+            newConns.add(claim.connection)
+            val action = if (claim.replaced == null) "NEW" else "REPLACE"
+            Log.d(TAG, "connectAndAwait $action: $url (pool=${connections.size})")
         }
         if (newConns.isEmpty()) {
             // All URLs already in pool — wait for at least one to be connected.
@@ -1415,7 +1553,7 @@ class RelayPool @Inject constructor(
                 subIds.forEach { recordOneShotRelayCoverage(it, url) }
                 return
             }
-            val conn = RelayConnection(url, okHttpClient, relayCapabilitiesStore)
+            val conn = relayConnectionFactory.create(url)
             activeEphemeralConnections.add(conn)
             try {
                 if (!connectIfTransportActive(conn)) return
@@ -1520,7 +1658,7 @@ class RelayPool @Inject constructor(
     fun onBlockedRelaysChanged(newBlockedUrls: Set<String>) {
         blockedUrls = newBlockedUrls
         for (url in newBlockedUrls) {
-            connections.remove(url)?.let { conn ->
+            removePooledConnection(url, clearPurposes = true)?.let { conn ->
                 conn.close()
                 Log.d(TAG, "Disconnected newly-blocked relay: $url")
             }
@@ -1540,40 +1678,18 @@ class RelayPool @Inject constructor(
                 Log.w(TAG, "connect GATE-SKIP: $url auth=${caps?.authRequired} restricted=${caps?.restricted} strikes=${caps?.strikes} reason='${caps?.lastReason}'")
                 continue
             }
-            // Read-decide-write: check existing entry state before creating new
-            val existing = connections[url]
-            if (existing != null) {
-                val s = existing.state.value
-                if (s == RelayState.CONNECTED || s == RelayState.CONNECTING) {
-                    Log.d(TAG, "connect REUSE: $url state=$s")
-                    continue
-                }
-                // Stale (DISCONNECTED/FAILED) — evict and replace
-                val replacement = RelayConnection(url, okHttpClient, relayCapabilitiesStore)
-                connections[url] = replacement  // map-before-close
-                existing.close()
-                connectionLastActivity[url] = System.currentTimeMillis()
-                scope.launch {
-                    if (connectIfTransportActive(replacement)) {
-                        listenForEvents(replacement)
-                    }
-                }
-                Log.d(TAG, "connect REPLACE: $url (was $s, pool=${connections.size})")
-                continue
-            }
-            // No existing entry — create new (subject to pool cap)
-            if (!canOpenNewConnection()) {
+            val claim = acquirePooledConnection(url)
+            if (claim == null) {
                 Log.w(TAG, "connect GATE-CAP: $url blocked by pool cap (${connections.size}/$POOL_SAFETY_CAP)")
                 continue
             }
-            val candidate = RelayConnection(url, okHttpClient, relayCapabilitiesStore)
-            connections[url] = candidate
-            connectionLastActivity[url] = System.currentTimeMillis()
-            scope.launch {
-                if (connectIfTransportActive(candidate)) {
-                    listenForEvents(candidate)
-                }
+            if (!claim.installed) {
+                Log.d(TAG, "connect REUSE: $url state=${claim.connection.state.value}")
+                continue
             }
+            scope.launch { listenForEvents(claim.connection) }
+            val action = if (claim.replaced == null) "NEW" else "REPLACE"
+            Log.d(TAG, "connect $action: $url (pool=${connections.size})")
         }
         Log.d(TAG, "Pool has ${connections.size} connections")
     }
@@ -1695,7 +1811,7 @@ class RelayPool @Inject constructor(
                         // A CLOSED relay won't send EOSE — release its slot and
                         // count it as done for coverage so it doesn't force a full timeout.
                         if (isOneShot) {
-                            releaseOneShotForRelay(closedSubId, conn.url)
+                            releaseOneShotForRelay(closedSubId, conn.url, conn)
                             recordOneShotRelayCoverage(closedSubId, conn.url)
                         }
                     } catch (e: Exception) {
@@ -1762,7 +1878,7 @@ class RelayPool @Inject constructor(
                         reconnectWithBackoff(url)
                     } else {
                         // No purpose, not in active subs — clean up the dead entry
-                        connections.remove(url, conn)
+                        removePooledConnection(url, conn, clearPurposes = true)
                     }
                 }
             }
@@ -1779,15 +1895,35 @@ class RelayPool @Inject constructor(
      * Sends CLOSE frame, decrements [relayOneShotCount], and flushes the
      * per-relay queue so queued REQs can drain.
      */
-    private fun releaseOneShotForRelay(subId: String, url: String) {
-        val released = oneShotReleased.computeIfAbsent(subId) { ConcurrentHashMap.newKeySet() }
-        if (!released.add(url)) return // already released — idempotent guard
+    private fun releaseOneShotForRelay(
+        subId: String,
+        url: String,
+        sourceConnection: RelayConnection? = null,
+    ) {
+        synchronized(socketLifecycleLock) {
+            val ownerKey = RelayOneShotOwnerKey(subId, url)
+            val currentOwner = relayOneShotOwners[ownerKey]
+            // A late EOSE from a replaced socket must not claim ownership of a
+            // same-id request that belongs to the new socket.
+            if (sourceConnection != null && currentOwner != null && currentOwner !== sourceConnection) {
+                return@synchronized
+            }
+            val released = oneShotReleased.computeIfAbsent(subId) { ConcurrentHashMap.newKeySet() }
+            if (!released.add(url)) return@synchronized
 
-        connections[url]?.let { conn ->
-            conn.send("""["CLOSE","$subId"]""")
+            val owner = takeRelayOneShotOwner(
+                subId = subId,
+                url = url,
+                sourceOwner = sourceConnection,
+                owners = relayOneShotOwners,
+            ) ?: return@synchronized
+            val current = connections[url]
+            if (current !== owner) return@synchronized
+
+            current.send("""["CLOSE","$subId"]""")
             relayOneShotCount[url]?.let { count ->
                 val prev = count.getAndUpdate { if (it > 0) it - 1 else 0 }
-                if (prev > 0) flushRelayQueue(conn)
+                if (prev > 0) flushRelayQueue(current)
             }
         }
     }
@@ -1814,7 +1950,7 @@ class RelayPool @Inject constructor(
         if (isOneShotSubscription(subId)) {
             _activeOneShotSubs.remove(subId)
             // Single release path — idempotent, sends CLOSE + decrements slot + flushes queue
-            releaseOneShotForRelay(subId, conn.url)
+            releaseOneShotForRelay(subId, conn.url, conn)
             // Record this relay as done; complete deferred when all targets covered
             recordOneShotRelayCoverage(subId, conn.url)
             Log.d(TAG, "CLOSE sent for one-shot sub '$subId' on ${conn.url}")
@@ -2925,7 +3061,7 @@ class RelayPool @Inject constructor(
         relayUrl: String,
         limit: Int,
     ): List<NostrEvent> {
-        val conn = RelayConnection(relayUrl, okHttpClient, relayCapabilitiesStore)
+        val conn = relayConnectionFactory.create(relayUrl)
         return try {
             if (!connectTrackedEphemeral(conn)) return emptyList()
             val state = withTimeoutOrNull(3_000L) {
@@ -3015,7 +3151,7 @@ class RelayPool @Inject constructor(
         page: Int,
         totalPages: Int,
     ): Boolean {
-        val conn = RelayConnection(relayUrl, okHttpClient, relayCapabilitiesStore)
+        val conn = relayConnectionFactory.create(relayUrl)
         return try {
             if (!connectTrackedEphemeral(conn)) return false
             val state = withTimeoutOrNull(2_000) {
@@ -3327,7 +3463,7 @@ class RelayPool @Inject constructor(
     suspend fun measureRtt(url: String): Int? {
         val u = normalizeRelayUrl(url) ?: return null
         if (u in blockedUrls) return null
-        val conn = RelayConnection(u, okHttpClient, relayCapabilitiesStore)
+        val conn = relayConnectionFactory.create(u)
         val start = System.nanoTime()
         return try {
             if (!connectTrackedEphemeral(conn)) return null
@@ -3574,7 +3710,7 @@ class RelayPool @Inject constructor(
         val url = normalizeRelayUrl(transport) ?: return emptyList<NostrEvent>() to 0
         val collected = mutableListOf<NostrEvent>()
         var verifyFailed = 0
-        val conn = RelayConnection(url, okHttpClient, relayCapabilitiesStore)
+        val conn = relayConnectionFactory.create(url)
 
         fun reqFor(subId: String, until: Long): String = buildJsonArray {
             add(JsonPrimitive("REQ"))
@@ -3663,17 +3799,9 @@ class RelayPool @Inject constructor(
         ) {
             return null
         }
-        val existing = connections[normalized]
-        if (existing != null && existing.isConnected) return existing
-        if (existing != null) {
-            connections.remove(normalized)   // map-before-close
-            existing.close()
-        }
-        val conn = RelayConnection(normalized, okHttpClient, relayCapabilitiesStore)
-        connections[normalized] = conn
-        connectionLastActivity[normalized] = System.currentTimeMillis()
-        if (!connectIfTransportActive(conn)) return null
-        scope.launch { listenForEvents(conn) }
+        val claim = acquirePooledConnection(normalized, bypassPoolCap = true) ?: return null
+        val conn = claim.connection
+        if (claim.installed) scope.launch { listenForEvents(conn) }
         return try {
             conn.awaitConnected(timeoutMs = 5_000)
             conn
@@ -4949,7 +5077,7 @@ class RelayPool @Inject constructor(
         if (caps?.restricted == true) {
             Log.w(TAG, "Skipping reconnect for restricted relay $url")
             reconnectAttempts.remove(url)
-            connections.remove(url)?.close()
+            removePooledConnection(url)?.close()
             return
         }
         // Don't hammer a dead pipe — defer until the network recovers.
@@ -4994,23 +5122,22 @@ class RelayPool @Inject constructor(
                     return@launch
                 }
 
-                // Map-before-close: put new entry first so listenForEvents.finally
-                // on the old conn sees identity mismatch and skips reconnect
-                val conn = RelayConnection(url, okHttpClient, relayCapabilitiesStore)
-                val old = connections.put(url, conn)
-                authenticatedRelays.remove(url)
-                optimisticAuthUsed.remove(url)
-                pendingChallenges.remove(url)
-                authFailedRelays.remove(url)
-                authRejectionStreak.remove(url)
-                authUnavailableRelays.remove(url)
-                pendingAuthEventIds.values.removeAll { it == url }
-                old?.close()
-                connectionLastActivity[url] = System.currentTimeMillis()
-                if (!connectIfTransportActive(conn)) {
+                val claim = acquirePooledConnection(
+                    url = url,
+                    bypassPoolCap = true,
+                    resetAuth = true,
+                )
+                if (claim == null) {
                     guard.set(false)
                     return@launch
                 }
+                if (!claim.installed) {
+                    // Another foreground path won ownership while this backoff
+                    // was sleeping. It owns the listener and replay signal.
+                    guard.set(false)
+                    return@launch
+                }
+                val conn = claim.connection
 
                 // Wait briefly for connection to establish
                 var waited = 0
@@ -5227,42 +5354,52 @@ class RelayPool @Inject constructor(
      * connections may be reused by outbox routing or other consumers.
      */
     fun releaseIfUnused(url: String) {
-        val purposes = connectionPurposes[url]
-        if (purposes != null && purposes.isNotEmpty()) return  // still in use
+        val purposes = connectionPurposes[url]?.toSet().orEmpty()
+        val activeSubUrls = activeSubUrlsForCleanup() ?: return
+        val hasActiveSubscription = url in activeSubUrls
         val lastActivity = connectionLastActivity[url] ?: 0L
-        if (System.currentTimeMillis() - lastActivity < 60_000L) return  // recent
+        if (!shouldReleaseRelayConnection(
+                purposes = purposes,
+                hasActiveSubscription = hasActiveSubscription,
+                lastActivityMs = lastActivity,
+                nowMs = System.currentTimeMillis(),
+            )
+        ) return
         // Map-before-close: remove first so listenForEvents.finally sees identity mismatch
-        val conn = connections.remove(url) ?: return
-        connectionLastActivity.remove(url)
-        connectionPurposes.remove(url)
+        val conn = removePooledConnection(url, clearPurposes = true) ?: return
         conn.close()
         Log.d(TAG, "Released unused connection: $url")
     }
 
     fun disconnectAll() {
-        // Map-before-close: snapshot then clear so listenForEvents.finally sees empty map
-        val snapshot = ArrayList(connections.values)
-        val ephemeralSnapshot = ArrayList(activeEphemeralConnections)
-        connections.clear()
-        connectionPurposes.clear()
-        profileFetchAttempted.clear()
-        hintedProfileFetchAttempted.clear()
-        bridgeEventFetchAttempted.clear()
-        // Complete all in-flight monitors so they clean up immediately
-        eventFetchInFlight.values.forEach { it.complete(null) }
-        eventFetchInFlight.clear()
-        missingRefCache.clear()
-        authenticatedRelays.clear()
-        authInFlight.clear()
-        pendingChallenges.clear()
-        authFailedRelays.clear()
-        pendingAuthEventIds.clear()
-        authRejectionStreak.clear()
-        optimisticAuthUsed.clear()
-        authUnavailableRelays.clear()
-        relayOneShotCount.clear()
-        relayReqQueue.clear()
-        connectionLastActivity.clear()
+        // Map-before-close: snapshot then clear under the same lock used by
+        // send/install/remove so no one-shot can attach during teardown.
+        val (snapshot, ephemeralSnapshot) = synchronized(socketLifecycleLock) {
+            val pooled = ArrayList(connections.values)
+            val ephemeral = ArrayList(activeEphemeralConnections)
+            connections.clear()
+            connectionPurposes.clear()
+            profileFetchAttempted.clear()
+            hintedProfileFetchAttempted.clear()
+            bridgeEventFetchAttempted.clear()
+            // Complete all in-flight monitors so they clean up immediately
+            eventFetchInFlight.values.forEach { it.complete(null) }
+            eventFetchInFlight.clear()
+            missingRefCache.clear()
+            authenticatedRelays.clear()
+            authInFlight.clear()
+            pendingChallenges.clear()
+            authFailedRelays.clear()
+            pendingAuthEventIds.clear()
+            authRejectionStreak.clear()
+            optimisticAuthUsed.clear()
+            authUnavailableRelays.clear()
+            relayOneShotOwners.clear()
+            relayOneShotCount.clear()
+            relayReqQueue.clear()
+            connectionLastActivity.clear()
+            pooled to ephemeral
+        }
         // Close after all maps are cleared
         snapshot.forEach { it.close() }
         ephemeralSnapshot.forEach { it.close() }

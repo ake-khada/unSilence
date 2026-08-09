@@ -8,7 +8,6 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.withTimeout
-import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.Response
 import okhttp3.WebSocket
@@ -74,7 +73,7 @@ private fun parseHttpCodeFromMessage(msg: String?): Int? {
  */
 class RelayConnection(
     val url: String,
-    private val client: OkHttpClient,
+    private val webSocketFactory: WebSocket.Factory,
     private val capabilitiesStore: RelayCapabilitiesStore? = null,
 ) {
     private val _messages = Channel<String>(capacity = Channel.BUFFERED)
@@ -117,7 +116,7 @@ class RelayConnection(
             _messages.close()
             return
         }
-        ws = client.newWebSocket(request, Listener())
+        ws = webSocketFactory.newWebSocket(request, Listener())
         Log.d(TAG, "Connecting to $url")
     }
 
