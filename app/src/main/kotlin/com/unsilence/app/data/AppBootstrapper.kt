@@ -259,6 +259,9 @@ class AppBootstrapper @Inject constructor(
         // Must happen BEFORE snapshot restore — EventProcessor fires batches
         // during the 21s snapshot parse.
         val indexerUrls = existingIndexers.ifEmpty { DEFAULT_INDEXER_URLS }
+        // Seed current-session NIP-42 eligibility before the first connection.
+        // Phase 3 replaces this with the full read/write/search/indexer union.
+        relayPool.setIntegralRelays(indexerUrls)
         for (rawUrl in indexerUrls) {
             normalizeRelayUrl(rawUrl)?.let { relayPool.addPurpose(it, ConnectionPurpose.PERSISTENT) }
         }

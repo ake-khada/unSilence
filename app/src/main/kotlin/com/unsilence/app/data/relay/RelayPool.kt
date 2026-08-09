@@ -624,6 +624,9 @@ class RelayPool @Inject constructor(
      *  Session-scoped (in-memory). Cleared on logout via disconnectAll(). */
     private val authUnavailableRelays = ConcurrentHashMap.newKeySet<String>()
 
+    /** Eligibility quarantine + distinct-challenge signing budget for this login session. */
+    private val authSessionPolicy = RelayAuthSessionPolicy()
+
     /** Emitted when a relay is determined to require auth we can't satisfy. */
     private val _relayAuthUnavailable = MutableSharedFlow<String>(
         replay = 0, extraBufferCapacity = 8, onBufferOverflow = BufferOverflow.DROP_OLDEST,
@@ -5195,12 +5198,32 @@ class RelayPool @Inject constructor(
      */
     private fun handleAuthChallenge(conn: RelayConnection, challenge: String) {
         val url = conn.url
-        val previousChallenge = pendingChallenges.put(url, challenge)
-
-        if (url in authUnavailableRelays) {
-            Log.d(TAG, "AUTH: $url marked unavailable, not retrying")
-            return
+        when (
+            authSessionPolicy.evaluateEligibility(
+                url = url,
+                configuredUrls = configuredAuthRelayUrlsSnapshot(),
+                unavailableRelays = authUnavailableRelays,
+                rejectionStreak = authRejectionStreak[url] ?: 0,
+            )
+        ) {
+            RelayAuthAdmission.INELIGIBLE -> {
+                authenticatedRelays.remove(url)
+                optimisticAuthUsed.remove(url)
+                authInFlight.remove(url)
+                pendingAuthEventIds.values.removeAll { it == url }
+                _relayAuthUnavailable.tryEmit(url)
+                Log.w(TAG, "AUTH: auth-ineligible relay $url — refusing identity signature")
+                return
+            }
+            RelayAuthAdmission.UNAVAILABLE -> {
+                Log.d(TAG, "AUTH: $url marked unavailable, not retrying")
+                return
+            }
+            RelayAuthAdmission.READY -> Unit
+            RelayAuthAdmission.ATTEMPT_LIMIT -> error("Attempt budget is checked after dedup")
         }
+
+        val previousChallenge = pendingChallenges.put(url, challenge)
 
         // Some relays repeat the same connection-scoped challenge for every
         // REQ. Once that exact challenge has completed, signing it again adds
@@ -5222,6 +5245,18 @@ class RelayPool @Inject constructor(
 
         if (!authInFlight.add(url)) {
             Log.w(TAG, "AUTH: already in flight for $url, skipping")
+            return
+        }
+
+        if (authSessionPolicy.reserveAttempt(url, authUnavailableRelays) == RelayAuthAdmission.ATTEMPT_LIMIT) {
+            authInFlight.remove(url)
+            pendingAuthEventIds.values.removeAll { it == url }
+            _relayAuthUnavailable.tryEmit(url)
+            Log.w(
+                TAG,
+                "AUTH: per-session attempt cap reached for $url " +
+                    "($MAX_RELAY_AUTH_ATTEMPTS_PER_SESSION) — refusing identity signature",
+            )
             return
         }
 
@@ -5285,6 +5320,23 @@ class RelayPool @Inject constructor(
                 authInFlight.remove(url)
             }
         }
+    }
+
+    /**
+     * Challenge-time snapshot: configuration is intentionally read live so a
+     * relay added during the session can become eligible without recreating the
+     * pool. Hint/follow-pack/WoT relays never enter this set implicitly.
+     */
+    private fun configuredAuthRelayUrlsSnapshot(): Set<String> {
+        val ownPubkey = keyManager.getPublicKeyHex()
+        val store = ownPubkey?.let { memoryEventStore.get() }
+        return configuredAuthRelayUrls(
+            integralRelayUrls = integralRelayUrls,
+            indexerRelayUrls = relayPreferencesStore.get().indexerRelayUrlsSnapshot(),
+            ownReadRelayUrls = ownPubkey?.let { store?.readRelaysFor(it) }.orEmpty(),
+            ownWriteRelayUrls = ownPubkey?.let { store?.writeRelaysFor(it) }.orEmpty(),
+            ownSearchRelayUrls = ownPubkey?.let { store?.getSearchRelayUrls(it) }.orEmpty(),
+        )
     }
 
     /**
@@ -5394,6 +5446,8 @@ class RelayPool @Inject constructor(
             authRejectionStreak.clear()
             optimisticAuthUsed.clear()
             authUnavailableRelays.clear()
+            authSessionPolicy.clear()
+            integralRelayUrls = emptySet()
             relayOneShotOwners.clear()
             relayOneShotCount.clear()
             relayReqQueue.clear()
