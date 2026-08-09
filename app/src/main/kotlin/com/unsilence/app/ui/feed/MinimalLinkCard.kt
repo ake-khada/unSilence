@@ -16,7 +16,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -32,6 +32,34 @@ import com.unsilence.app.ui.theme.AppType
 import com.unsilence.app.ui.theme.Spacing
 import com.unsilence.app.ui.theme.TextSecondary
 
+internal enum class MinimalLinkIconStage {
+    APPLE_TOUCH_ICON,
+    FAVICON,
+    GENERIC;
+
+    fun next(): MinimalLinkIconStage = when (this) {
+        APPLE_TOUCH_ICON -> FAVICON
+        FAVICON, GENERIC -> GENERIC
+    }
+}
+
+/**
+ * First-party-only icon policy for OG-less link cards. A missing site icon is a
+ * presentation failure, not permission to disclose the viewed domain to a proxy.
+ */
+internal fun minimalLinkIconUrl(
+    host: String,
+    stage: MinimalLinkIconStage,
+    loadFavicon: Boolean = true,
+): String? {
+    if (!loadFavicon || host.isBlank()) return null
+    return when (stage) {
+        MinimalLinkIconStage.APPLE_TOUCH_ICON -> "https://$host/apple-touch-icon.png"
+        MinimalLinkIconStage.FAVICON -> "https://$host/favicon.ico"
+        MinimalLinkIconStage.GENERIC -> null
+    }
+}
+
 @Composable
 fun MinimalLinkCard(
     url: String,
@@ -42,19 +70,11 @@ fun MinimalLinkCard(
     val host = remember(url) {
         runCatching { java.net.URI(url).host ?: url }.getOrDefault(url)
     }
-    // 0 = Google favicon API (bypasses WAF), 1 = direct apple-touch-icon, 2 = direct favicon, 3 = generic icon
-    var iconStage by remember(url) { mutableIntStateOf(0) }
+    // Stay first-party even when a site's WAF blocks direct icon paths; a generic
+    // icon is preferable to disclosing every viewed domain to a proxy.
+    var iconStage by remember(url) { mutableStateOf(MinimalLinkIconStage.APPLE_TOUCH_ICON) }
     val iconUrl = remember(host, iconStage, loadFavicon) {
-        if (!loadFavicon) {
-            null
-        } else {
-            when (iconStage) {
-                0 -> "https://www.google.com/s2/favicons?domain=$host&sz=128"
-                1 -> "https://$host/apple-touch-icon.png"
-                2 -> "https://$host/favicon.ico"
-                else -> null
-            }
-        }
+        minimalLinkIconUrl(host, iconStage, loadFavicon)
     }
 
     Row(
@@ -73,7 +93,7 @@ fun MinimalLinkCard(
                 modifier = Modifier
                     .size(40.dp)
                     .clip(RoundedCornerShape(6.dp)),
-                onError = { iconStage++ },
+                onError = { iconStage = iconStage.next() },
             )
         } else {
             Icon(
