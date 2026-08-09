@@ -1,7 +1,15 @@
 package com.unsilence.app.data.relay
 
+import com.unsilence.app.data.auth.verifyNostrEventFields
+import com.vitorpamplona.quartz.nip01Core.core.hexToByteArray
+import com.vitorpamplona.quartz.nip01Core.crypto.KeyPair
+import com.vitorpamplona.quartz.nip01Core.relay.normalizer.RelayUrlNormalizer
+import com.vitorpamplona.quartz.nip01Core.signers.NostrSignerInternal
+import com.vitorpamplona.quartz.nip42RelayAuth.RelayAuthEvent
+import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
@@ -23,8 +31,11 @@ class RelayPoolAuthTest {
     private val authUnavailableRelays = ConcurrentHashMap.newKeySet<String>()
     private val optimisticAuthUsed = ConcurrentHashMap.newKeySet<String>()
     private val pendingChallenges = ConcurrentHashMap<String, String>()
+    private val configuredRelays = ConcurrentHashMap.newKeySet<String>()
+    private val authSessionPolicy = RelayAuthSessionPolicy()
     private var lastCompleteAuthReal: Boolean? = null
     private var authSent = false
+    private var signatureCalls = 0
     private var reconnectEmitted = false
 
     @Before
@@ -35,15 +46,43 @@ class RelayPoolAuthTest {
         authUnavailableRelays.clear()
         optimisticAuthUsed.clear()
         pendingChallenges.clear()
+        configuredRelays.clear()
+        authSessionPolicy.clear()
         lastCompleteAuthReal = null
         authSent = false
+        signatureCalls = 0
         reconnectEmitted = false
     }
 
     // ── Simulated handlers (logic extracted from RelayPool) ─────────────
 
     /** Models handleAuthChallenge decision logic. */
-    private fun simulateAuthChallenge(url: String, challenge: String = "challenge"): String {
+    private fun simulateAuthChallenge(
+        url: String,
+        challenge: String = "challenge",
+        configured: Boolean = true,
+    ): String {
+        if (configured) configuredRelays.add(url) else configuredRelays.remove(url)
+        when (
+            authSessionPolicy.evaluateEligibility(
+                url = url,
+                configuredUrls = configuredAuthRelayUrls(
+                    integralRelayUrls = configuredRelays,
+                    indexerRelayUrls = emptyList(),
+                    ownReadRelayUrls = emptyList(),
+                    ownWriteRelayUrls = emptyList(),
+                    ownSearchRelayUrls = emptyList(),
+                ),
+                unavailableRelays = authUnavailableRelays,
+                rejectionStreak = authRejectionStreak[url] ?: 0,
+            )
+        ) {
+            RelayAuthAdmission.INELIGIBLE -> return "ineligible-skip"
+            RelayAuthAdmission.UNAVAILABLE -> return "unavailable-skip"
+            RelayAuthAdmission.READY -> Unit
+            RelayAuthAdmission.ATTEMPT_LIMIT -> error("attempt limit is checked after dedup")
+        }
+
         val previous = pendingChallenges.put(url, challenge)
         if (url in authUnavailableRelays) return "unavailable-skip"
         if (previous == challenge && url in authenticatedRelays) return "duplicate-skip"
@@ -55,7 +94,12 @@ class RelayPoolAuthTest {
             // falls through to re-auth
         }
         if (!authInFlight.add(url)) return "in-flight-skip"
+        if (authSessionPolicy.reserveAttempt(url, authUnavailableRelays) == RelayAuthAdmission.ATTEMPT_LIMIT) {
+            authInFlight.remove(url)
+            return "attempt-limit"
+        }
         authSent = true
+        signatureCalls++
         return "sent"
     }
 
@@ -126,6 +170,117 @@ class RelayPoolAuthTest {
         assertEquals("duplicate-skip", simulateAuthChallenge(url, "same"))
         assertTrue(url in authenticatedRelays)
         assertFalse(authSent)
+        assertEquals(0, authSessionPolicy.attemptCount(url))
+        assertEquals(0, signatureCalls)
+    }
+
+    @Test
+    fun `in-flight duplicate does not consume another auth attempt`() {
+        val url = "wss://relay.example"
+        authInFlight.add(url)
+
+        assertEquals("in-flight-skip", simulateAuthChallenge(url, "fresh"))
+        assertEquals(0, authSessionPolicy.attemptCount(url))
+        assertEquals(0, signatureCalls)
+    }
+
+    @Test
+    fun `configured relay admission permits a real valid auth signature`() = runTest {
+        val url = "wss://relay.example"
+        val challenge = "configured-relay-challenge"
+
+        assertEquals("sent", simulateAuthChallenge(url, challenge))
+        val signer = NostrSignerInternal(KeyPair(privKey = "11".repeat(32).hexToByteArray()))
+        val signed = signer.sign(RelayAuthEvent.build(RelayUrlNormalizer.normalize(url), challenge))
+
+        assertNotNull(signed)
+        assertEquals(22_242, signed.kind)
+        assertTrue(
+            verifyNostrEventFields(
+                id = signed.id,
+                pubkey = signed.pubKey,
+                createdAt = signed.createdAt,
+                kind = signed.kind,
+                tags = signed.tags.map { it.toList() },
+                content = signed.content,
+                sig = signed.sig,
+            ),
+        )
+        simulateCompleteAuth(url, real = true)
+        assertTrue(url in authenticatedRelays)
+    }
+
+    @Test
+    fun `hint-derived relay challenge is quarantined without invoking signer`() {
+        val url = "wss://hint-only.example"
+
+        assertEquals("ineligible-skip", simulateAuthChallenge(url, configured = false))
+        assertTrue(url in authUnavailableRelays)
+        assertEquals(0, signatureCalls)
+        assertEquals(0, authSessionPolicy.attemptCount(url))
+    }
+
+    @Test
+    fun `distinct challenge signatures stop at the per-session cap`() {
+        val url = "wss://relay.example"
+
+        repeat(MAX_RELAY_AUTH_ATTEMPTS_PER_SESSION) { index ->
+            assertEquals("sent", simulateAuthChallenge(url, "challenge-$index"))
+            simulateCompleteAuth(url, real = true)
+        }
+
+        assertEquals(
+            "attempt-limit",
+            simulateAuthChallenge(url, "challenge-over-limit"),
+        )
+        assertEquals(MAX_RELAY_AUTH_ATTEMPTS_PER_SESSION, signatureCalls)
+        assertEquals(MAX_RELAY_AUTH_ATTEMPTS_PER_SESSION, authSessionPolicy.attemptCount(url))
+        assertTrue(url in authUnavailableRelays)
+    }
+
+    @Test
+    fun `relay configured after policy quarantine becomes eligible live`() {
+        val url = "wss://later-configured.example"
+
+        assertEquals("ineligible-skip", simulateAuthChallenge(url, "first", configured = false))
+        assertTrue(url in authUnavailableRelays)
+
+        assertEquals("sent", simulateAuthChallenge(url, "second", configured = true))
+        assertFalse(url in authUnavailableRelays)
+        assertEquals(1, signatureCalls)
+    }
+
+    @Test
+    fun `configuration does not erase a genuine auth failure quarantine`() {
+        val url = "wss://failed-then-configured.example"
+        assertEquals("ineligible-skip", simulateAuthChallenge(url, configured = false))
+        authRejectionStreak[url] = 1
+
+        assertEquals("unavailable-skip", simulateAuthChallenge(url, configured = true))
+        assertTrue(url in authUnavailableRelays)
+        assertEquals(0, signatureCalls)
+    }
+
+    @Test
+    fun `configured auth set contains only the explicit relay sources`() {
+        val resolved = configuredAuthRelayUrls(
+            integralRelayUrls = listOf("wss://integral.example/"),
+            indexerRelayUrls = listOf("indexer.example"),
+            ownReadRelayUrls = listOf("wss://read.example"),
+            ownWriteRelayUrls = listOf("https://write.example"),
+            ownSearchRelayUrls = listOf("wss://search.example"),
+        )
+
+        assertEquals(
+            setOf(
+                "wss://integral.example",
+                "wss://indexer.example",
+                "wss://read.example",
+                "wss://write.example",
+                "wss://search.example",
+            ),
+            resolved,
+        )
     }
 
     @Test
@@ -255,6 +410,11 @@ class RelayPoolAuthTest {
         authUnavailableRelays.add(url)
         authenticatedRelays.add(url)
         authInFlight.add(url)
+        assertEquals(
+            RelayAuthAdmission.READY,
+            authSessionPolicy.reserveAttempt(url, authUnavailableRelays),
+        )
+        assertEquals(1, authSessionPolicy.attemptCount(url))
 
         // Simulate clearCaches
         authRejectionStreak.clear()
@@ -263,11 +423,13 @@ class RelayPoolAuthTest {
         authInFlight.clear()
         optimisticAuthUsed.clear()
         pendingChallenges.clear()
+        authSessionPolicy.clear()
 
         assertFalse(authRejectionStreak.containsKey(url))
         assertFalse(url in authUnavailableRelays)
         assertFalse(url in authenticatedRelays)
         assertFalse(url in authInFlight)
+        assertEquals(0, authSessionPolicy.attemptCount(url))
     }
 
     // ── Integration scenario: paid subscriber flow ──────────────────────
