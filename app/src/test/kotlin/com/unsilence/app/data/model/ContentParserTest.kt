@@ -822,6 +822,19 @@ class ContentParserTest {
     }
 
     @Test
+    fun `imeta MIME renders malformed-suffix image URL as media`() {
+        val mediaUrl = "https://cdn.example/${"b".repeat(64)}.jpgiyg"
+        val tags = """[["imeta","url $mediaUrl","m image/jpeg","dim 1200x800"]]"""
+
+        val model = parse("#winechain $mediaUrl ,", tagsJson = tags)
+
+        val image = model.media.images.single()
+        assertEquals(mediaUrl, image.url)
+        assertEquals(1200f / 800f, image.imetaAspect!!, 0.01f)
+        assertNull(model.media.ogCandidate)
+    }
+
+    @Test
     fun `imeta provides aspect ratio for video`() {
         val tags = """[["imeta","url https://vid.host/clip.mp4","dim 1920x1080"]]"""
         val model = parse("https://vid.host/clip.mp4", tagsJson = tags)

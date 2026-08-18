@@ -37,6 +37,8 @@ data class OgMetadata(
     val imageUrl: String?,
     val siteName: String?,
     val url: String,
+    /** The requested URL itself was confirmed as a safe raster image response. */
+    val isDirectImage: Boolean = false,
 )
 
 @Singleton
@@ -208,6 +210,7 @@ class OgFetcher @Inject constructor(
                 return@executeAndParse null
             }
             val ct = response.header("Content-Type") ?: ""
+            directImageMetadata(url, ct)?.let { return@executeAndParse it }
             if (ct.isNotBlank() && !ct.contains("text/html", ignoreCase = true)
                 && !ct.contains("application/xhtml", ignoreCase = true)) {
                 Log.d(TAG, "og fetch: bad content-type '$ct' for $url")
@@ -235,6 +238,44 @@ class OgFetcher @Inject constructor(
         private const val MAX_CACHE_ENTRIES = 256
         private const val MAX_FAILURE_ENTRIES = 512
         private const val NEGATIVE_CACHE_TTL_MS = 10 * 60 * 1000L
+
+        // SVG is deliberately excluded: direct-image promotion is for decoded
+        // raster media only, not remotely supplied active/document content.
+        private val DIRECT_RASTER_MIME_TYPES = setOf(
+            "image/jpeg",
+            "image/jpg",
+            "image/png",
+            "image/gif",
+            "image/webp",
+            "image/avif",
+            "image/heic",
+            "image/heif",
+        )
+
+        /**
+         * Promote a generic link only after its guarded HTTP response proves it
+         * is raster image media. This covers extensionless and malformed-suffix
+         * Blossom URLs without guessing from an attacker-controlled hostname or
+         * filename. The same untrusted-URL policy is re-applied here so the value
+         * remains safe if this helper is reused outside [doFetch].
+         */
+        internal fun directImageMetadata(url: String, contentType: String?): OgMetadata? {
+            if (parseAllowedUntrustedHttpUrl(url) == null) return null
+            contentType
+                ?.substringBefore(';')
+                ?.trim()
+                ?.lowercase()
+                ?.takeIf { it in DIRECT_RASTER_MIME_TYPES }
+                ?: return null
+            return OgMetadata(
+                title = null,
+                description = null,
+                imageUrl = url,
+                siteName = null,
+                url = url,
+                isDirectImage = true,
+            )
+        }
 
         // Matches property= or name= with og: prefix, in either order with content=.
         // Handles both quoted (content="val") and unquoted (content=val) attributes

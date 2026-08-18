@@ -202,6 +202,10 @@ internal fun ContentFlow(
                         url               = link.url,
                         fetchOgMetadata   = fetchOgMetadata,
                         hasCachedOgMetadata = hasCachedOgMetadata,
+                        imageDimensionCache = imageDimensionCache,
+                        onDirectImageClick = if (isEmbedded) {
+                            { onNoteClick(navigateId) }
+                        } else null,
                         showMinimalFallback = true,
                         modifier          = Modifier
                             .padding(horizontal = hPad)
