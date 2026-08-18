@@ -54,6 +54,7 @@ fun ComposePreviewCard(
             thumbnailCache = thumbnailCache,
             exoPlayer = null,
             isActiveVideo = false,
+            knownLightningAddress = ownProfile?.lud16,
         )
         model.poll?.let { poll ->
             PollCard(

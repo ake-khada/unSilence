@@ -27,8 +27,10 @@ import com.unsilence.app.data.memory.SensitiveContentMode
 import com.unsilence.app.data.memory.UserEntity
 import com.unsilence.app.data.memory.WotLookup
 import com.unsilence.app.data.model.EventModel
+import com.unsilence.app.data.model.PaymentTarget
 import com.unsilence.app.data.model.Segment
 import com.unsilence.app.data.model.VideoRenderModel
+import com.unsilence.app.data.model.shouldRenderAsCard
 import com.unsilence.app.data.relay.FeedWotDisplayMode
 import com.unsilence.app.data.relay.OgMetadata
 import com.unsilence.app.ui.shared.CardRole
@@ -87,6 +89,7 @@ internal fun ContentFlow(
     feedWotDisplayMode: FeedWotDisplayMode = FeedWotDisplayMode.NUMBERS,
     onWotSubjectsVisible: (Collection<String>) -> Unit = {},
     nestDepth: Int = 0,
+    knownLightningAddress: String? = null,
     modifier: Modifier = Modifier,
 ) {
     val navigateId = model.navigateId
@@ -123,92 +126,103 @@ internal fun ContentFlow(
         var i = 0
         var ogCardsRendered = 0
         segmentLoop@ while (i < model.segments.size) {
-            when (model.segments[i]) {
-                is Segment.Text, is Segment.MentionPubkey, is Segment.Link, is Segment.Hashtag -> {
-                    // Collect consecutive text/mention/link/hashtag run
-                    var j = i
-                    while (j < model.segments.size &&
-                        (model.segments[j] is Segment.Text ||
-                            model.segments[j] is Segment.MentionPubkey ||
-                            model.segments[j] is Segment.Link ||
-                            model.segments[j] is Segment.Hashtag)) j++
-                    val run = model.segments.subList(i, j).toList()
+            val current = model.segments[i]
+            if (current.isInlineContent(knownLightningAddress)) {
+                // Collect consecutive text/mention/link/hashtag runs. A bare
+                // email-shaped LUD-16 candidate remains ordinary inline text
+                // unless the author's trusted profile advertises it as lud16.
+                var j = i
+                while (j < model.segments.size &&
+                    model.segments[j].isInlineContent(knownLightningAddress)) j++
+                val run = model.segments.subList(i, j).map(Segment::asInlineContent)
 
-                    // Pick the link(s) in this run that will become an OG
-                    // preview card, and HIDE them from the inline text.
-                    // Showing the URL inline AND as the OG card duplicates
-                    // information — Amethyst, Damus, Jumble all elide the
-                    // URL when a preview is rendered. The OG card itself
-                    // displays the title + thumbnail; if the OG fetch
-                    // returns nothing useful, MinimalLinkCard's favicon +
-                    // hostname covers the case so the user always sees
-                    // some affordance for the link.
-                    val ogToRender = mutableListOf<Segment.Link>()
-                    val runForInline = mutableListOf<Segment>()
-                    val availableSlots = MAX_OG_CARDS - ogCardsRendered
-                    for (seg in run) {
-                        if (seg is Segment.Link && ogToRender.size < availableSlots) {
-                            ogToRender.add(seg)
-                        } else {
-                            runForInline.add(seg)
-                        }
+                // Pick the link(s) in this run that will become an OG
+                // preview card, and HIDE them from the inline text.
+                // Showing the URL inline AND as the OG card duplicates
+                // information — Amethyst, Damus, Jumble all elide the
+                // URL when a preview is rendered. The OG card itself
+                // displays the title + thumbnail; if the OG fetch
+                // returns nothing useful, MinimalLinkCard's favicon +
+                // hostname covers the case so the user always sees
+                // some affordance for the link.
+                val ogToRender = mutableListOf<Segment.Link>()
+                val runForInline = mutableListOf<Segment>()
+                val availableSlots = MAX_OG_CARDS - ogCardsRendered
+                for (seg in run) {
+                    if (seg is Segment.Link && ogToRender.size < availableSlots) {
+                        ogToRender.add(seg)
+                    } else {
+                        runForInline.add(seg)
                     }
+                }
 
-                    // Strip blank-line padding at media boundaries so text
-                    // sits tight against adjacent images/videos. The \n\n
-                    // separators in the content string create visible gaps
-                    // without this trim.
-                    trimTextRunEdges(runForInline)
+                // Strip blank-line padding at media boundaries so text
+                // sits tight against adjacent images/videos. The \n\n
+                // separators in the content string create visible gaps
+                // without this trim.
+                trimTextRunEdges(runForInline)
 
-                    // A run may be link-only (e.g. a bare-URL note): runForInline
-                    // is empty but ogToRender still holds the link. Skip only the
-                    // inline text in that case — the OG card loop below MUST still
-                    // run, otherwise the note renders completely blank (no URL, no
-                    // preview). Do NOT `continue` here.
-                    if (runForInline.isNotEmpty()) InlineText(
-                        segments      = runForInline,
-                        lookupProfile = lookupProfile,
-                        onAuthorClick = onAuthorClick,
-                        onHashtagClick = onHashtagClick,
-                        onTextClick   = { onNoteClick(navigateId) },
-                        customEmojis  = model.customEmojis,
-                        maxLines      = maxLines,
-                        overflow      = overflow,
-                        onTextLayoutResult = if (!isEmbedded) { result ->
-                            if (result.hasVisualOverflow) hasTextOverflow = true
-                        } else null,
-                        modifier      = Modifier
-                            .fillMaxWidth()
+                // A run may be link-only (e.g. a bare-URL note): runForInline
+                // is empty but ogToRender still holds the link. Skip only the
+                // inline text in that case — the OG card loop below MUST still
+                // run, otherwise the note renders completely blank (no URL, no
+                // preview). Do NOT `continue` here.
+                if (runForInline.isNotEmpty()) InlineText(
+                    segments      = runForInline,
+                    lookupProfile = lookupProfile,
+                    onAuthorClick = onAuthorClick,
+                    onHashtagClick = onHashtagClick,
+                    onTextClick   = { onNoteClick(navigateId) },
+                    customEmojis  = model.customEmojis,
+                    maxLines      = maxLines,
+                    overflow      = overflow,
+                    onTextLayoutResult = if (!isEmbedded) { result ->
+                        if (result.hasVisualOverflow) hasTextOverflow = true
+                    } else null,
+                    modifier      = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = hPad)
+                        .padding(bottom = Spacing.small),
+                )
+
+                // Once a top-level text run exceeds the collapsed viewport
+                // budget, stop rendering the remaining source-order content
+                // (OG cards, images, later text) until expanded. Otherwise a
+                // long post can still exceed the screen because the capped
+                // text is followed by a link preview or media card.
+                if (!isEmbedded && !expanded && hasTextOverflow) {
+                    break@segmentLoop
+                }
+
+                // Render OG preview cards for the links we removed from
+                // inline text. showMinimalFallback=true so a failed OG
+                // fetch still produces a card (favicon + hostname).
+                for (link in ogToRender) {
+                    OgPreviewCard(
+                        url               = link.url,
+                        fetchOgMetadata   = fetchOgMetadata,
+                        hasCachedOgMetadata = hasCachedOgMetadata,
+                        showMinimalFallback = true,
+                        modifier          = Modifier
                             .padding(horizontal = hPad)
                             .padding(bottom = Spacing.small),
                     )
+                    ogCardsRendered++
+                }
 
-                    // Once a top-level text run exceeds the collapsed viewport
-                    // budget, stop rendering the remaining source-order content
-                    // (OG cards, images, later text) until expanded. Otherwise a
-                    // long post can still exceed the screen because the capped
-                    // text is followed by a link preview or media card.
-                    if (!isEmbedded && !expanded && hasTextOverflow) {
-                        break@segmentLoop
-                    }
+                i = j
+                continue@segmentLoop
+            }
 
-                    // Render OG preview cards for the links we removed from
-                    // inline text. showMinimalFallback=true so a failed OG
-                    // fetch still produces a card (favicon + hostname).
-                    for (link in ogToRender) {
-                        OgPreviewCard(
-                            url               = link.url,
-                            fetchOgMetadata   = fetchOgMetadata,
-                            hasCachedOgMetadata = hasCachedOgMetadata,
-                            showMinimalFallback = true,
-                            modifier          = Modifier
-                                .padding(horizontal = hPad)
-                                .padding(bottom = Spacing.small),
-                        )
-                        ogCardsRendered++
-                    }
-
-                    i = j
+            when (current) {
+                is Segment.Payment -> {
+                    PaymentTargetCard(
+                        target = current.target,
+                        modifier = Modifier
+                            .padding(horizontal = hPad)
+                            .padding(bottom = Spacing.small),
+                    )
+                    i++
                 }
                 is Segment.Image -> {
                     // Collect images, absorbing blank-line text between them
@@ -361,6 +375,12 @@ internal fun ContentFlow(
                     )
                     i++
                 }
+                // These variants always take the inline-content branch above;
+                // keep the sealed when exhaustive if Segment grows later.
+                is Segment.Text,
+                is Segment.MentionPubkey,
+                is Segment.Link,
+                is Segment.Hashtag -> i++
             }
         }
 
@@ -393,6 +413,18 @@ internal fun ContentFlow(
             )
         }
     }
+}
+
+private fun Segment.isInlineContent(knownLightningAddress: String?): Boolean = when (this) {
+    is Segment.Text, is Segment.MentionPubkey, is Segment.Link, is Segment.Hashtag -> true
+    is Segment.Payment -> target is PaymentTarget.LightningAddress &&
+        !target.shouldRenderAsCard(knownLightningAddress)
+    else -> false
+}
+
+private fun Segment.asInlineContent(): Segment = when (this) {
+    is Segment.Payment -> Segment.Text(target.displayValue)
+    else -> this
 }
 
 /**

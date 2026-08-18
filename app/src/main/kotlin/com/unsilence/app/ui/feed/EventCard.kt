@@ -420,6 +420,7 @@ fun EventCard(
                     wotLookup           = wotLookup,
                     feedWotDisplayMode  = feedWotDisplayMode,
                     onWotSubjectsVisible = onWotSubjectsVisible,
+                    knownLightningAddress = authorProfile?.lud16,
                 )
 
                 if (model.poll != null) {

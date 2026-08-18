@@ -1,6 +1,8 @@
 package com.unsilence.app.data.model
 
 import com.unsilence.app.data.relay.NostrJson
+import com.unsilence.app.data.zap.ZapCryptoTestFixture
+import com.vitorpamplona.quartz.nip19Bech32.bech32.Bech32
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
@@ -154,6 +156,107 @@ class ContentParserTest {
     fun `whitespace-only content produces empty segments`() {
         val model = parse("   ")
         assertTrue(model.segments.isEmpty())
+    }
+
+    @Test
+    fun `checksum-valid bolt11 invoice becomes a payment segment`() {
+        val invoice = ZapCryptoTestFixture.NIP57_1K_SAT_INVOICE
+        val target = (parse(invoice).segments.single() as Segment.Payment).target
+            as PaymentTarget.LightningInvoice
+
+        assertEquals(invoice, target.invoice)
+        assertEquals(1_000_000L, target.amountMsats)
+        assertEquals(LightningNetwork.MAINNET, target.network)
+        assertEquals("lightning:$invoice", target.walletUri)
+    }
+
+    @Test
+    fun `lightning scheme and surrounding prose preserve source order around invoice card`() {
+        val invoice = ZapCryptoTestFixture.NIP57_1K_SAT_INVOICE
+        val segments = parse("Pay this:\nlightning:$invoice\nThanks").segments
+
+        assertEquals(3, segments.size)
+        assertEquals(Segment.Text("Pay this:\n"), segments[0])
+        assertTrue(segments[1] is Segment.Payment)
+        assertEquals(Segment.Text("\nThanks"), segments[2])
+    }
+
+    @Test
+    fun `invoice with invalid checksum remains plain text`() {
+        val invoice = ZapCryptoTestFixture.NIP57_1K_SAT_INVOICE
+        val tampered = invoice.dropLast(1) + if (invoice.last() == 'q') 'p' else 'q'
+
+        assertEquals(listOf(Segment.Text(tampered)), parse(tampered).segments)
+    }
+
+    @Test
+    fun `base58 bitcoin address and bip21 amount become validated payment cards`() {
+        val address = "1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa"
+        val bare = (parse(address).segments.single() as Segment.Payment).target as PaymentTarget.Bitcoin
+        assertEquals(BitcoinNetwork.MAINNET, bare.network)
+        assertEquals(BitcoinAddressFormat.P2PKH, bare.format)
+        assertEquals("bitcoin:$address", bare.walletUri)
+
+        val uri = "bitcoin:$address?amount=0.00001000&label=Tip"
+        val request = (parse(uri).segments.single() as Segment.Payment).target as PaymentTarget.Bitcoin
+        assertEquals(1_000L, request.amountSats)
+        assertEquals(uri, request.copyText)
+        assertTrue(request.explicitUri)
+    }
+
+    @Test
+    fun `bech32 and bech32m bitcoin formats are checksum validated`() {
+        val segwit = "BC1QW508D6QEJXTDG4Y5R3ZARVARY0C5XW7KV8F3T4"
+        val segwitTarget = (parse(segwit).segments.single() as Segment.Payment).target as PaymentTarget.Bitcoin
+        assertEquals(BitcoinAddressFormat.SEGWIT, segwitTarget.format)
+
+        val taproot = "bc1pwl3s54fzmk0cjnpl3w9af39je7pv5ldg504x5guk2hpecpg2kgsqaqstjq"
+        val taprootTarget = (parse(taproot).segments.single() as Segment.Payment).target as PaymentTarget.Bitcoin
+        assertEquals(BitcoinAddressFormat.TAPROOT, taprootTarget.format)
+
+        val invalid = segwit.dropLast(1) + "q"
+        assertEquals(listOf(Segment.Text(invalid)), parse(invalid).segments)
+    }
+
+    @Test
+    fun `bare lud16 candidate requires matching profile metadata before card rendering`() {
+        val segments = parse("Tip alice+nostr@pay.example please").segments
+
+        assertEquals(Segment.Text("Tip "), segments[0])
+        val target = (segments[1] as Segment.Payment).target as PaymentTarget.LightningAddress
+        assertEquals("alice+nostr@pay.example", target.address)
+        assertEquals("pay.example", target.domain)
+        assertFalse(target.explicitScheme)
+        assertFalse(target.shouldRenderAsCard(knownLightningAddress = null))
+        assertFalse(target.shouldRenderAsCard(knownLightningAddress = "alice@pay.example"))
+        assertTrue(target.shouldRenderAsCard(knownLightningAddress = target.address))
+        assertEquals(Segment.Text(" please"), segments[2])
+    }
+
+    @Test
+    fun `explicit lightning address uri can render without profile metadata`() {
+        val target = (parse("lightning:alice@pay.example").segments.single() as Segment.Payment).target
+            as PaymentTarget.LightningAddress
+
+        assertTrue(target.explicitScheme)
+        assertTrue(target.shouldRenderAsCard(knownLightningAddress = null))
+        assertEquals("lightning:alice@pay.example", target.walletUri)
+    }
+
+    @Test
+    fun `uppercase lud16 username is not misclassified`() {
+        val value = "Alice@pay.example"
+        assertEquals(listOf(Segment.Text(value)), parse(value).segments)
+    }
+
+    @Test
+    fun `checksum-valid lnurl becomes a payment segment`() {
+        val url = "https://pay.example/.well-known/lnurlp/alice"
+        val code = Bech32.encodeBytes("lnurl", url.encodeToByteArray(), Bech32.Encoding.Bech32)
+        val target = (parse(code).segments.single() as Segment.Payment).target as PaymentTarget.Lnurl
+
+        assertEquals(url, target.decodedUrl)
+        assertEquals("pay.example", target.host)
     }
 
     @Test

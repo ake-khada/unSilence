@@ -422,6 +422,7 @@ internal fun ThreadParentCard(
                     feedWotDisplayMode  = feedWotDisplayMode,
                     onWotSubjectsVisible = onWotSubjectsVisible,
                     nestDepth           = 1,
+                    knownLightningAddress = effectiveAuthor?.lud16,
                 )
             }
         } else if (event.kind == 6 || event.kind == 16) {

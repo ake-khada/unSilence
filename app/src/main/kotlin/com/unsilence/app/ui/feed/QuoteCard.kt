@@ -286,16 +286,23 @@ internal fun QuoteCard(
                         feedWotDisplayMode  = feedWotDisplayMode,
                         onWotSubjectsVisible = onWotSubjectsVisible,
                         nestDepth           = nestDepth + 1,
+                        knownLightningAddress = author?.lud16,
                     )
                 } else if (eventModel != null) {
                     // Compact third level: text only. A deeper quote is represented
                     // locally so its event is never resolved or fetched here.
                     val textSegments = remember(eventModel.segments) {
-                        eventModel.segments.filter {
-                            it is Segment.Text ||
-                                it is Segment.MentionPubkey ||
-                                it is Segment.Link ||
-                                it is Segment.Hashtag
+                        eventModel.segments.mapNotNull {
+                            when (it) {
+                                is Segment.Text,
+                                is Segment.MentionPubkey,
+                                is Segment.Link,
+                                is Segment.Hashtag -> it
+                                // This depth is deliberately text-only; preserve a
+                                // payment destination instead of dropping the card.
+                                is Segment.Payment -> Segment.Text(it.target.copyText)
+                                else -> null
+                            }
                         }
                     }
                     val hasDeeperQuote = remember(eventModel.segments) {
