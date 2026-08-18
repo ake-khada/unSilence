@@ -188,6 +188,7 @@ fun EmptyRepostBody(
                         feedWotDisplayMode  = feedWotDisplayMode,
                         onWotSubjectsVisible = onWotSubjectsVisible,
                         nestDepth           = 0,
+                        knownLightningAddress = targetProfile?.lud16,
                     )
                 }
             }

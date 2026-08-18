@@ -360,7 +360,8 @@ object ContentParser {
      *   3. video files   (.mp4 etc — distinct from generic Link)
      *   4. image files   (matched before generic URL)
      *   5. http(s) URLs  (generic Link)
-     *   6. plain text    (everything else)
+     *   6. validated Bitcoin / Lightning payment targets
+     *   7. plain text    (everything else)
      *
      * For native picture/video kinds, we ALSO surface imeta entries
      * as Image/Video segments at the head — these kinds put media in tags,
@@ -459,9 +460,17 @@ object ContentParser {
                 Segment.Link(m.value)
             })
         }
-        // Precedence 6: hashtags (structural walk — not regex)
+        // Precedence 6: checksum-validated payment destinations. LUD-16 is the
+        // one syntax-only format because it is intentionally email-shaped;
+        // rendering never contacts its domain merely to classify content.
+        for (located in PaymentTargetParser.findAll(content)) {
+            matches.add(Match(located.start, located.endExclusive, 6) {
+                Segment.Payment(located.target)
+            })
+        }
+        // Precedence 7: hashtags (structural walk — not regex)
         for ((start, end, tag) in findHashtags(content)) {
-            matches.add(Match(start, end, 6) { Segment.Hashtag(tag) })
+            matches.add(Match(start, end, 7) { Segment.Hashtag(tag) })
         }
 
         // Resolve overlaps: sort by start ASC, length DESC, precedence ASC.
@@ -537,12 +546,13 @@ object ContentParser {
         return if (afterGt.startsWith(" ")) afterGt.substring(1) else afterGt
     }
 
-    /** Media doesn't render as a grid inside a quote — keep the URL as a tappable
-     *  Link rather than dropping it (InlineText ignores Image/Video/YouTube). */
+    /** Blockquotes stay inline-only: retain media URLs as Links and payment
+     *  destinations as text rather than silently dropping either type. */
     private fun flattenMediaToLink(seg: Segment): Segment = when (seg) {
         is Segment.Image   -> Segment.Link(seg.url)
         is Segment.Video   -> Segment.Link(seg.model.videoUrl)
         is Segment.YouTube -> Segment.Link(seg.url)
+        is Segment.Payment -> Segment.Text(seg.target.copyText)
         else               -> seg
     }
 
