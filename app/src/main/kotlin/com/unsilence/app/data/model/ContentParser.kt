@@ -456,8 +456,31 @@ object ContentParser {
         }
         // Precedence 5: generic URLs
         for (m in URL_REGEX.findAll(content)) {
-            matches.add(Match(m.range.first, m.range.last + 1, 5) {
-                Segment.Link(m.value)
+            // Trim punctuation before constructing the match itself. Otherwise
+            // the longer generic match wins overlap resolution over a media
+            // match and either swallows punctuation or downgrades the media.
+            val cleanUrl = cleanMediaUrl(m.value)
+            val end = m.range.first + cleanUrl.length
+            val meta = imeta.firstOrNull { mediaUrlMatches(it.url, cleanUrl) }
+            val mime = meta?.mimeType?.substringBefore(';')?.trim()?.lowercase()
+            val width = meta?.width
+            val height = meta?.height
+            matches.add(Match(m.range.first, end, 5) {
+                when {
+                    mime?.startsWith("image/") == true -> Segment.Image(
+                        url = cleanUrl,
+                        imetaAspect = if (width != null && height != null && height > 0) {
+                            width.toFloat() / height
+                        } else null,
+                    )
+                    mime?.startsWith("video/") == true -> buildVideoRenderModelForUrl(
+                        url = cleanUrl,
+                        imeta = imeta,
+                        allowImetaVideo = true,
+                        shortForm = isShortFormVideoKind(kind),
+                    )?.let { Segment.Video(it) }
+                    else -> Segment.Link(cleanUrl)
+                }
             })
         }
         // Precedence 6: checksum-validated payment destinations. LUD-16 is the

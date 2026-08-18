@@ -28,6 +28,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import coil3.compose.AsyncImage
+import com.unsilence.app.data.model.Segment
 import com.unsilence.app.data.relay.OgMetadata
 import com.unsilence.app.ui.common.rememberWidthImageRequest
 import com.unsilence.app.ui.theme.AppType
@@ -52,6 +53,8 @@ internal fun OgPreviewCard(
     url: String,
     fetchOgMetadata: (suspend (String) -> OgMetadata?)? = null,
     hasCachedOgMetadata: ((String) -> Boolean)? = null,
+    imageDimensionCache: ImageDimensionCache? = null,
+    onDirectImageClick: (() -> Unit)? = null,
     showMinimalFallback: Boolean = true,
     modifier: Modifier = Modifier,
 ) {
@@ -76,7 +79,21 @@ internal fun OgPreviewCard(
     }
 
     val loadedOg = og
-    if (loadedOg != null && (loadedOg.title != null || loadedOg.imageUrl != null)) {
+    val directImageUrl = loadedOg
+        ?.takeIf { it.isDirectImage }
+        ?.imageUrl
+        ?.takeIf { it.isNotBlank() }
+    if (directImageUrl != null) {
+        val image = remember(directImageUrl) {
+            Segment.Image(url = directImageUrl, imetaAspect = null)
+        }
+        EventMediaGrid(
+            images = listOf(image),
+            imageDimensionCache = imageDimensionCache,
+            onImageClick = onDirectImageClick?.let { click -> { _: Int -> click() } },
+            modifier = modifier,
+        )
+    } else if (loadedOg != null && (loadedOg.title != null || loadedOg.imageUrl != null)) {
         var imageLoadFailed by remember { mutableStateOf(false) }
         Column(
             modifier = modifier
