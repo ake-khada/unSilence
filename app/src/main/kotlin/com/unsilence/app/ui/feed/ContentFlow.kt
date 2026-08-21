@@ -332,7 +332,6 @@ internal fun ContentFlow(
                     } else {
                         AddressChip(
                             segment       = seg,
-                            onNoteClick   = onNoteClick,
                             lookupProfile = lookupProfile,
                             profileFlow   = profileFlow,
                             modifier      = chipMod,
