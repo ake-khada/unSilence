@@ -229,38 +229,55 @@ fun EventCard(
 
     // Article layout
     if (role == CardRole.Article || role == CardRole.EmbeddedArticle || model.article != null) {
-        ArticleLayout(
-            model = model,
-            row = row,
-            engagement = engagement,
-            replyCount = liveReplyCount,
-            repostCount = liveRepostCount,
-            reactionCount = liveReactionCount,
-            zapTotalSats = liveZapTotalSats,
-            onNoteClick = onNoteClick,
-            onComment = onComment,
-            onArticleClick = onArticleClick,
-            onReact = onReact,
-            onReactLongPress = onReactLongPress,
-            pinnedEmojis = pinnedEmojis,
-            onReactWithEmoji = onReactWithEmoji,
-            onRepost = onRepost,
-            onQuote = onQuote,
-            onZap = onZap,
-            onSaveNwcUri = onSaveNwcUri,
-            onAuthorClick = onAuthorClick,
-            statsFlow = statsFlow,
-            profileFlow = profileFlow,
-            lookupProfile = lookupProfile,
-            zapDetailsForEvent = zapDetailsForEvent,
-            repostPubkeysForEvent = repostPubkeysForEvent,
-            reactionsForEvent = reactionsForEvent,
-            sourceProfile = sourceProfile,
-            wotLookup = wotLookup,
-            feedWotDisplayMode = feedWotDisplayMode,
-            role = role,
-            modifier = modifier,
-        )
+        if (hideWhole) {
+            SensitiveContentHiddenCard(
+                reason = contentWarningReason,
+                modifier = modifier.padding(horizontal = Spacing.medium, vertical = Spacing.small),
+            )
+        } else {
+            Box {
+                Box(modifier = if (showBlur) Modifier.blur(24.dp) else Modifier) {
+                    ArticleLayout(
+                        model = model,
+                        row = row,
+                        engagement = engagement,
+                        replyCount = liveReplyCount,
+                        repostCount = liveRepostCount,
+                        reactionCount = liveReactionCount,
+                        zapTotalSats = liveZapTotalSats,
+                        onNoteClick = onNoteClick,
+                        onComment = onComment,
+                        onArticleClick = onArticleClick,
+                        onReact = onReact,
+                        onReactLongPress = onReactLongPress,
+                        pinnedEmojis = pinnedEmojis,
+                        onReactWithEmoji = onReactWithEmoji,
+                        onRepost = onRepost,
+                        onQuote = onQuote,
+                        onZap = onZap,
+                        onSaveNwcUri = onSaveNwcUri,
+                        onAuthorClick = onAuthorClick,
+                        statsFlow = statsFlow,
+                        profileFlow = profileFlow,
+                        lookupProfile = lookupProfile,
+                        zapDetailsForEvent = zapDetailsForEvent,
+                        repostPubkeysForEvent = repostPubkeysForEvent,
+                        reactionsForEvent = reactionsForEvent,
+                        sourceProfile = sourceProfile,
+                        wotLookup = wotLookup,
+                        feedWotDisplayMode = feedWotDisplayMode,
+                        role = role,
+                        modifier = modifier,
+                    )
+                }
+                SensitiveContentRevealOverlay(
+                    visible = showBlur,
+                    reason = contentWarningReason,
+                    onReveal = { revealed = true },
+                    modifier = Modifier.align(Alignment.Center),
+                )
+            }
+        }
         return
     }
 
@@ -484,31 +501,12 @@ fun EventCard(
                 }
             }
 
-            // Tap-to-reveal overlay
-            if (showBlur) {
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .clickable { revealed = true }
-                        .padding(vertical = Spacing.xl)
-                        .align(Alignment.Center),
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                ) {
-                    Text(
-                        text = contentWarningReason?.takeIf { it.isNotBlank() }
-                            ?: "Sensitive content",
-                        fontSize = AppType.bodySmall,
-                        fontWeight = FontWeight.Medium,
-                        color = TextSecondary,
-                    )
-                    Spacer(Modifier.height(Spacing.small))
-                    Text(
-                        text = "Tap to reveal",
-                        fontSize = AppType.caption,
-                        color = TextSecondary.copy(alpha = 0.6f),
-                    )
-                }
-            }
+            SensitiveContentRevealOverlay(
+                visible = showBlur,
+                reason = contentWarningReason,
+                onReveal = { revealed = true },
+                modifier = Modifier.align(Alignment.Center),
+            )
         }
         } // end content-area Column (card-level long-press scope)
 
@@ -565,6 +563,36 @@ fun EventCard(
                 onProfileTap          = onAuthorClick,
             )
         }
+    }
+}
+
+@Composable
+private fun SensitiveContentRevealOverlay(
+    visible: Boolean,
+    reason: String?,
+    onReveal: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    if (!visible) return
+    Column(
+        modifier = modifier
+            .fillMaxWidth()
+            .clickable(onClick = onReveal)
+            .padding(vertical = Spacing.xl),
+        horizontalAlignment = Alignment.CenterHorizontally,
+    ) {
+        Text(
+            text = reason?.takeIf { it.isNotBlank() } ?: "Sensitive content",
+            fontSize = AppType.bodySmall,
+            fontWeight = FontWeight.Medium,
+            color = TextSecondary,
+        )
+        Spacer(Modifier.height(Spacing.small))
+        Text(
+            text = "Tap to reveal",
+            fontSize = AppType.caption,
+            color = TextSecondary.copy(alpha = 0.6f),
+        )
     }
 }
 
