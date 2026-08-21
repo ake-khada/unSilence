@@ -22,6 +22,9 @@ enum class CardRole {
     /** Article card — hero image, title, summary, action bar. */
     Article,
 
+    /** Embedded article — canonical article preview without engagement UI. */
+    EmbeddedArticle,
+
     /** Search results — no inline video. */
     Search,
 

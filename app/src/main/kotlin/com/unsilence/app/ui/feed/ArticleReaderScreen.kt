@@ -180,7 +180,7 @@ fun ArticleReaderScreen(
         }
     }
     LaunchedEffect(comments) {
-        articleReaderVm.hydrateCommentEngagement(comments)
+        articleReaderVm.hydrateEngagement(comments)
         if (articleCoord != null) {
             articleReaderVm.fetchCommentReplies(comments.map { it.id }, model.pubkey, model.engagementId, row.relayUrl)
         }

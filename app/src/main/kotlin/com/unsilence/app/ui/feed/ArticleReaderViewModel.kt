@@ -112,9 +112,8 @@ class ArticleReaderViewModel @Inject constructor(
             addAll(relayPreferencesStore.indexerRelayUrlsSnapshot())
         }.toList()
 
-    /** Hydrate engagement (reactions/zaps/reposts/replies) for the rendered
-     *  comment rows, so comment cards don't show stale zero counts. */
-    fun hydrateCommentEngagement(rows: List<FeedRow>) {
+    /** Hydrate engagement (reactions/zaps/reposts/replies) for rendered rows. */
+    fun hydrateEngagement(rows: List<FeedRow>) {
         if (rows.isEmpty()) return
         cardHydrator.hydrateEngagement(rows, 0, rows.size - 1)
     }
@@ -130,13 +129,11 @@ class ArticleReaderViewModel @Inject constructor(
     /** The article FeedRow for a coordinate, live from MES (null until resolved). */
     fun articleRowFlow(coord: String): Flow<FeedRow?> = memoryEventStore.articleRowByCoordFlow(coord)
 
-    /** Fire-and-forget fetch of an absent article by coord, then hydrate its
-     *  engagement so the embedded card's action bar is correct. No-op if cached. */
+    /** Fire-and-forget fetch of an absent article by coord. No-op if cached.
+     *  Engagement hydration is keyed to the resolved row in EmbeddedArticleCard,
+     *  so both cached and newly fetched articles take the same path. */
     fun ensureArticle(coord: String, author: String, dTag: String, hints: List<String>) {
-        if (memoryEventStore.articleRowByCoord(coord) != null) {
-            memoryEventStore.articleRowByCoord(coord)?.let { hydrateCommentEngagement(listOf(it)) }
-            return
-        }
+        if (memoryEventStore.articleRowByCoord(coord) != null) return
         viewModelScope.launch {
             val relays = buildSet {
                 addAll(hints)

@@ -228,7 +228,7 @@ fun EventCard(
     val liveZapTotalSats  = liveStats?.zapTotalSats  ?: row.zapTotalSats
 
     // Article layout
-    if (role == CardRole.Article || model.article != null) {
+    if (role == CardRole.Article || role == CardRole.EmbeddedArticle || model.article != null) {
         ArticleLayout(
             model = model,
             row = row,
@@ -570,7 +570,8 @@ fun EventCard(
 
 /**
  * Article card layout for kind-30023 (NIP-23 long-form).
- * Author row + hero image + title + summary + action bar.
+ * Author row + hero image + title + summary. [CardRole.EmbeddedArticle] omits
+ * the action bar and engagement drawer.
  */
 @Composable
 private fun ArticleLayout(
@@ -705,53 +706,55 @@ private fun ArticleLayout(
                 )
             }
 
-            // Action bar + inline engagement drawer
-            var drawerOpen by remember { mutableStateOf(false) }
-            EventActionBar(
-                // navigateId targets the article itself (inner event for a repost);
-                // EventActionBar keys the Quote action off noteId.
-                noteId          = model.navigateId,
-                zapTargetId     = model.engagementId,
-                replyCount      = replyCount,
-                repostCount     = repostCount,
-                reactionCount   = reactionCount,
-                zapTotalSats    = zapTotalSats,
-                hasReacted      = engagement.hasReacted,
-                hasReposted     = engagement.hasReposted,
-                hasZapped       = engagement.hasZapped,
-                isNwcConfigured = engagement.isNwcConfigured,
-                isZapLoading    = engagement.isZapLoading,
-                extraZapSats    = engagement.extraZapSats,
-                zapFlash        = engagement.zapFlash,
-                drawerOpen      = drawerOpen,
-                onChevronTap    = { drawerOpen = !drawerOpen },
-                onNoteClick     = { onNoteClick(row.id) },
-                onComment          = onComment,
-                onReact            = onReact,
-                onReactLongPress   = onReactLongPress,
-                pinnedEmojis       = pinnedEmojis,
-                onReactWithEmoji   = onReactWithEmoji,
-                onRepost           = onRepost,
-                onQuote            = onQuote,
-                onZap              = onZap,
-                onSaveNwcUri       = onSaveNwcUri,
-            )
-
-            AnimatedVisibility(
-                visible = drawerOpen,
-                enter = expandVertically(),
-                exit = shrinkVertically(),
-            ) {
-                EngagementDrawer(
-                    eventId               = model.engagementId,
-                    statsFlow             = statsFlow,
-                    zapDetailsForEvent    = zapDetailsForEvent,
-                    repostPubkeysForEvent = repostPubkeysForEvent,
-                    reactionsForEvent     = reactionsForEvent,
-                    profileFlow           = profileFlow,
-                    lookupProfile         = lookupProfile,
-                    onProfileTap          = onAuthorClick,
+            if (role != CardRole.EmbeddedArticle) {
+                // Action bar + inline engagement drawer
+                var drawerOpen by remember { mutableStateOf(false) }
+                EventActionBar(
+                    // navigateId targets the article itself (inner event for a repost);
+                    // EventActionBar keys the Quote action off noteId.
+                    noteId          = model.navigateId,
+                    zapTargetId     = model.engagementId,
+                    replyCount      = replyCount,
+                    repostCount     = repostCount,
+                    reactionCount   = reactionCount,
+                    zapTotalSats    = zapTotalSats,
+                    hasReacted      = engagement.hasReacted,
+                    hasReposted     = engagement.hasReposted,
+                    hasZapped       = engagement.hasZapped,
+                    isNwcConfigured = engagement.isNwcConfigured,
+                    isZapLoading    = engagement.isZapLoading,
+                    extraZapSats    = engagement.extraZapSats,
+                    zapFlash        = engagement.zapFlash,
+                    drawerOpen      = drawerOpen,
+                    onChevronTap    = { drawerOpen = !drawerOpen },
+                    onNoteClick     = { onNoteClick(row.id) },
+                    onComment          = onComment,
+                    onReact            = onReact,
+                    onReactLongPress   = onReactLongPress,
+                    pinnedEmojis       = pinnedEmojis,
+                    onReactWithEmoji   = onReactWithEmoji,
+                    onRepost           = onRepost,
+                    onQuote            = onQuote,
+                    onZap              = onZap,
+                    onSaveNwcUri       = onSaveNwcUri,
                 )
+
+                AnimatedVisibility(
+                    visible = drawerOpen,
+                    enter = expandVertically(),
+                    exit = shrinkVertically(),
+                ) {
+                    EngagementDrawer(
+                        eventId               = model.engagementId,
+                        statsFlow             = statsFlow,
+                        zapDetailsForEvent    = zapDetailsForEvent,
+                        repostPubkeysForEvent = repostPubkeysForEvent,
+                        reactionsForEvent     = reactionsForEvent,
+                        profileFlow           = profileFlow,
+                        lookupProfile         = lookupProfile,
+                        onProfileTap          = onAuthorClick,
+                    )
+                }
             }
         }
     }

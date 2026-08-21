@@ -31,7 +31,7 @@ import com.unsilence.app.ui.theme.Spacing
 import kotlinx.coroutines.flow.StateFlow
 
 /**
- * Tappable inline card for an addressable event (naddr: kind + pubkey + d-tag).
+ * Inline fallback card for an addressable event (naddr: kind + pubkey + d-tag).
  *
  * Resolves the author profile and shows kind label + d-tag title.
  * Rendered for [Segment.QuoteAddress] entries in the segment list.
@@ -39,7 +39,6 @@ import kotlinx.coroutines.flow.StateFlow
 @Composable
 internal fun AddressChip(
     segment: Segment.QuoteAddress,
-    onNoteClick: (String) -> Unit,
     lookupProfile: (suspend (String) -> UserEntity?)? = null,
     profileFlow: ((String) -> StateFlow<UserEntity?>)? = null,
     modifier: Modifier = Modifier,
