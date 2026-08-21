@@ -1,6 +1,5 @@
 package com.unsilence.app.ui.feed
 
-import androidx.compose.foundation.layout.Box
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -12,7 +11,6 @@ import com.unsilence.app.data.memory.toEventModel
 import com.unsilence.app.data.model.Segment
 import com.unsilence.app.ui.common.LocalAppSessionKey
 import com.unsilence.app.ui.shared.CardRole
-import com.unsilence.app.ui.shared.EmbeddedSensitiveGate
 import com.unsilence.app.ui.shared.EventEngagementSnapshot
 
 /**
@@ -27,7 +25,8 @@ import com.unsilence.app.ui.shared.EventEngagementSnapshot
  * Only a top-level host includes the article action bar; every embedded context
  * omits it because `ThreadParentCard` is contractually action-bar-free and its
  * fixed `nestDepth = 1` is a nesting bound rather than a quote level. Unresolved
- * articles at any depth fall back to [AddressChip].
+ * articles at any depth fall back to [AddressChip]. Both resolved roles self-gate
+ * through [EventCard] using the resolved article's own content warning.
  */
 @Composable
 internal fun EmbeddedArticleCard(
@@ -53,6 +52,7 @@ internal fun EmbeddedArticleCard(
         // Loading / unavailable → the compact stub (resolves the author at least).
         AddressChip(
             segment       = Segment.QuoteAddress(30023, author, dTag, hints),
+            onNoteClick   = onNoteClick,
             lookupProfile = actionsVm::lookupProfile,
             profileFlow   = providerVm::profileFlow,
             modifier      = modifier,
@@ -108,17 +108,5 @@ internal fun EmbeddedArticleCard(
         )
     }
 
-    if (isTopLevel) {
-        articleCard(modifier)
-    } else {
-        Box(modifier = modifier) {
-            EmbeddedSensitiveGate(
-                mode = sensitiveMode,
-                sensitive = r.hasContentWarning,
-                reason = r.contentWarningReason,
-            ) {
-                articleCard(Modifier)
-            }
-        }
-    }
+    articleCard(modifier)
 }

@@ -157,8 +157,8 @@ internal fun QuoteCard(
     val quoteNavigationId = resolvedModel?.navigateId ?: segment.eventId
     val resolvedDTag = resolvedModel?.article?.dTag
     if (resolvedModel?.effectiveKind == 30023 && resolvedDTag != null) {
-        // EmbeddedArticleCard applies an explicit EmbeddedSensitiveGate using
-        // the resolved article's own content-warning, so no outer gate here.
+        // EmbeddedArticleCard self-gates through its EventCard using the
+        // resolved article's own content-warning, so no outer gate here.
         EmbeddedArticleCard(
             coord         = "30023:${resolvedModel.pubkey}:$resolvedDTag",
             author        = resolvedModel.pubkey,
