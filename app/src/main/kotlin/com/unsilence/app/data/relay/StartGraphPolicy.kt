@@ -141,6 +141,17 @@ internal fun shouldAutoOpenStartGraph(
     else -> follows != null && follows.isEmpty()
 }
 
+/**
+ * An identity generated locally has no prior contact list to preserve, so its
+ * unresolved graph can be materialized as known-empty before the first publish.
+ * Imported and Amber identities remain unresolved until relay state proves otherwise.
+ */
+internal fun shouldMaterializeEmptyFollows(
+    follows: Set<String>?,
+    freshIdentityPending: Boolean,
+    graphKnownEmpty: Boolean,
+): Boolean = follows == null && (freshIdentityPending || graphKnownEmpty)
+
 internal fun shouldShowEmptyFollowingEntry(
     followsResolved: Boolean,
     follows: Set<String>?,

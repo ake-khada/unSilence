@@ -3,6 +3,8 @@ package com.unsilence.app.ui.onboarding
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -25,13 +27,13 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
-import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -44,6 +46,7 @@ import androidx.compose.ui.unit.sp
 import coil3.compose.AsyncImage
 import com.unsilence.app.data.relay.formatFollowerCount
 import com.unsilence.app.ui.common.IdentIcon
+import com.unsilence.app.ui.common.LineToWaveLoading
 import com.unsilence.app.ui.common.rememberAvatarImageRequest
 import com.unsilence.app.ui.shared.WotInlineLabel
 import com.unsilence.app.ui.theme.AppType
@@ -67,100 +70,149 @@ internal fun StartYourGraphScreen(
     onRetry: () -> Unit,
 ) {
     BackHandler(onBack = onDone)
-    Column(
+    Box(
         modifier = Modifier
             .fillMaxSize()
             .background(Black)
-            .statusBarsPadding(),
     ) {
-        Row(
+        Column(
             modifier = Modifier
-                .fillMaxWidth()
-                .height(52.dp)
-                .padding(horizontal = Spacing.medium),
-            verticalAlignment = Alignment.CenterVertically,
+                .fillMaxSize()
+                .statusBarsPadding(),
         ) {
-            Text(
-                text = "Start your graph",
-                color = Color.White,
-                fontSize = AppType.subheading,
-                fontWeight = FontWeight.SemiBold,
-                modifier = Modifier.weight(1f),
-            )
-            TextButton(onClick = onDone, enabled = !state.publishing) {
-                Text("Skip", color = TextSecondary, fontSize = AppType.body)
-            }
-        }
-
-        Box(modifier = Modifier.weight(1f)) {
-            when {
-                state.loading && state.packs.isEmpty() && state.notablePeople.isEmpty() -> {
-                    CircularProgressIndicator(
-                        color = Brand,
-                        strokeWidth = 2.dp,
-                        modifier = Modifier
-                            .size(28.dp)
-                            .align(Alignment.Center),
-                    )
-                }
-                state.error != null && state.packs.isEmpty() && state.notablePeople.isEmpty() -> {
-                    Column(
-                        modifier = Modifier.align(Alignment.Center),
-                        horizontalAlignment = Alignment.CenterHorizontally,
-                    ) {
-                        Text(state.error, color = TextSecondary, fontSize = AppType.body)
-                        TextButton(onClick = onRetry) { Text("Retry", color = Brand) }
-                    }
-                }
-                else -> GraphChoices(
-                    state = state,
-                    onTogglePack = onTogglePack,
-                    onTogglePerson = onTogglePerson,
-                    onPersonVisible = onPersonVisible,
-                )
-            }
-        }
-
-        state.error?.takeIf { state.packs.isNotEmpty() || state.notablePeople.isNotEmpty() }?.let {
-            Text(
-                text = it,
-                color = TextSecondary,
-                fontSize = AppType.caption,
+            Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(horizontal = Spacing.large, vertical = Spacing.micro),
-            )
-        }
-        Button(
-            onClick = onDone,
-            enabled = !state.publishing,
-            shape = RoundedCornerShape(8.dp),
-            colors = ButtonDefaults.buttonColors(
-                containerColor = Brand,
-                contentColor = Color(0xFF001012),
-                disabledContainerColor = Brand.copy(alpha = 0.45f),
-                disabledContentColor = Color.Black.copy(alpha = 0.65f),
-            ),
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = Spacing.large, vertical = Spacing.small)
-                .height(48.dp),
-        ) {
-            if (state.publishing) {
-                CircularProgressIndicator(
-                    color = Color.Black,
-                    strokeWidth = 2.dp,
-                    modifier = Modifier.size(18.dp),
+                    .height(52.dp)
+                    .padding(horizontal = Spacing.medium),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    text = "Start your graph",
+                    color = Color.White,
+                    fontSize = AppType.subheading,
+                    fontWeight = FontWeight.SemiBold,
+                    modifier = Modifier.weight(1f),
                 )
-            } else {
+                TextButton(onClick = onDone, enabled = !state.publishing) {
+                    Text("Skip", color = TextSecondary, fontSize = AppType.body)
+                }
+            }
+
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .weight(1f),
+            ) {
+                when {
+                    state.loading && state.packs.isEmpty() && state.notablePeople.isEmpty() -> {
+                        StartGraphProgress(
+                            message = "Finding your people…",
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .align(Alignment.Center),
+                        )
+                    }
+                    state.error != null && state.packs.isEmpty() && state.notablePeople.isEmpty() -> {
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .align(Alignment.Center),
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                        ) {
+                            Text(state.error, color = TextSecondary, fontSize = AppType.body)
+                            TextButton(onClick = onRetry) { Text("Retry", color = Brand) }
+                        }
+                    }
+                    else -> GraphChoices(
+                        state = state,
+                        onTogglePack = onTogglePack,
+                        onTogglePerson = onTogglePerson,
+                        onPersonVisible = onPersonVisible,
+                    )
+                }
+            }
+
+            state.error?.takeIf { state.packs.isNotEmpty() || state.notablePeople.isNotEmpty() }?.let {
+                Text(
+                    text = it,
+                    color = TextSecondary,
+                    fontSize = AppType.caption,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = Spacing.large, vertical = Spacing.micro),
+                )
+            }
+            Button(
+                onClick = onDone,
+                enabled = !state.publishing,
+                shape = RoundedCornerShape(8.dp),
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = Brand,
+                    contentColor = Color(0xFF001012),
+                    disabledContainerColor = Brand.copy(alpha = 0.45f),
+                    disabledContentColor = Color.Black.copy(alpha = 0.65f),
+                ),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = Spacing.large, vertical = Spacing.small)
+                    .height(48.dp),
+            ) {
                 Text(
                     text = "Done  ·  ${state.selectedFollowCount.coerceAtMost(5)} of 5",
                     fontSize = AppType.bodyLarge,
                     fontWeight = FontWeight.SemiBold,
                 )
             }
+            Spacer(Modifier.navigationBarsPadding())
         }
-        Spacer(Modifier.navigationBarsPadding())
+
+        if (state.publishing) {
+            StartGraphPublishingOverlay()
+        }
+    }
+}
+
+@Composable
+private fun StartGraphPublishingOverlay() {
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(Black.copy(alpha = 0.96f))
+            .clickable(
+                interactionSource = remember { MutableInteractionSource() },
+                indication = null,
+                onClick = {},
+            ),
+        contentAlignment = Alignment.Center,
+    ) {
+        StartGraphProgress(
+            message = "Building your graph…",
+            modifier = Modifier.fillMaxWidth(),
+        )
+    }
+}
+
+@Composable
+private fun StartGraphProgress(
+    message: String,
+    modifier: Modifier = Modifier,
+) {
+    Column(
+        modifier = modifier.padding(horizontal = Spacing.xl),
+        horizontalAlignment = Alignment.CenterHorizontally,
+    ) {
+        LineToWaveLoading(
+            modifier = Modifier.fillMaxWidth(0.62f),
+            height = 48.dp,
+            appearDelayMs = 0L,
+        )
+        Spacer(Modifier.height(Spacing.medium))
+        Text(
+            text = message,
+            color = TextSecondary,
+            fontSize = AppType.bodyLarge,
+        )
     }
 }
 

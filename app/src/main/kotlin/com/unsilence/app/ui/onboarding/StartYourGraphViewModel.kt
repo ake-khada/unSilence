@@ -22,6 +22,7 @@ import com.unsilence.app.data.relay.graphLanding
 import com.unsilence.app.data.relay.latestFollowPacks
 import com.unsilence.app.data.relay.rankFollowPacks
 import com.unsilence.app.data.relay.shouldAutoOpenStartGraph
+import com.unsilence.app.data.relay.shouldMaterializeEmptyFollows
 import com.unsilence.app.data.relay.shouldShowEmptyFollowingEntry
 import com.unsilence.app.data.relay.topFollowPackMembers
 import com.unsilence.app.data.relay.topNotablePubkeys
@@ -103,11 +104,16 @@ internal class StartYourGraphViewModel @Inject constructor(
     init {
         viewModelScope.launch {
             initGate.awaitFollows()
+            val freshPending = keyManager.isGraphOnboardingPending()
             var follows = ownPubkey?.let(memoryEventStore::getFollows)
-            if (follows == null && keyManager.isGraphKnownEmpty()) {
+            if (shouldMaterializeEmptyFollows(
+                    follows = follows,
+                    freshIdentityPending = freshPending,
+                    graphKnownEmpty = keyManager.isGraphKnownEmpty(),
+                )
+            ) {
                 follows = materializeEmptyFollowsIfNeeded()
             }
-            val freshPending = keyManager.isGraphOnboardingPending()
             if (follows?.isNotEmpty() == true && !keyManager.isGraphOnboardingCompleted()) {
                 keyManager.completeGraphOnboarding(hasFollows = true)
             }
@@ -200,34 +206,39 @@ internal class StartYourGraphViewModel @Inject constructor(
 
     fun finish() {
         if (_uiState.value.publishing) return
+        val selected = selectedPubkeys()
+        _uiState.value = _uiState.value.copy(publishing = true, error = null)
         viewModelScope.launch {
-            val selected = selectedPubkeys()
-            _uiState.value = _uiState.value.copy(publishing = selected.isNotEmpty(), error = null)
-            val follows = if (selected.isEmpty()) {
-                materializeEmptyFollowsIfNeeded()
-            } else {
-                when (val result = followBatchPublisher.addFollows(selected)) {
-                    is FollowPublishResult.Success -> result.follows
-                    else -> {
-                        _uiState.value = _uiState.value.copy(
-                            publishing = false,
-                            error = startGraphFollowError(result),
-                        )
-                        return@launch
+            try {
+                val follows = if (selected.isEmpty()) {
+                    materializeEmptyFollowsIfNeeded()
+                } else {
+                    when (val result = followBatchPublisher.addFollows(selected)) {
+                        is FollowPublishResult.Success -> result.follows
+                        else -> {
+                            _uiState.value = _uiState.value.copy(error = startGraphFollowError(result))
+                            return@launch
+                        }
                     }
                 }
-            }
-            if (follows == null) {
+                if (follows == null) {
+                    _uiState.value = _uiState.value.copy(
+                        error = "Couldn't publish follows. Try again.",
+                    )
+                    return@launch
+                }
+                keyManager.completeGraphOnboarding(hasFollows = follows.isNotEmpty())
+                _showEmptyFollowingEntry.value = follows.isEmpty()
+                landingChannel.send(graphLanding(follows))
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Exception) {
                 _uiState.value = _uiState.value.copy(
-                    publishing = false,
                     error = "Couldn't publish follows. Try again.",
                 )
-                return@launch
+            } finally {
+                _uiState.value = _uiState.value.copy(publishing = false)
             }
-            keyManager.completeGraphOnboarding(hasFollows = follows.isNotEmpty())
-            _showEmptyFollowingEntry.value = follows.isEmpty()
-            landingChannel.send(graphLanding(follows))
-            _uiState.value = _uiState.value.copy(publishing = false)
         }
     }
 
