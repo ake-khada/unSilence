@@ -108,6 +108,38 @@ class StartGraphPolicyTest {
     }
 
     @Test
+    fun `only locally proven empty graphs may materialize unresolved follows`() {
+        assertTrue(
+            shouldMaterializeEmptyFollows(
+                follows = null,
+                freshIdentityPending = true,
+                graphKnownEmpty = false,
+            ),
+        )
+        assertTrue(
+            shouldMaterializeEmptyFollows(
+                follows = null,
+                freshIdentityPending = false,
+                graphKnownEmpty = true,
+            ),
+        )
+        assertFalse(
+            shouldMaterializeEmptyFollows(
+                follows = null,
+                freshIdentityPending = false,
+                graphKnownEmpty = false,
+            ),
+        )
+        assertFalse(
+            shouldMaterializeEmptyFollows(
+                follows = setOf(member1),
+                freshIdentityPending = true,
+                graphKnownEmpty = true,
+            ),
+        )
+    }
+
+    @Test
     fun `landing follows the resulting graph rather than button label`() {
         assertEquals(GraphLanding.FOLLOWING, graphLanding(setOf(member1)))
         assertEquals(GraphLanding.GLOBAL_TRUSTED, graphLanding(emptySet()))
