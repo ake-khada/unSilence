@@ -7,14 +7,15 @@ import com.unsilence.app.data.auth.MuteKeyProvider
 import com.unsilence.app.data.memory.MemoryEventStore
 import com.unsilence.app.data.memory.WotAssertionEntity
 import com.unsilence.app.data.memory.WotLookup
-import org.junit.Assert.assertEquals
-import org.junit.Assert.assertFalse
-import org.junit.Assert.assertNull
-import org.junit.Assert.assertNotEquals
-import org.junit.Assert.assertTrue
-import org.junit.Test
+import kotlinx.coroutines.test.runTest
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.jsonPrimitive
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotEquals
+import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
+import org.junit.Test
 
 class WotFetchPolicyTest {
 
@@ -46,6 +47,19 @@ class WotFetchPolicyTest {
         assertEquals(3, chunks.size)
         assertEquals(401, chunks.flatten().distinct().size)
         assertTrue(chunks.all { it.size <= WOT_ASSERTION_CHUNK_SIZE })
+    }
+
+    @Test
+    fun `wot batch stays sequential and attempts pages after a miss`() = runTest {
+        val attempted = mutableListOf<Int>()
+
+        val allSucceeded = runWotChunkBatch(listOf("one", "two", "three")) { _, page, _ ->
+            attempted += page
+            page != 2
+        }
+
+        assertFalse(allSucceeded)
+        assertEquals(listOf(1, 2, 3), attempted)
     }
 
     @Test

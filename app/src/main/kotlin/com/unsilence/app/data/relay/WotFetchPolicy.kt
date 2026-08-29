@@ -41,6 +41,18 @@ internal fun wotSubjectChunks(
     return (priority + normalizedSubjects.filterNot { it in prioritySet }.sorted()).chunked(chunkSize)
 }
 
+/** Run every page sequentially; one failed page must not hide later coverage. */
+internal suspend fun <T> runWotChunkBatch(
+    chunks: List<T>,
+    fetchChunk: suspend (chunk: T, page: Int, totalPages: Int) -> Boolean,
+): Boolean {
+    var allSucceeded = true
+    chunks.forEachIndexed { index, chunk ->
+        if (!fetchChunk(chunk, index + 1, chunks.size)) allSucceeded = false
+    }
+    return allSucceeded
+}
+
 internal fun markWotChunkIfEosed(
     chunk: List<String>,
     eosed: Boolean,

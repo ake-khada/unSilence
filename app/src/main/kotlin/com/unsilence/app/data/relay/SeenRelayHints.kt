@@ -1,5 +1,8 @@
 package com.unsilence.app.data.relay
 
+private val NORMALIZED_BRIDGE_FALLBACK_RELAYS = normalizedRelayTargets(BRIDGE_FALLBACK_RELAY_URLS)
+private val NORMALIZED_BRIDGE_FALLBACK_RELAY_SET = NORMALIZED_BRIDGE_FALLBACK_RELAYS.toSet()
+
 /**
  * Per-lookup locality budget. Relay provenance is cumulative, so forwarding the
  * complete `relaysSeen` set would turn an additive hint into an unbounded fan-out.
@@ -96,8 +99,13 @@ internal fun bridgeFallbackRelayTargets(
     alreadyTriedRelays: Collection<String>,
 ): List<String> {
     val tried = normalizedRelayTargets(alreadyTriedRelays).toSet()
-    return normalizedRelayTargets(BRIDGE_FALLBACK_RELAY_URLS)
-        .filterNot(tried::contains)
+    return NORMALIZED_BRIDGE_FALLBACK_RELAYS.filterNot(tried::contains)
+}
+
+/** Bridge lookups share one unpurposed warm-pool socket during a request burst. */
+internal fun isBridgeFallbackRelay(url: String): Boolean {
+    val normalized = normalizeRelayUrl(url) ?: return false
+    return normalized in NORMALIZED_BRIDGE_FALLBACK_RELAY_SET
 }
 
 /** NIP-05 bootstrap for identities bridged by mostr. */
