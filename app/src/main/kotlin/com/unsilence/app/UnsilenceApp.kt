@@ -14,7 +14,6 @@ import coil3.ImageLoader
 import coil3.SingletonImageLoader
 import coil3.memory.MemoryCache
 import coil3.network.okhttp.OkHttpNetworkFetcherFactory
-import coil3.gif.AnimatedImageDecoder
 import coil3.gif.GifDecoder
 import coil3.video.VideoFrameDecoder
 import coil3.bitmapFactoryMaxParallelism
@@ -23,6 +22,7 @@ import coil3.request.allowRgb565
 import coil3.request.crossfade
 import com.unsilence.app.data.memory.MesMetricsLogger
 import com.unsilence.app.data.memory.SnapshotScheduler
+import com.unsilence.app.data.media.DirectBufferAnimatedImageDecoderFactory
 import com.unsilence.app.data.relay.FeedRelayWarmer
 import com.unsilence.app.data.relay.RelayPool
 import com.unsilence.app.data.relay.Subscription
@@ -132,7 +132,7 @@ class UnsilenceApp : Application(), SingletonImageLoader.Factory, androidx.work.
             .components {
                 add(OkHttpNetworkFetcherFactory(callFactory = { imageClient }))
                 if (Build.VERSION.SDK_INT >= 28) {
-                    add(AnimatedImageDecoder.Factory())
+                    add(DirectBufferAnimatedImageDecoderFactory())
                 } else {
                     add(GifDecoder.Factory())
                 }
