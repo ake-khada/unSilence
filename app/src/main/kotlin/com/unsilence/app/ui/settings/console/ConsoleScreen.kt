@@ -175,6 +175,12 @@ private fun RelaysCard(state: ConsoleUiState) {
             fontSize = 14.sp,
             fontWeight = FontWeight.SemiBold,
         )
+        Text(
+            text = state.relayCatalogSummary,
+            color = Text3,
+            fontSize = 11.5.sp,
+            modifier = Modifier.padding(top = 3.dp),
+        )
         Spacer(Modifier.height(Spacing.small))
         if (state.relays.isEmpty()) {
             Text("No relay connections", color = Text3, fontSize = 12.sp)
@@ -209,7 +215,7 @@ private fun RelayRow(row: ConsoleRelayRow) {
                 modifier = Modifier.weight(1f),
             )
             Text(
-                text = row.state?.name?.lowercase() ?: "idle",
+                text = row.state?.name?.lowercase() ?: "not active",
                 color = Text3,
                 fontSize = 10.sp,
                 fontFamily = FontFamily.Monospace,

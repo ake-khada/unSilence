@@ -1,11 +1,59 @@
 package com.unsilence.app.ui.settings.console
 
+import com.unsilence.app.data.relay.ConnectionPurpose
+import com.unsilence.app.data.relay.RelayConnectionDebugSnapshot
+import com.unsilence.app.data.relay.RelayDirectoryEntry
+import com.unsilence.app.data.relay.RelayState
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class ConsoleDiagnosticsTest {
+    @Test
+    fun `relay rows contain live connection domain while directory only enriches`() {
+        val connectedUrl = "wss://connected.example"
+        val queuedUrl = "wss://queued.example"
+        val catalogOnlyUrl = "wss://catalog-only.example"
+        val directory = listOf(connectedUrl, queuedUrl, catalogOnlyUrl).associateWith {
+            RelayDirectoryEntry(url = it, name = "Directory metadata")
+        }
+
+        val rows = buildConsoleRelayRows(
+            connectionStates = mapOf(connectedUrl to RelayState.CONNECTED),
+            directory = directory,
+            debug = mapOf(
+                queuedUrl to RelayConnectionDebugSnapshot(
+                    url = queuedUrl,
+                    purposes = setOf(ConnectionPurpose.FEED_WARM),
+                    oneShotCount = 0,
+                    queuedReqCount = 1,
+                    hasActiveSubscription = false,
+                ),
+            ),
+        )
+
+        assertEquals(listOf(connectedUrl, queuedUrl), rows.map { it.url })
+        assertEquals("Directory metadata", rows.single { it.url == connectedUrl }.directory?.name)
+        assertEquals("Directory metadata", rows.single { it.url == queuedUrl }.directory?.name)
+    }
+
+    @Test
+    fun `relay summary does not call unavailable states idle`() {
+        val rows = listOf(
+            consoleRelayRow("connected", RelayState.CONNECTED),
+            consoleRelayRow("connecting", RelayState.CONNECTING),
+            consoleRelayRow("failed", RelayState.FAILED),
+            consoleRelayRow("disconnected", RelayState.DISCONNECTED),
+            consoleRelayRow("queued", null),
+        )
+
+        assertEquals(
+            "1 connected · 1 connecting · 3 inactive",
+            formatConsoleRelaySummary(rows),
+        )
+    }
+
     @Test
     fun `parses thread-time logcat lines`() {
         val parsed = parseLogcatLine("07-09 11:22:33.444 123 456 D RelayPool: connected")
@@ -72,7 +120,7 @@ class ConsoleDiagnosticsTest {
     fun `formats diagnostics bundle`() {
         val bundle = formatDiagnosticsBundle(
             ConsoleDiagnosticsBundle(
-                relaySummary = "2 connected · 1 idle",
+                relaySummary = "2 connected · 0 connecting · 1 inactive · 790 catalogued for discovery",
                 storeSummary = "100 events · 1.0 MB",
                 gatesSummary = "trust 1h · monitors 2h · WoT 3h · 4/5 scored",
                 logs = listOf(parseLogcatLine("07-09 11:22:33.444 123 456 D RelayPool: connected")),
@@ -83,4 +131,14 @@ class ConsoleDiagnosticsTest {
         assertTrue(bundle.contains("2 connected"))
         assertTrue(bundle.contains("D/RelayPool: connected"))
     }
+
+    private fun consoleRelayRow(url: String, state: RelayState?) = ConsoleRelayRow(
+        url = url,
+        state = state,
+        purposes = emptySet(),
+        oneShotCount = 0,
+        queuedReqCount = 0,
+        hasActiveSubscription = false,
+        directory = null,
+    )
 }
