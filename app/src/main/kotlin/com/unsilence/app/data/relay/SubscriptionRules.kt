@@ -51,6 +51,7 @@ object SubscriptionRules {
         "emoji-discover-",
         "setref-",
         "wot-10040-",
+        "wot-30382-",
     )
 
     fun isOneShotSubscription(subId: String): Boolean =

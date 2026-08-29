@@ -1363,7 +1363,12 @@ class RelayPool @Inject constructor(
                 delay(50)
             }
             val ready = existingConns.count { it.isConnected }
-            Log.w(TAG, "connectAndAwait: timeout — $ready/${existingConns.size} relay(s) ready (existing)")
+            val timedOut = existingConns.filterNot { it.isConnected }.map { it.url }
+            Log.w(
+                TAG,
+                "connectAndAwait: timeout — $ready/${existingConns.size} relay(s) ready " +
+                    "(existing); timedOut=$timedOut",
+            )
             return ready
         }
         // Poll until at least one connection is ready
@@ -1377,7 +1382,11 @@ class RelayPool @Inject constructor(
             delay(50)
         }
         val ready = newConns.count { it.isConnected }
-        Log.w(TAG, "connectAndAwait: timeout — $ready/${newConns.size} relay(s) ready")
+        val timedOut = newConns.filterNot { it.isConnected }.map { it.url }
+        Log.w(
+            TAG,
+            "connectAndAwait: timeout — $ready/${newConns.size} relay(s) ready; timedOut=$timedOut",
+        )
         return ready
     }
 
@@ -1386,7 +1395,10 @@ class RelayPool @Inject constructor(
     /**
      * Send one-shot REQs to specified URLs with warm-pool reuse.
      *
-     * For URLs already in [connections]: reuses via [sendOneShotToRelay].
+     * For URLs already in [connections]: reuses via [sendOneShotToRelay]. Lookup-only
+     * bridge relays are admitted to the same unpurposed warm pool before classification,
+     * so concurrent profile/reference/article miss tiers share one handshake; the normal
+     * sweep evicts that socket because it has no persistent [ConnectionPurpose].
      * For URLs NOT in pool: opens ephemeral WebSocket (no cap, no reconnect),
      * sends REQs, collects events until EOSE, then closes.
      *
@@ -1437,6 +1449,17 @@ class RelayPool @Inject constructor(
             }
             return
         }
+
+        // The bridge is a common final tier across profiles, event references and articles.
+        // Keeping it ephemeral per call produced a handshake storm during one scroll pass.
+        // An unpurposed pooled connection is still lookup-only, but lets the existing
+        // one-shot demultiplexer reuse it until the regular sweep removes it.
+        for (url in normalized) {
+            if (isBridgeFallbackRelay(url)) {
+                getOrCreateConnection(url, requestClass)
+            }
+        }
+
         val reused = mutableListOf<String>()
         val ephemeral = mutableListOf<String>()
 
@@ -3120,9 +3143,10 @@ class RelayPool @Inject constructor(
     /**
      * Fetch NIP-85 kind-30382 user WoT assertions for [subjects] from the active provider relay.
      *
-     * The provider relay is opened as an ephemeral connection and never inserted into
-     * [connections]. Each chunk is marked queried only after that chunk's EOSE, preserving
-     * the MES Pending vs Absent distinction.
+     * Chunks run sequentially through the normal one-shot demultiplexer. The provider is kept as
+     * an unpurposed pooled connection, so viewport hydration batches share one handshake until the
+     * regular idle sweep (or background teardown) removes it. Each chunk is marked queried only
+     * after its own real EOSE, preserving the MES Pending vs Absent distinction.
      */
     suspend fun fetchWotAssertions(
         providerPubkey: String,
@@ -3137,100 +3161,90 @@ class RelayPool @Inject constructor(
         val chunks = wotSubjectChunks(subjects, prioritySubjects = prioritySubjects)
         if (chunks.isEmpty()) return false
 
-        var allEosed = true
-        for ((index, chunk) in chunks.withIndex()) {
-            val eosed = fetchWotChunk(relayUrl, provider, chunk, index + 1, chunks.size)
-            if (!eosed) {
-                allEosed = false
-            }
-        }
-        return allEosed
-    }
-
-    private suspend fun fetchWotChunk(
-        relayUrl: String,
-        provider: String,
-        chunk: List<String>,
-        page: Int,
-        totalPages: Int,
-    ): Boolean {
-        val conn = relayConnectionFactory.create(relayUrl)
         return try {
-            if (!connectTrackedEphemeral(conn)) return false
-            val state = withTimeoutOrNull(2_000) {
-                conn.state.first {
-                    it == RelayState.CONNECTED || it == RelayState.FAILED || it == RelayState.DISCONNECTED
+            runWotChunkBatch(chunks) { chunk, page, totalPages ->
+                try {
+                    fetchWotChunk(relayUrl, provider, chunk, page, totalPages)
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    Log.w(TAG, "WoT fetch failed for chunk $page/$totalPages on $relayUrl: ${e.message}")
+                    false
                 }
             }
-            if (state != RelayState.CONNECTED) {
-                Log.w(TAG, "WoT fetch connect failed for chunk $page/$totalPages on $relayUrl (state=$state)")
-                return false
-            }
-            fetchWotChunk(conn, relayUrl, provider, chunk, page, totalPages)
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
-            Log.w(TAG, "WoT fetch failed for chunk $page/$totalPages on $relayUrl: ${e.message}")
+            Log.w(TAG, "WoT fetch failed on $relayUrl: ${e.message}")
             false
-        } finally {
-            closeTrackedEphemeral(conn)
         }
     }
 
     private suspend fun fetchWotChunk(
-        conn: RelayConnection,
         relayUrl: String,
         provider: String,
         chunk: List<String>,
         page: Int,
         totalPages: Int,
     ): Boolean {
-        val subId = "wot-${relayUrl.hashCode().toUInt()}-${System.nanoTime()}-$page"
+        // Admit the provider to the unpurposed warm pool. Repeated viewport batches reuse it,
+        // while the ordinary sweep/background lifecycle still bounds its lifetime.
+        if (getOrCreateConnection(relayUrl, RelayRequestClass.GENERAL) == null) {
+            Log.w(TAG, "WoT fetch connect failed on $relayUrl")
+            return false
+        }
+
+        val subId = "wot-30382-${relayUrl.hashCode().toUInt()}-${System.nanoTime()}-$page"
         val filter = wotAssertionFilter(provider, chunk) ?: return false
         val req = buildJsonArray {
             add(JsonPrimitive("REQ"))
             add(JsonPrimitive(subId))
             add(filter)
         }.toString()
-        if (!conn.send(req)) return false
 
-        val verifiedEvents = ArrayList<NostrEvent>(chunk.size)
-        val eosed = withTimeoutOrNull(WOT_FETCH_TIMEOUT_MS) {
-            while (true) {
-                val raw = conn.messages.receive()
-                when {
-                    raw.startsWith("[\"EVENT\"") -> {
-                        val event = processor.parseAndVerify(raw, relayUrl)
-                        if (event != null && event.kind == 30382 && normalizeWotPubkey(event.pubkey) == provider) {
-                            verifiedEvents.add(event)
-                        }
+        val verifiedEvents = ConcurrentHashMap<String, NostrEvent>()
+        val sawRealEose = AtomicBoolean(false)
+        val evidenceTap = RelayMessageTap { message ->
+            when (message) {
+                is RelayTapMessage.VerifiedEvent -> {
+                    val event = message.event
+                    if (message.subscriptionId == subId &&
+                        event.kind == 30382 &&
+                        normalizeWotPubkey(event.pubkey) == provider
+                    ) {
+                        verifiedEvents.putIfAbsent(event.id, event)
                     }
-                    raw.startsWith("[\"EOSE\"") && extractEoseSubId(raw) == subId -> {
-                        return@withTimeoutOrNull true
+                }
+                is RelayTapMessage.Control -> {
+                    if (message.raw.startsWith("[\"EOSE\"") &&
+                        extractEoseSubId(message.raw) == subId
+                    ) {
+                        sawRealEose.set(true)
                     }
-                    raw.startsWith("[\"CLOSED\"") && raw.contains("\"$subId\"") -> {
-                        Log.w(TAG, "WoT fetch CLOSED for chunk $page/$totalPages on $relayUrl")
-                        return@withTimeoutOrNull false
-                    }
-                    raw.startsWith("[\"AUTH\"") -> {
-                        val challenge = raw.substringAfter("[\"AUTH\",\"", "")
-                            .substringBefore("\"")
-                        if (challenge.isNotEmpty()) handleAuthChallenge(conn, challenge)
-                    }
-                    raw.startsWith("[\"OK\"") -> handleOk(conn, raw)
                 }
             }
-            false
-        } == true
-
-        conn.send(buildJsonArray {
-            add(JsonPrimitive("CLOSE"))
-            add(JsonPrimitive(subId))
-        }.toString())
+        }
+        val completion = CompletableDeferred<Unit>()
+        oneShotEoseCallbacks[subId] = completion
+        processor.registerTap(evidenceTap)
+        val eosed = try {
+            sendOneShotBatch(
+                urls = listOf(relayUrl),
+                reqs = listOf(req),
+                subIds = listOf(subId),
+                timeoutMs = WOT_FETCH_TIMEOUT_MS,
+                requestClass = RelayRequestClass.GENERAL,
+            )
+            withTimeoutOrNull(WOT_FETCH_TIMEOUT_MS) { completion.await() } != null &&
+                sawRealEose.get()
+        } finally {
+            cleanupOneShotSub(subId)
+            processor.unregisterTap(evidenceTap)
+        }
 
         memoryEventStore.get().insertWotAssertionChunk(
             providerPubkey = provider,
-            events = verifiedEvents,
+            events = verifiedEvents.values.toList(),
             queriedSubjects = if (eosed) chunk else emptyList(),
         )
         return eosed

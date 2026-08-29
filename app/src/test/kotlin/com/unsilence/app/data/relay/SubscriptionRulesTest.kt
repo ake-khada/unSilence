@@ -35,6 +35,7 @@ class SubscriptionRulesTest {
             "trust-scores-",
             "poll-responses-",
             "wot-10040-",
+            "wot-30382-",
         )
 
         for (prefix in prefixes) {

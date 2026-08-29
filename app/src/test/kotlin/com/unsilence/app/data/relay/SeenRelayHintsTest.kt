@@ -1,6 +1,7 @@
 package com.unsilence.app.data.relay
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -109,6 +110,13 @@ class SeenRelayHintsTest {
             ).isEmpty(),
         )
         assertTrue(BRIDGE_FALLBACK_RELAY_URLS.none { it in GLOBAL_RELAY_URLS })
+    }
+
+    @Test
+    fun `bridge fallback identity is normalization safe`() {
+        assertTrue(isBridgeFallbackRelay("relay.mostr.pub/"))
+        assertFalse(isBridgeFallbackRelay("wss://relay.example"))
+        assertFalse(isBridgeFallbackRelay("not a relay"))
     }
 
     @Test
