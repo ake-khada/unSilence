@@ -22,19 +22,49 @@ import java.io.DataInputStream
 import java.io.DataOutputStream
 import java.io.File
 import java.io.InputStreamReader
+import java.util.concurrent.atomic.AtomicLong
 import javax.inject.Inject
 import javax.inject.Singleton
 
 private const val TAG = "SnapshotScheduler"
 private const val PERIODIC_INTERVAL_MS = 5 * 60 * 1000L // 5 minutes
+private const val DEFERRED_SAVE_DELAY_MS = 30_000L
+
+/**
+ * Tracks which save requests are covered by a completed snapshot.
+ *
+ * A write captures the newest request generation immediately before serialization. Requests
+ * already pending at that point are represented by the same file and can safely skip their
+ * queued writes. A request arriving during serialization receives a newer generation and is
+ * deliberately left pending, because its mutation may not be present in the in-flight snapshot.
+ */
+internal class SnapshotSaveCoordinator {
+    private val requested = AtomicLong(0L)
+    private val completedThrough = AtomicLong(0L)
+
+    fun request(): Long = requested.incrementAndGet()
+
+    fun coverageForSave(request: Long): Long? =
+        if (request <= completedThrough.get()) null else requested.get()
+
+    fun complete(coveredThrough: Long) {
+        completedThrough.updateAndGet { completed -> maxOf(completed, coveredThrough) }
+    }
+
+    fun reset() {
+        completedThrough.set(requested.get())
+    }
+}
 
 /**
  * Manages MemoryEventStore snapshot persistence with process-lifecycle-driven scheduling.
  *
  * Save triggers:
  *   1. Periodic — every 5 minutes while the app is foregrounded (ON_START → ON_STOP)
- *   2. onStop  — when the app moves to background (ProcessLifecycleOwner)
- *   3. Manual  — [saveNow] called during teardown (logout)
+ *   2. onStop — when the app moves to background (ProcessLifecycleOwner)
+ *   3. Immediate — shortly after authored state changes such as follows or reactions
+ *   4. Deferred — after a quiet window for passive cache updates such as NIP-05 verification
+ *   5. Manual — [saveNow] called during teardown (logout)
  *
  * Durability:
  *   Uses [AtomicFile] for crash-safe writes (write to tmp, rename on success,
@@ -44,18 +74,28 @@ private const val PERIODIC_INTERVAL_MS = 5 * 60 * 1000L // 5 minutes
  *   [Mutex] ensures only one save or restore runs at a time.
  */
 @Singleton
-class SnapshotScheduler @Inject constructor(
+class SnapshotScheduler internal constructor(
     private val memoryEventStore: MemoryEventStore,
     private val snapshotFile: AtomicFile,
+    private val deferredSaveDelayMs: Long,
 ) : DefaultLifecycleObserver {
+
+    @Inject
+    constructor(
+        memoryEventStore: MemoryEventStore,
+        snapshotFile: AtomicFile,
+    ) : this(memoryEventStore, snapshotFile, DEFERRED_SAVE_DELAY_MS)
 
     // Dedicated dispatcher. Snapshot restore is a long blocking parse —
     // must not compete with WebSocket consume threads.
     private val snapshotDispatcher = Dispatchers.IO.limitedParallelism(1)
     private val scope = CoroutineScope(SupervisorJob() + snapshotDispatcher)
     private val mutex = Mutex()
+    private val saveCoordinator = SnapshotSaveCoordinator()
+    private val scheduledJobsLock = Any()
     internal var periodicJob: Job? = null
     private var immediateJob: Job? = null
+    private var deferredJob: Job? = null
 
     // Guard: save() must not run before restoreIfPresent completes.
     // Without this, a lifecycle-triggered save can overwrite the valid
@@ -83,8 +123,9 @@ class SnapshotScheduler @Inject constructor(
     override fun onStop(owner: LifecycleOwner) {
         periodicJob?.cancel()
         periodicJob = null
+        val request = saveCoordinator.request()
         scope.launch {
-            val saved = withTimeoutOrNull(3000L) { save() }
+            val saved = withTimeoutOrNull(3000L) { save(request) }
             if (saved == null) {
                 Log.w(TAG, "onStop save timed out after 3s (mutex held by periodic save)")
             }
@@ -213,7 +254,7 @@ class SnapshotScheduler @Inject constructor(
      * Always runs — bypasses the [restored] guard (explicit caller intent).
      */
     suspend fun saveNow() {
-        doSave()
+        doSave(saveCoordinator.request(), requireRestored = false)
     }
 
     /**
@@ -222,10 +263,31 @@ class SnapshotScheduler @Inject constructor(
      * that the user can't background the app before the save fires.
      */
     fun scheduleImmediate() {
-        immediateJob?.cancel()
-        immediateJob = scope.launch {
-            delay(50L)
-            save()
+        val request = saveCoordinator.request()
+        synchronized(scheduledJobsLock) {
+            immediateJob?.cancel()
+            immediateJob = scope.launch {
+                delay(50L)
+                save(request)
+            }
+        }
+    }
+
+    /**
+     * Schedule persistence for passive cache state after a quiet window.
+     *
+     * Cache refreshes such as NIP-05 verification may finish in staggered bursts while the
+     * user scrolls. Restarting this timer folds the burst into one full-store snapshot; the
+     * periodic and onStop paths still bound durability if refreshes remain continuous.
+     */
+    fun scheduleDeferred() {
+        val request = saveCoordinator.request()
+        synchronized(scheduledJobsLock) {
+            deferredJob?.cancel()
+            deferredJob = scope.launch {
+                delay(deferredSaveDelayMs)
+                save(request)
+            }
         }
     }
 
@@ -233,22 +295,36 @@ class SnapshotScheduler @Inject constructor(
      * Delete snapshot file on disk. Called during teardown to prevent
      * restoreIfPresent() from reloading old user's events after re-login.
      */
-    fun deleteSnapshot() {
-        snapshotFile.delete()
-        restored = false
-        Log.d(TAG, "Snapshot deleted")
-    }
-
-    private suspend fun save() {
-        if (!restored) {
-            Log.d(TAG, "save() skipped — restore not yet complete")
-            return
+    suspend fun deleteSnapshot() {
+        val pendingJobs = synchronized(scheduledJobsLock) {
+            listOfNotNull(immediateJob, deferredJob).also {
+                immediateJob = null
+                deferredJob = null
+            }
         }
-        doSave()
+        pendingJobs.forEach(Job::cancel)
+        pendingJobs.forEach { it.join() }
+        mutex.withLock {
+            snapshotFile.delete()
+            saveCoordinator.reset()
+            restored = false
+            Log.d(TAG, "Snapshot deleted")
+        }
     }
 
-    private suspend fun doSave() {
+    private suspend fun save(request: Long) {
+        doSave(request, requireRestored = true)
+    }
+
+    private suspend fun doSave(request: Long, requireRestored: Boolean) {
         mutex.withLock {
+            // Check under the same lock as deleteSnapshot(): a save that passed an
+            // outside guard before logout could otherwise recreate the deleted file.
+            if (requireRestored && !restored) {
+                Log.d(TAG, "save() skipped — restore not yet complete")
+                return
+            }
+            val coveredThrough = saveCoordinator.coverageForSave(request) ?: return
             try {
                 val stream = snapshotFile.startWrite()
                 try {
@@ -260,6 +336,7 @@ class SnapshotScheduler @Inject constructor(
                     val sections = memoryEventStore.saveSnapshotBinary(out)
                     out.flush()
                     snapshotFile.finishWrite(stream)
+                    saveCoordinator.complete(coveredThrough)
                     Log.w(
                         TAG,
                         "Snapshot sections: totalBytes=${sections.totalBytes} " +
@@ -301,7 +378,7 @@ class SnapshotScheduler @Inject constructor(
         periodicJob = scope.launch {
             while (true) {
                 delay(PERIODIC_INTERVAL_MS)
-                save()
+                save(saveCoordinator.request())
             }
         }
     }

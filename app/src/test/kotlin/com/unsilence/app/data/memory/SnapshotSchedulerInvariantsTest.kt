@@ -10,6 +10,7 @@ import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.withContext
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -20,6 +21,10 @@ import java.io.ByteArrayOutputStream
 import java.io.DataInputStream
 import java.io.DataOutputStream
 import java.io.File
+import java.io.FileOutputStream
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicInteger
 
 /**
  * Invariant tests for SnapshotScheduler save/restore behavior.
@@ -30,9 +35,129 @@ import java.io.File
  */
 class SnapshotSchedulerInvariantsTest {
 
+    @Test
+    fun `save coordinator coalesces requests covered by the same write`() {
+        val coordinator = SnapshotSaveCoordinator()
+        val first = coordinator.request()
+        val second = coordinator.request()
+        val coveredThrough = coordinator.coverageForSave(first)
+
+        assertEquals(second, coveredThrough)
+        coordinator.complete(coveredThrough!!)
+
+        assertNull(coordinator.coverageForSave(first))
+        assertNull(coordinator.coverageForSave(second))
+    }
+
+    @Test
+    fun `save coordinator preserves a request arriving during serialization`() {
+        val coordinator = SnapshotSaveCoordinator()
+        val first = coordinator.request()
+        val coveredThrough = coordinator.coverageForSave(first)!!
+        val arrivedDuringWrite = coordinator.request()
+
+        coordinator.complete(coveredThrough)
+
+        assertEquals(arrivedDuringWrite, coordinator.coverageForSave(arrivedDuringWrite))
+    }
+
+    @Test
+    fun `stale completion after reset cannot cover a new session request`() {
+        val coordinator = SnapshotSaveCoordinator()
+        val oldRequest = coordinator.request()
+        val staleCoverage = coordinator.coverageForSave(oldRequest)!!
+
+        coordinator.reset()
+        coordinator.complete(staleCoverage)
+
+        val newSessionRequest = coordinator.request()
+        assertEquals(newSessionRequest, coordinator.coverageForSave(newSessionRequest))
+    }
+
+    @Test
+    fun `deleteSnapshot waits for an in-flight save and removes its completed file`() = runTest {
+        val snapshotPath = File(tmpDir, "logout-race.snapshot")
+        val atomicFile = BlockingStartAtomicFile(snapshotPath)
+        val racingScheduler = SnapshotScheduler(store, atomicFile)
+        store.insert(event(id = "previous-account-note", kind = 1, createdAt = 100))
+
+        val save = async(Dispatchers.IO) { racingScheduler.saveNow() }
+        assertTrue(
+            "save must reach startWrite while holding the scheduler mutex",
+            withContext(Dispatchers.IO) { atomicFile.writeAttempted.await(5, TimeUnit.SECONDS) },
+        )
+
+        val delete = async(Dispatchers.IO) { racingScheduler.deleteSnapshot() }
+        try {
+            assertFalse(
+                "delete must not reach AtomicFile while the stale save owns the mutex",
+                withContext(Dispatchers.IO) { atomicFile.deleteCalled.await(150, TimeUnit.MILLISECONDS) },
+            )
+        } finally {
+            atomicFile.allowWrite.countDown()
+        }
+        save.await()
+        delete.await()
+
+        assertTrue("delete must run after the save completes", atomicFile.deleteCalled.await(5, TimeUnit.SECONDS))
+        assertFalse("logout must leave no restorable snapshot", snapshotPath.exists())
+    }
+
+    @Test
+    fun `deferred cache saves collapse a completion burst into one snapshot`() = runTest {
+        val snapshotPath = File(tmpDir, "deferred-cache.snapshot")
+        val atomicFile = CountingAtomicFile(snapshotPath)
+        val deferredScheduler = SnapshotScheduler(store, atomicFile, deferredSaveDelayMs = 75L)
+        deferredScheduler.restoreIfPresent()
+        store.insert(event(id = "cached-verification", kind = 1, createdAt = 100))
+
+        repeat(8) { deferredScheduler.scheduleDeferred() }
+
+        assertTrue(
+            "the coalesced snapshot must complete",
+            withContext(Dispatchers.IO) { atomicFile.writeFinished.await(5, TimeUnit.SECONDS) },
+        )
+        withContext(Dispatchers.IO) { Thread.sleep(150L) }
+
+        assertEquals(1, atomicFile.writeCount.get())
+        assertTrue(snapshotPath.exists())
+    }
+
     private lateinit var tmpDir: File
     private lateinit var store: MemoryEventStore
     private lateinit var scheduler: SnapshotScheduler
+
+    private class BlockingStartAtomicFile(baseFile: File) : AtomicFile(baseFile) {
+        val writeAttempted = CountDownLatch(1)
+        val allowWrite = CountDownLatch(1)
+        val deleteCalled = CountDownLatch(1)
+
+        override fun startWrite(): FileOutputStream {
+            writeAttempted.countDown()
+            check(allowWrite.await(5, TimeUnit.SECONDS)) { "test timed out waiting to release snapshot write" }
+            return super.startWrite()
+        }
+
+        override fun delete() {
+            deleteCalled.countDown()
+            super.delete()
+        }
+    }
+
+    private class CountingAtomicFile(baseFile: File) : AtomicFile(baseFile) {
+        val writeCount = AtomicInteger(0)
+        val writeFinished = CountDownLatch(1)
+
+        override fun startWrite(): FileOutputStream {
+            writeCount.incrementAndGet()
+            return super.startWrite()
+        }
+
+        override fun finishWrite(str: FileOutputStream?) {
+            super.finishWrite(str)
+            writeFinished.countDown()
+        }
+    }
 
     @Before
     fun setUp() {

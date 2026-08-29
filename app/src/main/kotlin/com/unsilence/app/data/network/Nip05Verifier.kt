@@ -34,7 +34,7 @@ class Nip05Verifier @Inject constructor(
     private val coordinator = Nip05ResolutionCoordinator(
         memoryEventStore = memoryEventStore,
         fetch = httpClient::resolve,
-        onStored = snapshotScheduler::scheduleImmediate,
+        onStored = snapshotScheduler::scheduleDeferred,
         scope = CoroutineScope(SupervisorJob() + Dispatchers.IO),
     )
 
