@@ -72,6 +72,11 @@ class VideoPlaybackScope(
     internal var previousActiveId: String? = null
     internal var lastVisibleItemCount: Int = -1
     internal var lastLayoutShiftAt: Long = 0L
+    internal var mapPasses: Int = 0
+    internal var confirmationAttempts: Int = 0
+    internal var confirmationFires: Int = 0
+    internal var starvationWatchdogLoggedTicks: Int = 0
+    internal var modelsResolvedLogged: Boolean = false
 
     fun isActiveVideo(noteId: String): Boolean = noteId == activeVideoNoteId
 
@@ -284,6 +289,10 @@ fun rememberVideoPlaybackScope(
         if (scope.videoRenderModels != combined) {
             scope.videoRenderModels = combined
         }
+        if (!scope.modelsResolvedLogged && combined.isNotEmpty()) {
+            scope.modelsResolvedLogged = true
+            Log.w("VideoScope", "models resolved: ${combined.size} rows for $ownerId")
+        }
     }
 
     val noteIdsWithVideo = remember(scope.videoRenderModels) { scope.videoRenderModels.keys }
@@ -349,6 +358,8 @@ fun rememberVideoPlaybackScope(
         // changes. That is exactly the "video appears after sliding" failure.
         snapshotFlow { scope.videoRenderModels.keys to listState.layoutInfo }
             .map { (currentIds, layoutInfo) ->
+                scope.mapPasses += 1
+
                 // Fullscreen freeze
                 if (showFullscreenRef.value) return@map activeRef.value
 
@@ -416,6 +427,7 @@ fun rememberVideoPlaybackScope(
                     // Confirmation window — candidate must hold for the
                     // confirmation period. If a different candidate arrives,
                     // flatMapLatest cancels this coroutine automatically.
+                    scope.confirmationAttempts += 1
                     delay(VideoPlaybackScope.ACTIVATION_CONFIRMATION_MS)
 
                     // Initial activation should not wait for scroll settle. On
@@ -423,6 +435,7 @@ fun rememberVideoPlaybackScope(
                     // report transient scroll/layout motion; waiting for settle
                     // keeps autoplay dark until the user nudges the list.
                     if (activeRef.value == null) {
+                        scope.confirmationFires += 1
                         emit(candidate)
                         return@flow
                     }
@@ -437,6 +450,7 @@ fun rememberVideoPlaybackScope(
                         delay(VideoPlaybackScope.SCROLL_SETTLE_MS)
                     } while (listState.isScrollInProgress)
 
+                    scope.confirmationFires += 1
                     emit(candidate)
                 }
             }
@@ -457,15 +471,73 @@ fun rememberVideoPlaybackScope(
                     }
 
                     val oldId = scope.activeVideoNoteId
-                    Log.d("VideoScope", "Active video: ${oldId?.take(8) ?: "none"} → ${newActiveId?.take(8) ?: "none"}")
+                    Log.w(
+                        "VideoScope",
+                        "Active video: ${oldId?.take(8) ?: "none"} → " +
+                            "${newActiveId?.take(8) ?: "none"} owner=$ownerId",
+                    )
                     scope.previousActiveId = oldId
                     scope.activeVideoNoteId = newActiveId
                     scope.lastActiveTransitionAt = now
+                    if (oldId == null && newActiveId != null) {
+                        scope.mapPasses = 0
+                        scope.confirmationAttempts = 0
+                        scope.confirmationFires = 0
+                        scope.starvationWatchdogLoggedTicks = 0
+                    }
                     if (newActiveId == null) {
                         exoPlayer.playWhenReady = false
                     }
                 }
             }
+    }
+
+    LaunchedEffect(Unit) {
+        while (true) {
+            delay(5_000)
+
+            val currentModels = scope.videoRenderModels
+            if (scope.activeVideoNoteId != null || currentModels.isEmpty()) {
+                scope.starvationWatchdogLoggedTicks = 0
+                continue
+            }
+
+            val layoutInfo = listState.layoutInfo
+            val viewportStart = layoutInfo.viewportStartOffset
+            val viewportEnd = layoutInfo.viewportEndOffset
+            val visibleVideoItems = layoutInfo.visibleItemsInfo.mapNotNull { item ->
+                val id = item.key as? String ?: return@mapNotNull null
+                if (id !in currentModels.keys) return@mapNotNull null
+
+                val visibleTop = maxOf(item.offset, viewportStart)
+                val visibleBottom = minOf(item.offset + item.size, viewportEnd)
+                val fraction =
+                    if (item.size > 0) {
+                        maxOf(0, visibleBottom - visibleTop).toFloat() / item.size
+                    } else {
+                        0f
+                    }
+                id to fraction
+            }
+            val bestVisibleVideo = visibleVideoItems.maxByOrNull { it.second }
+            if (bestVisibleVideo == null || bestVisibleVideo.second < 0.35f) {
+                scope.starvationWatchdogLoggedTicks = 0
+                continue
+            }
+            if (scope.starvationWatchdogLoggedTicks >= 3) continue
+
+            scope.starvationWatchdogLoggedTicks += 1
+            Log.w(
+                "VideoScope",
+                "starvation: owner=$ownerId models=${currentModels.size} " +
+                    "visibleVideos=${visibleVideoItems.size} " +
+                    "best=${bestVisibleVideo.first.take(8)} " +
+                    "visibility=${bestVisibleVideo.second} mapPasses=${scope.mapPasses} " +
+                    "confirmationAttempts=${scope.confirmationAttempts} " +
+                    "confirmationFires=${scope.confirmationFires} " +
+                    "scrolling=${listState.isScrollInProgress}",
+            )
+        }
     }
 
     return scope
