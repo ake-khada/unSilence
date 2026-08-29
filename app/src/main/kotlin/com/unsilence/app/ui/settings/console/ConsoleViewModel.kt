@@ -29,7 +29,8 @@ import javax.inject.Inject
 data class ConsoleUiState(
     val refreshing: Boolean = false,
     val relays: List<ConsoleRelayRow> = emptyList(),
-    val relaySummary: String = "0 connected · 0 idle",
+    val relaySummary: String = "0 connected · 0 connecting · 0 inactive",
+    val relayCatalogSummary: String = "0 catalogued for discovery",
     val store: MesSizeSnapshot? = null,
     val snapshotAgeSeconds: Long = Long.MAX_VALUE,
     val gates: ConsoleGateState = ConsoleGateState(),
@@ -104,14 +105,17 @@ class ConsoleViewModel @Inject constructor(
             snapshotState,
             selectedFilter,
         ) { connectionStates, directory, snapshot, filter ->
-            val relayRows = buildRelayRows(connectionStates, directory, relayPool.connectionDebugSnapshot())
-            val connected = relayRows.count { it.state == RelayState.CONNECTED }
-            val idle = relayRows.size - connected
+            val relayRows = buildConsoleRelayRows(
+                connectionStates = connectionStates,
+                directory = directory,
+                debug = relayPool.connectionDebugSnapshot(),
+            )
             val filteredLogs = filterLogLines(snapshot.logs, filter)
             ConsoleUiState(
                 refreshing = snapshot.refreshing,
                 relays = relayRows,
-                relaySummary = "$connected connected · $idle idle",
+                relaySummary = formatConsoleRelaySummary(relayRows),
+                relayCatalogSummary = "${directory.size} catalogued for discovery",
                 store = snapshot.store,
                 snapshotAgeSeconds = snapshot.snapshotAgeSeconds,
                 gates = snapshot.gates,
@@ -170,30 +174,56 @@ class ConsoleViewModel @Inject constructor(
     fun diagnosticsText(state: ConsoleUiState): String =
         formatDiagnosticsBundle(
             ConsoleDiagnosticsBundle(
-                relaySummary = state.relaySummary,
+                relaySummary = "${state.relaySummary} · ${state.relayCatalogSummary}",
                 storeSummary = "${state.storeSummary} · snapshot ${formatSnapshotAgeSeconds(state.snapshotAgeSeconds)}",
                 gatesSummary = state.gatesSummary,
                 logs = state.filteredLogs,
             ),
         )
 
-    private fun buildRelayRows(
-        connectionStates: Map<String, RelayState>,
-        directory: Map<String, RelayDirectoryEntry>,
-        debug: Map<String, RelayConnectionDebugSnapshot>,
-    ): List<ConsoleRelayRow> {
-        val urls = (connectionStates.keys + directory.keys + debug.keys).toSortedSet()
-        return urls.map { url ->
-            val d = debug[url]
-            ConsoleRelayRow(
-                url = url,
-                state = connectionStates[url],
-                purposes = d?.purposes.orEmpty(),
-                oneShotCount = d?.oneShotCount ?: 0,
-                queuedReqCount = d?.queuedReqCount ?: 0,
-                hasActiveSubscription = d?.hasActiveSubscription == true,
-                directory = directory[url],
-            )
-        }
-    }
+}
+
+/**
+ * Build rows only for relays participating in the live connection system.
+ *
+ * [directory] is discovery metadata, not connection state. It enriches a live row but
+ * never creates one; otherwise hundreds of catalog-only relays appear as fake "idle"
+ * connections and obscure the sockets the Console is meant to diagnose.
+ */
+internal fun buildConsoleRelayRows(
+    connectionStates: Map<String, RelayState>,
+    directory: Map<String, RelayDirectoryEntry>,
+    debug: Map<String, RelayConnectionDebugSnapshot>,
+): List<ConsoleRelayRow> {
+    val urls = connectionStates.keys + debug.keys
+    return urls.map { url ->
+        val d = debug[url]
+        ConsoleRelayRow(
+            url = url,
+            state = connectionStates[url],
+            purposes = d?.purposes.orEmpty(),
+            oneShotCount = d?.oneShotCount ?: 0,
+            queuedReqCount = d?.queuedReqCount ?: 0,
+            hasActiveSubscription = d?.hasActiveSubscription == true,
+            directory = directory[url],
+        )
+    }.sortedWith(
+        compareBy<ConsoleRelayRow> { consoleRelayStateRank(it.state) }
+            .thenBy { it.url },
+    )
+}
+
+internal fun formatConsoleRelaySummary(rows: List<ConsoleRelayRow>): String {
+    val connected = rows.count { it.state == RelayState.CONNECTED }
+    val connecting = rows.count { it.state == RelayState.CONNECTING }
+    val inactive = rows.size - connected - connecting
+    return "$connected connected · $connecting connecting · $inactive inactive"
+}
+
+private fun consoleRelayStateRank(state: RelayState?): Int = when (state) {
+    RelayState.CONNECTED -> 0
+    RelayState.CONNECTING -> 1
+    RelayState.FAILED -> 2
+    RelayState.DISCONNECTED -> 3
+    null -> 4
 }
