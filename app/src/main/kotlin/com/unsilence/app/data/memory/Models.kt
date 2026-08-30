@@ -210,6 +210,7 @@ sealed interface NotificationRow {
         val dominantReaction: ReactionContent?, // reactions
         val anonymousCount: Int,
         val anonymousSats: Long,
+        val anonymousMostRecentAt: Long,         // preserves recency when named actors are filtered
         override val mostRecentAt: Long,
     ) : NotificationRow {
         override val key get() = "$notifType|$targetNoteId"
