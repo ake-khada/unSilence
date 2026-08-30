@@ -1,5 +1,6 @@
 package com.unsilence.app.ui.profile
 
+import com.unsilence.app.data.memory.MuteList
 import com.unsilence.app.data.memory.NostrEvent
 import com.unsilence.app.ui.feed.FeedContentFilter
 import org.junit.Assert.assertFalse
@@ -36,16 +37,57 @@ class ProfileContentPolicyTest {
         assertFalse(matchesProfileContentFilter(repost, FeedContentFilter.REPLIES_ONLY))
     }
 
+    @Test
+    fun `profile timeline hides events covered by the existing mute policy`() {
+        val mutedAuthor = event(kind = 1, pubkey = "muted-author")
+        val mutedWord = event(kind = 1, content = "A blocked phrase appears here")
+        val visible = event(kind = 1, id = "visible", content = "ordinary note")
+        val muteList = MuteList(
+            pubkeys = linkedSetOf("muted-author"),
+            hashtags = linkedSetOf(),
+            words = linkedSetOf("blocked phrase"),
+            eventIds = linkedSetOf(),
+        )
+
+        assertFalse(
+            isVisibleProfileTimelineEvent(
+                mutedAuthor,
+                FeedContentFilter.NOTES_ONLY,
+                muteList,
+                eventProvider = { null },
+            ),
+        )
+        assertFalse(
+            isVisibleProfileTimelineEvent(
+                mutedWord,
+                FeedContentFilter.NOTES_ONLY,
+                muteList,
+                eventProvider = { null },
+            ),
+        )
+        assertTrue(
+            isVisibleProfileTimelineEvent(
+                visible,
+                FeedContentFilter.NOTES_ONLY,
+                muteList,
+                eventProvider = { null },
+            ),
+        )
+    }
+
     private fun event(
         kind: Int,
+        id: String = "event-$kind",
+        pubkey: String = "author",
+        content: String = "content",
         tags: List<List<String>> = emptyList(),
         replyToId: String? = null,
         rootId: String? = null,
     ) = NostrEvent(
-        id = "event-$kind",
-        pubkey = "author",
+        id = id,
+        pubkey = pubkey,
         kind = kind,
-        content = "content",
+        content = content,
         createdAt = 1L,
         tags = tags,
 

@@ -1,6 +1,8 @@
 package com.unsilence.app.ui.profile
 
+import com.unsilence.app.data.memory.MuteList
 import com.unsilence.app.data.memory.NostrEvent
+import com.unsilence.app.data.memory.isMuted
 import com.unsilence.app.data.relay.PROFILE_NOTE_REPLY_EVENT_KINDS
 import com.unsilence.app.ui.feed.FeedContentFilter
 
@@ -27,3 +29,12 @@ internal fun matchesProfileContentFilter(
                 (!isRepost && (event.replyToId != null || event.rootId != null))
     }
 }
+
+internal fun isVisibleProfileTimelineEvent(
+    event: NostrEvent,
+    filter: FeedContentFilter,
+    muteList: MuteList?,
+    eventProvider: (String) -> NostrEvent?,
+): Boolean =
+    matchesProfileContentFilter(event, filter) &&
+        !isMuted(event, muteList, eventProvider)
