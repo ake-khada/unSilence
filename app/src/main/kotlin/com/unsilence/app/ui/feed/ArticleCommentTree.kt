@@ -1,9 +1,14 @@
 package com.unsilence.app.ui.feed
 
 import com.unsilence.app.data.memory.FeedRow
+import com.unsilence.app.ui.shared.pruneFullyMutedSubtrees
 
-/** A comment paired with its nesting depth (0 = top-level). */
-internal data class CommentDepth(val row: FeedRow, val depth: Int)
+/** A comment paired with its nesting depth (0 = top-level) and moderation state. */
+internal data class CommentDepth(
+    val row: FeedRow,
+    val depth: Int,
+    val muted: Boolean = false,
+)
 
 /**
  * Flatten the flat article-comment list into a depth-ordered display list:
@@ -14,7 +19,11 @@ internal data class CommentDepth(val row: FeedRow, val depth: Int)
  * quote/mention false-attribution guard). Siblings are oldest-first (createdAt,
  * id tie-break); depth is capped at [maxDepth] for layout. Pure + testable.
  */
-internal fun flattenArticleComments(comments: List<FeedRow>, maxDepth: Int = 6): List<CommentDepth> {
+internal fun flattenArticleComments(
+    comments: List<FeedRow>,
+    maxDepth: Int = 6,
+    mutedIds: Set<String> = emptySet(),
+): List<CommentDepth> {
     if (comments.isEmpty()) return emptyList()
     val ids = comments.mapTo(HashSet()) { it.id }
     val childrenOf = HashMap<String, MutableList<FeedRow>>()
@@ -35,11 +44,17 @@ internal fun flattenArticleComments(comments: List<FeedRow>, maxDepth: Int = 6):
     val visited = HashSet<String>()
     fun walk(row: FeedRow, depth: Int) {
         if (!visited.add(row.id)) return
-        out.add(CommentDepth(row, depth.coerceAtMost(maxDepth)))
+        out.add(CommentDepth(row, depth, muted = row.id in mutedIds))
         childrenOf[row.id]?.forEach { walk(it, depth + 1) }
     }
     roots.forEach { walk(it, 0) }
     // Safety net: any row not reached (cycle / orphan parent) shown flat.
-    for (c in comments) if (c.id !in visited) out.add(CommentDepth(c, 0))
-    return out
+    for (c in comments) {
+        if (c.id !in visited) out.add(CommentDepth(c, 0, muted = c.id in mutedIds))
+    }
+    return pruneFullyMutedSubtrees(
+        rows = out,
+        depthOf = { it.depth },
+        isMuted = { it.muted },
+    ).map { it.copy(depth = it.depth.coerceAtMost(maxDepth)) }
 }

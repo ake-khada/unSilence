@@ -74,6 +74,7 @@ import com.unsilence.app.ui.markdown.MarkdownContent
 import com.unsilence.app.ui.shared.CardRole
 import com.unsilence.app.ui.shared.EventEngagementSnapshot
 import com.unsilence.app.ui.shared.FeedDivider
+import com.unsilence.app.ui.shared.MutedContentHiddenCard
 import com.unsilence.app.ui.shared.PostActionsHost
 import com.unsilence.app.ui.shared.pollActionCallbacks
 import com.unsilence.app.ui.shared.rememberVideoPlaybackScope
@@ -171,7 +172,8 @@ fun ArticleReaderScreen(
         model.article?.dTag?.takeIf { it.isNotBlank() }?.let { "30023:${model.pubkey}:$it" }
     }
     val commentsFlow = remember(articleCoord) { articleReaderVm.commentsFlow(articleCoord ?: "") }
-    val comments by commentsFlow.collectAsStateWithLifecycle(emptyList())
+    val commentsState by commentsFlow.collectAsStateWithLifecycle(ArticleCommentsState())
+    val comments = commentsState.rows
     val wotLookups by articleReaderVm.wotLookups.collectAsStateWithLifecycle()
     val feedWotDisplayMode by articleReaderVm.feedWotDisplayMode.collectAsStateWithLifecycle()
     LaunchedEffect(articleCoord) {
@@ -179,24 +181,33 @@ fun ArticleReaderScreen(
             articleReaderVm.fetchComments(articleCoord, model.engagementId, model.pubkey, row.relayUrl)
         }
     }
-    LaunchedEffect(comments) {
-        articleReaderVm.hydrateEngagement(comments)
+    LaunchedEffect(comments, commentsState.mutedIds) {
+        articleReaderVm.hydrateEngagement(comments.filterNot { it.id in commentsState.mutedIds })
         if (articleCoord != null) {
             articleReaderVm.fetchCommentReplies(comments.map { it.id }, model.pubkey, model.engagementId, row.relayUrl)
         }
     }
-    LaunchedEffect(model.pubkey, comments) {
+    LaunchedEffect(model.pubkey, comments, commentsState.mutedIds) {
         articleReaderVm.requestWotHydration(
             buildSet {
                 add(model.pubkey)
-                addAll(wotSubjectsForFeedRows(comments, modelProvider = commentActionsVm::getEventModel))
+                addAll(
+                    wotSubjectsForFeedRows(
+                        comments.filterNot { it.id in commentsState.mutedIds },
+                        modelProvider = commentActionsVm::getEventModel,
+                    )
+                )
             }
         )
     }
     // Depth-ordered for display: replies nest under their parent (header count
     // stays comments.size). Same flat list drives count/contributors in MES.
-    val depthComments = remember(comments) { flattenArticleComments(comments) }
-    val commentRows = remember(depthComments) { depthComments.map { it.row } }
+    val depthComments = remember(comments, commentsState.mutedIds) {
+        flattenArticleComments(comments, mutedIds = commentsState.mutedIds)
+    }
+    val commentRows = remember(depthComments) {
+        depthComments.filterNot { it.muted }.map { it.row }
+    }
 
     // Article-comment compose (NIP-22). Hosted locally as an overlay so no callback
     // threading through the 5 reader call sites; reader stays behind the compose.
@@ -583,7 +594,7 @@ fun ArticleReaderScreen(
                     }
 
                     // ── Comments (NIP-22 1111 + legacy kind-1, oldest-first) ──
-                    if (comments.isNotEmpty()) {
+                    if (depthComments.isNotEmpty()) {
                         item(key = "comments-header") {
                             HorizontalDivider(color = MaterialTheme.colorScheme.surfaceVariant)
                             Text(
@@ -598,9 +609,6 @@ fun ArticleReaderScreen(
                         items(depthComments, key = { it.row.id }) { dc ->
                             val comment = dc.row
                             val depth = dc.depth
-                            val cModel = remember(comment.id) {
-                                commentActionsVm.getEventModel(comment.id) ?: comment.toEventModel()
-                            }
                             val guideColor = Color.White.copy(alpha = 0.10f)
                             Box(
                                 modifier = Modifier
@@ -613,7 +621,18 @@ fun ArticleReaderScreen(
                                     }
                                     .padding(start = (depth * 12).dp),
                             ) {
-                            EventCard(
+                                if (dc.muted) {
+                                    MutedContentHiddenCard(
+                                        modifier = Modifier.padding(
+                                            horizontal = Spacing.medium,
+                                            vertical = Spacing.small,
+                                        ),
+                                    )
+                                } else {
+                                    val cModel = remember(comment.id) {
+                                        commentActionsVm.getEventModel(comment.id) ?: comment.toEventModel()
+                                    }
+                                    EventCard(
                                 model                 = cModel,
                                 row                   = comment,
                                 role                  = CardRole.Reply,
@@ -682,7 +701,8 @@ fun ArticleReaderScreen(
                                 feedWotDisplayMode    = feedWotDisplayMode,
                                 onWotSubjectsVisible  = articleReaderVm::requestWotHydration,
                                 pollActions           = pollActions,
-                            )
+                                    )
+                                }
                             }
                             FeedDivider()
                         }

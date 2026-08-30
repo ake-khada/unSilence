@@ -17,16 +17,24 @@ import com.unsilence.app.data.relay.WotHydrationCoalescer
 import com.unsilence.app.data.relay.bridgeFallbackRelayTargets
 import com.unsilence.app.data.relay.wotLookupSnapshot
 import com.unsilence.app.ui.shared.TimelineCardData
+import com.unsilence.app.ui.shared.mutedTimelineRowIds
 import dagger.hilt.android.lifecycle.HiltViewModel
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import javax.inject.Inject
+
+data class ArticleCommentsState(
+    val rows: List<FeedRow> = emptyList(),
+    val mutedIds: Set<String> = emptySet(),
+)
 
 /**
  * Owns the article reader's COMMENT machinery: fetch comments by the article's
@@ -63,9 +71,21 @@ class ArticleReaderViewModel @Inject constructor(
         relayPreferencesStore.feedWotDisplayModeFlow()
             .stateIn(viewModelScope, SharingStarted.Eagerly, FeedWotDisplayMode.NUMBERS)
 
-    /** Comments for an article coordinate (oldest-first), live from MES. */
-    fun commentsFlow(coord: String): Flow<List<FeedRow>> =
-        memoryEventStore.articleCommentsFlow(coord)
+    /** Comments for an article coordinate (oldest-first), with muted rows retained as placeholders. */
+    fun commentsFlow(coord: String): Flow<ArticleCommentsState> =
+        combine(
+            memoryEventStore.articleCommentsFlow(coord),
+            memoryEventStore.ownMuteListFlow(),
+        ) { rows, muteList ->
+            ArticleCommentsState(
+                rows = rows,
+                mutedIds = mutedTimelineRowIds(
+                    rows = rows,
+                    muteList = muteList,
+                    eventProvider = memoryEventStore::getNostrEvent,
+                ),
+            )
+        }.flowOn(Dispatchers.Default)
 
     /**
      * Fetch comments from the article's likely relays: author write relays, the

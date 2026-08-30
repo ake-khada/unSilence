@@ -25,6 +25,8 @@ import com.unsilence.app.data.relay.relayResolutionTargets
 import com.unsilence.app.data.relay.wotLookupSnapshot
 import com.unsilence.app.data.relay.wotSubjectsForFeedRows
 import com.unsilence.app.ui.shared.TimelineCardData
+import com.unsilence.app.ui.shared.mutedTimelineRowIds
+import com.unsilence.app.ui.shared.pruneFullyMutedSubtrees
 import java.util.concurrent.ConcurrentHashMap
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.Dispatchers
@@ -45,7 +47,11 @@ import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import javax.inject.Inject
 
-data class DepthRow(val row: FeedRow, val depth: Int)
+data class DepthRow(
+    val row: FeedRow,
+    val depth: Int,
+    val muted: Boolean = false,
+)
 
 data class ThreadUiState(
     val focusedNote: FeedRow? = null,
@@ -72,6 +78,51 @@ internal fun threadProjectionParentId(
         parentId != focusedId &&
         parentId !in availableReplyIds
     ) focusedId else parentId
+}
+
+/**
+ * Flatten replies while retaining a muted parent only when a visible descendant needs its
+ * place in the tree. Fully muted subtrees disappear; retained descendants keep their depth.
+ */
+internal fun flattenThreadReplies(
+    focusedId: String,
+    replyRows: List<FeedRow>,
+    coordinateScoped: Boolean,
+    mutedIds: Set<String> = emptySet(),
+): List<DepthRow> {
+    val availableReplyIds = replyRows.mapTo(HashSet(replyRows.size)) { it.id }
+    val childrenOf = replyRows.groupBy { row ->
+        threadProjectionParentId(
+            replyToId = row.replyToId,
+            rootId = row.rootId,
+            focusedId = focusedId,
+            availableReplyIds = availableReplyIds,
+            coordinateScoped = coordinateScoped,
+        )
+    }.mapValues { (_, rows) -> rows.sortedBy { it.createdAt } }
+
+    val flatList = mutableListOf<DepthRow>()
+    val visited = mutableSetOf<String>()
+    fun walk(parentId: String, depth: Int) {
+        childrenOf[parentId]?.forEach { row ->
+            if (visited.add(row.id)) {
+                flatList.add(
+                    DepthRow(
+                        row = row,
+                        depth = depth,
+                        muted = row.id in mutedIds,
+                    )
+                )
+                walk(row.id, depth + 1)
+            }
+        }
+    }
+    walk(focusedId, 1)
+    return pruneFullyMutedSubtrees(
+        rows = flatList,
+        depthOf = { it.depth },
+        isMuted = { it.muted },
+    ).map { it.copy(depth = it.depth.coerceAtMost(MAX_REPLY_DEPTH)) }
 }
 
 /** Relay locality for the next hop in an ancestor walk. The relay that supplied
@@ -161,7 +212,11 @@ class ThreadViewModel @Inject constructor(
                         memoryEventStore.threadFeedRowFlow(id).map { Triple(id, false, it) }
                     }
                 }
-                .collect { (focusedId, articleMode, rows) ->
+                .combine(memoryEventStore.ownMuteListFlow()) { source, muteList ->
+                    source to muteList
+                }
+                .collect { (source, muteList) ->
+                    val (focusedId, articleMode, rows) = source
                     // Article mode: the focused article isn't in the comment list, and
                     // replies include NIP-22 kind-1111 (not just kind-1).
                     val focused = if (articleMode) {
@@ -174,12 +229,20 @@ class ThreadViewModel @Inject constructor(
                     } else {
                         rows.filter { it.id != focusedId && (it.kind == 1 || it.kind == 1111) }
                     }
+                    val mutedReplyIds = mutedTimelineRowIds(
+                        rows = replyRows,
+                        muteList = muteList,
+                        eventProvider = memoryEventStore::getNostrEvent,
+                    )
 
                     // Comment cards need live engagement — hydrate, same as the reader.
                     // Also stage-fetch replies-to-comments (descendants with no #a/#A
                     // tag) so nested replies show; dedupe so it can't loop.
                     if (articleMode && rows.isNotEmpty()) {
-                        cardHydrator.hydrateEngagement(rows, 0, rows.size - 1)
+                        val visibleRows = rows.filterNot { it.id in mutedReplyIds }
+                        if (visibleRows.isNotEmpty()) {
+                            cardHydrator.hydrateEngagement(visibleRows, 0, visibleRows.size - 1)
+                        }
                         val rowIds = rows.mapTo(HashSet(rows.size)) { it.id }
                         val missingParents = rows.asSequence()
                             .mapNotNull { it.replyToId }
@@ -199,33 +262,12 @@ class ThreadViewModel @Inject constructor(
                         }
                     }
 
-                    // Build parent→children map
-                    val availableReplyIds = replyRows.mapTo(HashSet(replyRows.size)) { it.id }
-                    val childrenOf = replyRows.groupBy { row ->
-                        threadProjectionParentId(
-                            replyToId = row.replyToId,
-                            rootId = row.rootId,
-                            focusedId = focusedId,
-                            availableReplyIds = availableReplyIds,
-                            coordinateScoped = articleMode,
-                        )
-                    }
-                        .mapValues { (_, v) -> v.sortedBy { it.createdAt } }
-
-                    // DFS flatten with bounded depth; visited set prevents
-                    // stack overflow from circular reply chains (malicious or bridged)
-                    val flatList = mutableListOf<DepthRow>()
-                    val visited = mutableSetOf<String>()
-                    fun walk(parentId: String, depth: Int) {
-                        childrenOf[parentId]?.forEach { row ->
-                            if (visited.add(row.id)) {
-                                flatList.add(DepthRow(row, depth.coerceAtMost(MAX_REPLY_DEPTH)))
-                                walk(row.id, depth + 1)
-                            }
-                        }
-                    }
-                    walk(focusedId, 1)
-
+                    val flatList = flattenThreadReplies(
+                        focusedId = focusedId,
+                        replyRows = replyRows,
+                        coordinateScoped = articleMode,
+                        mutedIds = mutedReplyIds,
+                    )
                     _uiState.value = ThreadUiState(
                         focusedNote    = focused,
                         replies        = flatList,
@@ -233,7 +275,7 @@ class ThreadViewModel @Inject constructor(
                         focusedReplyId = tappedId.takeIf { it != focusedId },
                     )
                     val subjects = wotSubjectsForFeedRows(
-                        listOfNotNull(focused) + flatList.map { it.row },
+                        listOfNotNull(focused) + flatList.filterNot { it.muted }.map { it.row },
                         modelProvider = memoryEventStore::getEventModel,
                     )
                     _wotSubjects.value = subjects
