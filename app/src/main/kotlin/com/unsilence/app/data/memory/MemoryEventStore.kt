@@ -5731,6 +5731,7 @@ class MemoryEventStore @Inject constructor(
         private val reactionCounts = HashMap<ReactionContent, Int>()
         private var anonymousCount = 0
         private var anonymousSats = 0L
+        private var anonymousMostRecentAt = 0L
         private var sumSats = 0L
         private var mostRecentAt = 0L
 
@@ -5747,6 +5748,7 @@ class MemoryEventStore @Inject constructor(
             if (actorPubkey == null) {
                 anonymousCount++
                 anonymousSats += sats
+                anonymousMostRecentAt = maxOf(anonymousMostRecentAt, createdAt)
                 return
             }
             val prev = actorsByPubkey[actorPubkey]
@@ -5773,6 +5775,7 @@ class MemoryEventStore @Inject constructor(
                 dominantReaction = reactionCounts.maxByOrNull { it.value }?.key,
                 anonymousCount = anonymousCount,
                 anonymousSats = anonymousSats,
+                anonymousMostRecentAt = anonymousMostRecentAt,
                 mostRecentAt = mostRecentAt,
             )
         }

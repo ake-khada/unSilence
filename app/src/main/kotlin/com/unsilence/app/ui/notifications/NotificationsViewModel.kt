@@ -109,14 +109,19 @@ class NotificationsViewModel @Inject constructor(
                 lastSeenPubkey = pubkey
             }
 
-            memoryEventStore.notificationsFlow(pubkey, followedOnly = followedOnly)
+            mutedNotificationsFlow(
+                rows = memoryEventStore.notificationsFlow(pubkey, followedOnly = followedOnly),
+                muteLists = memoryEventStore.ownMuteListFlow(),
+                eventProvider = memoryEventStore::getNostrEvent,
+            )
                 .collect { items ->
                     _uiState.update { it.copy(items = items, loading = false) }
-                    if (items.isNotEmpty()) {
-                        // Read the in-memory mirror — markSeen() updates it
-                        // immediately (stale capture caused dot reappearing).
-                        _hasNew.value = items.first().mostRecentAt > lastSeenCache.value
-                    }
+                    // Read the in-memory mirror — markSeen() updates it immediately
+                    // (stale capture caused dot reappearing). An entirely muted batch
+                    // cannot leave the new-activity dot lit.
+                    _hasNew.value = items.firstOrNull()?.mostRecentAt
+                        ?.let { it > lastSeenCache.value }
+                        ?: false
 
                     // Fetch missing profiles across ALL actors (singles + every
                     // grouped actor), not just one actor per row.
