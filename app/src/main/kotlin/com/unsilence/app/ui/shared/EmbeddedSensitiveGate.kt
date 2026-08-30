@@ -102,6 +102,21 @@ fun EmbeddedSensitiveGate(
  *  gate and by EventCard for top-level posts on non-feed surfaces. */
 @Composable
 fun SensitiveContentHiddenCard(reason: String?, modifier: Modifier = Modifier) {
+    ContentHiddenCard(
+        text = reason?.takeIf { it.isNotBlank() }?.let { "Sensitive content hidden — $it" }
+            ?: "Sensitive content hidden",
+        modifier = modifier,
+    )
+}
+
+/** Structure-preserving placeholder for a muted reply or comment. */
+@Composable
+fun MutedContentHiddenCard(modifier: Modifier = Modifier) {
+    ContentHiddenCard(text = "Muted content hidden", modifier = modifier)
+}
+
+@Composable
+private fun ContentHiddenCard(text: String, modifier: Modifier) {
     Row(
         verticalAlignment = Alignment.CenterVertically,
         modifier = modifier
@@ -118,8 +133,7 @@ fun SensitiveContentHiddenCard(reason: String?, modifier: Modifier = Modifier) {
         )
         Spacer(Modifier.width(Spacing.small))
         Text(
-            text = reason?.takeIf { it.isNotBlank() }?.let { "Sensitive content hidden — $it" }
-                ?: "Sensitive content hidden",
+            text = text,
             color = TextSecondary,
             fontSize = AppType.footnote,
             fontWeight = FontWeight.Medium,

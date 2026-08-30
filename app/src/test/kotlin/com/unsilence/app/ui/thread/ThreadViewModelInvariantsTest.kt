@@ -2,6 +2,7 @@ package com.unsilence.app.ui.thread
 
 import com.unsilence.app.data.memory.FeedRow
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -39,28 +40,6 @@ class ThreadViewModelInvariantsTest {
         zapCount = 0,
     )
 
-    /**
-     * Mirrors the DFS walk in ThreadViewModel.collect{} — same algorithm,
-     * extracted here so we can test it without standing up the full VM.
-     */
-    private fun walkThread(focusedId: String, replyRows: List<FeedRow>): List<DepthRow> {
-        val childrenOf = replyRows.groupBy { it.replyToId ?: it.rootId ?: focusedId }
-            .mapValues { (_, v) -> v.sortedBy { it.createdAt } }
-
-        val flatList = mutableListOf<DepthRow>()
-        val visited = mutableSetOf<String>()
-        fun walk(parentId: String, depth: Int) {
-            childrenOf[parentId]?.forEach { row ->
-                if (visited.add(row.id)) {
-                    flatList.add(DepthRow(row, depth.coerceAtMost(MAX_REPLY_DEPTH)))
-                    walk(row.id, depth + 1)
-                }
-            }
-        }
-        walk(focusedId, 1)
-        return flatList
-    }
-
     // ── Normal tree ──────────────────────────────────────────────────────────
 
     @Test
@@ -75,7 +54,7 @@ class ThreadViewModelInvariantsTest {
             row("B", replyToId = focused, createdAt = 200),
             row("C", replyToId = "A", createdAt = 150),
         )
-        val result = walkThread(focused, replies)
+        val result = flattenThreadReplies(focused, replies, coordinateScoped = false)
 
         assertEquals(3, result.size)
         // A comes first (createdAt 100), then its child C, then B (createdAt 200)
@@ -85,6 +64,67 @@ class ThreadViewModelInvariantsTest {
         assertEquals(2, result[1].depth)
         assertEquals("B", result[2].row.id)
         assertEquals(1, result[2].depth)
+    }
+
+    @Test
+    fun `muted parent remains as a placeholder and keeps its child attached`() {
+        val focused = "root"
+        val replies = listOf(
+            row("A", replyToId = focused, createdAt = 100),
+            row("B", replyToId = focused, createdAt = 200),
+            row("C", replyToId = "A", createdAt = 150),
+        )
+
+        val result = flattenThreadReplies(
+            focusedId = focused,
+            replyRows = replies,
+            coordinateScoped = false,
+            mutedIds = setOf("A"),
+        )
+
+        assertEquals(listOf("A", "C", "B"), result.map { it.row.id })
+        assertTrue(result[0].muted)
+        assertEquals(1, result[0].depth)
+        assertFalse(result[1].muted)
+        assertEquals(2, result[1].depth)
+    }
+
+    @Test
+    fun `muted leaf replies are dropped rather than replaced with placeholders`() {
+        val replies = (1..30).map { index ->
+            row(
+                id = "spam-$index",
+                replyToId = "root",
+                createdAt = index.toLong(),
+            )
+        }
+
+        val result = flattenThreadReplies(
+            focusedId = "root",
+            replyRows = replies,
+            coordinateScoped = false,
+            mutedIds = replies.mapTo(HashSet()) { it.id },
+        )
+
+        assertTrue(result.isEmpty())
+    }
+
+    @Test
+    fun `muted parent with only muted descendants collapses wholesale`() {
+        val replies = listOf(
+            row("muted-parent", replyToId = "root", createdAt = 100),
+            row("muted-child", replyToId = "muted-parent", createdAt = 200),
+            row("visible-sibling", replyToId = "root", createdAt = 300),
+        )
+
+        val result = flattenThreadReplies(
+            focusedId = "root",
+            replyRows = replies,
+            coordinateScoped = false,
+            mutedIds = setOf("muted-parent", "muted-child"),
+        )
+
+        assertEquals(listOf("visible-sibling"), result.map { it.row.id })
     }
 
     // ── Circular reference ───────────────────────────────────────────────────
@@ -99,7 +139,7 @@ class ThreadViewModelInvariantsTest {
         )
         // Without cycle protection this would recurse forever.
         // With the visited set it should terminate with a finite list.
-        val result = walkThread(focused, replies)
+        val result = flattenThreadReplies(focused, replies, coordinateScoped = false)
 
         // Both nodes form a disconnected cycle (A→B, B→A, neither is a child of "root").
         // Walk from "root" correctly finds nothing. The key invariant: no crash, finite, no dupes.
@@ -116,7 +156,7 @@ class ThreadViewModelInvariantsTest {
         val replies = listOf(
             row("A", replyToId = "A", rootId = focused, createdAt = 100),
         )
-        val result = walkThread(focused, replies)
+        val result = flattenThreadReplies(focused, replies, coordinateScoped = false)
 
         // A's parent is itself, but since the groupBy key is replyToId ("A"),
         // walk("root", 1) won't find it — only walk("A", ...) would.
@@ -138,7 +178,7 @@ class ThreadViewModelInvariantsTest {
                 createdAt = depth * 100L,
             )
         }
-        val result = walkThread(focused, replies)
+        val result = flattenThreadReplies(focused, replies, coordinateScoped = false)
 
         assertEquals(11, result.size)
         assertEquals((1..10).toList() + 10, result.map { it.depth })
@@ -155,7 +195,7 @@ class ThreadViewModelInvariantsTest {
             row("B", replyToId = "A", rootId = focused, createdAt = 200),
             row("C", replyToId = "B", rootId = focused, createdAt = 300),
         )
-        val result = walkThread(focused, replies)
+        val result = flattenThreadReplies(focused, replies, coordinateScoped = false)
 
         assertTrue("Result should be finite", result.size <= 3)
         val ids = result.map { it.row.id }

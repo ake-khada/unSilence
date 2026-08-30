@@ -63,6 +63,7 @@ import com.unsilence.app.ui.feed.engagementId
 import com.unsilence.app.ui.shared.CardRole
 import com.unsilence.app.ui.shared.EngagementSnapshot
 import com.unsilence.app.ui.shared.FeedDivider
+import com.unsilence.app.ui.shared.MutedContentHiddenCard
 import com.unsilence.app.ui.shared.PostActionsHost
 import com.unsilence.app.ui.shared.forEvent
 import com.unsilence.app.ui.shared.pollActionCallbacks
@@ -143,7 +144,7 @@ fun ThreadScreen(
 
     // ── Video playback scope ────────────────────────────────────────────────
     val allThreadRows = remember(state.focusedNote, state.replies) {
-        listOfNotNull(state.focusedNote) + state.replies.map { it.row }
+        listOfNotNull(state.focusedNote) + state.replies.filterNot { it.muted }.map { it.row }
     }
     val videoScope = rememberVideoPlaybackScope(
         ownerId            = "thread-$eventId",
@@ -356,64 +357,73 @@ fun ThreadScreen(
                                         }
                                         .padding(start = indent),
                                 ) {
-                                    val replyModel = remember(reply.id) {
-                                        actionsViewModel.getEventModel(reply.id) ?: reply.toEventModel()
+                                    if (depthRow.muted) {
+                                        MutedContentHiddenCard(
+                                            modifier = Modifier.padding(
+                                                horizontal = Spacing.medium,
+                                                vertical = Spacing.small,
+                                            ),
+                                        )
+                                    } else {
+                                        val replyModel = remember(reply.id) {
+                                            actionsViewModel.getEventModel(reply.id) ?: reply.toEventModel()
+                                        }
+                                        EventCard(
+                                            model               = replyModel,
+                                            row                 = reply,
+                                            role                = CardRole.Reply,
+                                            engagement          = engagement.forEvent(replyModel.engagementId),
+                                            isFocused           = reply.id == state.focusedReplyId,
+                                            onNoteClick         = { /* already viewing thread */ },
+                                            onComment           = { onComment(reply.id) },
+                                            onAuthorClick       = onAuthorClick,
+                                            onQuote             = onQuote,
+                                            onArticleClick      = { articleRow = it },
+                                            onReact             = { actionsViewModel.react(reply.id, reply.pubkey) },
+                                            onReactLongPress    = {
+                                                emojiReactTarget = reply.id to reply.pubkey
+                                                showFullEmojiPicker = true
+                                            },
+                                            pinnedEmojis        = pinnedEmojis,
+                                            onReactWithEmoji    = { emoji ->
+                                                actionsViewModel.react(reply.id, reply.pubkey, ":${emoji.shortcode}:", emoji.url)
+                                            },
+                                            onRepost            = { actionsViewModel.repost(reply.id, reply.pubkey, reply.relayUrl) },
+                                            onZap               = { req -> actionsViewModel.zap(reply.id, reply.pubkey, reply.relayUrl, req) },
+                                            onSaveNwcUri        = { uri -> actionsViewModel.saveNwcUri(uri) },
+                                            lookupProfile       = actionsViewModel::lookupProfile,
+                                            lookupEvent         = { id, hints -> actionsViewModel.lookupEvent(id, hints) },
+                                            lookupEventWithAuthor = { id, hints, authorPk -> actionsViewModel.lookupEvent(id, hints, authorPk) },
+                                            lookupEventReference = actionsViewModel::lookupEvent,
+                                            lookupModel         = actionsViewModel::getEventModel,
+                                            fetchOgMetadata     = actionsViewModel::fetchOgMetadata,
+                                            hasCachedOgMetadata = actionsViewModel::hasCachedOgMetadata,
+                                            profileFlow         = viewModel::profileFlow,
+                                            statsFlow           = viewModel::statsFlow,
+                                            zapDetailsForEvent  = viewModel::zapDetailsForEvent,
+                                            repostPubkeysForEvent = viewModel::repostPubkeysForEvent,
+                                            reactionsForEvent   = viewModel::reactionsForEvent,
+                                            imageDimensionCache = actionsViewModel.imageDimensionCache,
+                                            thumbnailCache      = actionsViewModel.videoThumbnailCache,
+                                            exoPlayer           = videoScope.exoPlayer,
+                                            isMuted             = videoScope.isMuted,
+                                            onToggleMute        = { videoScope.toggleMute() },
+                                            isActiveVideo       = videoScope.isActiveVideo(reply.id),
+                                            activeVideoUrl      = videoScope.activeVideoUrl,
+                                            isFullscreen        = videoScope.showFullscreenVideo,
+                                            onOpenFullscreen    = { videoScope.openFullscreen(reply.id) },
+                                            onVideoModelsResolved = { models ->
+                                                videoScope.registerVideoModels(reply.id, models)
+                                            },
+                                            sensitiveMode       = sensitiveMode,
+                                            isSensitive         = reply.hasContentWarning,
+                                            contentWarningReason = reply.contentWarningReason,
+                                            onLongPress         = { actionsRow = reply },
+                                            wotLookup           = { key -> wotLookups[key] },
+                                            feedWotDisplayMode  = feedWotDisplayMode,
+                                            pollActions         = pollActions,
+                                        )
                                     }
-                                    EventCard(
-                                        model               = replyModel,
-                                        row                 = reply,
-                                        role                = CardRole.Reply,
-                                        engagement          = engagement.forEvent(replyModel.engagementId),
-                                        isFocused           = reply.id == state.focusedReplyId,
-                                        onNoteClick         = { /* already viewing thread */ },
-                                        onComment           = { onComment(reply.id) },
-                                        onAuthorClick       = onAuthorClick,
-                                        onQuote             = onQuote,
-                                        onArticleClick      = { articleRow = it },
-                                        onReact             = { actionsViewModel.react(reply.id, reply.pubkey) },
-                                        onReactLongPress    = {
-                                            emojiReactTarget = reply.id to reply.pubkey
-                                            showFullEmojiPicker = true
-                                        },
-                                        pinnedEmojis        = pinnedEmojis,
-                                        onReactWithEmoji    = { emoji ->
-                                            actionsViewModel.react(reply.id, reply.pubkey, ":${emoji.shortcode}:", emoji.url)
-                                        },
-                                        onRepost            = { actionsViewModel.repost(reply.id, reply.pubkey, reply.relayUrl) },
-                                        onZap               = { req -> actionsViewModel.zap(reply.id, reply.pubkey, reply.relayUrl, req) },
-                                        onSaveNwcUri        = { uri -> actionsViewModel.saveNwcUri(uri) },
-                                        lookupProfile       = actionsViewModel::lookupProfile,
-                                        lookupEvent         = { id, hints -> actionsViewModel.lookupEvent(id, hints) },
-                                        lookupEventWithAuthor = { id, hints, authorPk -> actionsViewModel.lookupEvent(id, hints, authorPk) },
-                                        lookupEventReference = actionsViewModel::lookupEvent,
-                                        lookupModel         = actionsViewModel::getEventModel,
-                                        fetchOgMetadata     = actionsViewModel::fetchOgMetadata,
-                                        hasCachedOgMetadata = actionsViewModel::hasCachedOgMetadata,
-                                        profileFlow         = viewModel::profileFlow,
-                                        statsFlow           = viewModel::statsFlow,
-                                        zapDetailsForEvent  = viewModel::zapDetailsForEvent,
-                                        repostPubkeysForEvent = viewModel::repostPubkeysForEvent,
-                                        reactionsForEvent   = viewModel::reactionsForEvent,
-                                        imageDimensionCache = actionsViewModel.imageDimensionCache,
-                                        thumbnailCache      = actionsViewModel.videoThumbnailCache,
-                                        exoPlayer           = videoScope.exoPlayer,
-                                        isMuted             = videoScope.isMuted,
-                                        onToggleMute        = { videoScope.toggleMute() },
-                                        isActiveVideo       = videoScope.isActiveVideo(reply.id),
-                                        activeVideoUrl      = videoScope.activeVideoUrl,
-                                        isFullscreen        = videoScope.showFullscreenVideo,
-                                        onOpenFullscreen    = { videoScope.openFullscreen(reply.id) },
-                                        onVideoModelsResolved = { models ->
-                                            videoScope.registerVideoModels(reply.id, models)
-                                        },
-                                        sensitiveMode       = sensitiveMode,
-                                        isSensitive         = reply.hasContentWarning,
-                                        contentWarningReason = reply.contentWarningReason,
-                                        onLongPress         = { actionsRow = reply },
-                                        wotLookup           = { key -> wotLookups[key] },
-                                        feedWotDisplayMode  = feedWotDisplayMode,
-                                        pollActions         = pollActions,
-                                    )
                                 }
                                 FeedDivider()
                             }
