@@ -1,35 +1,28 @@
 package com.unsilence.app.ui.thread
 
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
-import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
-import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
-import androidx.activity.compose.BackHandler
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -38,17 +31,13 @@ import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalWindowInfo
-import coil3.compose.AsyncImage
 import com.unsilence.app.data.memory.FeedRow
 import com.unsilence.app.data.memory.toEventModel
 import com.unsilence.app.ui.common.IdentIcon
@@ -63,14 +52,16 @@ import com.unsilence.app.ui.feed.engagementId
 import com.unsilence.app.ui.shared.CardRole
 import com.unsilence.app.ui.shared.EngagementSnapshot
 import com.unsilence.app.ui.shared.FeedDivider
+import com.unsilence.app.ui.shared.LikelySpamClusterCard
 import com.unsilence.app.ui.shared.MutedContentHiddenCard
 import com.unsilence.app.ui.shared.PostActionsHost
+import com.unsilence.app.ui.shared.ReplyListItem
 import com.unsilence.app.ui.shared.forEvent
 import com.unsilence.app.ui.shared.pollActionCallbacks
+import com.unsilence.app.ui.shared.replyListItems
 import com.unsilence.app.ui.shared.rememberVideoPlaybackScope
-import com.unsilence.app.ui.theme.Black
 import com.unsilence.app.ui.theme.AppType
-import com.unsilence.app.ui.theme.Brand
+import com.unsilence.app.ui.theme.Black
 import com.unsilence.app.ui.theme.Sizing
 import com.unsilence.app.ui.theme.Spacing
 import com.unsilence.app.ui.theme.TextSecondary
@@ -122,6 +113,10 @@ fun ThreadScreen(
     val listState = rememberLazyListState()
     val cardWidthPx = LocalWindowInfo.current.containerSize.width
     var didScrollToFocus by remember { mutableStateOf(false) }
+    var revealedSpamClusters by remember(eventId) { mutableStateOf(emptySet<String>()) }
+    val threadItems = remember(state.replies, revealedSpamClusters) {
+        replyListItems(state.replies, revealedSpamClusters)
+    }
 
     LaunchedEffect(openArticleOnLoad, state.focusedNote?.id) {
         val focused = state.focusedNote
@@ -144,7 +139,9 @@ fun ThreadScreen(
 
     // ── Video playback scope ────────────────────────────────────────────────
     val allThreadRows = remember(state.focusedNote, state.replies) {
-        listOfNotNull(state.focusedNote) + state.replies.filterNot { it.muted }.map { it.row }
+        listOfNotNull(state.focusedNote) + state.replies
+            .filterNot { it.muted || it.spamClusterId != null }
+            .map { it.row }
     }
     val videoScope = rememberVideoPlaybackScope(
         ownerId            = "thread-$eventId",
@@ -158,18 +155,11 @@ fun ThreadScreen(
     @OptIn(FlowPreview::class)
     LaunchedEffect(allThreadRows, state.focusedNote?.id, cardWidthPx) {
         if (allThreadRows.isEmpty()) return@LaunchedEffect
-        val hasFocused = state.focusedNote != null
-        val replyStartIndex = if (hasFocused) 2 else 1
-        val replyDataOffset = if (hasFocused) 1 else 0
+        val rowIndexById = allThreadRows.withIndex().associate { it.value.id to it.index }
         fun visibleRowsFromLayout(): List<Int> =
             listState.layoutInfo.visibleItemsInfo.mapNotNull { item ->
-                val lazyIndex = item.index
-                when {
-                    hasFocused && lazyIndex == 0 -> 0
-                    lazyIndex >= replyStartIndex -> replyDataOffset + lazyIndex - replyStartIndex
-                    else -> null
-                }?.takeIf { it in allThreadRows.indices }
-            }
+                (item.key as? String)?.let(rowIndexById::get)
+            }.distinct()
 
         fun warmVisibleRows(visibleRows: List<Int>) {
             val first = visibleRows.minOrNull() ?: return
@@ -203,13 +193,16 @@ fun ThreadScreen(
     }
 
     // ── Scroll to focused reply (when thread opened via a deep reply) ────
-    LaunchedEffect(state.focusedReplyId, state.replies) {
+    LaunchedEffect(state.focusedReplyId, threadItems, state.focusedNote?.id) {
         val focusId = state.focusedReplyId ?: return@LaunchedEffect
         if (didScrollToFocus) return@LaunchedEffect
-        val replyIdx = state.replies.indexOfFirst { it.row.id == focusId }
+        val replyIdx = threadItems.indexOfFirst { item ->
+            item is ReplyListItem.Reply && item.depthRow.row.id == focusId
+        }
         if (replyIdx >= 0) {
-            // Leading items: focused note (1) + reply count header (1) = 2
-            listState.scrollToItem(2 + replyIdx)
+            val leadingItems = (if (state.focusedNote != null) 1 else 0) +
+                (if (state.replies.isNotEmpty()) 1 else 0)
+            listState.scrollToItem(leadingItems + replyIdx)
             didScrollToFocus = true
         }
     }
@@ -335,9 +328,11 @@ fun ThreadScreen(
                                     ),
                                 )
                             }
-                            items(state.replies, key = { it.row.id }) { depthRow ->
-                                val reply = depthRow.row
-                                val depth = depthRow.depth
+                            items(threadItems, key = { it.key }) { threadItem ->
+                                val depth = when (threadItem) {
+                                    is ReplyListItem.Reply -> threadItem.depthRow.depth
+                                    is ReplyListItem.SpamCluster -> threadItem.depth
+                                }
                                 val indent = replyIndentDp(depth).dp
                                 val lineColor = Color.White.copy(alpha = 0.10f)
 
@@ -357,72 +352,95 @@ fun ThreadScreen(
                                         }
                                         .padding(start = indent),
                                 ) {
-                                    if (depthRow.muted) {
-                                        MutedContentHiddenCard(
+                                    when (threadItem) {
+                                        is ReplyListItem.SpamCluster -> LikelySpamClusterCard(
+                                            replyCount = threadItem.replyCount,
+                                            revealed = threadItem.revealed,
+                                            onToggle = {
+                                                revealedSpamClusters =
+                                                    if (threadItem.clusterId in revealedSpamClusters) {
+                                                        revealedSpamClusters - threadItem.clusterId
+                                                    } else {
+                                                        revealedSpamClusters + threadItem.clusterId
+                                                    }
+                                            },
                                             modifier = Modifier.padding(
                                                 horizontal = Spacing.medium,
                                                 vertical = Spacing.small,
                                             ),
                                         )
-                                    } else {
-                                        val replyModel = remember(reply.id) {
-                                            actionsViewModel.getEventModel(reply.id) ?: reply.toEventModel()
+
+                                        is ReplyListItem.Reply -> {
+                                            val depthRow = threadItem.depthRow
+                                            val reply = depthRow.row
+                                            if (depthRow.muted) {
+                                                MutedContentHiddenCard(
+                                                    modifier = Modifier.padding(
+                                                        horizontal = Spacing.medium,
+                                                        vertical = Spacing.small,
+                                                    ),
+                                                )
+                                            } else {
+                                                val replyModel = remember(reply.id) {
+                                                    actionsViewModel.getEventModel(reply.id) ?: reply.toEventModel()
+                                                }
+                                                EventCard(
+                                                    model               = replyModel,
+                                                    row                 = reply,
+                                                    role                = CardRole.Reply,
+                                                    engagement          = engagement.forEvent(replyModel.engagementId),
+                                                    isFocused           = reply.id == state.focusedReplyId,
+                                                    onNoteClick         = { /* already viewing thread */ },
+                                                    onComment           = { onComment(reply.id) },
+                                                    onAuthorClick       = onAuthorClick,
+                                                    onQuote             = onQuote,
+                                                    onArticleClick      = { articleRow = it },
+                                                    onReact             = { actionsViewModel.react(reply.id, reply.pubkey) },
+                                                    onReactLongPress    = {
+                                                        emojiReactTarget = reply.id to reply.pubkey
+                                                        showFullEmojiPicker = true
+                                                    },
+                                                    pinnedEmojis        = pinnedEmojis,
+                                                    onReactWithEmoji    = { emoji ->
+                                                        actionsViewModel.react(reply.id, reply.pubkey, ":${emoji.shortcode}:", emoji.url)
+                                                    },
+                                                    onRepost            = { actionsViewModel.repost(reply.id, reply.pubkey, reply.relayUrl) },
+                                                    onZap               = { req -> actionsViewModel.zap(reply.id, reply.pubkey, reply.relayUrl, req) },
+                                                    onSaveNwcUri        = { uri -> actionsViewModel.saveNwcUri(uri) },
+                                                    lookupProfile       = actionsViewModel::lookupProfile,
+                                                    lookupEvent         = { id, hints -> actionsViewModel.lookupEvent(id, hints) },
+                                                    lookupEventWithAuthor = { id, hints, authorPk -> actionsViewModel.lookupEvent(id, hints, authorPk) },
+                                                    lookupEventReference = actionsViewModel::lookupEvent,
+                                                    lookupModel         = actionsViewModel::getEventModel,
+                                                    fetchOgMetadata     = actionsViewModel::fetchOgMetadata,
+                                                    hasCachedOgMetadata = actionsViewModel::hasCachedOgMetadata,
+                                                    profileFlow         = viewModel::profileFlow,
+                                                    statsFlow           = viewModel::statsFlow,
+                                                    zapDetailsForEvent  = viewModel::zapDetailsForEvent,
+                                                    repostPubkeysForEvent = viewModel::repostPubkeysForEvent,
+                                                    reactionsForEvent   = viewModel::reactionsForEvent,
+                                                    imageDimensionCache = actionsViewModel.imageDimensionCache,
+                                                    thumbnailCache      = actionsViewModel.videoThumbnailCache,
+                                                    exoPlayer           = videoScope.exoPlayer,
+                                                    isMuted             = videoScope.isMuted,
+                                                    onToggleMute        = { videoScope.toggleMute() },
+                                                    isActiveVideo       = videoScope.isActiveVideo(reply.id),
+                                                    activeVideoUrl      = videoScope.activeVideoUrl,
+                                                    isFullscreen        = videoScope.showFullscreenVideo,
+                                                    onOpenFullscreen    = { videoScope.openFullscreen(reply.id) },
+                                                    onVideoModelsResolved = { models ->
+                                                        videoScope.registerVideoModels(reply.id, models)
+                                                    },
+                                                    sensitiveMode       = sensitiveMode,
+                                                    isSensitive         = reply.hasContentWarning,
+                                                    contentWarningReason = reply.contentWarningReason,
+                                                    onLongPress         = { actionsRow = reply },
+                                                    wotLookup           = { key -> wotLookups[key] },
+                                                    feedWotDisplayMode  = feedWotDisplayMode,
+                                                    pollActions         = pollActions,
+                                                )
+                                            }
                                         }
-                                        EventCard(
-                                            model               = replyModel,
-                                            row                 = reply,
-                                            role                = CardRole.Reply,
-                                            engagement          = engagement.forEvent(replyModel.engagementId),
-                                            isFocused           = reply.id == state.focusedReplyId,
-                                            onNoteClick         = { /* already viewing thread */ },
-                                            onComment           = { onComment(reply.id) },
-                                            onAuthorClick       = onAuthorClick,
-                                            onQuote             = onQuote,
-                                            onArticleClick      = { articleRow = it },
-                                            onReact             = { actionsViewModel.react(reply.id, reply.pubkey) },
-                                            onReactLongPress    = {
-                                                emojiReactTarget = reply.id to reply.pubkey
-                                                showFullEmojiPicker = true
-                                            },
-                                            pinnedEmojis        = pinnedEmojis,
-                                            onReactWithEmoji    = { emoji ->
-                                                actionsViewModel.react(reply.id, reply.pubkey, ":${emoji.shortcode}:", emoji.url)
-                                            },
-                                            onRepost            = { actionsViewModel.repost(reply.id, reply.pubkey, reply.relayUrl) },
-                                            onZap               = { req -> actionsViewModel.zap(reply.id, reply.pubkey, reply.relayUrl, req) },
-                                            onSaveNwcUri        = { uri -> actionsViewModel.saveNwcUri(uri) },
-                                            lookupProfile       = actionsViewModel::lookupProfile,
-                                            lookupEvent         = { id, hints -> actionsViewModel.lookupEvent(id, hints) },
-                                            lookupEventWithAuthor = { id, hints, authorPk -> actionsViewModel.lookupEvent(id, hints, authorPk) },
-                                            lookupEventReference = actionsViewModel::lookupEvent,
-                                            lookupModel         = actionsViewModel::getEventModel,
-                                            fetchOgMetadata     = actionsViewModel::fetchOgMetadata,
-                                            hasCachedOgMetadata = actionsViewModel::hasCachedOgMetadata,
-                                            profileFlow         = viewModel::profileFlow,
-                                            statsFlow           = viewModel::statsFlow,
-                                            zapDetailsForEvent  = viewModel::zapDetailsForEvent,
-                                            repostPubkeysForEvent = viewModel::repostPubkeysForEvent,
-                                            reactionsForEvent   = viewModel::reactionsForEvent,
-                                            imageDimensionCache = actionsViewModel.imageDimensionCache,
-                                            thumbnailCache      = actionsViewModel.videoThumbnailCache,
-                                            exoPlayer           = videoScope.exoPlayer,
-                                            isMuted             = videoScope.isMuted,
-                                            onToggleMute        = { videoScope.toggleMute() },
-                                            isActiveVideo       = videoScope.isActiveVideo(reply.id),
-                                            activeVideoUrl      = videoScope.activeVideoUrl,
-                                            isFullscreen        = videoScope.showFullscreenVideo,
-                                            onOpenFullscreen    = { videoScope.openFullscreen(reply.id) },
-                                            onVideoModelsResolved = { models ->
-                                                videoScope.registerVideoModels(reply.id, models)
-                                            },
-                                            sensitiveMode       = sensitiveMode,
-                                            isSensitive         = reply.hasContentWarning,
-                                            contentWarningReason = reply.contentWarningReason,
-                                            onLongPress         = { actionsRow = reply },
-                                            wotLookup           = { key -> wotLookups[key] },
-                                            feedWotDisplayMode  = feedWotDisplayMode,
-                                            pollActions         = pollActions,
-                                        )
                                     }
                                 }
                                 FeedDivider()
@@ -443,6 +461,7 @@ fun ThreadScreen(
         ArticleReaderScreen(
             row             = row,
             model           = model,
+            focusedCommentId = state.focusedReplyId,
             onDismiss       = { articleRow = null },
             onQuote         = onQuote,
             onReact         = { actionsViewModel.react(model.engagementId, model.pubkey) },

@@ -1,6 +1,9 @@
 package com.unsilence.app.ui.feed
 
 import com.unsilence.app.data.memory.FeedRow
+import com.unsilence.app.ui.shared.ReplyListItem
+import com.unsilence.app.ui.shared.markLikelyCoordinatedSpam
+import com.unsilence.app.ui.shared.replyListItems
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -8,8 +11,14 @@ import org.junit.Test
 
 class ArticleCommentTreeTest {
 
-    private fun row(id: String, replyToId: String?, createdAt: Long) = FeedRow(
-        id = id, pubkey = "pk", kind = 1111, content = "c", createdAt = createdAt,
+    private fun row(
+        id: String,
+        replyToId: String?,
+        createdAt: Long,
+        pubkey: String = "pk",
+        content: String = "c",
+    ) = FeedRow(
+        id = id, pubkey = pubkey, kind = 1111, content = content, createdAt = createdAt,
         tags = "[]", relayUrl = "wss://r", replyToId = replyToId, rootId = null,
         hasContentWarning = false, contentWarningReason = null, zapTotalSats = 0,
         authorName = null, authorDisplayName = null, authorPicture = null, authorNip05 = null,
@@ -81,6 +90,52 @@ class ArticleCommentTreeTest {
         )
 
         assertEquals(listOf("visible-root"), flat.map { it.row.id })
+    }
+
+    @Test
+    fun `tagged seed spam in article comments collapses through the shared projection`() {
+        val comments = listOf(
+            row(
+                id = "spam",
+                replyToId = "article",
+                createdAt = 1,
+                pubkey = "unknown",
+                content = "one, two, three, four, five, six, seven, eight, @spammer",
+            ),
+            row(
+                id = "visible",
+                replyToId = "article",
+                createdAt = 2,
+                pubkey = "friend",
+                content = "A normal comment remains visible.",
+            ),
+        )
+
+        val marked = markLikelyCoordinatedSpam(flattenArticleComments(comments))
+        val projected = replyListItems(marked, emptySet())
+
+        assertEquals(2, projected.size)
+        assertTrue(projected.first() is ReplyListItem.SpamCluster)
+        assertEquals("visible", (projected.last() as ReplyListItem.Reply).key)
+    }
+
+    @Test
+    fun `deep-linked article comment is protected from spam collapse`() {
+        val focused = row(
+            id = "focused",
+            replyToId = "article",
+            createdAt = 1,
+            pubkey = "unknown",
+            content = "one, two, three, four, five, six, seven, eight, @spammer",
+        )
+
+        val marked = markLikelyCoordinatedSpam(
+            rows = flattenArticleComments(listOf(focused)),
+            protectedEventIds = setOf(focused.id),
+        )
+
+        assertEquals(null, marked.single().spamClusterId)
+        assertTrue(replyListItems(marked, emptySet()).single() is ReplyListItem.Reply)
     }
 
     @Test

@@ -2,6 +2,7 @@ package com.unsilence.app.ui.feed
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.unsilence.app.data.auth.KeyManager
 import com.unsilence.app.data.memory.EventStats
 import com.unsilence.app.data.memory.FeedRow
 import com.unsilence.app.data.memory.MemoryEventStore
@@ -17,6 +18,8 @@ import com.unsilence.app.data.relay.WotHydrationCoalescer
 import com.unsilence.app.data.relay.bridgeFallbackRelayTargets
 import com.unsilence.app.data.relay.wotLookupSnapshot
 import com.unsilence.app.ui.shared.TimelineCardData
+import com.unsilence.app.ui.shared.ModeratedReplyRow
+import com.unsilence.app.ui.shared.markLikelyCoordinatedSpam
 import com.unsilence.app.ui.shared.mutedTimelineRowIds
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.Dispatchers
@@ -34,6 +37,7 @@ import javax.inject.Inject
 data class ArticleCommentsState(
     val rows: List<FeedRow> = emptyList(),
     val mutedIds: Set<String> = emptySet(),
+    val depthRows: List<ModeratedReplyRow> = emptyList(),
 )
 
 /**
@@ -48,6 +52,7 @@ data class ArticleCommentsState(
 @HiltViewModel
 class ArticleReaderViewModel @Inject constructor(
     private val memoryEventStore: MemoryEventStore,
+    private val keyManager: KeyManager,
     private val relayPool: RelayPool,
     private val relayPreferencesStore: RelayPreferencesStore,
     private val cardHydrator: CardHydrator,
@@ -71,18 +76,43 @@ class ArticleReaderViewModel @Inject constructor(
         relayPreferencesStore.feedWotDisplayModeFlow()
             .stateIn(viewModelScope, SharingStarted.Eagerly, FeedWotDisplayMode.NUMBERS)
 
-    /** Comments for an article coordinate (oldest-first), with muted rows retained as placeholders. */
-    fun commentsFlow(coord: String): Flow<ArticleCommentsState> =
+    /**
+     * Comments for an article coordinate (oldest-first), with muted rows retained as placeholders.
+     * A deep-linked comment remains visible even when its content matches a spam shape.
+     */
+    fun commentsFlow(
+        coord: String,
+        protectedEventIds: Set<String> = emptySet(),
+    ): Flow<ArticleCommentsState> =
         combine(
             memoryEventStore.articleCommentsFlow(coord),
             memoryEventStore.ownMuteListFlow(),
-        ) { rows, muteList ->
+            memoryEventStore.wotSignalFlow,
+            memoryEventStore.followsSignalFlow,
+        ) { rows, muteList, _, _ ->
+            val mutedIds = mutedTimelineRowIds(
+                rows = rows,
+                muteList = muteList,
+                eventProvider = memoryEventStore::getNostrEvent,
+            )
+            val ownPubkey = keyManager.getPublicKeyHex()
+            val followedPubkeys = ownPubkey
+                ?.let(memoryEventStore::getFollows)
+                .orEmpty()
+            val trustCache = HashMap<String, Boolean>()
             ArticleCommentsState(
                 rows = rows,
-                mutedIds = mutedTimelineRowIds(
-                    rows = rows,
-                    muteList = muteList,
-                    eventProvider = memoryEventStore::getNostrEvent,
+                mutedIds = mutedIds,
+                depthRows = markLikelyCoordinatedSpam(
+                    rows = flattenArticleComments(rows, mutedIds = mutedIds),
+                    protectedEventIds = protectedEventIds,
+                    isTrustedAuthor = { pubkey ->
+                        trustCache.getOrPut(pubkey) {
+                            pubkey == ownPubkey ||
+                                pubkey in followedPubkeys ||
+                                memoryEventStore.wotFor(pubkey) is WotLookup.Scored
+                        }
+                    },
                 ),
             )
         }.flowOn(Dispatchers.Default)
