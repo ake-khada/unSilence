@@ -1,5 +1,6 @@
 package com.unsilence.app.ui.shared
 
+import android.os.SystemClock
 import android.util.Log
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.runtime.Composable
@@ -16,6 +17,8 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.media3.common.MediaItem
+import androidx.media3.common.PlaybackException
+import androidx.media3.common.Player
 import androidx.media3.exoplayer.ExoPlayer
 import com.unsilence.app.data.memory.FeedRow
 import com.unsilence.app.data.model.EventModel
@@ -77,6 +80,8 @@ class VideoPlaybackScope(
     internal var confirmationFires: Int = 0
     internal var starvationWatchdogLoggedTicks: Int = 0
     internal var modelsResolvedLogged: Boolean = false
+    internal var modelsResolvedAtElapsedMs: Long = 0L
+    internal var playbackRequestedAtElapsedMs: Long = 0L
 
     fun isActiveVideo(noteId: String): Boolean = noteId == activeVideoNoteId
 
@@ -231,8 +236,47 @@ fun rememberVideoPlaybackScope(
     val exoPlayer = holder.player
     val scope = remember(ownerId) { VideoPlaybackScope(exoPlayer, holder, ownerId) }
 
-    // Release ownership on disposal
-    DisposableEffect(ownerId) { onDispose { holder.releaseOwnership(ownerId) } }
+    // Release ownership on disposal. A qualifying one-shot summary closes the
+    // watchdog's blind spot for a screen that disappears before its first 5s tick.
+    DisposableEffect(ownerId) {
+        onDispose {
+            val currentModels = scope.videoRenderModels
+            if (scope.activeVideoNoteId == null && currentModels.isNotEmpty()) {
+                val layoutInfo = listState.layoutInfo
+                val viewportStart = layoutInfo.viewportStartOffset
+                val viewportEnd = layoutInfo.viewportEndOffset
+                val bestVisible = layoutInfo.visibleItemsInfo.mapNotNull { item ->
+                    val id = item.key as? String ?: return@mapNotNull null
+                    if (id !in currentModels.keys) return@mapNotNull null
+                    val visibleTop = maxOf(item.offset, viewportStart)
+                    val visibleBottom = minOf(item.offset + item.size, viewportEnd)
+                    val fraction = if (item.size > 0) {
+                        maxOf(0, visibleBottom - visibleTop).toFloat() / item.size
+                    } else {
+                        0f
+                    }
+                    id to fraction
+                }.maxByOrNull { it.second }
+                if (bestVisible != null && bestVisible.second >= 0.35f) {
+                    val modelsAgeMs = scope.modelsResolvedAtElapsedMs
+                        .takeIf { it > 0L }
+                        ?.let { SystemClock.elapsedRealtime() - it }
+                        ?: -1L
+                    Log.w(
+                        "VideoScope",
+                        "disposed before activation: owner=$ownerId " +
+                            "best=${bestVisible.first.take(8)} visibility=${bestVisible.second} " +
+                            "models=${currentModels.size} modelsAgeMs=$modelsAgeMs " +
+                            "mapPasses=${scope.mapPasses} " +
+                            "confirmationAttempts=${scope.confirmationAttempts} " +
+                            "confirmationFires=${scope.confirmationFires} " +
+                            "scrolling=${listState.isScrollInProgress}",
+                    )
+                }
+            }
+            holder.releaseOwnership(ownerId)
+        }
+    }
 
     // Lifecycle pause/resume
     val lifecycleOwner = LocalLifecycleOwner.current
@@ -291,6 +335,7 @@ fun rememberVideoPlaybackScope(
         }
         if (!scope.modelsResolvedLogged && combined.isNotEmpty()) {
             scope.modelsResolvedLogged = true
+            scope.modelsResolvedAtElapsedMs = SystemClock.elapsedRealtime()
             Log.w("VideoScope", "models resolved: ${combined.size} rows for $ownerId")
         }
     }
@@ -308,9 +353,66 @@ fun rememberVideoPlaybackScope(
         }
     }
 
+    // Player milestones are intentionally warning-level and owner-gated so they
+    // survive release shrinking without each remembered screen logging callbacks
+    // from the singleton player claimed by a different surface.
+    DisposableEffect(exoPlayer, ownerId) {
+        val listener = object : Player.Listener {
+            override fun onPlaybackStateChanged(playbackState: Int) {
+                if (!holder.isOwner(ownerId)) return
+                val state = when (playbackState) {
+                    Player.STATE_BUFFERING -> "buffering"
+                    Player.STATE_READY -> "ready"
+                    Player.STATE_ENDED -> "ended"
+                    else -> return
+                }
+                Log.w(
+                    "VideoScope",
+                    "player $state: id=${scope.activeVideoNoteId?.take(8) ?: "none"} " +
+                        "owner=$ownerId elapsedMs=${scope.playbackRequestElapsedMs()}",
+                )
+            }
+
+            override fun onRenderedFirstFrame() {
+                if (!holder.isOwner(ownerId)) return
+                Log.w(
+                    "VideoScope",
+                    "player first-frame: id=${scope.activeVideoNoteId?.take(8) ?: "none"} " +
+                        "owner=$ownerId elapsedMs=${scope.playbackRequestElapsedMs()}",
+                )
+            }
+
+            override fun onPlayerError(error: PlaybackException) {
+                if (!holder.isOwner(ownerId)) return
+                Log.w(
+                    "VideoScope",
+                    "player error: id=${scope.activeVideoNoteId?.take(8) ?: "none"} " +
+                        "owner=$ownerId code=${error.errorCode} name=${error.errorCodeName} " +
+                        "cause=${error.cause?.javaClass?.simpleName ?: "none"} " +
+                        "elapsedMs=${scope.playbackRequestElapsedMs()}",
+                )
+            }
+        }
+        exoPlayer.addListener(listener)
+        onDispose { exoPlayer.removeListener(listener) }
+    }
+
     LaunchedEffect(activeVideoUrl) {
         if (activeVideoUrl != null) {
             val retainedUrl = holder.currentUrl
+            val wasRetained = holder.isRetained
+            val activeId = scope.activeVideoNoteId
+            scope.playbackRequestedAtElapsedMs = SystemClock.elapsedRealtime()
+            val requestMode = when {
+                retainedUrl != activeVideoUrl -> "rebind"
+                wasRetained -> "resume-retained"
+                else -> "resume-owned"
+            }
+            Log.w(
+                "VideoScope",
+                "player request: id=${activeId?.take(8) ?: "none"} " +
+                    "owner=$ownerId mode=$requestMode",
+            )
             holder.claim(ownerId)
             if (retainedUrl == activeVideoUrl && holder.isRetained.not()) {
                 // Same URL, player was already claimed (not retained) — just ensure playing
@@ -342,7 +444,7 @@ fun rememberVideoPlaybackScope(
     //   1. Layout shift cooldown: for 500ms after visible item count changes,
     //      the detector returns the current active (no change). Catches
     //      hydration-induced reflow without blocking normal scroll.
-    //   2. Confirmation: a candidate must hold for 250ms continuous before
+    //   2. Confirmation: a candidate must hold for 400ms continuous before
     //      promotion. flatMapLatest cancels stale candidates automatically.
     //   3. Oscillation detection: in collect, block A→B→A bounce-back
     //      transitions within OSCILLATION_BLOCK_MS. Targets the specific
@@ -471,10 +573,17 @@ fun rememberVideoPlaybackScope(
                     }
 
                     val oldId = scope.activeVideoNoteId
+                    val modelsAgeMs = scope.modelsResolvedAtElapsedMs
+                        .takeIf { it > 0L }
+                        ?.let { SystemClock.elapsedRealtime() - it }
+                        ?: -1L
                     Log.w(
                         "VideoScope",
                         "Active video: ${oldId?.take(8) ?: "none"} → " +
-                            "${newActiveId?.take(8) ?: "none"} owner=$ownerId",
+                            "${newActiveId?.take(8) ?: "none"} owner=$ownerId " +
+                            "modelsAgeMs=$modelsAgeMs mapPasses=${scope.mapPasses} " +
+                            "confirmationAttempts=${scope.confirmationAttempts} " +
+                            "confirmationFires=${scope.confirmationFires}",
                     )
                     scope.previousActiveId = oldId
                     scope.activeVideoNoteId = newActiveId
@@ -542,3 +651,9 @@ fun rememberVideoPlaybackScope(
 
     return scope
 }
+
+private fun VideoPlaybackScope.playbackRequestElapsedMs(): Long =
+    playbackRequestedAtElapsedMs
+        .takeIf { it > 0L }
+        ?.let { SystemClock.elapsedRealtime() - it }
+        ?: -1L
