@@ -30,6 +30,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.unsilence.app.data.memory.SensitiveContentMode
 import com.unsilence.app.ui.theme.AppType
+import com.unsilence.app.ui.theme.Brand
 import com.unsilence.app.ui.theme.Spacing
 import com.unsilence.app.ui.theme.SurfaceVariant
 import com.unsilence.app.ui.theme.TextSecondary
@@ -113,6 +114,54 @@ fun SensitiveContentHiddenCard(reason: String?, modifier: Modifier = Modifier) {
 @Composable
 fun MutedContentHiddenCard(modifier: Modifier = Modifier) {
     ContentHiddenCard(text = "Muted content hidden", modifier = modifier)
+}
+
+/** Reversible summary for a high-confidence coordinated-spam reply cluster. */
+@Composable
+fun LikelySpamClusterCard(
+    replyCount: Int,
+    revealed: Boolean,
+    onToggle: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        modifier = modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(8.dp))
+            .background(SurfaceVariant)
+            .clickable(onClick = onToggle)
+            .padding(horizontal = Spacing.medium, vertical = Spacing.small),
+    ) {
+        Icon(
+            imageVector = Icons.Outlined.VisibilityOff,
+            contentDescription = null,
+            tint = TextSecondary,
+            modifier = Modifier.size(16.dp),
+        )
+        Spacer(Modifier.width(Spacing.small))
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                text = "Likely coordinated spam",
+                color = TextSecondary,
+                fontSize = AppType.footnote,
+                fontWeight = FontWeight.Medium,
+            )
+            Text(
+                text = "$replyCount ${if (replyCount == 1) "reply" else "replies"} " +
+                    if (revealed) "shown" else "hidden",
+                color = TextSecondary.copy(alpha = 0.7f),
+                fontSize = AppType.caption,
+            )
+        }
+        Spacer(Modifier.width(Spacing.small))
+        Text(
+            text = if (revealed) "Hide" else "Show",
+            color = Brand,
+            fontSize = AppType.footnote,
+            fontWeight = FontWeight.Medium,
+        )
+    }
 }
 
 @Composable

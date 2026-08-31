@@ -74,10 +74,13 @@ import com.unsilence.app.ui.markdown.MarkdownContent
 import com.unsilence.app.ui.shared.CardRole
 import com.unsilence.app.ui.shared.EventEngagementSnapshot
 import com.unsilence.app.ui.shared.FeedDivider
+import com.unsilence.app.ui.shared.LikelySpamClusterCard
 import com.unsilence.app.ui.shared.MutedContentHiddenCard
 import com.unsilence.app.ui.shared.PostActionsHost
+import com.unsilence.app.ui.shared.ReplyListItem
 import com.unsilence.app.ui.shared.pollActionCallbacks
 import com.unsilence.app.ui.shared.rememberVideoPlaybackScope
+import com.unsilence.app.ui.shared.replyListItems
 import com.unsilence.app.data.memory.FeedRow
 import com.unsilence.app.data.memory.toEventModel
 import com.unsilence.app.data.model.EventModel
@@ -104,6 +107,7 @@ import kotlinx.serialization.json.jsonPrimitive
 fun ArticleReaderScreen(
     row: FeedRow,
     model: EventModel,
+    focusedCommentId: String? = null,
     onDismiss: () -> Unit,
     onNoteClick: (String) -> Unit = {},
     onReact: () -> Unit = {},
@@ -171,18 +175,33 @@ fun ArticleReaderScreen(
     val articleCoord = remember(model.engagementId, model.article?.dTag, model.pubkey) {
         model.article?.dTag?.takeIf { it.isNotBlank() }?.let { "30023:${model.pubkey}:$it" }
     }
-    val commentsFlow = remember(articleCoord) { articleReaderVm.commentsFlow(articleCoord ?: "") }
+    val commentsFlow = remember(articleCoord, focusedCommentId) {
+        articleReaderVm.commentsFlow(
+            coord = articleCoord ?: "",
+            protectedEventIds = setOfNotNull(focusedCommentId),
+        )
+    }
     val commentsState by commentsFlow.collectAsStateWithLifecycle(ArticleCommentsState())
     val comments = commentsState.rows
+    val depthComments = commentsState.depthRows
     val wotLookups by articleReaderVm.wotLookups.collectAsStateWithLifecycle()
     val feedWotDisplayMode by articleReaderVm.feedWotDisplayMode.collectAsStateWithLifecycle()
+    var revealedSpamClusters by remember(articleCoord) { mutableStateOf(emptySet<String>()) }
+    val commentItems = remember(depthComments, revealedSpamClusters) {
+        replyListItems(depthComments, revealedSpamClusters)
+    }
+    val commentRows = remember(depthComments) {
+        depthComments
+            .filterNot { it.muted || it.spamClusterId != null }
+            .map { it.row }
+    }
     LaunchedEffect(articleCoord) {
         if (articleCoord != null) {
             articleReaderVm.fetchComments(articleCoord, model.engagementId, model.pubkey, row.relayUrl)
         }
     }
-    LaunchedEffect(comments, commentsState.mutedIds) {
-        articleReaderVm.hydrateEngagement(comments.filterNot { it.id in commentsState.mutedIds })
+    LaunchedEffect(comments, commentsState.mutedIds, commentRows) {
+        articleReaderVm.hydrateEngagement(commentRows)
         if (articleCoord != null) {
             articleReaderVm.fetchCommentReplies(comments.map { it.id }, model.pubkey, model.engagementId, row.relayUrl)
         }
@@ -200,15 +219,6 @@ fun ArticleReaderScreen(
             }
         )
     }
-    // Depth-ordered for display: replies nest under their parent (header count
-    // stays comments.size). Same flat list drives count/contributors in MES.
-    val depthComments = remember(comments, commentsState.mutedIds) {
-        flattenArticleComments(comments, mutedIds = commentsState.mutedIds)
-    }
-    val commentRows = remember(depthComments) {
-        depthComments.filterNot { it.muted }.map { it.row }
-    }
-
     // Article-comment compose (NIP-22). Hosted locally as an overlay so no callback
     // threading through the 5 reader call sites; reader stays behind the compose.
     var commentTarget by remember { mutableStateOf<ArticleCommentTarget?>(null) }
@@ -293,6 +303,21 @@ fun ArticleReaderScreen(
 
     var drawerOpen by remember { mutableStateOf(false) }
     val listState = rememberLazyListState()
+    var didScrollToFocusedComment by remember(articleCoord, focusedCommentId) {
+        mutableStateOf(false)
+    }
+    LaunchedEffect(focusedCommentId, commentItems) {
+        val focusId = focusedCommentId ?: return@LaunchedEffect
+        if (didScrollToFocusedComment) return@LaunchedEffect
+        val commentIndex = commentItems.indexOfFirst { item ->
+            item is ReplyListItem.Reply && item.depthRow.row.id == focusId
+        }
+        if (commentIndex >= 0) {
+            // The article body and comments header precede commentItems.
+            listState.scrollToItem(commentIndex + 2)
+            didScrollToFocusedComment = true
+        }
+    }
     val cardWidthPx = LocalWindowInfo.current.containerSize.width
     val commentVideoScope = rememberVideoPlaybackScope(
         ownerId = "article-comments-${model.engagementId}",
@@ -316,6 +341,7 @@ fun ArticleReaderScreen(
     @OptIn(FlowPreview::class)
     LaunchedEffect(commentRows, cardWidthPx) {
         if (commentRows.isEmpty()) return@LaunchedEffect
+        val rowIndexById = commentRows.withIndex().associate { it.value.id to it.index }
         commentActionsVm.warmCardWindow(
             rows = commentRows,
             first = 0,
@@ -325,8 +351,8 @@ fun ArticleReaderScreen(
         )
         snapshotFlow {
             listState.layoutInfo.visibleItemsInfo.mapNotNull { item ->
-                (item.index - 2).takeIf { it in commentRows.indices }
-            }
+                (item.key as? String)?.let(rowIndexById::get)
+            }.distinct()
         }.sample(100).collect { visibleRows ->
             val first = visibleRows.minOrNull() ?: return@collect
             val last = visibleRows.maxOrNull() ?: first
@@ -606,9 +632,11 @@ fun ArticleReaderScreen(
                                     .padding(horizontal = Spacing.medium, vertical = Spacing.small),
                             )
                         }
-                        items(depthComments, key = { it.row.id }) { dc ->
-                            val comment = dc.row
-                            val depth = dc.depth
+                        items(commentItems, key = { it.key }) { commentItem ->
+                            val depth = when (commentItem) {
+                                is ReplyListItem.Reply -> commentItem.depthRow.depth
+                                is ReplyListItem.SpamCluster -> commentItem.depth
+                            }
                             val guideColor = Color.White.copy(alpha = 0.10f)
                             Box(
                                 modifier = Modifier
@@ -621,87 +649,111 @@ fun ArticleReaderScreen(
                                     }
                                     .padding(start = (depth * 12).dp),
                             ) {
-                                if (dc.muted) {
-                                    MutedContentHiddenCard(
+                                when (commentItem) {
+                                    is ReplyListItem.SpamCluster -> LikelySpamClusterCard(
+                                        replyCount = commentItem.replyCount,
+                                        revealed = commentItem.revealed,
+                                        onToggle = {
+                                            revealedSpamClusters =
+                                                if (commentItem.clusterId in revealedSpamClusters) {
+                                                    revealedSpamClusters - commentItem.clusterId
+                                                } else {
+                                                    revealedSpamClusters + commentItem.clusterId
+                                                }
+                                        },
                                         modifier = Modifier.padding(
                                             horizontal = Spacing.medium,
                                             vertical = Spacing.small,
                                         ),
                                     )
-                                } else {
-                                    val cModel = remember(comment.id) {
-                                        commentActionsVm.getEventModel(comment.id) ?: comment.toEventModel()
+
+                                    is ReplyListItem.Reply -> {
+                                        val dc = commentItem.depthRow
+                                        val comment = dc.row
+                                        if (dc.muted) {
+                                            MutedContentHiddenCard(
+                                                modifier = Modifier.padding(
+                                                    horizontal = Spacing.medium,
+                                                    vertical = Spacing.small,
+                                                ),
+                                            )
+                                        } else {
+                                            val cModel = remember(comment.id) {
+                                                commentActionsVm.getEventModel(comment.id) ?: comment.toEventModel()
+                                            }
+                                            EventCard(
+                                                model                 = cModel,
+                                                row                   = comment,
+                                                role                  = CardRole.Reply,
+                                                engagement            = EventEngagementSnapshot(isNwcConfigured = isNwcConfigured),
+                                                isFocused             = comment.id == focusedCommentId,
+                                                onNoteClick           = onNoteTap,
+                                                onComment             = {
+                                                    // kind-1111 comment → NIP-22 reply (kind-1111).
+                                                    // legacy kind-1 comment → normal kind-1 reply, but opened
+                                                    // as a LOCAL compose overlay (NIP-22 forbids 1111 replies to
+                                                    // kind-1; onNoteClick would open the thread behind the reader).
+                                                    if (comment.kind == 1111 && articleCoord != null) {
+                                                        commentTarget = ArticleCommentTarget(
+                                                            articleId = model.engagementId,
+                                                            articleCoord = articleCoord,
+                                                            articlePubkey = model.pubkey,
+                                                            articleRelayHint = articleRelayHint,
+                                                            parentId = comment.id,
+                                                            parentKind = comment.kind,
+                                                            parentPubkey = comment.pubkey,
+                                                            parentRelayHint = comment.relayUrl.takeIf { it.isNotBlank() },
+                                                        )
+                                                    } else {
+                                                        legacyReplyToEventId = comment.id
+                                                    }
+                                                },
+                                                onAuthorClick         = onAuthorTap,
+                                                onHashtagClick        = onHashtagTap,
+                                                onQuote               = onQuote,
+                                                onArticleClick        = { onNoteTap(it.id) },
+                                                onReact               = { commentActionsVm.react(comment.id, comment.pubkey) },
+                                                onReactLongPress      = {},
+                                                pinnedEmojis          = pinnedEmojis,
+                                                onReactWithEmoji      = { emoji -> commentActionsVm.react(comment.id, comment.pubkey, ":${emoji.shortcode}:", emoji.url) },
+                                                onRepost              = { commentActionsVm.repost(comment.id, comment.pubkey, comment.relayUrl) },
+                                                onZap                 = { req -> commentActionsVm.zap(comment.id, comment.pubkey, comment.relayUrl, req) },
+                                                onSaveNwcUri          = { uri -> commentActionsVm.saveNwcUri(uri) },
+                                                lookupProfile         = commentActionsVm::lookupProfile,
+                                                lookupEvent           = { id, hints -> commentActionsVm.lookupEvent(id, hints) },
+                                                lookupEventWithAuthor = { id, hints, authorPk -> commentActionsVm.lookupEvent(id, hints, authorPk) },
+                                                lookupEventReference = commentActionsVm::lookupEvent,
+                                                lookupModel           = commentActionsVm::getEventModel,
+                                                fetchOgMetadata       = commentActionsVm::fetchOgMetadata,
+                                                hasCachedOgMetadata   = commentActionsVm::hasCachedOgMetadata,
+                                                profileFlow           = articleReaderVm::profileFlow,
+                                                statsFlow             = articleReaderVm::statsFlow,
+                                                zapDetailsForEvent    = articleReaderVm::zapDetailsForEvent,
+                                                repostPubkeysForEvent = articleReaderVm::repostPubkeysForEvent,
+                                                reactionsForEvent     = articleReaderVm::reactionsForEvent,
+                                                imageDimensionCache   = commentActionsVm.imageDimensionCache,
+                                                thumbnailCache        = commentActionsVm.videoThumbnailCache,
+                                                exoPlayer             = commentVideoScope.exoPlayer,
+                                                isMuted               = commentVideoScope.isMuted,
+                                                onToggleMute          = { commentVideoScope.toggleMute() },
+                                                isActiveVideo         = commentVideoScope.isActiveVideo(comment.id),
+                                                activeVideoUrl        = commentVideoScope.activeVideoUrl,
+                                                isFullscreen          = commentVideoScope.showFullscreenVideo,
+                                                onOpenFullscreen      = { commentVideoScope.openFullscreen(comment.id) },
+                                                onVideoModelsResolved = { models ->
+                                                    commentVideoScope.registerVideoModels(comment.id, models)
+                                                },
+                                                sensitiveMode         = sensitiveMode,
+                                                isSensitive           = comment.hasContentWarning,
+                                                contentWarningReason  = comment.contentWarningReason,
+                                                onLongPress           = { commentActionsRow = comment },
+                                                wotLookup             = { key -> wotLookups[key] },
+                                                feedWotDisplayMode    = feedWotDisplayMode,
+                                                onWotSubjectsVisible  = articleReaderVm::requestWotHydration,
+                                                pollActions           = pollActions,
+                                            )
+                                        }
                                     }
-                                    EventCard(
-                                model                 = cModel,
-                                row                   = comment,
-                                role                  = CardRole.Reply,
-                                engagement            = EventEngagementSnapshot(isNwcConfigured = isNwcConfigured),
-                                onNoteClick           = onNoteTap,
-                                onComment             = {
-                                    // kind-1111 comment → NIP-22 reply (kind-1111).
-                                    // legacy kind-1 comment → normal kind-1 reply, but opened
-                                    // as a LOCAL compose overlay (NIP-22 forbids 1111 replies to
-                                    // kind-1; onNoteClick would open the thread behind the reader).
-                                    if (comment.kind == 1111 && articleCoord != null) {
-                                        commentTarget = ArticleCommentTarget(
-                                            articleId = model.engagementId,
-                                            articleCoord = articleCoord,
-                                            articlePubkey = model.pubkey,
-                                            articleRelayHint = articleRelayHint,
-                                            parentId = comment.id,
-                                            parentKind = comment.kind,
-                                            parentPubkey = comment.pubkey,
-                                            parentRelayHint = comment.relayUrl.takeIf { it.isNotBlank() },
-                                        )
-                                    } else {
-                                        legacyReplyToEventId = comment.id
-                                    }
-                                },
-                                onAuthorClick         = onAuthorTap,
-                                onHashtagClick        = onHashtagTap,
-                                onQuote               = onQuote,
-                                onArticleClick        = { onNoteTap(it.id) },
-                                onReact               = { commentActionsVm.react(comment.id, comment.pubkey) },
-                                onReactLongPress      = {},
-                                pinnedEmojis          = pinnedEmojis,
-                                onReactWithEmoji      = { emoji -> commentActionsVm.react(comment.id, comment.pubkey, ":${emoji.shortcode}:", emoji.url) },
-                                onRepost              = { commentActionsVm.repost(comment.id, comment.pubkey, comment.relayUrl) },
-                                onZap                 = { req -> commentActionsVm.zap(comment.id, comment.pubkey, comment.relayUrl, req) },
-                                onSaveNwcUri          = { uri -> commentActionsVm.saveNwcUri(uri) },
-                                lookupProfile         = commentActionsVm::lookupProfile,
-                                lookupEvent           = { id, hints -> commentActionsVm.lookupEvent(id, hints) },
-                                lookupEventWithAuthor = { id, hints, authorPk -> commentActionsVm.lookupEvent(id, hints, authorPk) },
-                                lookupEventReference = commentActionsVm::lookupEvent,
-                                lookupModel           = commentActionsVm::getEventModel,
-                                fetchOgMetadata       = commentActionsVm::fetchOgMetadata,
-                                hasCachedOgMetadata   = commentActionsVm::hasCachedOgMetadata,
-                                profileFlow           = articleReaderVm::profileFlow,
-                                statsFlow             = articleReaderVm::statsFlow,
-                                zapDetailsForEvent    = articleReaderVm::zapDetailsForEvent,
-                                repostPubkeysForEvent = articleReaderVm::repostPubkeysForEvent,
-                                reactionsForEvent     = articleReaderVm::reactionsForEvent,
-                                imageDimensionCache   = commentActionsVm.imageDimensionCache,
-                                thumbnailCache        = commentActionsVm.videoThumbnailCache,
-                                exoPlayer             = commentVideoScope.exoPlayer,
-                                isMuted               = commentVideoScope.isMuted,
-                                onToggleMute          = { commentVideoScope.toggleMute() },
-                                isActiveVideo         = commentVideoScope.isActiveVideo(comment.id),
-                                activeVideoUrl        = commentVideoScope.activeVideoUrl,
-                                isFullscreen          = commentVideoScope.showFullscreenVideo,
-                                onOpenFullscreen      = { commentVideoScope.openFullscreen(comment.id) },
-                                onVideoModelsResolved = { models ->
-                                    commentVideoScope.registerVideoModels(comment.id, models)
-                                },
-                                sensitiveMode         = sensitiveMode,
-                                isSensitive           = comment.hasContentWarning,
-                                contentWarningReason  = comment.contentWarningReason,
-                                onLongPress           = { commentActionsRow = comment },
-                                wotLookup             = { key -> wotLookups[key] },
-                                feedWotDisplayMode    = feedWotDisplayMode,
-                                onWotSubjectsVisible  = articleReaderVm::requestWotHydration,
-                                pollActions           = pollActions,
-                                    )
                                 }
                             }
                             FeedDivider()

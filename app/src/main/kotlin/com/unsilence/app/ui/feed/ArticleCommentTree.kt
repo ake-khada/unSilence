@@ -1,14 +1,11 @@
 package com.unsilence.app.ui.feed
 
 import com.unsilence.app.data.memory.FeedRow
+import com.unsilence.app.ui.shared.ModeratedReplyRow
 import com.unsilence.app.ui.shared.pruneFullyMutedSubtrees
 
 /** A comment paired with its nesting depth (0 = top-level) and moderation state. */
-internal data class CommentDepth(
-    val row: FeedRow,
-    val depth: Int,
-    val muted: Boolean = false,
-)
+internal typealias CommentDepth = ModeratedReplyRow
 
 /**
  * Flatten the flat article-comment list into a depth-ordered display list:

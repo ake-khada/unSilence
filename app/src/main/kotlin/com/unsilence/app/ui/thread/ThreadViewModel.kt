@@ -25,6 +25,8 @@ import com.unsilence.app.data.relay.relayResolutionTargets
 import com.unsilence.app.data.relay.wotLookupSnapshot
 import com.unsilence.app.data.relay.wotSubjectsForFeedRows
 import com.unsilence.app.ui.shared.TimelineCardData
+import com.unsilence.app.ui.shared.ModeratedReplyRow
+import com.unsilence.app.ui.shared.markLikelyCoordinatedSpam
 import com.unsilence.app.ui.shared.mutedTimelineRowIds
 import com.unsilence.app.ui.shared.pruneFullyMutedSubtrees
 import java.util.concurrent.ConcurrentHashMap
@@ -39,6 +41,7 @@ import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.flow.flatMapLatest
+import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.stateIn
@@ -47,11 +50,7 @@ import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import javax.inject.Inject
 
-data class DepthRow(
-    val row: FeedRow,
-    val depth: Int,
-    val muted: Boolean = false,
-)
+typealias DepthRow = ModeratedReplyRow
 
 data class ThreadUiState(
     val focusedNote: FeedRow? = null,
@@ -164,6 +163,7 @@ class ThreadViewModel @Inject constructor(
 
     private val _uiState = MutableStateFlow(ThreadUiState())
     val uiState: StateFlow<ThreadUiState> = _uiState.asStateFlow()
+    private val _baseUiState = MutableStateFlow(ThreadUiState())
     private val _wotSubjects = MutableStateFlow<Set<String>>(emptySet())
     val wotLookups: StateFlow<Map<String, WotLookup>> =
         combine(_wotSubjects, memoryEventStore.wotSignalFlow) { subjects, _ ->
@@ -268,7 +268,7 @@ class ThreadViewModel @Inject constructor(
                         coordinateScoped = articleMode,
                         mutedIds = mutedReplyIds,
                     )
-                    _uiState.value = ThreadUiState(
+                    _baseUiState.value = ThreadUiState(
                         focusedNote    = focused,
                         replies        = flatList,
                         loading        = false,
@@ -281,6 +281,37 @@ class ThreadViewModel @Inject constructor(
                     _wotSubjects.value = subjects
                     wotHydrationCoalescer.requestHydration(subjects)
                 }
+        }
+
+        viewModelScope.launch {
+            combine(
+                _baseUiState,
+                memoryEventStore.wotSignalFlow,
+                memoryEventStore.followsSignalFlow,
+            ) { baseState, _, _ -> baseState }
+                .map { baseState ->
+                    val ownPubkey = pubkeyHex
+                    val followedPubkeys = ownPubkey
+                        ?.let(memoryEventStore::getFollows)
+                        .orEmpty()
+                    val trustCache = HashMap<String, Boolean>()
+                    baseState.copy(
+                        replies = markLikelyCoordinatedSpam(
+                            rows = baseState.replies,
+                            protectedEventIds = setOfNotNull(baseState.focusedReplyId),
+                            isTrustedAuthor = { pubkey ->
+                                trustCache.getOrPut(pubkey) {
+                                    pubkey == ownPubkey ||
+                                        pubkey in followedPubkeys ||
+                                        memoryEventStore.wotFor(pubkey) is WotLookup.Scored
+                                }
+                            },
+                        ),
+                    )
+                }
+                .distinctUntilChanged()
+                .flowOn(Dispatchers.Default)
+                .collect { _uiState.value = it }
         }
     }
 
@@ -310,6 +341,7 @@ class ThreadViewModel @Inject constructor(
         fetchedMissingParents.clear()
         tappedId = null
         _wotSubjects.value = emptySet()
+        _baseUiState.value = ThreadUiState()
         _uiState.value = ThreadUiState()
     }
 
@@ -392,6 +424,7 @@ class ThreadViewModel @Inject constructor(
 
             // Clear stale state only after confirming this is a different thread.
             // Clearing before the same-root early return strands the drawer in Loading.
+            _baseUiState.value = ThreadUiState(loading = true)
             _uiState.value = ThreadUiState(loading = true)
 
             applyRoot(bestGuessRoot, urls)
