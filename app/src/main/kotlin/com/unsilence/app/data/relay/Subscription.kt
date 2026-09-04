@@ -49,9 +49,8 @@ private const val RELAY_REPLAY_DEBOUNCE_MS = 1_000L
  *      removing them. resumeAll() re-sends stored REQ payloads. Used by
  *      ProcessLifecycleOwner to stop event flow when backgrounded.
  *
- * Reconnect handling is NOT in this primitive. If a relay drops mid-sub,
- * onclose fires once and that relay is done. Higher layers (TimelineService,
- * RelayBrowseSession) handle reconnect-and-resub.
+ * On reconnect, the stored REQ is replayed for that relay. Consumers that keep
+ * EOSE-sensitive state receive [onReplayCycleStarted] before the new cycle.
  *
  * Thread safety: subscribe() is suspend (network I/O). Callbacks fire on
  * EventProcessor's bounded Default dispatcher. Callbacks must not block.
@@ -74,6 +73,7 @@ class Subscription @Inject constructor(
         val requestClass: RelayRequestClass,
         val onevent: (NostrEvent) -> Unit,
         val oneose: (allEosed: Boolean) -> Unit,
+        val onReplayCycleStarted: () -> Unit,
         val onclose: (url: String, reason: String) -> Unit,
         val knownIds: MutableSet<String> = ConcurrentHashMap.newKeySet(),
         val eosedRelays: MutableSet<String> = ConcurrentHashMap.newKeySet(),
@@ -126,7 +126,7 @@ class Subscription @Inject constructor(
 
     /**
      * Subscribe to [urls] with [filter]. Caller-provided callbacks fire on
-     * incoming events / EOSEs / closes for this subscription's subId.
+     * incoming events / EOSEs / replay-cycle starts / closes for this subId.
      *
      * Returns a [Handle] — call close() to terminate. Idempotent close.
      */
@@ -135,6 +135,7 @@ class Subscription @Inject constructor(
         filter: NostrFilter,
         onevent: (NostrEvent) -> Unit,
         oneose: (allEosed: Boolean) -> Unit = {},
+        onReplayCycleStarted: () -> Unit = {},
         onclose: (url: String, reason: String) -> Unit = { _, _ -> },
     ): Handle {
         ensureTapRegistered()
@@ -153,6 +154,7 @@ class Subscription @Inject constructor(
             requestClass = requestClass,
             onevent = onevent,
             oneose = oneose,
+            onReplayCycleStarted = onReplayCycleStarted,
             onclose = onclose,
         )
         subs[subId] = state
@@ -275,6 +277,7 @@ class Subscription @Inject constructor(
             state.isPaused = false
             state.eosedRelays.clear()
             state.closedRelays.clear()
+            state.lastEventAt = 0L
             for (url in state.urls) {
                 if (!relayCapabilitiesStore.shouldSkipRequest(url, state.requestClass)) {
                     transport.sendToRelay(url, state.reqPayload)
@@ -304,7 +307,7 @@ class Subscription @Inject constructor(
         }
         rateLimitSkipLogged.remove(normalized)
 
-        val matching = subs.values.filter { state ->
+        val matching = subs.entries.filter { (_, state) ->
             !state.isPaused &&
                 normalized in state.urls &&
                 !relayCapabilitiesStore.shouldSkipRequest(normalized, state.requestClass)
@@ -316,11 +319,26 @@ class Subscription @Inject constructor(
         if (!claimReplayWindow(normalized, nowMs)) return
 
         var count = 0
-        for (state in matching) {
+        for ((subId, state) in matching) {
+            val startsNewCycle = state.eosedRelays.size >= state.urls.size
+            if (startsNewCycle) {
+                state.lastEventAt = 0L
+                try {
+                    state.onReplayCycleStarted()
+                } catch (t: Throwable) {
+                    Log.w(TAG, "onReplayCycleStarted threw for $normalized", t)
+                }
+            }
             state.eosedRelays.remove(normalized)
             state.closedRelays.remove(normalized)
-            transport.sendToRelay(normalized, state.reqPayload)
-            count++
+            if (transport.sendToRelay(normalized, state.reqPayload)) {
+                startRelayEoseWatchdog(subId, normalized)
+                count++
+            } else {
+                // Restore the completed state if the socket disappeared between
+                // the reconnect signal and replay dispatch.
+                handleRelayEose(subId, normalized)
+            }
         }
         Log.d(TAG, "resumeRelay $normalized: replayed $count sub(s)")
     }
@@ -456,23 +474,36 @@ class Subscription @Inject constructor(
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
         watchdogScopes[subId] = scope
         for (url in urlSet) {
-            scope.launch {
-                val deadline = android.os.SystemClock.elapsedRealtime() + EOSE_CEILING_MS
-                while (true) {
-                    val s = subs[subId] ?: return@launch
-                    if (s.isPaused) return@launch
-                    if (s.eosedRelays.contains(url) || s.closedRelays.contains(url)) return@launch
-                    val now = android.os.SystemClock.elapsedRealtime()
-                    val quiesced = s.lastEventAt > 0L && (now - s.lastEventAt) >= EOSE_QUIESCENCE_MS
-                    val ceilingHit = now >= deadline
-                    if (quiesced || ceilingHit) {
-                        Log.d(TAG, "EOSE watchdog: synthesizing sub=$subId relay=$url " +
-                            "(${if (quiesced) "quiescent" else "ceiling"})")
-                        handleRelayEose(subId, url)
-                        return@launch
-                    }
-                    delay(EOSE_POLL_MS)
+            startRelayEoseWatchdog(subId, url, scope)
+        }
+    }
+
+    private fun startRelayEoseWatchdog(
+        subId: String,
+        url: String,
+        scope: CoroutineScope? = watchdogScopes[subId],
+    ) {
+        val watchdogScope = scope ?: return
+        watchdogScope.launch {
+            val deadline = android.os.SystemClock.elapsedRealtime() + EOSE_CEILING_MS
+            while (true) {
+                val state = subs[subId] ?: return@launch
+                if (state.isPaused) return@launch
+                if (url in state.eosedRelays || url in state.closedRelays) return@launch
+                val now = android.os.SystemClock.elapsedRealtime()
+                val quiesced = state.lastEventAt > 0L &&
+                    now - state.lastEventAt >= EOSE_QUIESCENCE_MS
+                val ceilingHit = now >= deadline
+                if (quiesced || ceilingHit) {
+                    Log.d(
+                        TAG,
+                        "EOSE watchdog: synthesizing sub=$subId relay=$url " +
+                            "(${if (quiesced) "quiescent" else "ceiling"})",
+                    )
+                    handleRelayEose(subId, url)
+                    return@launch
                 }
+                delay(EOSE_POLL_MS)
             }
         }
     }

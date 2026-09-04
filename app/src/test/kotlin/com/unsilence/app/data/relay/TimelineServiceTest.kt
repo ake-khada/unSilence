@@ -117,6 +117,67 @@ class TimelineServiceTest {
     }
 
     @Test
+    fun `empty initial cycle completes loading and reconnect backfills history`() = runTest {
+        val url = "wss://a.example"
+        val emitted = CopyOnWriteArrayList<Pair<List<NostrEvent>, Boolean>>()
+        service.subscribeTimeline(
+            subRequests = listOf(
+                SubRequest(
+                    urls = listOf(url),
+                    filter = NostrFilter(kinds = listOf(1), limit = 10),
+                ),
+            ),
+            onEvents = { events, eosed -> emitted.add(events to eosed) },
+        )
+        val initialSubId = transport.lastReqSubId()
+        tapRegistry.fire("""["EOSE","$initialSubId"]""", url)
+
+        assertEquals(listOf(emptyList<NostrEvent>() to true), emitted)
+
+        transport.sends.clear()
+        subscription.resumeRelay(url, nowMs = 1_000L)
+        val subId = transport.lastReqSubId()
+        val recoveredId = "d".repeat(64)
+        tapRegistry.fire(eventMessage(subId, recoveredId, createdAt = 100L), url)
+        tapRegistry.fire("""["EOSE","$subId"]""", url)
+
+        val (events, eosed) = emitted.last()
+        assertTrue(eosed)
+        assertEquals(listOf(recoveredId), events.map { it.id })
+    }
+
+    @Test
+    fun `replay cycle does not double-count a subRequest as complete`() = runTest {
+        val firstUrl = "wss://a.example"
+        val secondUrl = "wss://b.example"
+        val emitted = CopyOnWriteArrayList<Pair<List<NostrEvent>, Boolean>>()
+        service.subscribeTimeline(
+            subRequests = listOf(firstUrl, secondUrl).map { url ->
+                SubRequest(
+                    urls = listOf(url),
+                    filter = NostrFilter(kinds = listOf(1), limit = 10),
+                )
+            },
+            onEvents = { events, eosed -> emitted.add(events to eosed) },
+        )
+        val initialSubIds = transport.sends
+            .filter { it.msg.startsWith("[\"REQ\"") }
+            .associate { sent -> sent.url to extractSubId(sent.msg) }
+        tapRegistry.fire("""["EOSE","${initialSubIds.getValue(firstUrl)}"]""", firstUrl)
+
+        transport.sends.clear()
+        subscription.resumeRelay(firstUrl, nowMs = 1_000L)
+        val replaySubId = transport.lastReqSubId()
+        val recoveredId = "e".repeat(64)
+        tapRegistry.fire(eventMessage(replaySubId, recoveredId, createdAt = 100L), firstUrl)
+        tapRegistry.fire("""["EOSE","$replaySubId"]""", firstUrl)
+
+        assertTrue("second subRequest is still pending", !emitted.last().second)
+        tapRegistry.fire("""["EOSE","${initialSubIds.getValue(secondUrl)}"]""", secondUrl)
+        assertTrue("both subRequests have now completed", emitted.last().second)
+    }
+
+    @Test
     fun `cache hit on second subscribe injects since`() = runTest {
         val sr = SubRequest(listOf("wss://a.example"), NostrFilter(kinds = listOf(1), limit = 10))
         val handle1 = service.subscribeTimeline(
