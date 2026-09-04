@@ -4,88 +4,114 @@ import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import java.util.concurrent.atomic.AtomicLong
 import javax.inject.Inject
 import javax.inject.Singleton
 
+/** Opaque capability proving that a readiness signal belongs to the current login. */
+@JvmInline
+value class InitSession internal constructor(internal val generation: Long)
+
 /**
- * Coroutine-based readiness signal for cold-start data dependencies.
+ * Session-scoped readiness for cold-start data dependencies.
  *
- * Bootstrap signals three milestones:
- *   1. `signalFollowsReady()` — kind-3 contact list loaded (or timed out)
- *   2. `signalRelaysReady()` — own kind-10002 relay list loaded (or timed out)
- *   3. `signalFeedConnectionsReady()` — global relay WebSockets connected
- *      (Phase1 Step5 complete). Consumers that need relay subs to work
- *      (FeedViewModel) gate on this before issuing subscriptions.
- *
- * Consumers call `awaitFollows()` / `awaitRelays()` / `awaitReady()` /
- * `awaitFeedConnections()` before issuing relay subscriptions that depend
- * on those datasets. Awaiters that arrive AFTER the signal resume immediately.
- *
- * Idempotent — second signal call is a no-op. Cannot be reset; create a
- * new InitGate (or rebuild the Hilt graph) for a fresh cold start.
- *
- * Mirrors Jumble's NostrProvider isInitialized gate (NostrProvider.tsx).
+ * [beginSession] creates fresh milestones for every login. Bootstrap must present the
+ * returned [InitSession] when signalling them, so a late completion from a cancelled
+ * account can never release consumers belonging to the next account.
  */
 @Singleton
 class InitGate @Inject constructor() {
 
-    private val followsDeferred = CompletableDeferred<Unit>()
-    private val relaysDeferred = CompletableDeferred<Unit>()
-    private val feedConnectionsDeferred = CompletableDeferred<Unit>()
+    private data class SessionState(
+        val owner: String?,
+        val token: InitSession,
+        val follows: CompletableDeferred<Unit> = CompletableDeferred(),
+        val relays: CompletableDeferred<Unit> = CompletableDeferred(),
+        val feedConnections: CompletableDeferred<Unit> = CompletableDeferred(),
+    )
+
+    private val lock = Any()
+    private val nextGeneration = AtomicLong(0)
+
+    @Volatile
+    private var state = newState(owner = null)
 
     private val _phase = MutableStateFlow(Phase.CONNECTING)
 
-    /** Observable phase for UI (splash, debug screens). Avoid using for control flow — use awaitX instead. */
+    /** Observable phase for UI only. Use the await methods for control flow. */
     val phase: StateFlow<Phase> = _phase.asStateFlow()
 
     enum class Phase { CONNECTING, FOLLOWS, RELAYS, READY }
 
-    /** Bootstrap calls this when kind-3 has been fetched (or timeout fired). Idempotent. */
-    fun signalFollowsReady() {
-        if (followsDeferred.complete(Unit)) {
-            recomputePhase()
-        }
+    /** Starts a clean readiness epoch for [owner]. */
+    fun beginSession(owner: String): InitSession = synchronized(lock) {
+        newState(owner).also {
+            state = it
+            _phase.value = Phase.CONNECTING
+        }.token
     }
 
-    /** Bootstrap calls this when own kind-10002 has been fetched (or timeout fired). Idempotent. */
-    fun signalRelaysReady() {
-        if (relaysDeferred.complete(Unit)) {
-            recomputePhase()
-        }
+    /** Invalidates every token issued before logout. */
+    fun invalidateSession() = synchronized(lock) {
+        state = newState(owner = null)
+        _phase.value = Phase.CONNECTING
     }
 
-    /** Bootstrap calls this after Phase1 Step5 — global relay connections established. Idempotent. */
-    fun signalFeedConnectionsReady() {
-        feedConnectionsDeferred.complete(Unit)
+    fun isCurrent(session: InitSession, owner: String? = null): Boolean {
+        val current = state
+        return current.token == session && (owner == null || current.owner == owner)
     }
 
-    /** Suspend until follows are ready. Returns immediately if already signaled. */
-    suspend fun awaitFollows() = followsDeferred.await()
+    /** Signals that kind-3 discovery completed, including a verified empty result. */
+    fun signalFollowsReady(session: InitSession) = signal(session) { it.follows }
 
-    /** Suspend until own relay list is ready. Returns immediately if already signaled. */
-    suspend fun awaitRelays() = relaysDeferred.await()
+    /** Signals that kind-10002 discovery completed, including a verified empty result. */
+    fun signalRelaysReady(session: InitSession) = signal(session) { it.relays }
 
-    /** Suspend until BOTH follows and relays are ready. */
+    /** Signals that the feed relay set has at least completed its connection attempt. */
+    fun signalFeedConnectionsReady(session: InitSession) =
+        signal(session, recompute = false) { it.feedConnections }
+
+    suspend fun awaitFollows() = state.follows.await()
+
+    suspend fun awaitRelays() = state.relays.await()
+
     suspend fun awaitReady() {
-        followsDeferred.await()
-        relaysDeferred.await()
+        val current = state
+        current.follows.await()
+        current.relays.await()
     }
 
-    /** Suspend until global relay connections are established (Phase1 Step5). */
-    suspend fun awaitFeedConnections() = feedConnectionsDeferred.await()
+    suspend fun awaitFeedConnections() = state.feedConnections.await()
 
-    /** Non-suspending status check — useful for early-exit paths. */
-    val followsReady: Boolean get() = followsDeferred.isCompleted
-    val relaysReady: Boolean get() = relaysDeferred.isCompleted
-    val feedConnectionsReady: Boolean get() = feedConnectionsDeferred.isCompleted
-    val isReady: Boolean get() = followsReady && relaysReady
+    val followsReady: Boolean get() = state.follows.isCompleted
+    val relaysReady: Boolean get() = state.relays.isCompleted
+    val feedConnectionsReady: Boolean get() = state.feedConnections.isCompleted
+    val isReady: Boolean
+        get() = state.let { it.follows.isCompleted && it.relays.isCompleted }
 
-    private fun recomputePhase() {
+    private fun signal(
+        session: InitSession,
+        recompute: Boolean = true,
+        milestone: (SessionState) -> CompletableDeferred<Unit>,
+    ) = synchronized(lock) {
+        val current = state
+        if (current.token != session) return@synchronized
+        if (milestone(current).complete(Unit) && recompute) recomputePhase(current)
+    }
+
+    private fun recomputePhase(current: SessionState) {
+        if (state !== current) return
         _phase.value = when {
-            followsReady && relaysReady -> Phase.READY
-            relaysReady -> Phase.RELAYS  // relays before follows is unusual but handle gracefully
-            followsReady -> Phase.FOLLOWS
+            current.follows.isCompleted && current.relays.isCompleted -> Phase.READY
+            current.relays.isCompleted -> Phase.RELAYS
+            current.follows.isCompleted -> Phase.FOLLOWS
             else -> Phase.CONNECTING
         }
     }
+
+    private fun newState(owner: String?): SessionState = SessionState(
+        owner = owner,
+        token = InitSession(nextGeneration.incrementAndGet()),
+    )
 }

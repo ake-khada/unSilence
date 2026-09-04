@@ -156,6 +156,40 @@ class GlobalFeedPolicyTest {
         assertEquals(GlobalFeedLens.RAW, parseGlobalFeedLens("RAW"))
     }
 
+    @Test
+    fun `automatic empty-graph fallback forces Trusted without overwriting stored lens`() {
+        assertTrue(shouldUseAutomaticTrustedGlobal(null))
+        assertTrue(shouldUseAutomaticTrustedGlobal(emptySet()))
+        assertFalse(shouldUseAutomaticTrustedGlobal(setOf("alice")))
+        assertEquals(
+            GlobalFeedLens.TRUSTED,
+            effectiveGlobalFeedLens(GlobalFeedLens.RAW, automaticTrustedFallback = true),
+        )
+        assertEquals(
+            GlobalFeedLens.RAW,
+            effectiveGlobalFeedLens(GlobalFeedLens.RAW, automaticTrustedFallback = false),
+        )
+    }
+
+    @Test
+    fun `trusted hydration failure surfaces only for requested authors still pending`() {
+        assertTrue(
+            shouldSurfaceTrustedHydrationFailure(setOf("alice"), setOf("alice")) {
+                WotLookup.Pending
+            },
+        )
+        assertFalse(
+            shouldSurfaceTrustedHydrationFailure(setOf("alice"), setOf("bob")) {
+                WotLookup.Pending
+            },
+        )
+        assertFalse(
+            shouldSurfaceTrustedHydrationFailure(setOf("alice"), setOf("alice")) {
+                scored(it)
+            },
+        )
+    }
+
     private fun scored(pubkey: String): WotLookup.Scored = WotLookup.Scored(
         WotAssertionEntity(
             subjectPubkey = pubkey,

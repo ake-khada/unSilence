@@ -1420,6 +1420,32 @@ class MemoryEventStoreInvariantsTest {
         assertFalse(rl.write.contains("wss://x.example"))
     }
 
+    @Test
+    fun `confirmed absent relay list is loaded empty and a real event wins`() {
+        val pk = "new-relay-list-pubkey"
+
+        assertNull(store.getRelayList(pk))
+        assertTrue(store.materializeEmptyRelayListIfAbsent(pk))
+        assertEquals(emptyList<String>(), store.getRelayList(pk)?.read)
+        assertEquals(emptyList<String>(), store.getRelayList(pk)?.write)
+        assertFalse(10002 in store.getProfileRelayFacts(pk).publishedKinds)
+
+        store.insert(
+            event(
+                id = "real-relay-list",
+                pubkey = pk,
+                kind = 10002,
+                createdAt = 100,
+                tags = listOf(listOf("r", "wss://relay.example")),
+            ),
+        )
+
+        assertEquals(listOf("wss://relay.example"), store.getRelayList(pk)?.read)
+        assertEquals(listOf("wss://relay.example"), store.getRelayList(pk)?.write)
+        assertTrue(10002 in store.getProfileRelayFacts(pk).publishedKinds)
+        assertFalse(store.materializeEmptyRelayListIfAbsent(pk))
+    }
+
     // ── Kind 30002 parameterized replaceable ────────────────────────────────
 
     @Test

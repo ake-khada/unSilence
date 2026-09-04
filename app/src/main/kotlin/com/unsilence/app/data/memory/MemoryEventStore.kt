@@ -3698,6 +3698,24 @@ class MemoryEventStore @Inject constructor(
         tags = tags.map { it.toList() },
         relaysSeen = ConcurrentHashMap.newKeySet<String>().apply { addAll(this@copyForContactListRetention.relaysSeen) },
     )
+
+    /**
+     * Records a relay-confirmed missing kind-10002 as loaded-empty without
+     * inventing a published revision. A concurrently arriving real event wins:
+     * either it is already present, or [handleRelayList] overwrites this baseline.
+     */
+    internal fun materializeEmptyRelayListIfAbsent(pubkey: String): Boolean {
+        if (readWriteRelayConfigsByPubkey[pubkey]?.isNotEmpty() == true) return false
+        val inserted = relayListsByPubkey.putIfAbsent(
+            pubkey,
+            RelayList(read = emptyList(), write = emptyList()),
+        ) == null
+        if (!inserted) return false
+        readWriteRelayConfigsByPubkey.putIfAbsent(pubkey, emptyList())
+        _relayConfigSignal.value = System.nanoTime()
+        return true
+    }
+
     fun getRelayList(pubkey: String): RelayList? = relayListsByPubkey[pubkey]
     fun getMuteList(pubkey: String): MuteList? = muteListsByPubkey[pubkey]
 

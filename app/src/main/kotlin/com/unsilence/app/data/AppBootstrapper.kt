@@ -5,6 +5,7 @@ import android.util.Log
 import androidx.work.WorkManager
 import com.unsilence.app.data.blossom.BlossomServersStore
 import com.unsilence.app.data.init.InitGate
+import com.unsilence.app.data.init.InitSession
 import com.unsilence.app.data.auth.KeyManager
 import com.unsilence.app.work.BackgroundSyncWorker
 import com.unsilence.app.data.auth.SigningManager
@@ -12,11 +13,11 @@ import com.unsilence.app.data.relay.RelayPreferencesStore
 import com.unsilence.app.data.wallet.NwcManager
 import com.unsilence.app.data.memory.MemoryEventStore
 import com.unsilence.app.data.memory.NostrEvent
-import com.unsilence.app.data.memory.RelayConfig
 import com.unsilence.app.data.memory.SnapshotScheduler
 import com.unsilence.app.data.memory.WotProviderDescriptor
-import com.unsilence.app.data.relay.ConnectionPurpose
+import com.unsilence.app.data.relay.AccountMetadataFetchResult
 import com.unsilence.app.data.relay.CardHydrator
+import com.unsilence.app.data.relay.ConnectionPurpose
 import com.unsilence.app.data.relay.EventProcessor
 import com.unsilence.app.data.relay.MuteListFetchResult
 import com.unsilence.app.data.relay.ProfileResolver
@@ -25,6 +26,7 @@ import com.unsilence.app.data.relay.RelayMessageTap
 import com.unsilence.app.data.relay.RelayTapMessage
 import com.unsilence.app.data.relay.WotProviderSource
 import com.unsilence.app.data.relay.TrendingClient
+import com.unsilence.app.data.relay.canMaterializeEmptyContactList
 import com.unsilence.app.data.relay.normalizeRelayUrl
 import com.unsilence.app.data.relay.ANTIPRIMAL_RELAY_URL
 import com.unsilence.app.data.relay.GLOBAL_RELAY_URLS
@@ -46,7 +48,6 @@ import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.asSharedFlow
-import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
@@ -60,6 +61,8 @@ import javax.inject.Singleton
 
 private const val TAG = "AppBootstrapper"
 private const val FRESHNESS_WINDOW_SEC = 6 * 3600L  // 6 hours
+private val ACCOUNT_METADATA_RECOVERY_DELAYS_MS = listOf(10_000L, 30_000L)
+private val MUTE_RECOVERY_DELAYS_MS = listOf(10_000L, 20_000L, 40_000L)
 
 /**
  * Coalesces verification of the same replaceable mute-list revision.
@@ -143,6 +146,7 @@ class AppBootstrapper @Inject constructor(
     // singletons (RelayPool, EventProcessor, MES, KeyManager).
     private val bootstrapMutex = Mutex()
     private var bootstrapJob: Job? = null
+    @Volatile private var accountMetadataRecoveryJob: Job? = null
     @Volatile private var muteRecoveryJob: Job? = null
     private val muteEventVerificationGate = MuteEventVerificationGate()
     // Monotonic session generation. Bumped by both bootstrap() (login) and teardown()
@@ -185,34 +189,36 @@ class AppBootstrapper @Inject constructor(
     }
 
     /**
-     * Sequential bootstrap for the logged-in user.
+     * Bootstrap for the logged-in user.
      *
-     * Each step completes (or times out) before the next starts:
+     * Latency-critical account discovery is bounded and consolidated:
      * 1. Connect to indexer relays → wait for at least one connection
-     * 2. Fetch kind-3 (contact list) → wait for follows to appear in MemoryEventStore
-     * 3. Fetch kind-0 (own profile) → wait for profile to appear in MemoryEventStore
-     * 4. Fetch kind-10002 (relay list) → wait for response (5s timeout)
-     * 4b. Fetch NIP-51 relay kinds (10006, 10007, 10012, 30002)
-     * 5. Connect to global relays → opens persistent feed subscriptions
+     * 2. Fetch kind 0/3/10002 in one request while warming cold-start fallback relays
+     * 3. Select own read relays, or Trusted Global defaults when none exist
+     * 4. Continue NIP-51, mute, profile and maintenance hydration off the entry path
      *
      * Guarded by a Mutex so concurrent calls (e.g. config change + init)
      * don't interleave steps.
      */
-    suspend fun bootstrap(pubkeyHex: String) {
+    suspend fun bootstrap(pubkeyHex: String, initSession: InitSession) {
         // Claim a new session generation; supersedes any in-flight teardown/bootstrap.
         val myGen = sessionGen.incrementAndGet()
         // Cancel any in-progress bootstrap (e.g. from previous login session).
         // Without this, the old bootstrap holds the mutex for minutes
         // (MediaPreconnect.warmUp can hang) and the new bootstrap starves.
         bootstrapJob?.cancel()
-        bootstrapJob = scope.launch { doBootstrap(pubkeyHex, myGen) }
+        bootstrapJob = scope.launch { doBootstrap(pubkeyHex, myGen, initSession) }
         bootstrapJob?.join()
     }
 
-    private suspend fun doBootstrap(pubkeyHex: String, myGen: Int) = bootstrapMutex.withLock {
+    private suspend fun doBootstrap(
+        pubkeyHex: String,
+        myGen: Int,
+        initSession: InitSession,
+    ) = bootstrapMutex.withLock {
         // If a newer session (another login, or a logout) supervened while we waited
         // for the mutex, abandon this run — the newer one is authoritative.
-        if (sessionGen.get() != myGen) {
+        if (sessionGen.get() != myGen || !initGate.isCurrent(initSession, pubkeyHex)) {
             Log.w(TAG, "SESSION-FENCE: bootstrap aborted — superseded (gen=${sessionGen.get()} myGen=$myGen)")
             return@withLock
         }
@@ -221,6 +227,8 @@ class AppBootstrapper @Inject constructor(
         // ═══════════════════════════════════════════════════════════════════
         claimAccountOwner(pubkeyHex)
         ownZapReceiptAuthorityCoordinator.start(pubkeyHex)
+        accountMetadataRecoveryJob?.cancel()
+        accountMetadataRecoveryJob = null
         muteRecoveryJob?.cancel()
         muteRecoveryJob = null
         muteBootstrapSettledForPubkey = null
@@ -287,7 +295,7 @@ class AppBootstrapper @Inject constructor(
         // steps can await follows via signal flows without waiting for full parse.
         val snapshotAgeSec = snapshotScheduler.getSnapshotAgeSeconds()
         val snapshotFresh = snapshotAgeSec < FRESHNESS_WINDOW_SEC
-        val snapshotJob = scope.launch {
+        scope.launch {
             snapshotScheduler.restoreIfPresent()
             if (sessionGen.get() == myGen && keyManager.getPublicKeyHex() == pubkeyHex) {
                 muteListRepository.markSnapshotReady()
@@ -297,97 +305,64 @@ class AppBootstrapper @Inject constructor(
             }
         }
 
-        // Step 2: Wait for follows in MES, with snapshot-fresh fast path.
-        val followsCached = memoryEventStore.getFollows(pubkeyHex)?.isNotEmpty() == true
-
-        var follows: Set<String>?
-        if (followsCached && snapshotFresh) {
-            follows = memoryEventStore.getFollows(pubkeyHex)
-            Log.d(TAG, "Phase1 Step2: follows snapshot-fresh (snapshot ${snapshotAgeSec}s old, ${follows?.size} follows) — skipping refetch")
-        } else if (snapshotFresh) {
-            // Snapshot is fresh but follows not yet in MES — wait briefly for
-            // background restore. If the wait yields nothing (corrupted snapshot
-            // missing follows section, or restore is slower than expected), fall
-            // through to relay fetch. NEVER accept a null follows result when
-            // we have a relay connection available.
-            follows = withTimeoutOrNull(3_000L) {
-                memoryEventStore.followsFlow(pubkeyHex).filter { it.isNotEmpty() }.first()
-            }
-            if (follows.isNullOrEmpty()) {
-                Log.w(TAG, "Phase1 Step2: snapshot follows missing — fetching from relay")
-                relayPool.fetchFollowList(pubkeyHex)
-                follows = withTimeoutOrNull(10_000L) {
-                    memoryEventStore.followsFlow(pubkeyHex).filter { it.isNotEmpty() }.first()
-                }
-            }
-            Log.d(TAG, "Phase1 Step2: follows resolved (count=${follows?.size})")
-        } else {
-            relayPool.fetchFollowList(pubkeyHex)
-            follows = withTimeoutOrNull(10_000L) {
-                memoryEventStore.followsFlow(pubkeyHex).filter { it.isNotEmpty() }.first()
-            }
-            Log.d(TAG, "Phase1 Step2: ${follows?.size ?: 0} follows loaded from relay (snapshot ${snapshotAgeSec}s old)")
+        // A truly cold identity needs useful content even when it has never published
+        // account metadata. Warm the safe fallback while the single combined metadata
+        // lookup runs; established accounts with a fresh snapshot keep their own relays.
+        val coldFallbackUrls = if (snapshotFresh) emptyList() else GLOBAL_RELAY_URLS
+        coldFallbackUrls.forEach { rawUrl ->
+            normalizeRelayUrl(rawUrl)?.let { relayPool.addPurpose(it, ConnectionPurpose.PERSISTENT) }
         }
-        initGate.signalFollowsReady()
-        Log.d(TAG, "InitGate: follows signaled")
+        relayPool.connect(coldFallbackUrls)
 
-        // Step 3: Fetch kind-10002 (relay list) — wait for response via MES.
+        // Steps 2–3: kind 0, 3 and 10002 are one logical account-discovery request.
+        // Serial waits made a verified empty identity pay every timeout in succession.
+        val followsBefore = memoryEventStore.getFollows(pubkeyHex)
         val relaysBefore = memoryEventStore.getReadWriteRelayConfigs(pubkeyHex)
-
-        var freshRelays: List<RelayConfig>?
-        if (relaysBefore.isNotEmpty() && snapshotFresh) {
-            freshRelays = relaysBefore
-            Log.d(TAG, "Phase1 Step3: kind-10002 snapshot-fresh (snapshot ${snapshotAgeSec}s old, ${freshRelays.size} relays) — skipping refetch")
-        } else if (snapshotFresh) {
-            // Snapshot being parsed in background — relay configs arrive during
-            // events section. Wait briefly for them.
-            freshRelays = withTimeoutOrNull(2_000L) {
-                memoryEventStore.readWriteRelayConfigsFlow(pubkeyHex)
-                    .filter { it.isNotEmpty() }
-                    .first()
-            }
-            if (freshRelays.isNullOrEmpty()) {
-                Log.w(TAG, "Phase1 Step3: snapshot relay-configs missing — fetching from relay")
-                relayPool.fetchRelayLists(listOf(pubkeyHex))
-                freshRelays = withTimeoutOrNull(5_000L) {
-                    memoryEventStore.readWriteRelayConfigsFlow(pubkeyHex)
-                        .filter { it.isNotEmpty() }
-                        .first()
-                }
-            }
-            Log.d(TAG, "Phase1 Step3: kind-10002 from background snapshot (${freshRelays?.size ?: "timeout"})")
+        val hasFreshGraphAndRelays = snapshotFresh &&
+            followsBefore?.isNotEmpty() == true && relaysBefore.isNotEmpty()
+        val metadataFetch = if (hasFreshGraphAndRelays) {
+            null
         } else {
-            relayPool.fetchRelayLists(listOf(pubkeyHex))
-            freshRelays = withTimeoutOrNull(5_000L) {
-                if (relaysBefore.isEmpty()) {
-                    memoryEventStore.readWriteRelayConfigsFlow(pubkeyHex)
-                        .filter { it.isNotEmpty() }
-                        .first()
-                } else {
-                    memoryEventStore.readWriteRelayConfigsFlow(pubkeyHex)
-                        .filter { it != relaysBefore }
-                        .first()
-                }
-            }
-            Log.d(TAG, "Phase1 Step3: kind-10002 ${if (freshRelays != null) "arrived (${freshRelays.size} relays)" else "timeout — using existing/fallback"} (snapshot ${snapshotAgeSec}s old)")
+            relayPool.fetchAccountMetadata(pubkeyHex, indexerUrls)
         }
-        initGate.signalRelaysReady()
+        metadataFetch?.let { materializeConfirmedEmptyAccountLists(pubkeyHex, it) }
+        val follows = memoryEventStore.getFollows(pubkeyHex)
+        val freshRelays = memoryEventStore.getReadWriteRelayConfigs(pubkeyHex)
+        Log.d(
+            TAG,
+            "Phase1 account discovery: follows=${follows?.size ?: "unresolved"} " +
+                "relays=${freshRelays.size} graphResponded=${metadataFetch?.hasGraphResponse ?: true} " +
+                "realEose=${metadataFetch?.eoseRelays?.size ?: 0}",
+        )
+        if (follows == null && metadataFetch != null && !metadataFetch.hasGraphResponse) {
+            startAccountMetadataRecovery(pubkeyHex, indexerUrls, myGen, initSession)
+        }
+        initGate.signalFollowsReady(initSession)
+        Log.d(TAG, "InitGate: follows signaled")
+        initGate.signalRelaysReady(initSession)
         Log.d(TAG, "InitGate: relays signaled")
 
         // Step 4: Pre-load blocked relays before global connections
         relayPool.refreshBlockedRelays()
 
         // Step 5: Connect to global relays — feed subscriptions start HERE
-        val readRelays = (freshRelays ?: memoryEventStore.getReadWriteRelayConfigs(pubkeyHex))
+        val readRelays = freshRelays
             .filter { it.marker == null || it.marker == "read" }
             .map { it.url }
             .take(8)
         val globalUrls = readRelays.ifEmpty { GLOBAL_RELAY_URLS }
+        coldFallbackUrls
+            .filterNot { candidate -> globalUrls.any { normalizeRelayUrl(it) == normalizeRelayUrl(candidate) } }
+            .forEach { candidate ->
+                normalizeRelayUrl(candidate)?.let {
+                    relayPool.removePurpose(it, ConnectionPurpose.PERSISTENT)
+                }
+            }
         for (url in globalUrls) {
             normalizeRelayUrl(url)?.let { relayPool.addPurpose(it, ConnectionPurpose.PERSISTENT) }
         }
         relayPool.connectAndAwait(globalUrls, timeoutMs = 5_000)
-        initGate.signalFeedConnectionsReady()
+        initGate.signalFeedConnectionsReady(initSession)
 
         Log.d(TAG, "Phase1 complete: relay connections active (${globalUrls.size} relays)")
 
@@ -749,6 +724,7 @@ class AppBootstrapper @Inject constructor(
         //    BEFORE taking the mutex so a login that supervenes will out-number us.
         val jobToCancel = bootstrapJob
         val tornGen = sessionGen.incrementAndGet()
+        initGate.invalidateSession()
         jobToCancel?.cancel()
 
         bootstrapMutex.withLock {
@@ -760,6 +736,8 @@ class AppBootstrapper @Inject constructor(
                 return@withLock
             }
             bootstrapJob = null
+            accountMetadataRecoveryJob?.cancel()
+            accountMetadataRecoveryJob = null
             muteRecoveryJob?.cancel()
             muteRecoveryJob = null
             muteBootstrapSettledForPubkey = null
@@ -903,11 +881,105 @@ class AppBootstrapper @Inject constructor(
         }
     }
 
+    /** Retry unresolved account metadata without holding the user on the entry screen. */
+    private fun startAccountMetadataRecovery(
+        pubkeyHex: String,
+        indexerUrls: List<String>,
+        myGen: Int,
+        initSession: InitSession,
+    ) {
+        accountMetadataRecoveryJob?.cancel()
+        accountMetadataRecoveryJob = scope.launch {
+            val recoveryRelays = indexerUrls.mapNotNull(::normalizeRelayUrl).toSet()
+            if (recoveryRelays.isEmpty()) return@launch
+            var attempt = 0
+            while (true) {
+                val timedDelay = ACCOUNT_METADATA_RECOVERY_DELAYS_MS.getOrNull(attempt)
+                val trigger = if (timedDelay != null) {
+                    withTimeoutOrNull(timedDelay) {
+                        relayPool.onRelayReconnected.first { relay ->
+                            normalizeRelayUrl(relay) in recoveryRelays
+                        }
+                    } ?: "backoff"
+                } else {
+                    relayPool.onRelayReconnected.first { relay ->
+                        normalizeRelayUrl(relay) in recoveryRelays
+                    }
+                }
+                if (sessionGen.get() != myGen ||
+                    !initGate.isCurrent(initSession, pubkeyHex) ||
+                    keyManager.getPublicKeyHex() != pubkeyHex
+                ) {
+                    return@launch
+                }
+
+                Log.i(
+                    TAG,
+                    "ACCOUNT-RECOVERY attempt=${attempt + 1} trigger=$trigger",
+                )
+                relayPool.connectAndAwait(recoveryRelays.toList(), timeoutMs = 5_000)
+                val result = relayPool.fetchAccountMetadata(pubkeyHex, indexerUrls)
+                if (sessionGen.get() != myGen ||
+                    !initGate.isCurrent(initSession, pubkeyHex) ||
+                    keyManager.getPublicKeyHex() != pubkeyHex
+                ) {
+                    return@launch
+                }
+                materializeConfirmedEmptyAccountLists(pubkeyHex, result)
+                if (result.hasGraphResponse) {
+                    val recoveredFollows = memoryEventStore.getFollows(pubkeyHex).orEmpty()
+                    if (recoveredFollows.isNotEmpty()) {
+                        val unresolvedProfiles = profileResolver.filterUnresolved(recoveredFollows)
+                        if (unresolvedProfiles.isNotEmpty()) {
+                            profileResolver.request(unresolvedProfiles.toList())
+                        }
+                        relayPool.fetchRelayLists(recoveredFollows.toList())
+                    }
+                    Log.i(TAG, "ACCOUNT-RECOVERY resolved graph metadata")
+                    return@launch
+                }
+                attempt++
+                if (attempt == ACCOUNT_METADATA_RECOVERY_DELAYS_MS.size) {
+                    Log.w(
+                        TAG,
+                        "ACCOUNT-RECOVERY timed retries exhausted for ${pubkeyHex.take(8)}…; " +
+                            "waiting for an indexer reconnect",
+                    )
+                }
+            }
+        }
+    }
+
     /**
-     * A failed one-shot is not replayed when a socket reconnects. Retry only on
-     * real RelayPool reconnect signals, at most three times for the session.
-     * This avoids polling/radio loops while guaranteeing that an encrypted
-     * pending edit does not remain silently local after connectivity recovers.
+     * A real EOSE quorum turns network absence into explicit loaded-empty state.
+     * This is what lets a fresh imported key publish its first contact and relay
+     * lists; timeouts and CLOSED frames never reach this path.
+     */
+    private fun materializeConfirmedEmptyAccountLists(
+        pubkeyHex: String,
+        result: AccountMetadataFetchResult,
+    ) {
+        val contactListAbsent = canMaterializeEmptyContactList(
+            localStateResolved = memoryEventStore.getFollows(pubkeyHex) != null,
+            declaredWriteRelays = memoryEventStore.writeRelaysFor(pubkeyHex),
+            result = result,
+        )
+        if (contactListAbsent) {
+            memoryEventStore.updateFollows(pubkeyHex, emptySet(), createdAt = 0L)
+            Log.i(TAG, "ACCOUNT-METADATA confirmed empty contact list")
+        }
+        if (result.confirmsAbsent(10002) &&
+            memoryEventStore.materializeEmptyRelayListIfAbsent(pubkeyHex)
+        ) {
+            Log.i(TAG, "ACCOUNT-METADATA confirmed empty relay list")
+        }
+    }
+
+    /**
+     * A failed one-shot is not replayed automatically. Retry on a reconnect or a
+     * bounded backoff. After three timed attempts, remain passively armed for a
+     * real reconnect so an offline pending edit can still reach the network without
+     * creating a polling or radio loop.
      */
     private fun startMuteListReconnectRecovery(
         pubkeyHex: String,
@@ -916,8 +988,16 @@ class AppBootstrapper @Inject constructor(
     ) {
         muteRecoveryJob?.cancel()
         muteRecoveryJob = scope.launch {
-            repeat(3) { attempt ->
-                val reconnectedRelay = relayPool.onRelayReconnected.first()
+            var attempt = 0
+            while (true) {
+                val timedDelay = MUTE_RECOVERY_DELAYS_MS.getOrNull(attempt)
+                val reconnectedRelay = if (timedDelay != null) {
+                    withTimeoutOrNull(timedDelay) {
+                        relayPool.onRelayReconnected.first()
+                    } ?: "backoff"
+                } else {
+                    relayPool.onRelayReconnected.first()
+                }
                 if (sessionGen.get() != myGen ||
                     keyManager.getPublicKeyHex() != pubkeyHex ||
                     muteBootstrapSettledForPubkey != pubkeyHex ||
@@ -933,7 +1013,7 @@ class AppBootstrapper @Inject constructor(
 
                 Log.i(
                     TAG,
-                    "MUTE-RECOVERY attempt=${attempt + 1}/3 trigger=$reconnectedRelay",
+                    "MUTE-RECOVERY attempt=${attempt + 1} trigger=$reconnectedRelay",
                 )
                 val fetchResult = relayPool.fetchMuteList(pubkeyHex, indexerUrls)
                 if (sessionGen.get() != myGen || keyManager.getPublicKeyHex() != pubkeyHex) {
@@ -955,8 +1035,15 @@ class AppBootstrapper @Inject constructor(
                 ) {
                     return@launch
                 }
+                attempt++
+                if (attempt == MUTE_RECOVERY_DELAYS_MS.size) {
+                    Log.w(
+                        TAG,
+                        "MUTE-RECOVERY timed retries exhausted for ${pubkeyHex.take(8)}…; " +
+                            "pending edit retained and waiting for a relay reconnect",
+                    )
+                }
             }
-            Log.w(TAG, "MUTE-RECOVERY exhausted for ${pubkeyHex.take(8)}…; pending edit retained")
         }
     }
 
@@ -1041,6 +1128,11 @@ class AppBootstrapper @Inject constructor(
         }
 
         val observedEvent = fetchResult.receivedEvent
+        if (observedEvent == null && fetchResult.confirmedEmptyCoverage &&
+            memoryEventStore.getLatestMuteListEvent(pubkeyHex) == null
+        ) {
+            return MuteSettleOutcome(MuteSettleResult.RelayConfirmedEmpty)
+        }
         val settled = withTimeoutOrNull(10_000L) {
             while (true) {
                 val event = awaitMuteListEvent(
@@ -1055,7 +1147,7 @@ class AppBootstrapper @Inject constructor(
                 )
                 if (event == null) {
                     return@withTimeoutOrNull if (
-                        observedEvent == null && fetchResult.fullEoseCoverage
+                        observedEvent == null && fetchResult.confirmedEmptyCoverage
                     ) {
                         MuteSettleOutcome(MuteSettleResult.RelayConfirmedEmpty)
                     } else {

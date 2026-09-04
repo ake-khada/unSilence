@@ -6,20 +6,18 @@ import org.junit.Test
 
 class SubscriptionRulesTest {
 
-    /**
-     * All 19 one-shot prefixes verified against RelayPool.isOneShotSubscription().
-     * Was 21 before engagement consolidation (3 engagement-{replies,reactions,zaps}-
-     * merged into single "engagement-" prefix).
-     */
+    /** Every canonical one-shot family must close and release its pooled slot on EOSE. */
     @Test
     fun `all one-shot prefixes are recognized`() {
         val prefixes = listOf(
+            "account-metadata-",
             "kind3-",
             "kind10002-",
             "profiles-",
             "hint-profiles-",
             "src-profiles-",
             "hint-event-",
+            "hint-batch-",
             "search-",
             "older-",
             "relay-ecosystem-",
@@ -33,7 +31,19 @@ class SubscriptionRulesTest {
             "engagement-",
             "batch-events-",
             "trust-scores-",
+            "prefetch-",
+            "mute-",
+            "own-eng-",
+            "eng-",
+            "article-comments-",
+            "article-addr-",
             "poll-responses-",
+            "comment-replies-",
+            "comment-parents-",
+            "emoji-list-",
+            "emoji-set-",
+            "emoji-discover-",
+            "setref-",
             "wot-10040-",
             "wot-30382-",
         )

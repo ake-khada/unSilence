@@ -6,7 +6,11 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.SharedFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.launch
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
@@ -23,6 +27,11 @@ class WotHydrationCoalescer @Inject constructor(
     private val staleProfileSubjects: MutableSet<String> = ConcurrentHashMap.newKeySet()
     private val inFlight = AtomicBoolean(false)
     private var debounceJob: Job? = null
+    private val _failedSubjects = MutableSharedFlow<Set<String>>(
+        extraBufferCapacity = 1,
+        onBufferOverflow = BufferOverflow.DROP_OLDEST,
+    )
+    val failedSubjects: SharedFlow<Set<String>> = _failedSubjects.asSharedFlow()
 
     fun requestHydration(pubkeys: Collection<String>) {
         val candidates = selectWotHydrationCandidates(
@@ -67,11 +76,12 @@ class WotHydrationCoalescer @Inject constructor(
                 val subjects = drainEligibleSubjects()
                 if (subjects.isEmpty()) return@launch
                 val provider = memoryEventStore.activeWotProvider()
-                relayPool.fetchWotAssertions(
+                val succeeded = relayPool.fetchWotAssertions(
                     providerPubkey = provider.providerPubkey,
                     relayHint = provider.relayHint,
                     subjects = subjects,
                 )
+                if (!succeeded) _failedSubjects.tryEmit(subjects.toSet())
             } finally {
                 inFlight.set(false)
                 if (pendingSubjects.isNotEmpty() || staleProfileSubjects.isNotEmpty()) {

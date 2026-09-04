@@ -28,6 +28,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.JsonPrimitive
@@ -101,6 +102,20 @@ class MuteListRepository @Inject constructor(
                 val ownPubkey = keyManager.getPublicKeyHex() ?: continue
                 val result = publisher.publishPending(ownPubkey)
                 handlePublishResult(result)
+            }
+        }
+        scope.launch {
+            relayPool.onRelayReconnected.collectLatest {
+                // A reconnect burst represents one connectivity recovery episode.
+                // Coalesce it, then resume a durable pending edit without polling.
+                delay(1_000L)
+                val ownPubkey = keyManager.getPublicKeyHex() ?: return@collectLatest
+                if (_publishSafe.value && snapshotReady &&
+                    memoryEventStore.getPendingMutePublish(ownPubkey) != null
+                ) {
+                    Log.i(TAG, "MUTE-PUBLISH retrying pending edit after relay recovery")
+                    requestPublish(resetRetries = true)
+                }
             }
         }
     }

@@ -150,6 +150,7 @@ fun FeedScreen(
     val feedWotDisplayMode by viewModel.feedWotDisplayMode.collectAsStateWithLifecycle()
 
     val coldStartState by viewModel.coldStartState.collectAsStateWithLifecycle()
+    val trustedHydrationFailed by viewModel.trustedHydrationFailed.collectAsStateWithLifecycle()
     val sensitiveMode  by viewModel.sensitiveContentMode.collectAsStateWithLifecycle()
     val listState = rememberLazyListState()
     val cardWidthPx = LocalWindowInfo.current.containerSize.width
@@ -179,6 +180,7 @@ fun FeedScreen(
     val immersiveMode = currentFilter.isImmersiveVideoMode()
     val trustedGlobalHydrating = currentFeedType is FeedType.Global &&
         globalFeedLens == GlobalFeedLens.TRUSTED && globalDropCounters.pendingAuthors > 0
+    val trustedGlobalFailed = trustedGlobalHydrating && trustedHydrationFailed
     val immersiveItems = remember(events, immersiveMode) {
         if (!immersiveMode) {
             emptyList()
@@ -335,6 +337,7 @@ fun FeedScreen(
             targetState = when {
                 coldStartState == FeedViewModel.ColdStartState.LOADING -> "loading"
                 isLoadingV && events.isEmpty() -> "loading"
+                !isLoadingV && events.isEmpty() && trustedGlobalFailed -> "trust_failed"
                 !isLoadingV && events.isEmpty() && trustedGlobalHydrating -> "trust_loading"
                 !isLoadingV && events.isEmpty() && currentFeedType is FeedType.Following &&
                     showFindPeopleEmptyState -> "empty_following"
@@ -370,6 +373,15 @@ fun FeedScreen(
 
             "trust_loading" -> {
                 LoadingScreen()
+            }
+
+            "trust_failed" -> {
+                EmptyState(
+                    icon = Icons.Outlined.Forum,
+                    message = "Couldn't verify trusted posts",
+                    hint = "Tap to retry",
+                    modifier = Modifier.clickable { viewModel.retryTrustedHydration() },
+                )
             }
 
             "empty_following" -> {
