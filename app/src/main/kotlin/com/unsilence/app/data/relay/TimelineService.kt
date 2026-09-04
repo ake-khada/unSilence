@@ -13,6 +13,7 @@ import kotlinx.coroutines.withTimeoutOrNull
 import java.security.MessageDigest
 import java.util.Collections
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
 import javax.inject.Inject
@@ -156,6 +157,7 @@ class TimelineService @Inject constructor(
         val multiKey = generateMultiKey(subRequests)
         val perSubKeys = Collections.synchronizedList(mutableListOf<String>())
         val perSubTimelines = Array<List<NostrEvent>>(subRequests.size) { emptyList() }
+        val perSubEosed = Array(subRequests.size) { AtomicBoolean(false) }
         val eosedCount = AtomicInteger(0)
         val multiHandles = Collections.synchronizedList(mutableListOf<Subscription.Handle>())
 
@@ -200,7 +202,7 @@ class TimelineService @Inject constructor(
                     subRequest = sr,
                     onPerSubEvents = { events, eosed ->
                         perSubTimelines[index] = events
-                        if (eosed) {
+                        if (eosed && perSubEosed[index].compareAndSet(false, true)) {
                             eosedCount.incrementAndGet()
                             if (sr.tier == SubTier.FAST) fastEosedCount.incrementAndGet()
                         }
@@ -215,12 +217,18 @@ class TimelineService @Inject constructor(
                         if (shouldMerge) {
                             lastIntermediateMergeAtMs.set(nowMs)
                             val merged = mergeTimelines(perSubTimelines.toList(), sr.filter.limit)
-                            if (merged.isNotEmpty()) {
-                                val allEosed = eosedCount.get() >= subRequests.size
+                            val allEosed = eosedCount.get() >= subRequests.size
+                            if (merged.isNotEmpty() || allEosed) {
                                 try { onEvents(merged, allEosed) } catch (t: Throwable) {
                                     Log.w(TAG, "onEvents threw", t)
                                 }
                             }
+                        }
+                    },
+                    onReplayCycleStarted = {
+                        if (perSubEosed[index].compareAndSet(true, false)) {
+                            eosedCount.decrementAndGet()
+                            if (sr.tier == SubTier.FAST) fastEosedCount.decrementAndGet()
                         }
                     },
                     onNew = { evt ->
@@ -283,6 +291,7 @@ class TimelineService @Inject constructor(
         index: Int,
         subRequest: SubRequest,
         onPerSubEvents: (events: List<NostrEvent>, eosed: Boolean) -> Unit,
+        onReplayCycleStarted: () -> Unit,
         onNew: (NostrEvent) -> Unit,
         onClose: ((String, String) -> Unit)?,
         needSort: Boolean,
@@ -343,6 +352,14 @@ class TimelineService @Inject constructor(
                         }
                     }
                 }
+            },
+            onReplayCycleStarted = {
+                synchronized(stateLock) {
+                    events.clear()
+                    eosed = false
+                    eosedAt = null
+                }
+                onReplayCycleStarted()
             },
             oneose = { allRelaysEosed ->
                 val toEmit: List<NostrEvent>
