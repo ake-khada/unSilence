@@ -17,6 +17,7 @@ object SubscriptionRules {
      * slot cleanup to run.
      */
     private val oneShotPrefixes = listOf(
+        "account-metadata-",
         "kind3-",
         "kind10002-",
         "profiles-",

@@ -54,6 +54,7 @@ import javax.inject.Inject
 import javax.inject.Singleton
 
 private const val TAG = "RelayPool"
+private val ACCOUNT_METADATA_KINDS = listOf(0, 3, 10002)
 
 /** Profile fallback negative-cache TTL — prevents re-firing the full chain. */
 private const val PROFILE_FALLBACK_NEG_TTL = 5 * 60_000L
@@ -73,11 +74,13 @@ private const val EVENT_PROCESSOR_SETTLE_MS = 200L
 private const val BRIDGE_EVENT_FETCH_TTL_MS = 5 * 60_000L
 internal const val MAX_EPHEMERAL_CONNECTIONS = 4
 private const val FOREGROUND_RECONNECT_STAGGER_MS = 200L
-private const val MAX_FOLLOW_REFRESH_RELAYS = 4
-private const val FOLLOW_REFRESH_TIMEOUT_MS = 12_000L
+private const val MAX_FOLLOW_REFRESH_RELAYS = 8
 private const val MAX_PROFILE_METADATA_REFRESH_RELAYS = 4
 private const val PROFILE_METADATA_REFRESH_TIMEOUT_MS = 12_000L
+private const val ACCOUNT_METADATA_FETCH_TIMEOUT_MS = 5_000L
+private const val ACCOUNT_METADATA_EMPTY_EVIDENCE_RELAYS = 2
 private const val MUTE_LIST_FETCH_TIMEOUT_MS = 8_000L
+private const val MUTE_EMPTY_EVIDENCE_RELAYS_PER_CLASS = 2
 internal const val FOLLOW_REFRESH_FRESH_MS = 60_000L
 internal const val FOLLOW_REFRESH_RETRY_MS = 15_000L
 
@@ -238,6 +241,26 @@ internal fun profileMetadataRefreshResult(
 internal val EVENT_REFERENCE_FETCH_KINDS =
     listOf(0, 1, 6, 7, 16, 20, 21, 22, 34235, 34236, 1068, 1111, 30023)
 
+private fun buildReplaceableMetadataReq(
+    subId: String,
+    pubkey: String,
+    kinds: Collection<Int>,
+): String =
+    buildJsonArray {
+        add(JsonPrimitive("REQ"))
+        add(JsonPrimitive(subId))
+        for (kind in kinds) {
+            add(buildJsonObject {
+                put("kinds", buildJsonArray { add(JsonPrimitive(kind)) })
+                put("authors", buildJsonArray { add(JsonPrimitive(pubkey)) })
+                put("limit", JsonPrimitive(1))
+            })
+        }
+    }.toString()
+
+internal fun buildAccountMetadataReq(subId: String, pubkey: String): String =
+    buildReplaceableMetadataReq(subId, pubkey, ACCOUNT_METADATA_KINDS)
+
 internal fun buildCommentParentsReq(subId: String, parentIds: List<String>): String =
     buildJsonArray {
         add(JsonPrimitive("REQ"))
@@ -310,7 +333,7 @@ data class RelayConnectionDebugSnapshot(
 /**
  * Freshness evidence collected by the dedicated kind-10000 request.
  *
- * [receivedEvent] is signature-verified by EventProcessor. [fullEoseCoverage]
+ * [receivedEvent] is signature-verified by EventProcessor. [confirmedEmptyCoverage]
  * is deliberately based on real EOSE frames, not the one-shot lifecycle signal:
  * failed/closed ephemeral sockets are released as lifecycle-complete so they do
  * not leak slots, but they are not proof that the relay-side list was queried.
@@ -319,13 +342,72 @@ internal data class MuteListFetchResult(
     val receivedEvent: NostrEvent? = null,
     val eoseRelays: Set<String> = emptySet(),
     val expectedRelays: Set<String> = emptySet(),
+    val writeRelays: Set<String> = emptySet(),
+    val fallbackRelays: Set<String> = emptySet(),
+    val indexerRelays: Set<String> = emptySet(),
 ) {
-    val fullEoseCoverage: Boolean
-        get() = expectedRelays.isNotEmpty() && eoseRelays.containsAll(expectedRelays)
+    val confirmedEmptyCoverage: Boolean
+        get() = when {
+            // A declared outbox is authoritative: never overwrite until every
+            // declared write relay confirms the replaceable event is absent.
+            writeRelays.isNotEmpty() -> eoseRelays.containsAll(writeRelays)
+            // With no kind-10002, corroborate absence across both the relays we
+            // would publish to and independent indexers. Two of each tolerates
+            // one unhealthy endpoint without reducing this to a single-relay guess.
+            fallbackRelays.isNotEmpty() || indexerRelays.isNotEmpty() ->
+                hasMuteEmptyQuorum(eoseRelays, fallbackRelays) &&
+                    hasMuteEmptyQuorum(eoseRelays, indexerRelays)
+            else -> expectedRelays.isNotEmpty() && eoseRelays.containsAll(expectedRelays)
+        }
 
     val hasFreshnessEvidence: Boolean
-        get() = receivedEvent != null || fullEoseCoverage
+        get() = receivedEvent != null || confirmedEmptyCoverage
 }
+
+private fun hasMuteEmptyQuorum(eoseRelays: Set<String>, candidates: Set<String>): Boolean {
+    if (candidates.size < MUTE_EMPTY_EVIDENCE_RELAYS_PER_CLASS) return false
+    return candidates.count { it in eoseRelays } >= MUTE_EMPTY_EVIDENCE_RELAYS_PER_CLASS
+}
+
+/** Real relay coverage from the combined own-profile/contact/relay-list lookup. */
+internal data class AccountMetadataFetchResult(
+    val queriedRelays: Set<String> = emptySet(),
+    val eoseRelays: Set<String> = emptySet(),
+    val receivedKinds: Set<Int> = emptySet(),
+) {
+    /**
+     * A verified event proves presence. Absence needs every declared outbox, or
+     * independent agreement when there is no outbox. A timeout/CLOSED frame is
+     * never evidence.
+     */
+    fun resolves(kind: Int): Boolean =
+        kind in receivedKinds || confirmsAbsent(kind)
+
+    fun confirmsAbsent(
+        kind: Int,
+        authoritativeRelays: Collection<String> = emptyList(),
+    ): Boolean {
+        if (kind in receivedKinds) return false
+        val admittedEose = eoseRelays.intersect(queriedRelays)
+        val authoritative = authoritativeRelays.mapNotNull(::normalizeRelayUrl).toSet()
+        return if (authoritative.isNotEmpty()) {
+            admittedEose.containsAll(authoritative)
+        } else {
+            admittedEose.size >= ACCOUNT_METADATA_EMPTY_EVIDENCE_RELAYS
+        }
+    }
+
+    /** Profile/relay-list events alone do not resolve the contact graph. */
+    val hasGraphResponse: Boolean get() = resolves(3)
+}
+
+internal fun canMaterializeEmptyContactList(
+    localStateResolved: Boolean,
+    declaredWriteRelays: Collection<String>,
+    result: AccountMetadataFetchResult,
+): Boolean =
+    !localStateResolved &&
+        result.confirmsAbsent(3, authoritativeRelays = declaredWriteRelays)
 
 /** Source of "which relays currently have a non-paused subscription."
  *  Consulted by the pool sweep to avoid force-closing connections with
@@ -1404,6 +1486,7 @@ class RelayPool @Inject constructor(
      *
      * Ephemeral connections never enter [connections] and are globally limited by
      * [MAX_EPHEMERAL_CONNECTIONS], independently of the persistent-pool cap.
+     * Returns the normalized targets admitted by block/capability policy.
      */
     suspend fun sendOneShotBatch(
         urls: List<String>,
@@ -1413,12 +1496,12 @@ class RelayPool @Inject constructor(
         capabilityBypassRelays: Set<String> = emptySet(),
         includeActiveFeedRelay: Boolean = false,
         requestClass: RelayRequestClass = RelayRequestClass.GENERAL,
-    ) {
+    ): Set<String> {
         if (socketTransportSuspended.get()) {
             subIds.forEach { subId ->
                 oneShotEoseCallbacks[subId]?.complete(Unit)
             }
-            return
+            return emptySet()
         }
         val activeFeedRelay = activeSingleRelayFeedUrl?.let(::normalizeRelayUrl)
         val bypassRelays = capabilityBypassRelays.mapNotNull { normalizeRelayUrl(it) }.toSet()
@@ -1447,7 +1530,7 @@ class RelayPool @Inject constructor(
             ) {
                 Log.d(TAG, "one-shot skipped: only feedRelay in target set")
             }
-            return
+            return emptySet()
         }
 
         // The bridge is a common final tier across profiles, event references and articles.
@@ -1508,7 +1591,10 @@ class RelayPool @Inject constructor(
                         it == RelayState.CONNECTED || it == RelayState.FAILED || it == RelayState.DISCONNECTED
                     }
                 }
-                if (state != RelayState.CONNECTED) continue
+                if (state != RelayState.CONNECTED) {
+                    subIds.forEach { recordOneShotRelayCoverage(it, url) }
+                    continue
+                }
             }
             subIds.forEach { _activeOneShotSubs.add(it) }
             reqs.forEach { req ->
@@ -1522,7 +1608,7 @@ class RelayPool @Inject constructor(
         }
 
         // Ephemeral path: open temporary connections (parallel, bounded by timeout)
-        if (ephemeral.isEmpty()) return
+        if (ephemeral.isEmpty()) return targetSet
 
         coroutineScope {
             ephemeral.map { url ->
@@ -1539,6 +1625,7 @@ class RelayPool @Inject constructor(
                 }
             }.awaitAll()
         }
+        return targetSet
     }
 
     /**
@@ -2075,8 +2162,8 @@ class RelayPool @Inject constructor(
         }
 
     /**
-     * Refresh a user's replaceable kind-3 from their write relays plus one
-     * independent broad index. Every selected relay gets a chance to respond;
+     * Refresh a user's replaceable kind-3 from their write relays and
+     * independent broad indexes. Every selected relay gets a chance to respond;
      * EventProcessor/MES created-at ordering then chooses the newest event.
      * This deliberately avoids the old first-responder race, where one stale
      * relay won and all newer in-flight responses were immediately closed.
@@ -2095,33 +2182,44 @@ class RelayPool @Inject constructor(
             }
             followRefreshLastAttemptMs[pubkeyHex] = nowMs
 
+            val mes = memoryEventStore.get()
+            val declaredWriteRelays = mes.writeRelaysFor(pubkeyHex)
             val targets = followRefreshRelayTargets(
-                writeRelayUrls = memoryEventStore.get().writeRelaysFor(pubkeyHex),
+                writeRelayUrls = declaredWriteRelays,
                 indexRelayUrls = FOLLOWER_INDEX_RELAY_URLS,
                 limit = MAX_FOLLOW_REFRESH_RELAYS,
             )
             if (targets.isEmpty()) return@withContext false
 
-            val filter = buildJsonObject {
-                put("kinds", buildJsonArray { add(JsonPrimitive(3)) })
-                put("authors", buildJsonArray { add(JsonPrimitive(pubkeyHex)) })
-                put("limit", JsonPrimitive(1))
-            }
-            val results = fetchPaginatedEvents(
-                urls = targets,
-                baseFilter = filter,
-                subIdPrefix = "follow-refresh",
-                maxPages = 1,
-                timeoutMs = FOLLOW_REFRESH_TIMEOUT_MS,
+            val result = fetchReplaceableMetadata(
+                pubkeyHex = pubkeyHex,
+                rawRelayUrls = targets,
+                kinds = listOf(3),
+                subIdPrefix = "kind3-refresh",
             )
-            val eventResponses = results.count { it.totalEvents > 0 }
+            val received = 3 in result.receivedKinds
+            var resolved = received && mes.getPublishableFollowsSnapshot(pubkeyHex) != null
+            val confirmedNewAccountEmpty = !resolved && canMaterializeEmptyContactList(
+                localStateResolved = mes.getFollowsSnapshot(pubkeyHex) != null,
+                declaredWriteRelays = declaredWriteRelays,
+                result = result,
+            )
+            if (confirmedNewAccountEmpty) {
+                // A zero timestamp is a synthetic baseline, not a published
+                // revision. Any real kind-3 arriving later supersedes it.
+                mes.updateFollows(pubkeyHex, emptySet(), createdAt = 0L)
+                resolved = true
+            }
             Log.i(
                 TAG,
                 "FOLLOW-REFRESH author=${pubkeyHex.take(8)} targets=${targets.size} " +
-                    "covered=${results.size} events=${results.sumOf { it.totalEvents }}",
+                    "eose=${result.eoseRelays.size} received=$received " +
+                    "confirmedEmpty=$confirmedNewAccountEmpty resolved=$resolved",
             )
-            (eventResponses > 0).also { refreshed ->
-                if (refreshed) followRefreshLastSuccessMs[pubkeyHex] = android.os.SystemClock.elapsedRealtime()
+            resolved.also { refreshed ->
+                if (refreshed) {
+                    followRefreshLastSuccessMs[pubkeyHex] = android.os.SystemClock.elapsedRealtime()
+                }
             }
         }
 
@@ -2270,7 +2368,7 @@ class RelayPool @Inject constructor(
     /**
      * Subscription IDs are prefixed to encode their lifecycle type.
      *
-     *  ONE_SHOT  (close after EOSE): kind3-, kind10002-, profiles-, hint-profiles-,
+     *  ONE_SHOT  (close after EOSE): account-metadata-, kind3-, kind10002-, profiles-, hint-profiles-,
      *                                src-profiles-, search-, older-, relay-ecosystem-,
      *                                thread-event-, thread-replies-, thread-reactions-,
      *                                thread-zaps-, user-posts-, user-longform-,
@@ -2280,6 +2378,89 @@ class RelayPool @Inject constructor(
      */
     private fun isOneShotSubscription(subId: String): Boolean =
         SubscriptionRules.isOneShotSubscription(subId)
+
+    /**
+     * Resolve the three pieces of metadata needed to enter the app in one bounded
+     * request. A real EOSE is retained as negative-result evidence; events still flow
+     * through EventProcessor into MES exactly like every other relay fetch.
+     */
+    internal suspend fun fetchAccountMetadata(
+        pubkeyHex: String,
+        rawRelayUrls: List<String>,
+    ): AccountMetadataFetchResult = fetchReplaceableMetadata(
+        pubkeyHex = pubkeyHex,
+        rawRelayUrls = rawRelayUrls,
+        kinds = ACCOUNT_METADATA_KINDS,
+        subIdPrefix = "account-metadata",
+    )
+
+    private suspend fun fetchReplaceableMetadata(
+        pubkeyHex: String,
+        rawRelayUrls: List<String>,
+        kinds: Collection<Int>,
+        subIdPrefix: String,
+    ): AccountMetadataFetchResult {
+        val relayUrls = rawRelayUrls.mapNotNull(::normalizeRelayUrl).distinct()
+        if (relayUrls.isEmpty() || kinds.isEmpty()) return AccountMetadataFetchResult()
+
+        val subId = "$subIdPrefix-${System.nanoTime()}"
+        val acceptedKinds = kinds.toSet()
+        val req = buildReplaceableMetadataReq(subId, pubkeyHex, acceptedKinds)
+        val realEoseRelays = ConcurrentHashMap.newKeySet<String>()
+        val receivedKinds = ConcurrentHashMap.newKeySet<Int>()
+        val evidenceTap = RelayMessageTap { message ->
+            when (message) {
+                is RelayTapMessage.VerifiedEvent -> {
+                    if (message.subscriptionId == subId &&
+                        message.event.pubkey == pubkeyHex &&
+                        message.event.kind in acceptedKinds
+                    ) {
+                        receivedKinds.add(message.event.kind)
+                    }
+                }
+                is RelayTapMessage.Control -> {
+                    if (message.raw.startsWith("[\"EOSE\"") &&
+                        extractEoseSubId(message.raw) == subId
+                    ) {
+                        realEoseRelays.add(message.relayUrl)
+                    }
+                }
+            }
+        }
+        val lifecycleComplete = CompletableDeferred<Unit>()
+        oneShotEoseCallbacks[subId] = lifecycleComplete
+        processor.registerTap(evidenceTap)
+        val queriedRelays = try {
+            try {
+                val admitted = sendOneShotBatch(
+                    urls = relayUrls,
+                    reqs = listOf(req),
+                    subIds = listOf(subId),
+                    timeoutMs = ACCOUNT_METADATA_FETCH_TIMEOUT_MS,
+                )
+                withTimeoutOrNull(ACCOUNT_METADATA_FETCH_TIMEOUT_MS) {
+                    lifecycleComplete.await()
+                }
+                admitted
+            } finally {
+                cleanupOneShotSub(subId)
+            }
+        } finally {
+            processor.unregisterTap(evidenceTap)
+        }
+        delay(EVENT_PROCESSOR_SETTLE_MS)
+        return AccountMetadataFetchResult(
+            queriedRelays = queriedRelays,
+            eoseRelays = realEoseRelays.toSet(),
+            receivedKinds = receivedKinds.toSet(),
+        ).also { result ->
+            Log.d(
+                TAG,
+                "Replaceable metadata: realEose=${result.eoseRelays.size}/" +
+                    "${result.queriedRelays.size} kinds=${result.receivedKinds}",
+            )
+        }
+    }
 
     /**
      * Send a one-time REQ for the user's kind 3 (follow list) to indexer relays.
@@ -2436,7 +2617,8 @@ class RelayPool @Inject constructor(
 
     /**
      * One-shot fetch for NIP-51 mute list (kind 10000).
-     * Sent to indexer + connected write relays, same pattern as fetchRelayEcosystem.
+     * Sent to indexers plus the owner's write relays, or Global fallbacks when the
+     * owner has no relay list. Failed pooled entries are healed before dispatch.
      */
     internal suspend fun fetchMuteList(
         pubkeyHex: String,
@@ -2456,11 +2638,38 @@ class RelayPool @Inject constructor(
         val writeRelayUrls = memoryEventStore.get().writeRelaysFor(pubkeyHex)
             .mapNotNull { normalizeRelayUrl(it) }
             .filter { it !in indexerRelayUrls }
-        val allTargets = (writeRelayUrls + indexerRelayUrls).distinct()
+            .toSet()
+        val fallbackRelayUrls = if (writeRelayUrls.isEmpty()) {
+            GLOBAL_RELAY_URLS.mapNotNull(::normalizeRelayUrl).toSet()
+        } else {
+            emptySet()
+        }
+        val allTargets = (writeRelayUrls + fallbackRelayUrls + indexerRelayUrls).toList()
         if (allTargets.isEmpty()) {
             Log.w(TAG, "NIP-51 mute-list fetch skipped: no relay targets")
             return MuteListFetchResult()
         }
+
+        // A timed retry may encounter FAILED/DISCONNECTED pooled entries. Heal those
+        // entries before choosing negative-result witnesses; sendOneShotBatch otherwise
+        // correctly refuses to treat a dead pooled socket as relay evidence.
+        connectAndAwait(allTargets, timeoutMs = 5_000)
+
+        // Empty is safe only with two already-live witnesses in each independent
+        // relay class. Selecting them before dispatch turns the rule into complete
+        // coverage of a small explicit set, rather than "some fraction responded".
+        val fallbackEvidenceRelays = fallbackRelayUrls
+            .filter { connections[it]?.isConnected == true }
+            .take(MUTE_EMPTY_EVIDENCE_RELAYS_PER_CLASS)
+            .toSet()
+            .takeIf { it.size == MUTE_EMPTY_EVIDENCE_RELAYS_PER_CLASS }
+            .orEmpty()
+        val indexerEvidenceRelays = indexerRelayUrls
+            .filter { connections[it]?.isConnected == true }
+            .take(MUTE_EMPTY_EVIDENCE_RELAYS_PER_CLASS)
+            .toSet()
+            .takeIf { it.size == MUTE_EMPTY_EVIDENCE_RELAYS_PER_CLASS }
+            .orEmpty()
 
         val receivedEvent = AtomicReference<NostrEvent?>(null)
         val eoseRelays = ConcurrentHashMap.newKeySet<String>()
@@ -2486,9 +2695,10 @@ class RelayPool @Inject constructor(
         val eose = CompletableDeferred<Unit>()
         oneShotEoseCallbacks[subId] = eose
         processor.registerTap(evidenceTap)
+        var admittedRelays: Set<String> = emptySet()
         val batchCompleted = try {
             try {
-                sendOneShotBatch(
+                admittedRelays = sendOneShotBatch(
                     urls = allTargets,
                     reqs = listOf(req),
                     subIds = listOf(subId),
@@ -2507,14 +2717,18 @@ class RelayPool @Inject constructor(
         val result = MuteListFetchResult(
             receivedEvent = receivedEvent.get(),
             eoseRelays = eoseRelays.toSet(),
-            expectedRelays = allTargets.toSet(),
+            expectedRelays = admittedRelays,
+            writeRelays = writeRelayUrls,
+            fallbackRelays = fallbackEvidenceRelays,
+            indexerRelays = indexerEvidenceRelays,
         )
         Log.d(
             TAG,
             "NIP-51 mute-list fetch lifecycleComplete=$batchCompleted " +
                 "event=${result.receivedEvent != null} " +
                 "realEose=${result.eoseRelays.size}/${result.expectedRelays.size} " +
-                "(${indexerRelayUrls.size} indexers, ${writeRelayUrls.size} write relays)",
+                "(${result.indexerRelays.size} indexers, ${result.writeRelays.size} write, " +
+                "${result.fallbackRelays.size} fallback relays)",
         )
         return result
     }

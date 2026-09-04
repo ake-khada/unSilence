@@ -83,7 +83,7 @@ class AppBootstrapperMuteSettlementTest {
             expectedRelays = setOf("wss://one.example", "wss://two.example"),
         )
 
-        assertEquals(false, result.fullEoseCoverage)
+        assertEquals(false, result.confirmedEmptyCoverage)
         assertEquals(false, result.hasFreshnessEvidence)
     }
 
@@ -95,7 +95,7 @@ class AppBootstrapperMuteSettlementTest {
             expectedRelays = relays,
         )
 
-        assertEquals(true, result.fullEoseCoverage)
+        assertEquals(true, result.confirmedEmptyCoverage)
         assertEquals(true, result.hasFreshnessEvidence)
     }
 
@@ -104,6 +104,46 @@ class AppBootstrapperMuteSettlementTest {
         val result = MuteListFetchResult(receivedEvent = event("network-event"))
 
         assertEquals(true, result.hasFreshnessEvidence)
+    }
+
+    @Test
+    fun `declared write relays all require real EOSE before empty is confirmed`() {
+        val writes = setOf("wss://one.example", "wss://two.example")
+        val partial = MuteListFetchResult(
+            eoseRelays = setOf("wss://one.example"),
+            expectedRelays = writes,
+            writeRelays = writes,
+        )
+        val complete = partial.copy(eoseRelays = writes)
+
+        assertEquals(false, partial.confirmedEmptyCoverage)
+        assertEquals(true, complete.confirmedEmptyCoverage)
+    }
+
+    @Test
+    fun `missing relay list uses corroborated fallback and indexer quorum`() {
+        val fallbacks = setOf("wss://global-one.example", "wss://global-two.example")
+        val indexers = setOf("wss://index-one.example", "wss://index-two.example")
+        val covered = MuteListFetchResult(
+            eoseRelays = fallbacks + indexers,
+            expectedRelays = fallbacks + indexers,
+            fallbackRelays = fallbacks,
+            indexerRelays = indexers,
+        )
+
+        assertEquals(true, covered.confirmedEmptyCoverage)
+        assertEquals(
+            false,
+            covered.copy(eoseRelays = fallbacks + "wss://index-one.example")
+                .confirmedEmptyCoverage,
+        )
+        assertEquals(
+            false,
+            covered.copy(
+                fallbackRelays = setOf("wss://global-one.example"),
+                eoseRelays = setOf("wss://global-one.example") + indexers,
+            ).confirmedEmptyCoverage,
+        )
     }
 
     @Test

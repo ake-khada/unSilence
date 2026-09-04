@@ -76,6 +76,22 @@ private inline fun feedTrace(message: () -> String) {
     if (TRACE_FEED_VM) Log.d(TAG, message())
 }
 
+internal fun effectiveGlobalFeedLens(
+    stored: GlobalFeedLens,
+    automaticTrustedFallback: Boolean,
+): GlobalFeedLens = if (automaticTrustedFallback) GlobalFeedLens.TRUSTED else stored
+
+internal fun shouldUseAutomaticTrustedGlobal(follows: Set<String>?): Boolean =
+    follows.isNullOrEmpty()
+
+internal fun shouldSurfaceTrustedHydrationFailure(
+    failedSubjects: Set<String>,
+    requestedSubjects: Set<String>,
+    lookup: (String) -> WotLookup,
+): Boolean = failedSubjects.any { subject ->
+    subject in requestedSubjects && lookup(subject) == WotLookup.Pending
+}
+
 sealed class FeedType {
     data object Global    : FeedType()
     data object Following : FeedType()
@@ -181,9 +197,14 @@ class FeedViewModel @Inject constructor(
     )
     val feedType: StateFlow<FeedType> = _feedType.asStateFlow()
 
-    val globalFeedLens: StateFlow<GlobalFeedLens> =
-        relayPreferencesStore.globalFeedLensFlow()
-            .stateIn(viewModelScope, SharingStarted.Eagerly, GlobalFeedLens.TRUSTED)
+    private val storedGlobalFeedLens = relayPreferencesStore.globalFeedLensFlow()
+        .stateIn(viewModelScope, SharingStarted.Eagerly, GlobalFeedLens.TRUSTED)
+    private val automaticTrustedGlobal = MutableStateFlow(false)
+    val globalFeedLens: StateFlow<GlobalFeedLens> = combine(
+        storedGlobalFeedLens,
+        automaticTrustedGlobal,
+        ::effectiveGlobalFeedLens,
+    ).stateIn(viewModelScope, SharingStarted.Eagerly, GlobalFeedLens.TRUSTED)
 
     private val globalFeedPolicy = GlobalFeedPolicy()
     private val trustedSweepRequested: MutableSet<String> = ConcurrentHashMap.newKeySet()
@@ -193,8 +214,11 @@ class FeedViewModel @Inject constructor(
         _globalFeedDropCounters.asStateFlow()
     private val _trustedHiddenCount = MutableStateFlow(0)
     val trustedHiddenCount: StateFlow<Int> = _trustedHiddenCount.asStateFlow()
+    private val _trustedHydrationFailed = MutableStateFlow(false)
+    val trustedHydrationFailed: StateFlow<Boolean> = _trustedHydrationFailed.asStateFlow()
 
     fun setFeedType(type: FeedType) {
+        automaticTrustedGlobal.value = false
         val restored = restoreFeedTypeOrGlobal(type)
         feedTrace { "setFeedType: ${_feedType.value} → $restored" }
         _authUnavailableRelay.value = null
@@ -207,8 +231,17 @@ class FeedViewModel @Inject constructor(
     }
 
     fun setGlobalFeedLens(lens: GlobalFeedLens) {
-        if (lens == globalFeedLens.value) return
+        val wasAutomatic = automaticTrustedGlobal.value
+        automaticTrustedGlobal.value = false
+        if (!wasAutomatic && lens == storedGlobalFeedLens.value) return
         viewModelScope.launch { relayPreferencesStore.setGlobalFeedLens(lens) }
+    }
+
+    private fun selectAutomaticTrustedGlobal(reason: String) {
+        automaticTrustedGlobal.value = true
+        _feedType.value = FeedType.Global
+        _coldStartState.value = ColdStartState.READY_GLOBAL
+        feedTrace { "cold-start: $reason -> Trusted Global" }
     }
 
     fun clearLiveArrival(id: String) {
@@ -778,7 +811,17 @@ class FeedViewModel @Inject constructor(
     }
 
     fun refresh() {
+        if (_trustedHydrationFailed.value) retryTrustedHydration()
         _refreshCounter.value = _refreshCounter.value + 1
+    }
+
+    fun retryTrustedHydration() {
+        val pending = trustedSweepRequested.filter {
+            memoryEventStore.wotFor(it) == WotLookup.Pending
+        }
+        trustedSweepRequested.removeAll(pending.toSet())
+        _trustedHydrationFailed.value = false
+        requestTrustedCandidateSweep(pending)
     }
 
     private val _refreshCounter = MutableStateFlow(0)
@@ -794,6 +837,7 @@ class FeedViewModel @Inject constructor(
         if (_isRefreshing.value) return
         if (now - lastRefreshAt < REFRESH_DEBOUNCE_MS) return
         lastRefreshAt = now
+        if (_trustedHydrationFailed.value) retryTrustedHydration()
         _isRefreshing.value = true
         _refreshCounter.value = _refreshCounter.value + 1
     }
@@ -814,6 +858,19 @@ class FeedViewModel @Inject constructor(
             }
         }
 
+        viewModelScope.launch {
+            wotHydrationCoalescer.failedSubjects.collect { failed ->
+                if (shouldSurfaceTrustedHydrationFailure(
+                        failedSubjects = failed,
+                        requestedSubjects = trustedSweepRequested,
+                        lookup = memoryEventStore::wotFor,
+                    )
+                ) {
+                    _trustedHydrationFailed.value = true
+                }
+            }
+        }
+
         val ownPubkey = keyManager.getPublicKeyHex()
 
         // Cold-start: figure out initial feed type FIRST (no resubscribe yet),
@@ -828,9 +885,7 @@ class FeedViewModel @Inject constructor(
                     _coldStartState.value = ColdStartState.READY_FOLLOWING
                     feedTrace { "cold-start: ${snapshotFollows.size} follows in snapshot -> Following" }
                 } else if (keyManager.isGraphKnownEmpty()) {
-                    _feedType.value = FeedType.Global
-                    _coldStartState.value = ColdStartState.READY_GLOBAL
-                    feedTrace { "cold-start: completed empty graph -> Global" }
+                    selectAutomaticTrustedGlobal("completed empty graph")
                 } else {
                     // Slow path: wait for bootstrap's authoritative kind-3 attempt.
                     // Do not flash Global while follows are still unknown; keep the
@@ -838,14 +893,13 @@ class FeedViewModel @Inject constructor(
                     // when the contact list arrives.
                     initGate.awaitFollows()
                     val follows = memoryEventStore.getFollows(ownPubkey)
-                    if (follows == null) {
-                        _feedType.value = FeedType.Following
-                        _coldStartState.value = ColdStartState.READY_FOLLOWING
-                        feedTrace { "cold-start: follows unresolved after bootstrap -> Following" }
-                    } else if (follows.isEmpty()) {
-                        _feedType.value = FeedType.Global
-                        _coldStartState.value = ColdStartState.READY_GLOBAL
-                        feedTrace { "cold-start: no follows -> Global" }
+                    if (shouldUseAutomaticTrustedGlobal(follows)) {
+                        val reason = if (follows == null) {
+                            "follows unresolved after bounded discovery"
+                        } else {
+                            "no follows"
+                        }
+                        selectAutomaticTrustedGlobal(reason)
                     } else {
                         _hasFollows.value = true
                         // Wait briefly for own kind-10002 (best-effort, optional)
@@ -856,7 +910,7 @@ class FeedViewModel @Inject constructor(
                         }
                         _feedType.value = FeedType.Following
                         _coldStartState.value = ColdStartState.READY_FOLLOWING
-                        feedTrace { "cold-start: ${follows.size} follows from relay -> Following" }
+                        feedTrace { "cold-start: ${follows.orEmpty().size} follows from relay -> Following" }
                     }
                 }
             } else {
@@ -874,6 +928,15 @@ class FeedViewModel @Inject constructor(
                     val hasFollows = follows.isNotEmpty()
                     _hasFollows.value = hasFollows
                     _followsVersion.value = _followsVersion.value + 1
+                    // The fallback is provisional only. A late kind-3 may arrive after
+                    // the bounded discovery window; honor it unless the user has made
+                    // any explicit feed or lens choice in the meantime.
+                    if (hasFollows && automaticTrustedGlobal.value) {
+                        automaticTrustedGlobal.value = false
+                        _feedType.value = FeedType.Following
+                        _coldStartState.value = ColdStartState.READY_FOLLOWING
+                        feedTrace { "late follows resolved (${follows.size}) -> Following" }
+                    }
                 }
             }
         }
@@ -1162,11 +1225,15 @@ class FeedViewModel @Inject constructor(
         }
         val newlyRequested = subjects.filter { trustedSweepRequested.add(it) }
         if (newlyRequested.isEmpty()) return
+        _trustedHydrationFailed.value = false
         _wotSubjects.update { current -> current + newlyRequested }
         wotHydrationCoalescer.requestHydration(newlyRequested)
     }
 
-    private fun resetTrustedCandidateSweep() = trustedSweepRequested.clear()
+    private fun resetTrustedCandidateSweep() {
+        trustedSweepRequested.clear()
+        _trustedHydrationFailed.value = false
+    }
 
     // ── Mute / Report actions ──────────────────────────────────────────────
 

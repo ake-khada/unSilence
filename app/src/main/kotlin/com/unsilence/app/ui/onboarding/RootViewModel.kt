@@ -10,6 +10,7 @@ import androidx.lifecycle.viewModelScope
 import com.unsilence.app.data.AppBootstrapper
 import com.unsilence.app.data.auth.KeyManager
 import com.unsilence.app.data.blossom.BlossomServersStore
+import com.unsilence.app.data.init.InitGate
 import com.unsilence.app.data.settings.SettingsStore
 import com.unsilence.app.data.wallet.ZapPreferencesStore
 import dagger.hilt.android.lifecycle.HiltViewModel
@@ -23,6 +24,7 @@ class RootViewModel @Inject constructor(
     private val savedStateHandle: SavedStateHandle,
     val keyManager: KeyManager,
     private val bootstrapper: AppBootstrapper,
+    private val initGate: InitGate,
     private val zapPreferencesStore: ZapPreferencesStore,
     private val blossomServersStore: BlossomServersStore,
     private val settingsStore: SettingsStore,
@@ -47,7 +49,10 @@ class RootViewModel @Inject constructor(
             val pubkey = keyManager.getPublicKeyHex()
             if (pubkey != null) {
                 selectPreferenceOwner(pubkey)
-                viewModelScope.launch(Dispatchers.IO) { bootstrapper.bootstrap(pubkey) }
+                val initSession = initGate.beginSession(pubkey)
+                viewModelScope.launch(Dispatchers.IO) {
+                    bootstrapper.bootstrap(pubkey, initSession)
+                }
             }
         }
     }
@@ -56,10 +61,13 @@ class RootViewModel @Inject constructor(
         if (isLoggingOut) return
         val pubkey = keyManager.getPublicKeyHex() ?: return
         selectPreferenceOwner(pubkey)
+        val initSession = initGate.beginSession(pubkey)
         sessionId++
         savedStateHandle[SESSION_ID_KEY] = sessionId
         isLoggedIn = true
-        viewModelScope.launch(Dispatchers.IO) { bootstrapper.bootstrap(pubkey) }
+        viewModelScope.launch(Dispatchers.IO) {
+            bootstrapper.bootstrap(pubkey, initSession)
+        }
     }
 
     fun logout() {
