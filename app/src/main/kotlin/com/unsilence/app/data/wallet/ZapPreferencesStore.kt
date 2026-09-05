@@ -7,6 +7,7 @@ import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.longPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
+import androidx.datastore.preferences.core.stringSetPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.CoroutineScope
@@ -16,6 +17,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -45,10 +47,15 @@ data class ZapPreferences(
 }
 
 @Singleton
-class ZapPreferencesStore @Inject constructor(
-    @ApplicationContext private val context: Context,
+class ZapPreferencesStore internal constructor(
+    private val dataStore: DataStore<Preferences>,
+    private val scope: CoroutineScope,
 ) {
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    @Inject
+    constructor(@ApplicationContext context: Context) : this(
+        dataStore = context.zapPrefsDataStore,
+        scope = CoroutineScope(SupervisorJob() + Dispatchers.IO),
+    )
 
     private val activeOwner = MutableStateFlow<String?>(null)
     private val _state = MutableStateFlow(ZapPreferences.DEFAULT)
@@ -56,7 +63,7 @@ class ZapPreferencesStore @Inject constructor(
 
     init {
         scope.launch {
-            context.zapPrefsDataStore.data
+            dataStore.data
                 .combine(activeOwner) { prefs, owner -> prefs.toZapPreferences(owner) }
                 .collect { _state.value = it }
         }
@@ -77,7 +84,7 @@ class ZapPreferencesStore @Inject constructor(
     suspend fun updatePreset(index: Int, amountSats: Long?, message: String?) {
         require(index in 0 until ZapPreferences.PRESET_COUNT)
         val owner = activeOwner.value ?: return
-        context.zapPrefsDataStore.edit { prefs ->
+        dataStore.edit { prefs ->
             if (amountSats != null) {
                 prefs[amountKey(owner, index)] = amountSats
             }
@@ -89,9 +96,34 @@ class ZapPreferencesStore @Inject constructor(
 
     suspend fun setDefaultPrivate(value: Boolean) {
         val owner = activeOwner.value ?: return
-        context.zapPrefsDataStore.edit { prefs ->
+        dataStore.edit { prefs ->
             prefs[defaultPrivateKey(owner)] = value
         }
+    }
+
+    suspend fun trustedZapperPubkeys(ownerPubkey: String): Set<String> {
+        val owner = ownerPubkey.trim().lowercase()
+        return dataStore.data.first()[trustedZapperPubkeysKey(owner)]
+            .orEmpty()
+            .mapNotNullTo(LinkedHashSet(), ::normalizedZapperPubkey)
+    }
+
+    /** Atomically retain every HTTPS-discovered zapper key previously seen for this owner. */
+    suspend fun rememberTrustedZapperPubkeys(
+        ownerPubkey: String,
+        freshPubkeys: Set<String>,
+    ): Set<String> {
+        val owner = ownerPubkey.trim().lowercase()
+        val fresh = freshPubkeys.mapNotNullTo(LinkedHashSet(), ::normalizedZapperPubkey)
+        var merged: Set<String> = emptySet()
+        dataStore.edit { prefs ->
+            val existing = prefs[trustedZapperPubkeysKey(owner)]
+                .orEmpty()
+                .mapNotNullTo(LinkedHashSet(), ::normalizedZapperPubkey)
+            merged = existing + fresh
+            prefs[trustedZapperPubkeysKey(owner)] = merged
+        }
+        return merged
     }
 
     private fun Preferences.toZapPreferences(owner: String?): ZapPreferences {
@@ -115,4 +147,10 @@ class ZapPreferencesStore @Inject constructor(
 
     private fun defaultPrivateKey(owner: String) =
         booleanPreferencesKey("${owner}_default_private")
+
+    private fun trustedZapperPubkeysKey(owner: String) =
+        stringSetPreferencesKey("${owner}_trusted_zapper_pubkeys")
 }
+
+private fun normalizedZapperPubkey(value: String): String? = value.trim().lowercase()
+    .takeIf { pubkey -> pubkey.length == 64 && pubkey.all { it in '0'..'9' || it in 'a'..'f' } }

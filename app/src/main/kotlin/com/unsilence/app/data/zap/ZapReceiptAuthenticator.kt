@@ -16,7 +16,9 @@ import kotlinx.serialization.decodeFromString
 internal sealed interface OwnZapServiceAuthority {
     data object Unavailable : OwnZapServiceAuthority
     data object Unsupported : OwnZapServiceAuthority
-    data class Trusted(val zapperPubkey: String) : OwnZapServiceAuthority
+    data class Trusted(val zapperPubkeys: Set<String>) : OwnZapServiceAuthority {
+        constructor(zapperPubkey: String) : this(setOf(zapperPubkey))
+    }
 }
 
 internal enum class ZapReceiptRejection {
@@ -128,7 +130,7 @@ internal fun authenticateZapReceipt(
             OwnZapServiceAuthority.Unsupported -> {
                 return ZapReceiptDecision.Rejected(ZapReceiptRejection.OWN_AUTHORITY_UNSUPPORTED)
             }
-            is OwnZapServiceAuthority.Trusted -> if (event.pubkey != ownAuthority.zapperPubkey) {
+            is OwnZapServiceAuthority.Trusted -> if (event.pubkey !in ownAuthority.zapperPubkeys) {
                 return ZapReceiptDecision.Rejected(ZapReceiptRejection.WRONG_ZAPPER)
             }
         }

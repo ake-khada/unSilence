@@ -256,7 +256,7 @@ class ZapRepository @Inject constructor(
         }
         val zapper = meta.nostrPubkey
         return if (meta.allowsNostr && zapper != null && isHexPubkey(zapper)) {
-            OwnZapServiceAuthority.Trusted(zapper)
+            OwnZapServiceAuthority.Trusted(zapper.lowercase())
         } else {
             OwnZapServiceAuthority.Unsupported
         }
