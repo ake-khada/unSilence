@@ -15,7 +15,9 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.json.JsonPrimitive
@@ -247,6 +249,7 @@ class ProfilePipeline @Inject constructor(
         val noteEvents = try {
             fetchNotes(pubkey, writeRelays, maxPages, isOwn)
         } catch (e: Exception) {
+            currentCoroutineContext().ensureActive()
             Log.w(TAG, "Step2 failed: ${e.message}")
             memoryEventStore.userEvents(pubkey, PROFILE_KINDS, 2500)
         }
@@ -257,6 +260,7 @@ class ProfilePipeline @Inject constructor(
         val refIds = try {
             hydrateRefs(noteEvents, anchorPolicy)
         } catch (e: Exception) {
+            currentCoroutineContext().ensureActive()
             Log.w(TAG, "Step3 failed: ${e.message}")
             emptySet()
         }
@@ -272,6 +276,7 @@ class ProfilePipeline @Inject constructor(
         try {
             fetchEngagement(eagerEngagementEvents, writeRelays)
         } catch (e: Exception) {
+            currentCoroutineContext().ensureActive()
             Log.w(TAG, "Step4 failed: ${e.message}")
         }
         Log.d(TAG, "Step4: eager engagement fetched for ${eagerEngagementEvents.size}/${noteEvents.size} notes")
@@ -287,6 +292,7 @@ class ProfilePipeline @Inject constructor(
             try {
                 fetchOwnEngagement(eagerEngagementEvents)
             } catch (e: Exception) {
+                currentCoroutineContext().ensureActive()
                 Log.w(TAG, "Step5 failed: ${e.message}")
             }
             Log.d(TAG, "Step5: own-engagement markers fetched")
