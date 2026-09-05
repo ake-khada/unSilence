@@ -113,6 +113,40 @@ class ZapReceiptAuthenticatorTest {
     }
 
     @Test
+    fun `historical and current own zapper keys are accepted while an unknown key is rejected`() = runTest {
+        val historicalZapper = crypto.identity("77")
+        val authority = OwnZapServiceAuthority.Trusted(
+            setOf(historicalZapper.pubkey, zapper),
+        )
+        val zapRequest = request(senderSigner)
+
+        assertTrue(
+            authenticateZapReceipt(
+                receipt(historicalZapper, zapRequest),
+                ownPubkey = recipient,
+                ownAuthority = authority,
+            ) is ZapReceiptDecision.Accepted,
+        )
+        assertTrue(
+            authenticateZapReceipt(
+                receipt(zapperSigner, zapRequest),
+                ownPubkey = recipient,
+                ownAuthority = authority,
+            ) is ZapReceiptDecision.Accepted,
+        )
+        assertEquals(
+            ZapReceiptRejection.WRONG_ZAPPER,
+            (
+                authenticateZapReceipt(
+                    receipt(attackerSigner, zapRequest),
+                    ownPubkey = recipient,
+                    ownAuthority = authority,
+                ) as ZapReceiptDecision.Rejected
+            ).reason,
+        )
+    }
+
+    @Test
     fun `invoice and signed request amount mismatch is rejected`() = runTest {
         val request = request(senderSigner, amountMsats = 2_000_000L)
         val decision = authenticateZapReceipt(
