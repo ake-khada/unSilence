@@ -45,6 +45,8 @@ fun ComposePreviewCard(
             role = CardRole.Feed,
             onNoteClick = {},
             onAuthorClick = {},
+            // Draft previews are intentionally non-navigable.
+            onHashtagClick = {},
             lookupProfile = lookupProfile,
             lookupEvent = lookupEvent,
             lookupModel = lookupModel,

@@ -65,6 +65,7 @@ fun EmptyRepostBody(
     imageDimensionCache: ImageDimensionCache?,
     onNoteClick: (String) -> Unit,
     onAuthorClick: (String) -> Unit,
+    onHashtagClick: (String) -> Unit,
     // Video env — forwarded so a poster-less reposted video gets the MMR
     // first-frame (thumbnailCache) instead of a dark placeholder, and so the
     // target video can attach the shared player when this row is active.
@@ -166,6 +167,7 @@ fun EmptyRepostBody(
                         role                = CardRole.Embedded,
                         onNoteClick         = onNoteClick,
                         onAuthorClick       = onAuthorClick,
+                        onHashtagClick      = onHashtagClick,
                         lookupProfile       = lookupProfile,
                         profileFlow         = profileFlow,
                         lookupEvent         = lookupEventWithAuthor?.let { lookup ->
