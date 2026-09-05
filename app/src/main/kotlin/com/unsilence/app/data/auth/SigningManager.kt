@@ -13,6 +13,8 @@ import com.vitorpamplona.quartz.nip01Core.signers.NostrSignerInternal
 import com.vitorpamplona.quartz.nip01Core.signers.NostrSignerSync
 import com.vitorpamplona.quartz.nip55AndroidSigner.client.NostrSignerExternal
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
 import java.util.concurrent.CopyOnWriteArraySet
 import javax.inject.Inject
@@ -80,10 +82,10 @@ class SigningManager @Inject constructor(
     suspend fun <T : Event> sign(template: EventTemplate<T>): T? {
         val s = getOrCreateSigner() ?: return null
         return if (s is NostrSignerExternal) {
-            runCatching { s.sign(template) }.getOrNull()
+            signerAttempt { s.sign(template) }
         } else {
             withContext(Dispatchers.Default) {
-                runCatching { s.sign(template) }.getOrNull()
+                signerAttempt { s.sign(template) }
             }
         }
     }
@@ -96,11 +98,7 @@ class SigningManager @Inject constructor(
     suspend fun encrypt(plaintext: String, peerPubkeyHex: String): String? {
         val s = getOrCreateSigner() ?: return null
 
-        val result = try {
-            s.nip44Encrypt(plaintext, peerPubkeyHex)
-        } catch (_: Throwable) {
-            return null
-        } ?: return null
+        val result = signerAttempt { s.nip44Encrypt(plaintext, peerPubkeyHex) } ?: return null
 
         if (!isValidNip44V2Ciphertext(result)) return null
 
@@ -118,23 +116,8 @@ class SigningManager @Inject constructor(
             return null
         }
 
-        val result = try {
-            s.nip44Decrypt(ciphertext, peerPubkeyHex)
-        } catch (_: Throwable) {
-            null
-        } ?: try {
-            s.nip04Decrypt(ciphertext, peerPubkeyHex)
-        } catch (_: Throwable) {
-            return null
-        } ?: return null
-
-        // Catch Amber error-string returns
-        if (result.startsWith("Could not", ignoreCase = true) ||
-            result.startsWith("Error", ignoreCase = true)) {
-            return null
-        }
-
-        return result
+        return signerDecryptAttempt { s.nip44Decrypt(ciphertext, peerPubkeyHex) }
+            ?: signerDecryptAttempt { s.nip04Decrypt(ciphertext, peerPubkeyHex) }
     }
 
     /**
@@ -150,21 +133,26 @@ class SigningManager @Inject constructor(
         decrypt(ciphertext, peerPubkeyHex)?.let { return it }
 
         // Path 3: Quartz bech32 — unwrap to NIP-04 and decrypt directly.
-        // Must call nip04Decrypt without trying nip44 first, because Amber
-        // returns "Could not decrypt" as a non-null string from nip44Decrypt,
-        // which blocks the NIP-04 fallback in decrypt().
         val nip04 = unwrapPzapBech32(ciphertext) ?: return null
         val s = getOrCreateSigner() ?: return null
-        val result = try {
-            s.nip04Decrypt(nip04, peerPubkeyHex)
-        } catch (_: Throwable) {
-            null
-        } ?: return null
-        if (result.startsWith("Could not", ignoreCase = true) ||
-            result.startsWith("Error", ignoreCase = true)) {
-            return null
-        }
-        return result
+        return signerDecryptAttempt { s.nip04Decrypt(nip04, peerPubkeyHex) }
+    }
+
+    /** Amber reports some failures as strings; every decrypt attempt treats them as null. */
+    private suspend fun signerDecryptAttempt(block: suspend () -> String?): String? =
+        normalizeSignerResult(signerAttempt(block))
+
+    /** Signer IPC/crypto failures are nullable results; coroutine cancellation is not. */
+    private suspend fun <T> signerAttempt(block: suspend () -> T): T? = try {
+        block()
+    } catch (_: Exception) {
+        currentCoroutineContext().ensureActive()
+        null
+    }
+
+    private fun normalizeSignerResult(result: String?): String? = result?.takeUnless {
+        it.startsWith("Could not", ignoreCase = true) ||
+            it.startsWith("Error", ignoreCase = true)
     }
 
     /**

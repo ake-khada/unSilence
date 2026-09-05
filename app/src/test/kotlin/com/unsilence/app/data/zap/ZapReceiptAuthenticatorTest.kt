@@ -4,10 +4,12 @@ import com.unsilence.app.data.auth.MuteKeyProvider
 import com.unsilence.app.data.memory.MemoryEventStore
 import com.unsilence.app.data.memory.NostrEvent
 import com.unsilence.app.data.memory.NotificationRow
+import com.unsilence.app.data.memory.VerifiedPrivateZap
 import com.unsilence.app.data.memory.ZapAttribution
 import com.unsilence.app.data.relay.EventDto
 import com.unsilence.app.data.relay.NostrJson
 import kotlinx.coroutines.test.runTest
+import kotlinx.coroutines.flow.first
 import kotlinx.serialization.encodeToString
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
@@ -375,6 +377,30 @@ class ZapReceiptAuthenticatorTest {
             ZapAttribution.IntentionallyAnonymous,
             store.zapDetailsForEvent(target).single().attribution,
         )
+    }
+
+    @Test
+    fun `pending private zap work is derived replayed and removed after verification`() = runTest {
+        val store = ownRecipientStore()
+        val anonymousSigner = crypto.identity("66")
+        val privateReceipt = receipt(
+            zapperSigner,
+            request(anonymousSigner, anonCiphertext = "opaque-ciphertext"),
+        )
+        store.insert(privateReceipt)
+
+        val firstCollection = store.pendingPrivateZapDecrypts.first()
+        val lateCollection = store.pendingPrivateZapDecrypts.first()
+        assertEquals(setOf(privateReceipt.id), firstCollection.map { it.zapReceiptId }.toSet())
+        assertEquals(firstCollection, lateCollection)
+
+        store.acceptVerifiedPrivateZap(
+            zapReceiptId = privateReceipt.id,
+            verified = VerifiedPrivateZap(senderPubkey = sender, comment = "private"),
+            targetId = target,
+        )
+
+        assertTrue(store.pendingPrivateZapDecrypts.first().isEmpty())
     }
 
     @Test
