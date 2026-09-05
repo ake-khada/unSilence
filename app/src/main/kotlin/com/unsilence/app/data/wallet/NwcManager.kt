@@ -54,7 +54,6 @@ private const val KEY_SECRET = "wallet_secret"
 private const val KEY_OWNER  = "owner_pubkey"
 private const val BALANCE_TTL_MS = 60_000L
 private const val PAYMENT_TIMEOUT_MS = 45_000L
-private const val PAYMENT_READY_TIMEOUT_MS = 7_000L
 
 class WalletPaymentPendingException(message: String) : Exception(message)
 
@@ -132,6 +131,11 @@ class NwcManager @Inject constructor(
         prefs.edit().clear().apply()
         lastBalance = null
         Log.d(TAG, "NWC connection cleared")
+    }
+
+    /** Retire the persistent payment socket before Android suspends networking. */
+    fun suspendForBackground() {
+        closePaymentSession("app backgrounded")
     }
 
     /**
@@ -273,11 +277,12 @@ class NwcManager @Inject constructor(
             pending.getAndSet(null)?.deferred?.complete(Result.failure(Exception("Wallet relay closed: $reason")))
             webSocket?.close(1000, reason.take(120))
             webSocket = null
+            discardPaymentSession(this)
         }
 
         suspend fun sendPayment(bolt11: String, amountMsats: Long?): Result<Unit> = sendMutex.withLock {
             val readyResult = try {
-                withTimeout(PAYMENT_READY_TIMEOUT_MS) { ready.await() }
+                withTimeout(ZAP_NETWORK_LEG_TIMEOUT_MS) { ready.await() }
             } catch (e: TimeoutCancellationException) {
                 close("ready timeout")
                 return@withLock Result.failure(Exception("Wallet relay did not become ready"))
@@ -334,7 +339,7 @@ class NwcManager @Inject constructor(
             try {
                 withTimeout(PAYMENT_TIMEOUT_MS) { payment.deferred.await() }
             } catch (e: TimeoutCancellationException) {
-                pending.compareAndSet(payment, null)
+                close("payment timeout")
                 Result.failure(
                     WalletPaymentPendingException(
                         "Wallet has not confirmed this zap yet. Check your wallet before retrying."
