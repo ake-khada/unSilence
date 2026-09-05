@@ -266,6 +266,7 @@ fun ThreadScreen(
                                     onNoteClick         = { /* already on thread */ },
                                     onComment           = { onComment(note.id) },
                                     onAuthorClick       = onAuthorClick,
+                                    onHashtagClick      = onHashtagClick,
                                     onQuote             = onQuote,
                                     onArticleClick      = { articleRow = it },
                                     onReact             = { actionsViewModel.react(note.id, note.pubkey) },
@@ -310,6 +311,9 @@ fun ThreadScreen(
                                     onLongPress         = { actionsRow = note },
                                     wotLookup           = { key -> wotLookups[key] },
                                     feedWotDisplayMode  = feedWotDisplayMode,
+                                    // ThreadViewModel hydrates the complete visible row set as a batch.
+                                    onWotSubjectsVisible = {},
+                                    onNewPostAnimated   = {},
                                     pollActions         = pollActions,
                                 )
                                 FeedDivider()
@@ -393,6 +397,7 @@ fun ThreadScreen(
                                                     onNoteClick         = { /* already viewing thread */ },
                                                     onComment           = { onComment(reply.id) },
                                                     onAuthorClick       = onAuthorClick,
+                                                    onHashtagClick      = onHashtagClick,
                                                     onQuote             = onQuote,
                                                     onArticleClick      = { articleRow = it },
                                                     onReact             = { actionsViewModel.react(reply.id, reply.pubkey) },
@@ -437,6 +442,9 @@ fun ThreadScreen(
                                                     onLongPress         = { actionsRow = reply },
                                                     wotLookup           = { key -> wotLookups[key] },
                                                     feedWotDisplayMode  = feedWotDisplayMode,
+                                                    // ThreadViewModel hydrates the complete visible row set as a batch.
+                                                    onWotSubjectsVisible = {},
+                                                    onNewPostAnimated   = {},
                                                     pollActions         = pollActions,
                                                 )
                                             }

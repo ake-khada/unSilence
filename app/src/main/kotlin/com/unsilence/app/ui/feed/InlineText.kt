@@ -52,7 +52,7 @@ internal fun InlineText(
     segments: List<Segment>,
     lookupProfile: (suspend (String) -> UserEntity?)?,
     onAuthorClick: (String) -> Unit,
-    onHashtagClick: (String) -> Unit = {},
+    onHashtagClick: (String) -> Unit,
     onTextClick: () -> Unit,
     customEmojis: Map<String, String> = emptyMap(),
     modifier: Modifier = Modifier,

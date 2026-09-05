@@ -751,6 +751,7 @@ fun ArticleReaderScreen(
                                                 feedWotDisplayMode    = feedWotDisplayMode,
                                                 onWotSubjectsVisible  = articleReaderVm::requestWotHydration,
                                                 pollActions           = pollActions,
+                                                onNewPostAnimated     = {},
                                             )
                                         }
                                     }

@@ -55,15 +55,9 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
-import androidx.compose.ui.text.LinkAnnotation
-import androidx.compose.ui.text.SpanStyle
-import androidx.compose.ui.text.TextLinkStyles
 import androidx.compose.ui.text.buildAnnotatedString
-import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
-import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.style.TextOverflow
-import androidx.compose.ui.text.withLink
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -72,6 +66,7 @@ import com.unsilence.app.data.media.SaveMediaKind
 import com.unsilence.app.data.media.isSavableVideoSource
 import com.unsilence.app.data.memory.FeedRow
 import com.unsilence.app.data.memory.UserEntity
+import com.unsilence.app.data.model.ContentParser
 import com.unsilence.app.data.relay.Nip19FailureCache
 import com.unsilence.app.ui.common.IdentIcon
 import com.unsilence.app.ui.common.rememberAvatarImageRequest
@@ -278,28 +273,64 @@ internal fun AvatarImage(
     }
 }
 
-/** Renders note text with nostr profile references as inline @displayName mentions. */
+private sealed interface NostrRichTextReference {
+    val start: Int
+    val endExclusive: Int
+
+    data class Profile(
+        override val start: Int,
+        override val endExclusive: Int,
+        val pubkeyHex: String,
+    ) : NostrRichTextReference
+
+    data class Hashtag(
+        override val start: Int,
+        override val endExclusive: Int,
+        val tag: String,
+    ) : NostrRichTextReference
+}
+
+private fun nostrRichTextReferences(content: String): List<NostrRichTextReference> {
+    val profiles = NOSTR_PROFILE_URI_REGEX.findAll(content).mapNotNull { match ->
+        val ref = decodeNostrRef(match.value)
+        if (ref is NostrRef.ProfileRef) {
+            NostrRichTextReference.Profile(
+                start = match.range.first,
+                endExclusive = match.range.last + 1,
+                pubkeyHex = ref.pubkeyHex,
+            )
+        } else {
+            null
+        }
+    }.toList()
+    val hashtags = ContentParser.findHashtags(content).mapNotNull { (start, endExclusive, tag) ->
+        val overlapsProfile = profiles.any { profile ->
+            start < profile.endExclusive && endExclusive > profile.start
+        }
+        if (overlapsProfile) null else {
+            NostrRichTextReference.Hashtag(start, endExclusive, tag)
+        }
+    }
+    return (profiles + hashtags).sortedBy(NostrRichTextReference::start)
+}
+
+/** Renders note text with tappable nostr profile references and hashtags. */
 @Composable
 internal fun NostrRichText(
     content: String,
     lookupProfile: (suspend (String) -> UserEntity?)?,
     onAuthorClick: (String) -> Unit,
+    onHashtagClick: (String) -> Unit,
     onTextClick: () -> Unit,
     modifier: Modifier = Modifier,
     maxLines: Int = Int.MAX_VALUE,
     overflow: TextOverflow = TextOverflow.Clip,
     textAlign: TextAlign? = null,
 ) {
-    // Parse mention positions and resolved pubkeys (stable for same content)
-    val mentions = remember(content) {
-        NOSTR_PROFILE_URI_REGEX.findAll(content).mapNotNull { m ->
-            val ref = decodeNostrRef(m.value)
-            if (ref is NostrRef.ProfileRef) Triple(m.range, m.value, ref.pubkeyHex) else null
-        }.toList()
-    }
+    val references = remember(content) { nostrRichTextReferences(content) }
 
-    // No mentions — plain Text with click handler
-    if (mentions.isEmpty()) {
+    // Plain text remains the fast path when there are no interactive spans.
+    if (references.isEmpty()) {
         Text(
             text       = content,
             color      = MaterialTheme.colorScheme.onSurface,
@@ -317,51 +348,55 @@ internal fun NostrRichText(
     var profileMap by remember(content) {
         mutableStateOf(emptyMap<String, UserEntity?>())
     }
-    LaunchedEffect(mentions) {
+    val mentionPubkeys = remember(references) {
+        references.filterIsInstance<NostrRichTextReference.Profile>()
+            .map(NostrRichTextReference.Profile::pubkeyHex)
+            .distinct()
+    }
+    LaunchedEffect(mentionPubkeys) {
         if (lookupProfile != null) {
             profileMap = coroutineScope {
-                mentions.map { (_, _, hex) ->
+                mentionPubkeys.map { hex ->
                     async { hex to lookupProfile(hex) }
                 }.awaitAll().toMap()
             }
         }
     }
 
-    val annotatedText = remember(content, mentions, profileMap, onAuthorClick) {
+    val annotatedText = remember(
+        content,
+        references,
+        profileMap,
+        onAuthorClick,
+        onHashtagClick,
+    ) {
         buildAnnotatedString {
             var lastIndex = 0
-            for ((range, raw, pubkeyHex) in mentions) {
-                // Text before this mention
-                if (range.first > lastIndex) {
-                    append(content.substring(lastIndex, range.first))
+            for (reference in references) {
+                if (reference.start > lastIndex) {
+                    append(content.substring(lastIndex, reference.start))
                 }
 
-                val profile = profileMap[pubkeyHex]
-                val npubFallback = runCatching { NPub.create(pubkeyHex).take(16) + "…" }
-                    .getOrDefault("${pubkeyHex.take(8)}…")
-                val displayName = profile?.displayName?.takeIf { it.isNotBlank() }
-                    ?: profile?.name?.takeIf { it.isNotBlank() && !looksLikeHexPubkey(it) }
-                    ?: npubFallback
-
-                withLink(
-                    LinkAnnotation.Clickable(
-                        tag = pubkeyHex,
-                        styles = TextLinkStyles(
-                            style = SpanStyle(
-                                color          = Brand,
-                                fontWeight     = FontWeight.Medium,
-                                textDecoration = TextDecoration.None,
-                            ),
-                        ),
-                        linkInteractionListener = { onAuthorClick(pubkeyHex) },
-                    ),
-                ) {
-                    append("@$displayName")
+                when (reference) {
+                    is NostrRichTextReference.Profile -> {
+                        val pubkeyHex = reference.pubkeyHex
+                        val profile = profileMap[pubkeyHex]
+                        val npubFallback = runCatching { NPub.create(pubkeyHex).take(16) + "…" }
+                            .getOrDefault("${pubkeyHex.take(8)}…")
+                        val displayName = profile?.displayName?.takeIf { it.isNotBlank() }
+                            ?: profile?.name?.takeIf {
+                                it.isNotBlank() && !looksLikeHexPubkey(it)
+                            }
+                            ?: npubFallback
+                        appendMentionSpan(pubkeyHex, displayName, onAuthorClick)
+                    }
+                    is NostrRichTextReference.Hashtag -> {
+                        appendHashtagSpan(reference.tag, onHashtagClick)
+                    }
                 }
 
-                lastIndex = range.last + 1
+                lastIndex = reference.endExclusive
             }
-            // Remaining text after last mention
             if (lastIndex < content.length) {
                 append(content.substring(lastIndex))
             }
