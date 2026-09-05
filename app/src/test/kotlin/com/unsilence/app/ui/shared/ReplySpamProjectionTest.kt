@@ -61,27 +61,46 @@ class ReplySpamProjectionTest {
     }
 
     @Test
-    fun `seed phrase shape rejects a second mention or a non-person nostr entity`() {
+    fun `seed phrase shape rejects a second mention`() {
         assertFalse(
             isSeedPhraseShape(
                 "@alice, one, two, three, four, five, six, seven, eight, @bob",
             ),
         )
-        assertFalse(
+    }
+
+    @Test
+    fun `seed phrase shape rejects prose punctuation uppercase digits and short lists`() {
+        assertFalse(isSeedPhraseShape("one, two, three, four, five, six, seven"))
+        assertFalse(isSeedPhraseShape("one, two, three, four, five, six, seven, Eight"))
+        assertFalse(isSeedPhraseShape("one, two, three, four, five, six, seven, eight2"))
+        assertFalse(isSeedPhraseShape("one, two, three, four, five, six, seven, eight."))
+        assertFalse(isSeedPhraseShape("This is human prose, with commas, but not a bare word list"))
+    }
+
+    @Test
+    fun `seed phrase shape ignores a trailing relay URL`() {
+        assertTrue(isSeedPhraseShape("$SEED_A, wss://relay.example"))
+    }
+
+    @Test
+    fun `seed phrase shape ignores a URL in the middle of the list`() {
+        assertTrue(
             isSeedPhraseShape(
-                "one, two, three, four, five, six, seven, eight, nostr:note1qqqqqqqqqq",
+                "abandon, ability, able, https://example.com/path, about, above, absent, " +
+                    "absorb, abstract, absurd, abuse, access, accident",
             ),
         )
     }
 
     @Test
-    fun `seed phrase shape rejects prose punctuation uppercase digits urls and short lists`() {
-        assertFalse(isSeedPhraseShape("one, two, three, four, five, six, seven"))
-        assertFalse(isSeedPhraseShape("one, two, three, four, five, six, seven, Eight"))
-        assertFalse(isSeedPhraseShape("one, two, three, four, five, six, seven, eight2"))
-        assertFalse(isSeedPhraseShape("one, two, three, four, five, six, seven, eight."))
-        assertFalse(isSeedPhraseShape("one, two, three, four, five, six, seven, https://eight.test"))
-        assertFalse(isSeedPhraseShape("This is human prose, with commas, but not a bare word list"))
+    fun `a comma list containing only URLs is not seed shaped`() {
+        assertFalse(
+            isSeedPhraseShape(
+                "wss://one.example, ws://two.example, https://three.example, " +
+                    "http://four.example, nostr:note1qqqqqqqqqq",
+            ),
+        )
     }
 
     @Test
@@ -159,22 +178,80 @@ class ReplySpamProjectionTest {
     }
 
     @Test
-    fun `multiple mentions and non-person references remain ineligible for clustering`() {
+    fun `different appended relay URLs do not evade long near-duplicate clustering`() {
+        val rows = listOf(
+            depthRow(
+                "bait-a",
+                "alice",
+                bait("alpha amber autumn arrive") + " wss://relay-a.example",
+                createdAt = 100,
+            ),
+            depthRow(
+                "bait-b",
+                "bob",
+                bait("binary breeze bronze balance", reversed = true) +
+                    " https://relay-b.example/path",
+                createdAt = 200,
+            ),
+            depthRow(
+                "bait-c",
+                "carol",
+                bait("cactus canvas circle copper") + " ws://relay-c.example",
+                createdAt = 300,
+            ),
+        )
+
+        val marked = markLikelyCoordinatedSpam(rows)
+
+        assertTrue(marked.all { it.spamClusterId?.startsWith("near-duplicate:") == true })
+        assertEquals(1, marked.mapNotNull { it.spamClusterId }.toSet().size)
+    }
+
+    @Test
+    fun `unrelated long replies sharing a link do not cluster`() {
+        val sharedLink = " https://example.com/source"
+        val marked = markLikelyCoordinatedSpam(
+            listOf(
+                depthRow(
+                    "legitimate-a",
+                    "alice",
+                    "astronomy observers calibrated telescopes beneath winter skies while distant " +
+                        "galaxies revealed spectral patterns mapping hydrogen clouds across ancient " +
+                        "clusters; careful measurements supported an updated catalogue for students " +
+                        "planning independent research sessions next spring.$sharedLink",
+                ),
+                depthRow(
+                    "legitimate-b",
+                    "bob",
+                    "gardeners prepared raised beds using composted leaves before planting tomatoes " +
+                        "basil peppers carrots and climbing beans; steady irrigation shaded seedlings " +
+                        "during summer afternoons while ladybirds protected healthy shoots from aphids " +
+                        "without chemical treatments.$sharedLink",
+                ),
+                depthRow(
+                    "legitimate-c",
+                    "carol",
+                    "musicians rehearsed unfamiliar chamber passages slowly until rhythmic entrances " +
+                        "aligned; violin cello clarinet and piano balanced dynamics through attentive " +
+                        "listening then recorded several complete takes for tomorrow's community radio " +
+                        "broadcast and archive.$sharedLink",
+                ),
+            ),
+        )
+
+        assertTrue(marked.all { it.spamClusterId == null })
+    }
+
+    @Test
+    fun `multiple mentions remain ineligible for clustering`() {
         val person = "nostr:npub1" + "q".repeat(58)
-        val note = "nostr:note1" + "q".repeat(58)
         val rowsWithTwoMentions = listOf(
             depthRow("bait-a", "alice", bait("alpha amber autumn arrive") + " $person $person"),
             depthRow("bait-b", "bob", bait("binary breeze bronze balance") + " $person"),
             depthRow("bait-c", "carol", bait("cactus canvas circle copper") + " $person"),
         )
-        val rowsWithNoteReference = listOf(
-            depthRow("bait-d", "alice", bait("alpha amber autumn arrive") + " $note"),
-            depthRow("bait-e", "bob", bait("binary breeze bronze balance") + " $note"),
-            depthRow("bait-f", "carol", bait("cactus canvas circle copper") + " $note"),
-        )
 
         assertTrue(markLikelyCoordinatedSpam(rowsWithTwoMentions).all { it.spamClusterId == null })
-        assertTrue(markLikelyCoordinatedSpam(rowsWithNoteReference).all { it.spamClusterId == null })
     }
 
     @Test

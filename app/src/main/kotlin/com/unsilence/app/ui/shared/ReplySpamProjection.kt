@@ -51,9 +51,11 @@ internal sealed interface ReplyListItem {
  * leaves are eligible: hiding a parent could orphan a live descendant or
  * distort the tree.
  *
- * The near-duplicate path deliberately ignores short replies and linked
- * content. Both paths detect shape rather than a campaign word list, so bots
- * cannot evade the rule merely by swapping vocabulary.
+ * The near-duplicate path deliberately ignores short replies. Links are
+ * stripped before either detector evaluates the remaining text, so appending
+ * a relay or web URL cannot turn an otherwise matching payload into a bypass.
+ * Both paths detect shape rather than a campaign word list, so bots cannot
+ * evade the rule merely by swapping vocabulary.
  */
 internal fun markLikelyCoordinatedSpam(
     rows: List<ModeratedReplyRow>,
@@ -203,14 +205,9 @@ private class WorkingCluster(first: SpamCandidate) {
 }
 
 private fun tokenSignature(content: String): TokenSignature? {
-    val structuralContent = contentWithoutAtMostOnePersonMention(content) ?: return null
+    val withoutMention = contentWithoutAtMostOnePersonMention(content) ?: return null
+    val structuralContent = LINK_REFERENCE_REGEX.replace(withoutMention, " ")
     if (structuralContent.length < MIN_CONTENT_WORDS * 4) return null
-    if (
-        structuralContent.contains("://") ||
-        structuralContent.contains("nostr:", ignoreCase = true)
-    ) {
-        return null
-    }
 
     val bounded = structuralContent.take(MAX_CONTENT_CHARS).lowercase(Locale.ROOT)
     val signalTokens = LinkedHashSet<String>(MAX_SIGNAL_TOKENS)
@@ -247,7 +244,8 @@ private fun tokenSignature(content: String): TokenSignature? {
  * BIP-39-shaped payload without depending on a fixed word list: eight or more
  * comma-separated lowercase ASCII words. One person mention may appear as a
  * separate token or beside one word; this closes the campaign's one-mention
- * evasion without admitting URLs, digits, or general sentence punctuation.
+ * evasion. Link-only segments are ignored; digits and general sentence
+ * punctuation in the remaining payload still reject the shape.
  */
 internal fun isSeedPhraseShape(content: String): Boolean {
     var mentionCount = 0
@@ -261,9 +259,13 @@ internal fun isSeedPhraseShape(content: String): Boolean {
         }
         if (mentionCount > 1) return false
 
-        val word = withoutMention.trim()
+        var linkCount = 0
+        val word = LINK_REFERENCE_REGEX.replace(withoutMention) {
+            linkCount += 1
+            ""
+        }.trim()
         if (word.isEmpty()) {
-            if (segmentMentions == 0) return false
+            if (segmentMentions == 0 && linkCount == 0) return false
         } else {
             if (word.any { it !in 'a'..'z' }) return false
             wordCount += 1
@@ -339,5 +341,9 @@ private const val FNV64_OFFSET_BASIS = -3750763034362895579L
 private const val FNV64_PRIME = 1099511628211L
 private val PERSON_MENTION_REGEX = Regex(
     pattern = "(?:nostr:n(?:pub|profile)1[a-z0-9]{10,200}|@n(?:pub|profile)1[a-z0-9]{10,200}|@[a-z0-9._-]{1,64}|#\\[\\d{1,3}])",
+    option = RegexOption.IGNORE_CASE,
+)
+private val LINK_REFERENCE_REGEX = Regex(
+    pattern = "(?:wss?|https?)://\\S+|nostr:\\S+",
     option = RegexOption.IGNORE_CASE,
 )
