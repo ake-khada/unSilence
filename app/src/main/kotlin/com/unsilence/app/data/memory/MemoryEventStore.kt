@@ -28,6 +28,7 @@ import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.onStart
 import kotlinx.coroutines.flow.onSubscription
 import kotlinx.coroutines.flow.sample
+import kotlinx.coroutines.flow.update
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.jsonArray
@@ -779,17 +780,18 @@ class MemoryEventStore @Inject constructor(
     /**
      * Decrypted and inner-signature-verified NIP-57 private zaps, keyed by
      * kind-9735 event id. Populated after async decrypt + authentication.
-     * Memory-only — re-decrypted on cold start via rescanPendingPrivateZapDecrypts.
      */
     private val verifiedPrivateZapsById = ConcurrentHashMap<String, VerifiedPrivateZap>()
+    private val privateZapPendingSignal = MutableStateFlow(0L)
 
-    /** Fires only for an authenticated own receipt carrying a verified anon request. */
-    private val _pendingPrivateZapDecrypts = MutableSharedFlow<PendingPrivateZapDecrypt>(
-        replay = 0,
-        extraBufferCapacity = 64,
-        onBufferOverflow = BufferOverflow.DROP_OLDEST,
-    )
-    val pendingPrivateZapDecrypts: Flow<PendingPrivateZapDecrypt> get() = _pendingPrivateZapDecrypts
+    /**
+     * Derivable pending work. A dedicated replaying generation gives late collectors
+     * the current set without rescanning receipts on unrelated engagement updates.
+     */
+    val pendingPrivateZapDecrypts: Flow<Set<PendingPrivateZapDecrypt>>
+        get() = privateZapPendingSignal
+            .map { pendingPrivateZapDecryptsSnapshot() }
+            .distinctUntilChanged()
 
     // ─── Actor-side action indexes (Tier 4: "what have I done?") ───────────
     // Key: actor pubkey → Set<target event ID>
@@ -810,6 +812,11 @@ class MemoryEventStore @Inject constructor(
 
     /** Set by AppBootstrapper after login — used as anchor for LRU eviction. */
     @Volatile var ownPubkey: String? = null
+        set(value) {
+            if (field == value) return
+            field = value
+            privateZapPendingSignal.update { it + 1L }
+        }
 
     /** Currently viewed profile — single-slot anchor for content eviction.
      *  Set by UserProfileViewModel on loadProfile(), cleared on onCleared(). */
@@ -2172,20 +2179,8 @@ class MemoryEventStore @Inject constructor(
             }
         }
 
-        val envelope = receipt.privateEnvelope
-        if (envelope != null && own != null && receipt.recipientPubkey == own &&
-            !verifiedPrivateZapsById.containsKey(receipt.receiptId)
-        ) {
-            _pendingPrivateZapDecrypts.tryEmit(
-                PendingPrivateZapDecrypt(
-                    zapReceiptId = receipt.receiptId,
-                    anonCiphertext = envelope.ciphertext,
-                    anonSignerPubkey = envelope.signerPubkey,
-                    recipientPubkey = envelope.recipientPubkey,
-                    targetTagName = envelope.targetTagName,
-                    targetId = envelope.targetId,
-                )
-            )
+        if (receipt.privateEnvelope != null || previous?.privateEnvelope != null) {
+            privateZapPendingSignal.update { it + 1L }
         }
     }
 
@@ -2194,7 +2189,10 @@ class MemoryEventStore @Inject constructor(
         eventsById[event.id]?.let { retained ->
             contentAdmissionIndex.track(retained.id, retained.kind, contentAdmissionTier(retained))
         }
-        verifiedPrivateZapsById.remove(event.id)
+        val removedVerified = verifiedPrivateZapsById.remove(event.id)
+        if (previous?.privateEnvelope != null || removedVerified != null) {
+            privateZapPendingSignal.update { it + 1L }
+        }
         val targetId = previous?.targetId ?: event.tags
             .firstOrNull { it.size >= 2 && (it[0] == "e" || it[0] == "a") }
             ?.getOrNull(1)
@@ -4317,6 +4315,7 @@ class MemoryEventStore @Inject constructor(
         val authenticated = authenticatedZapReceiptsById[zapReceiptId] ?: return
         if (authenticated.targetId != targetId || authenticated.privateEnvelope == null) return
         verifiedPrivateZapsById[zapReceiptId] = verified
+        privateZapPendingSignal.update { it + 1L }
 
         // Patch the drawer entry — swap anon pubkey for real sender,
         // upgrade comment from "" to the decrypted content. Matched by
@@ -4347,31 +4346,26 @@ class MemoryEventStore @Inject constructor(
         if (ownPk != null) bumpNotificationSignal(ownPk)
     }
 
-    /**
-     * Public scan trigger — call after snapshot restore + ownPubkey is set.
-     * Walks kind-9735 events addressed to own pubkey and re-fires pending
-     * decrypts for any with anon tags that aren't already in the sidecar.
-     * Idempotent: PrivateZapRepository skips entries already decrypted.
-     */
-    fun rescanPendingPrivateZapDecrypts() {
-        val own = ownPubkey ?: return
-        val zapReceiptIds = idsByKind[9735] ?: return
-        for (id in zapReceiptIds) {
-            if (verifiedPrivateZapsById.containsKey(id)) continue
-            val receipt = authenticatedZapReceiptsById[id] ?: continue
-            if (receipt.recipientPubkey != own) continue
-            val envelope = receipt.privateEnvelope ?: continue
-            _pendingPrivateZapDecrypts.tryEmit(
+    private fun pendingPrivateZapDecryptsSnapshot(): Set<PendingPrivateZapDecrypt> {
+        val own = ownPubkey ?: return emptySet()
+        return authenticatedZapReceiptsById.values.asSequence()
+            .filter { receipt ->
+                receipt.recipientPubkey == own &&
+                    receipt.privateEnvelope != null &&
+                    !verifiedPrivateZapsById.containsKey(receipt.receiptId)
+            }
+            .map { receipt ->
+                val envelope = requireNotNull(receipt.privateEnvelope)
                 PendingPrivateZapDecrypt(
-                    zapReceiptId = id,
+                    zapReceiptId = receipt.receiptId,
                     anonCiphertext = envelope.ciphertext,
                     anonSignerPubkey = envelope.signerPubkey,
                     recipientPubkey = envelope.recipientPubkey,
                     targetTagName = envelope.targetTagName,
                     targetId = envelope.targetId,
                 )
-            )
-        }
+            }
+            .toSet()
     }
 
     // ─── A.5.1 T1: Relay browse queries ───────────────────────────────────
@@ -7636,6 +7630,7 @@ class MemoryEventStore @Inject constructor(
         engagementCapped.clear()
         profileAnchoredIds.clear()
         verifiedPrivateZapsById.clear()
+        privateZapPendingSignal.value = 0L
         notifIdsByRecipient.clear()
         notificationSignalByRecipient.clear()
         _feedSignal.value = 0L

@@ -523,11 +523,9 @@ class AppBootstrapper @Inject constructor(
         // and surface in NotificationsViewModel's MES flow.
         relayPool.subscribeOwnNotifications(pubkeyHex, System.currentTimeMillis() / 1000)
 
-        // NIP-57 private zap decryption: start collector + rescan snapshot.
-        // After snapshot restore + ownPubkey set, any kind-9735 with anon tags
-        // addressed to us will fire pending decrypt requests to PrivateZapRepository.
+        // NIP-57 private zap decryption. Pending work is derived from MES's
+        // authenticated receipt set, so a late collector receives snapshot work too.
         privateZapRepository.start()
-        memoryEventStore.rescanPendingPrivateZapDecrypts()
 
         // ═══════════════════════════════════════════════════════════════════
         // Phase 3 (2500ms): Maintenance
