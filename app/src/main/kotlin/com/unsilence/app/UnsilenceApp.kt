@@ -26,6 +26,7 @@ import com.unsilence.app.data.media.DirectBufferAnimatedImageDecoderFactory
 import com.unsilence.app.data.relay.FeedRelayWarmer
 import com.unsilence.app.data.relay.RelayPool
 import com.unsilence.app.data.relay.Subscription
+import com.unsilence.app.data.wallet.NwcManager
 import com.unsilence.app.ui.feed.SharedPlayerHolder
 import com.unsilence.app.di.ImageClient
 import dagger.hilt.EntryPoint
@@ -48,6 +49,7 @@ class UnsilenceApp : Application(), SingletonImageLoader.Factory, androidx.work.
     @Inject lateinit var workerFactory: HiltWorkerFactory
     @Inject lateinit var snapshotScheduler: SnapshotScheduler
     @Inject lateinit var mesMetricsLogger: MesMetricsLogger
+    @Inject lateinit var nwcManager: NwcManager
     @Inject lateinit var relayPool: RelayPool
     @Inject lateinit var feedRelayWarmer: FeedRelayWarmer
     @Inject lateinit var sharedPlayerHolder: SharedPlayerHolder
@@ -85,6 +87,7 @@ class UnsilenceApp : Application(), SingletonImageLoader.Factory, androidx.work.
                 subscription.pauseAll()
                 feedRelayWarmer.onBackground()
                 relayPool.suspendSocketsForBackground()
+                nwcManager.suspendForBackground()
                 sharedPlayerHolder.releaseForLifecycle("app backgrounded")
             }
             override fun onStart(owner: LifecycleOwner) {

@@ -41,6 +41,7 @@ data class ZapRequest(
 )
 
 private const val LNURL_CACHE_TTL_MS = 5 * 60 * 1000L
+internal const val ZAP_NETWORK_LEG_TIMEOUT_MS = 12_000L
 
 class ZapException(message: String) : Exception(message)
 
@@ -76,7 +77,7 @@ class ZapRepository @Inject constructor(
     /** Plain LNURL HTTP must not inherit the app's WebSocket-tuned readTimeout(0). */
     private val lnurlClient by lazy {
         okHttpClient.newBuilder()
-            .callTimeout(12, TimeUnit.SECONDS)
+            .callTimeout(ZAP_NETWORK_LEG_TIMEOUT_MS, TimeUnit.MILLISECONDS)
             .readTimeout(10, TimeUnit.SECONDS)
             .pingInterval(0, TimeUnit.SECONDS)
             .build()
