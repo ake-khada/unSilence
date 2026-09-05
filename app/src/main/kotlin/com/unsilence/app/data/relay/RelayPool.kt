@@ -23,6 +23,7 @@ import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.CancellationException
@@ -3590,6 +3591,7 @@ class RelayPool @Inject constructor(
                 // If we got a good response, no need to try more sources
                 if (count > 0) break
             } catch (e: Exception) {
+                currentCoroutineContext().ensureActive()
                 Log.w(TAG, "Trust fetch failed on $url: ${e.message}")
             }
         }
@@ -3644,6 +3646,7 @@ class RelayPool @Inject constructor(
                 "(${result.totalPages} pages, ${result.totalEvents} events)")
             true
         } catch (e: Exception) {
+            currentCoroutineContext().ensureActive()
             Log.w(TAG, "Monitor fetch failed: ${e.message}")
             false
         }
@@ -3703,6 +3706,7 @@ class RelayPool @Inject constructor(
             }
             if (state == RelayState.CONNECTED) ((System.nanoTime() - start) / 1_000_000L).toInt() else null
         } catch (_: Exception) {
+            currentCoroutineContext().ensureActive()
             null
         } finally {
             closeTrackedEphemeral(conn)
@@ -3818,6 +3822,7 @@ class RelayPool @Inject constructor(
             val land = relayDirectory.keys.filter { it.contains("relays.land") }
             Log.w(TAG, "DIRECTORY: relays.land entries = $land")   // acceptance signal
         } catch (e: Exception) {
+            currentCoroutineContext().ensureActive()
             Log.w(TAG, "DIRECTORY: build failed — ${e.message} (TTL not advanced, will retry)")
         } finally {
             directoryInFlight.set(false)
@@ -4008,6 +4013,7 @@ class RelayPool @Inject constructor(
                 }
             }
         } catch (e: Exception) {
+            currentCoroutineContext().ensureActive()
             Log.w(TAG, "DIRECTORY: collect failed on $url — ${e.message}")
         } finally {
             closeTrackedEphemeral(conn)
@@ -4037,6 +4043,7 @@ class RelayPool @Inject constructor(
             conn.awaitConnected(timeoutMs = 5_000)
             conn
         } catch (_: Exception) {
+            currentCoroutineContext().ensureActive()
             Log.w(TAG, "getOrCreateConnection: $normalized failed to connect")
             null
         }
@@ -5410,6 +5417,7 @@ class RelayPool @Inject constructor(
                     }
                 }
             } catch (e: Exception) {
+                currentCoroutineContext().ensureActive()
                 guard.set(false)
                 Log.w(TAG, "Reconnect failed for $url: ${e.message}")
                 if (attempt < 8) {
@@ -5544,6 +5552,7 @@ class RelayPool @Inject constructor(
                     authInFlight.remove(url)
                 }
             } catch (e: Exception) {
+                currentCoroutineContext().ensureActive()
                 Log.e(TAG, "AUTH: error authenticating to $url", e)
                 authInFlight.remove(url)
             }

@@ -33,6 +33,8 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonArray
@@ -764,7 +766,11 @@ class CardHydrator @Inject constructor(
         if (!markBounded(key, imageDimensionWarmed, imageDimensionWarmOrder, PREFETCH_KEY_CAP)) return
         if (imageDimensionCache.getCached(url) != null) return
         backfillScope.launch {
-            runCatching { imageDimensionCache.resolve(url) }
+            try {
+                imageDimensionCache.resolve(url)
+            } catch (_: Exception) {
+                currentCoroutineContext().ensureActive()
+            }
         }
     }
 
