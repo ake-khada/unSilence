@@ -4,7 +4,6 @@ import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -41,7 +40,6 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -50,7 +48,6 @@ import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalClipboardManager
@@ -78,6 +75,7 @@ import com.unsilence.app.ui.common.LocalAppSessionKey
 import com.unsilence.app.ui.common.LocalNip05VerificationController
 import com.unsilence.app.ui.common.LocalShowSnackbar
 import com.unsilence.app.ui.common.ShimmerNoteCard
+import com.unsilence.app.ui.common.tabSwipe
 import com.unsilence.app.ui.feed.toCompactSats
 import com.unsilence.app.ui.feed.ArticleReaderScreen
 import com.unsilence.app.ui.feed.FullScreenVideoDialog
@@ -356,7 +354,6 @@ fun UserProfileScreen(
     val npubShort = viewModel.npub?.let { "${it.take(6)}…${it.takeLast(4)}" }
     val scoredWotInline = profileWotLookup as? WotLookup.Scored
 
-    val swipeDrag = remember { mutableFloatStateOf(0f) }
     val tabs = ProfileTab.entries
 
     Box(
@@ -369,24 +366,11 @@ fun UserProfileScreen(
             state               = listState,
             modifier            = Modifier
                 .fillMaxSize()
-                .pointerInput(selectedTab) {
-                    detectHorizontalDragGestures(
-                        onDragEnd = {
-                            val threshold = 100.dp.toPx()
-                            val curIdx = tabs.indexOf(selectedTab)
-                            if (swipeDrag.floatValue > threshold && curIdx > 0) {
-                                viewModel.selectedTab.value = tabs[curIdx - 1]
-                            } else if (swipeDrag.floatValue < -threshold && curIdx < tabs.lastIndex) {
-                                viewModel.selectedTab.value = tabs[curIdx + 1]
-                            }
-                            swipeDrag.floatValue = 0f
-                        },
-                        onDragCancel = { swipeDrag.floatValue = 0f },
-                        onHorizontalDrag = { _, dragAmount ->
-                            swipeDrag.floatValue += dragAmount
-                        },
-                    )
-                },
+                .tabSwipe(
+                    key = selectedTab,
+                    onPrevious = { tabs.getOrNull(tabs.indexOf(selectedTab) - 1)?.let { viewModel.selectedTab.value = it } },
+                    onNext = { tabs.getOrNull(tabs.indexOf(selectedTab) + 1)?.let { viewModel.selectedTab.value = it } },
+                ),
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {
             // Space for top bar (statusBar + topBarHeight)

@@ -3,7 +3,6 @@ package com.unsilence.app.ui.search
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -54,7 +53,6 @@ import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
 import androidx.compose.ui.input.nestedscroll.NestedScrollSource
 import androidx.compose.ui.input.nestedscroll.nestedScroll
@@ -81,6 +79,7 @@ import com.unsilence.app.ui.common.LocalAppSessionKey
 import com.unsilence.app.ui.common.LocalShowSnackbar
 import com.unsilence.app.ui.common.ShimmerNoteCard
 import com.unsilence.app.ui.common.ShimmerTrendingDiscovery
+import com.unsilence.app.ui.common.tabSwipe
 import com.unsilence.app.data.memory.FeedRow
 import com.unsilence.app.data.memory.toEventModel
 import com.unsilence.app.ui.common.LocalOpenEmojiSettings
@@ -115,7 +114,6 @@ import com.vitorpamplona.quartz.nip01Core.core.hexToByteArray
 import com.vitorpamplona.quartz.nip19Bech32.toNpub
 import kotlinx.coroutines.FlowPreview
 import kotlinx.coroutines.flow.sample
-import kotlin.math.abs
 
 private val TAB_LABELS = listOf("All", "People", "Notes", "Tags")
 private val WOT_SEARCH_SIGNAL_WIDTH = 48.dp
@@ -454,28 +452,13 @@ fun SearchScreen(
         // ── Results ───────────────────────────────────────────────────────────
         Box(modifier = Modifier
             .fillMaxSize()
-            .pointerInput(state.hasSearched) {
-                if (!state.hasSearched) return@pointerInput
-                var horizontalDrag = 0f
-                detectHorizontalDragGestures(
-                    onDragStart = { horizontalDrag = 0f },
-                    onHorizontalDrag = { change, dragAmount ->
-                        horizontalDrag += dragAmount
-                        if (abs(horizontalDrag) > SEARCH_TAB_SWIPE_THRESHOLD_PX / 2f) {
-                            change.consume()
-                        }
-                    },
-                    onDragEnd = {
-                        when {
-                            horizontalDrag <= -SEARCH_TAB_SWIPE_THRESHOLD_PX ->
-                                selectedTab = (selectedTab + 1).coerceAtMost(TAB_LABELS.lastIndex)
-                            horizontalDrag >= SEARCH_TAB_SWIPE_THRESHOLD_PX ->
-                                selectedTab = (selectedTab - 1).coerceAtLeast(0)
-                        }
-                    },
-                    onDragCancel = { horizontalDrag = 0f },
-                )
-            }
+            .tabSwipe(
+                key = state.hasSearched,
+                enabled = state.hasSearched,
+                commitThresholdPx = SEARCH_TAB_SWIPE_THRESHOLD_PX,
+                onPrevious = { selectedTab = (selectedTab - 1).coerceAtLeast(0) },
+                onNext = { selectedTab = (selectedTab + 1).coerceAtMost(TAB_LABELS.lastIndex) },
+            )
             .nestedScroll(remember {
                 object : NestedScrollConnection {
                     override fun onPreScroll(available: Offset, source: NestedScrollSource): Offset {
