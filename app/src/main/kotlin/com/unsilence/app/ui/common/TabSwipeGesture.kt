@@ -9,10 +9,15 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.unit.dp
 import kotlin.math.abs
 
-private const val HORIZONTAL_DOMINANCE = 1.5f
+private const val TAB_SWIPE_DOMINANCE = 1.5f
 
-internal fun shouldClaimHorizontalSwipe(dx: Float, dy: Float, touchSlop: Float): Boolean =
-    abs(dx) > touchSlop && abs(dx) > abs(dy) * HORIZONTAL_DOMINANCE
+/** Claims only after horizontal slop and strict horizontal-over-vertical dominance. */
+internal fun shouldClaimHorizontalSwipe(
+    dx: Float,
+    dy: Float,
+    touchSlop: Float,
+    dominance: Float,
+): Boolean = abs(dx) > touchSlop && abs(dx) > abs(dy) * dominance
 
 /** Whole-screen tab swipe that yields to vertical scrolls and consumed child gestures. */
 internal fun Modifier.tabSwipe(
@@ -47,7 +52,14 @@ internal fun Modifier.tabSwipe(
                 }
 
                 if (!claimed) {
-                    if (shouldClaimHorizontalSwipe(drag.x, drag.y, touchSlop)) {
+                    if (
+                        shouldClaimHorizontalSwipe(
+                            dx = drag.x,
+                            dy = drag.y,
+                            touchSlop = touchSlop,
+                            dominance = TAB_SWIPE_DOMINANCE,
+                        )
+                    ) {
                         claimed = true
                     } else if (abs(drag.x) > touchSlop || abs(drag.y) > touchSlop) {
                         break
