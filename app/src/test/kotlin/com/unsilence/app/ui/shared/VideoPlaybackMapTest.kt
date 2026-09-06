@@ -4,6 +4,7 @@ import com.unsilence.app.data.memory.FeedRow
 import com.unsilence.app.data.model.VideoRenderModel
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -29,6 +30,83 @@ class VideoPlaybackMapTest {
 
     private val own = listOf(model("https://host/own.mp4"))
     private val quoted = listOf(model("https://host/quoted.mp4"))
+
+    @Test
+    fun `selected video URL wins within a multi-video row`() {
+        val second = model("https://host/second.mp4")
+
+        assertEquals(
+            second.videoUrl,
+            resolveSelectedVideoUrl(own + second, selectedUrl = second.videoUrl),
+        )
+    }
+
+    @Test
+    fun `missing or stale video selection falls back to first model`() {
+        assertEquals(own.first().videoUrl, resolveSelectedVideoUrl(own, selectedUrl = null))
+        assertEquals(
+            own.first().videoUrl,
+            resolveSelectedVideoUrl(own, selectedUrl = "https://host/stale.mp4"),
+        )
+    }
+
+    @Test
+    fun `empty video row has no selected URL`() {
+        assertEquals(null, resolveSelectedVideoUrl(emptyList(), selectedUrl = null))
+    }
+
+    @Test
+    fun `fullscreen request selects a registered secondary video`() {
+        val second = model("https://host/second.mp4")
+
+        assertEquals(
+            second.videoUrl,
+            resolvePlaybackVideoUrl(
+                models = own + second,
+                requestedUrl = second.videoUrl,
+            ),
+        )
+    }
+
+    @Test
+    fun `fullscreen request never falls back from an unregistered URL`() {
+        assertEquals(
+            null,
+            resolvePlaybackVideoUrl(
+                models = own,
+                requestedUrl = "https://host/unregistered.mp4",
+            ),
+        )
+    }
+
+    @Test
+    fun `video selections retain only URLs still registered by current rows`() {
+        val current = mapOf(
+            "visible" to "https://host/visible-second.mp4",
+            "stale-url" to "https://host/old.mp4",
+            "off-screen" to "https://host/off-screen.mp4",
+        )
+        val modelsByNote = mapOf(
+            "visible" to listOf(
+                model("https://host/visible-first.mp4"),
+                model("https://host/visible-second.mp4"),
+            ),
+            "stale-url" to listOf(model("https://host/new.mp4")),
+        )
+
+        assertEquals(
+            mapOf("visible" to "https://host/visible-second.mp4"),
+            retainRegisteredVideoSelections(current, modelsByNote),
+        )
+    }
+
+    @Test
+    fun `unchanged video selections preserve map identity`() {
+        val current = mapOf("visible" to "https://host/visible.mp4")
+        val modelsByNote = mapOf("visible" to listOf(model("https://host/visible.mp4")))
+
+        assertSame(current, retainRegisteredVideoSelections(current, modelsByNote))
+    }
 
     @Test
     fun `fullscreen open ignores rows without a target URL`() {
