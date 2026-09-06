@@ -24,7 +24,7 @@ class ReplySpamProjectionTest {
     }
 
     @Test
-    fun `seed phrase shape permits one person mention evasion`() {
+    fun `seed phrase shape ignores one person reference`() {
         assertTrue(
             isSeedPhraseShape(
                 "@alice, one, two, three, four, five, six, seven, eight",
@@ -61,12 +61,17 @@ class ReplySpamProjectionTest {
     }
 
     @Test
-    fun `seed phrase shape rejects a second mention`() {
-        assertFalse(
-            isSeedPhraseShape(
-                "@alice, one, two, three, four, five, six, seven, eight, @bob",
-            ),
+    fun `multiple mentions and a relay reference do not evade seed detection`() {
+        val content =
+            "one @alice @bob nostr:npub1${"q".repeat(58)} wss://relay.example, " +
+                "two, three, four, five, six, seven, eight"
+
+        assertTrue(isSeedPhraseShape(content))
+        val marked = markLikelyCoordinatedSpam(
+            listOf(depthRow("multi-reference-seed", "unknown", content)),
         )
+
+        assertTrue(marked.single().spamClusterId?.startsWith("seed-shape:") == true)
     }
 
     @Test
@@ -243,15 +248,31 @@ class ReplySpamProjectionTest {
     }
 
     @Test
-    fun `multiple mentions remain ineligible for clustering`() {
-        val person = "nostr:npub1" + "q".repeat(58)
-        val rowsWithTwoMentions = listOf(
-            depthRow("bait-a", "alice", bait("alpha amber autumn arrive") + " $person $person"),
-            depthRow("bait-b", "bob", bait("binary breeze bronze balance") + " $person"),
-            depthRow("bait-c", "carol", bait("cactus canvas circle copper") + " $person"),
+    fun `multiple mentions and relay references do not evade clustering`() {
+        val firstPerson = "nostr:npub1" + "q".repeat(58)
+        val secondPerson = "@npub1" + "p".repeat(58)
+        val rows = listOf(
+            depthRow(
+                "bait-a",
+                "alice",
+                bait("alpha amber autumn arrive") + " $firstPerson $secondPerson wss://relay-a.example",
+            ),
+            depthRow(
+                "bait-b",
+                "bob",
+                bait("binary breeze bronze balance") + " @op @moderator https://relay-b.example",
+            ),
+            depthRow(
+                "bait-c",
+                "carol",
+                bait("cactus canvas circle copper") + " #[0] #[1] nostr:note1${"z".repeat(58)}",
+            ),
         )
 
-        assertTrue(markLikelyCoordinatedSpam(rowsWithTwoMentions).all { it.spamClusterId == null })
+        val marked = markLikelyCoordinatedSpam(rows)
+
+        assertTrue(marked.all { it.spamClusterId?.startsWith("near-duplicate:") == true })
+        assertEquals(1, marked.mapNotNull { it.spamClusterId }.toSet().size)
     }
 
     @Test
