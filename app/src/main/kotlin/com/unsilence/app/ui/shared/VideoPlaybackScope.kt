@@ -69,6 +69,7 @@ class VideoPlaybackScope(
     /** Pre-computed video render models keyed by event ID. */
     var videoRenderModels by mutableStateOf<Map<String, List<VideoRenderModel>>>(emptyMap())
         internal set
+    private var selectedVideoUrls by mutableStateOf<Map<String, String>>(emptyMap())
 
     // Detector state — written only from the detection coroutine (main thread)
     internal var lastActiveTransitionAt: Long = 0L
@@ -87,15 +88,13 @@ class VideoPlaybackScope(
     fun isActiveVideo(noteId: String): Boolean = noteId == activeVideoNoteId
 
     /**
-     * URL of the video currently bound to the shared player, derived from the
-     * active row's first render model. For a quote-only row this resolves to the
-     * QUOTED video's URL (the map keys the parent row.id to the quoted models),
-     * which lets nested grids attach the player only when their own
-     * model.videoUrl matches — preventing an own-video row from also driving a
-     * nested quoted video. Null when nothing is active.
+     * URL currently bound to the shared player. Multi-video rows use their
+     * selected page; every other row falls back to its first render model.
+     * For a quote-only row the map still keys the parent row id to the quoted
+     * models, so nested grids attach only when their own URL matches.
      */
     val activeVideoUrl: String?
-        get() = activeVideoNoteId?.let { videoRenderModels[it]?.firstOrNull()?.videoUrl }
+        get() = activeVideoNoteId?.let(::selectedVideoUrl)
 
     fun toggleMute() { isMuted = !isMuted }
 
@@ -105,16 +104,35 @@ class VideoPlaybackScope(
         videoRenderModels = videoRenderModels + (noteId to models)
     }
 
-    fun openFullscreen(noteId: String) {
+    fun selectedVideoUrl(noteId: String): String? =
+        resolveSelectedVideoUrl(videoRenderModels[noteId].orEmpty(), selectedVideoUrls[noteId])
+
+    fun selectVideo(noteId: String, videoUrl: String) {
+        val registeredUrl = videoRenderModels[noteId]
+            ?.firstOrNull { it.videoUrl == videoUrl }
+            ?.videoUrl
+            ?: return
+        if (selectedVideoUrls[noteId] == registeredUrl) return
+        selectedVideoUrls = selectedVideoUrls + (noteId to registeredUrl)
+    }
+
+    internal fun pruneVideoSelections(modelsByNote: Map<String, List<VideoRenderModel>>) {
+        val retainedSelections = retainRegisteredVideoSelections(selectedVideoUrls, modelsByNote)
+        if (retainedSelections !== selectedVideoUrls) selectedVideoUrls = retainedSelections
+    }
+
+    fun openFullscreen(noteId: String, requestedVideoUrl: String) {
         // Only claim fullscreen when the row resolves to a bound video URL.
         // A cold empty-repost target may render its preview before the model map
         // recomputes to include row.id → targetModels; without this guard,
         // tapping it would open an empty (black) fullscreen with no media. The
         // tap is a no-op until the target warms (map recompute on next `events`).
-        val targetUrl = videoRenderModels[noteId]?.firstOrNull()?.videoUrl
+        val targetUrl = resolvePlaybackVideoUrl(
+            models = videoRenderModels[noteId].orEmpty(),
+            requestedUrl = requestedVideoUrl,
+        ) ?: return
+        selectVideo(noteId, targetUrl)
         val decision = decideFullscreenPlayback(targetUrl, holder.currentUrl, exoPlayer.mediaItemCount)
-        if (decision == FullscreenPlaybackDecision.Ignore) return
-        val videoUrl = targetUrl ?: return
         when (decision) {
             FullscreenPlaybackDecision.Ignore -> return
             FullscreenPlaybackDecision.Resume -> {
@@ -129,7 +147,7 @@ class VideoPlaybackScope(
                 holder.claim(ownerId)
                 exoPlayer.stop()
                 exoPlayer.clearMediaItems()
-                exoPlayer.setMediaItem(MediaItem.fromUri(videoUrl))
+                exoPlayer.setMediaItem(MediaItem.fromUri(targetUrl))
                 exoPlayer.prepare()
                 exoPlayer.playWhenReady = true
             }
@@ -144,6 +162,28 @@ class VideoPlaybackScope(
         showFullscreenVideo = false
         isMuted = preFullscreenMuted
     }
+}
+
+internal fun resolveSelectedVideoUrl(
+    models: List<VideoRenderModel>,
+    selectedUrl: String?,
+): String? = models.firstOrNull { it.videoUrl == selectedUrl }?.videoUrl
+    ?: models.firstOrNull()?.videoUrl
+
+internal fun resolvePlaybackVideoUrl(
+    models: List<VideoRenderModel>,
+    requestedUrl: String,
+): String? = models.firstOrNull { it.videoUrl == requestedUrl }?.videoUrl
+
+internal fun retainRegisteredVideoSelections(
+    selections: Map<String, String>,
+    modelsByNote: Map<String, List<VideoRenderModel>>,
+): Map<String, String> {
+    fun isRegistered(noteId: String, url: String): Boolean =
+        modelsByNote[noteId]?.any { it.videoUrl == url } == true
+
+    if (selections.all { (noteId, url) -> isRegistered(noteId, url) }) return selections
+    return selections.filter { (noteId, url) -> isRegistered(noteId, url) }
 }
 
 internal enum class FullscreenPlaybackDecision {
@@ -334,6 +374,7 @@ fun rememberVideoPlaybackScope(
         if (scope.videoRenderModels != combined) {
             scope.videoRenderModels = combined
         }
+        scope.pruneVideoSelections(combined)
         if (!scope.modelsResolvedLogged && combined.isNotEmpty()) {
             scope.modelsResolvedLogged = true
             scope.modelsResolvedAtElapsedMs = SystemClock.elapsedRealtime()
@@ -348,11 +389,7 @@ fun rememberVideoPlaybackScope(
     //   Deactivation: playWhenReady=false (retain codec+media). No stop(), no clearMediaItems().
     //   Reactivation same URL: playWhenReady=true. No prepare(), no codec realloc.
     //   Reactivation different URL: stop()+clearMediaItems(), then setMediaItem()+prepare().
-    val activeVideoUrl = remember(scope.activeVideoNoteId, scope.videoRenderModels) {
-        scope.activeVideoNoteId?.let { noteId ->
-            scope.videoRenderModels[noteId]?.firstOrNull()?.videoUrl
-        }
-    }
+    val activeVideoUrl = scope.activeVideoUrl
 
     // Player milestones are intentionally warning-level and owner-gated so they
     // survive release shrinking without each remembered screen logging callbacks

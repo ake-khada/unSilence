@@ -41,9 +41,9 @@ private const val COLLAPSED_CARD_CHROME_DP = 104f
  * Walks the segment list from an [EventModel] and renders each content section
  * in source order.
  *
- * Consecutive Image segments collapse into one EventMediaGrid, consecutive
- * Video segments into one EventVideoGrid, consecutive Text/MentionPubkey/Link
- * runs into one InlineText (URLs render as inline cyan clickable text).
+ * Image or video runs separated only by blank text collapse into one media
+ * carousel; consecutive Text/MentionPubkey/Link runs become one InlineText
+ * (URLs render as inline cyan clickable text).
  * After each text run, OG preview cards render for links in that run (up to
  * [MAX_OG_CARDS] total per note).
  *
@@ -232,18 +232,30 @@ internal fun ContentFlow(
                     i = j
                 }
                 is Segment.Video -> {
-                    // Collect consecutive videos
+                    // Collect videos, absorbing blank-line text between them.
                     var j = i
-                    while (j < model.segments.size && model.segments[j] is Segment.Video) j++
+                    while (j < model.segments.size) {
+                        when (val segment = model.segments[j]) {
+                            is Segment.Video -> j++
+                            is Segment.Text -> if (segment.text.isBlank()) j++ else break
+                            else -> break
+                        }
+                    }
                     val videos = model.segments.subList(i, j)
                         .filterIsInstance<Segment.Video>()
                     EventVideoGrid(
                         videos           = videos,
                         isActiveVideo    = showVideo && videoScope?.isActiveVideo(videoOwnerId) == true,
                         activeVideoUrl   = videoScope?.activeVideoUrl,
+                        selectedVideoUrl = videoScope?.selectedVideoUrl(videoOwnerId),
+                        onVideoSelected  = videoScope?.let { scope ->
+                            { video -> scope.selectVideo(videoOwnerId, video.videoUrl) }
+                        },
                         isFullscreen     = videoScope?.showFullscreenVideo == true,
-                        onOpenFullscreen = onOpenFullscreen
-                            ?: { videoScope?.openFullscreen(videoOwnerId) ?: Unit },
+                        onOpenFullscreen = { video ->
+                            onOpenFullscreen?.invoke()
+                                ?: videoScope?.openFullscreen(videoOwnerId, video.videoUrl)
+                        },
                         exoPlayer        = if (showVideo) videoScope?.exoPlayer else null,
                         isMuted          = videoScope?.isMuted ?: true,
                         onToggleMute     = { videoScope?.toggleMute() ?: Unit },

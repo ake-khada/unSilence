@@ -4,6 +4,7 @@ import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -46,6 +47,25 @@ import com.unsilence.app.ui.theme.Sizing
 import com.unsilence.app.ui.theme.Surface1
 
 private val MediaPlaceholder = Surface1
+
+private fun Modifier.videoTapTarget(
+    onOpenFullscreen: () -> Unit,
+    pagerGestureModifier: Modifier?,
+): Modifier = if (pagerGestureModifier == null) clickable(onClick = onOpenFullscreen) else this
+
+@Composable
+private fun BoxScope.VideoPagerInputOverlay(
+    onOpenFullscreen: () -> Unit,
+    pagerGestureModifier: Modifier?,
+) {
+    if (pagerGestureModifier == null) return
+    Box(
+        modifier = Modifier
+            .matchParentSize()
+            .clickable(onClick = onOpenFullscreen)
+            .then(pagerGestureModifier),
+    )
+}
 
 internal val VideoRenderModel.imetaAspectRatio: Float?
     get() {
@@ -137,6 +157,7 @@ fun VideoPreviewCard(
     modifier: Modifier = Modifier,
     forceSquare: Boolean = false,
     thumbnailCache: VideoThumbnailCache? = null,
+    pagerGestureModifier: Modifier? = null,
 ) {
     // A cached decoded ratio is stronger evidence than publisher-supplied imeta.
     val imetaAspect = model.imetaAspectRatio
@@ -159,7 +180,7 @@ fun VideoPreviewCard(
             .aspectRatio(displayAspect)
             .clip(RoundedCornerShape(Sizing.mediaCornerRadius))
             .background(MediaPlaceholder)
-            .clickable { onOpenFullscreen() },
+            .videoTapTarget(onOpenFullscreen, pagerGestureModifier),
         contentAlignment = Alignment.Center,
     ) {
         VideoThumbnailImage(
@@ -180,6 +201,8 @@ fun VideoPreviewCard(
                 }
             } else null,
         )
+
+        VideoPagerInputOverlay(onOpenFullscreen, pagerGestureModifier)
 
         // Play icon overlay
         Box(
@@ -221,6 +244,7 @@ fun InlineVideoPlayer(
     forceSquare: Boolean = false,
     thumbnailCache: VideoThumbnailCache? = null,
     isFullscreen: Boolean = false,
+    pagerGestureModifier: Modifier? = null,
 ) {
     // A cached decoded ratio is stronger evidence than publisher-supplied imeta.
     val imetaAspect = model.imetaAspectRatio
@@ -287,7 +311,7 @@ fun InlineVideoPlayer(
             .aspectRatio(displayAspect)
             .clip(RoundedCornerShape(Sizing.mediaCornerRadius))
             .background(MediaPlaceholder)
-            .clickable { onOpenFullscreen() },
+            .videoTapTarget(onOpenFullscreen, pagerGestureModifier),
         contentAlignment = Alignment.Center,
     ) {
         // Poster underneath — visible until first frame renders
@@ -325,7 +349,11 @@ fun InlineVideoPlayer(
             },
             update = { view ->
                 view.player = if (!isFullscreen) exoPlayer else null
-                view.setOnClickListener { onOpenFullscreen() }
+                if (pagerGestureModifier == null) {
+                    view.setOnClickListener { onOpenFullscreen() }
+                } else {
+                    view.setOnClickListener(null)
+                }
                 view.resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT
                 view.setShutterBackgroundColor(android.graphics.Color.TRANSPARENT)
             },
@@ -333,6 +361,8 @@ fun InlineVideoPlayer(
                 .fillMaxSize()
                 .alpha(if (isFirstFrameRendered) 1f else 0f),
         )
+
+        VideoPagerInputOverlay(onOpenFullscreen, pagerGestureModifier)
 
         // Mute toggle
         IconButton(
