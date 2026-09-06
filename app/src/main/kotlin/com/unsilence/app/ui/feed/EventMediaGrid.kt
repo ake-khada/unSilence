@@ -1,8 +1,12 @@
 package com.unsilence.app.ui.feed
 
 import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.MutatePriority
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.TargetedFlingBehavior
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -16,6 +20,8 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.pager.HorizontalPager
+import androidx.compose.foundation.pager.PagerDefaults
+import androidx.compose.foundation.pager.PagerState
 import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -38,8 +44,13 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.pointer.PointerEventPass
+import androidx.compose.ui.input.pointer.positionChange
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.input.pointer.util.VelocityTracker
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -50,18 +61,115 @@ import coil3.compose.AsyncImage
 import com.unsilence.app.data.media.SaveMediaKind
 import com.unsilence.app.data.model.Segment
 import com.unsilence.app.ui.common.rememberFullWidthImageRequest
+import com.unsilence.app.ui.common.shouldClaimHorizontalSwipe
 import com.unsilence.app.ui.theme.Brand
 import com.unsilence.app.ui.theme.Sizing
 import com.unsilence.app.ui.theme.Spacing
 import com.unsilence.app.ui.theme.Surface1
 import com.unsilence.app.ui.theme.TextSecondary
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.launch
+import kotlin.math.abs
 import me.saket.telephoto.zoomable.coil3.ZoomableAsyncImage
 import me.saket.telephoto.zoomable.rememberZoomableImageState
 import me.saket.telephoto.zoomable.rememberZoomableState
 
 private val MediaPlaceholder = Surface1
+private const val CAROUSEL_SWIPE_DOMINANCE = 1f
+
+/**
+ * Horizontal pager input that yields diagonal and vertical drags to the surrounding list.
+ * The stock pager still owns scrolling and fling physics after this gate claims a gesture.
+ */
+private fun Modifier.feedMediaPagerGestures(
+    pagerState: PagerState,
+    flingBehavior: TargetedFlingBehavior,
+): Modifier = pointerInput(pagerState, flingBehavior) {
+    val touchSlop = viewConfiguration.touchSlop
+    val pointerScope = CoroutineScope(currentCoroutineContext())
+
+    awaitEachGesture {
+        val down = awaitFirstDown(requireUnconsumed = false)
+        if (down.isConsumed) return@awaitEachGesture
+
+        val velocityTracker = VelocityTracker().apply {
+            addPosition(down.uptimeMillis, down.position)
+        }
+        var drag = Offset.Zero
+        var firstDelta = Offset.Zero
+
+        while (true) {
+            val change = awaitPointerEvent(PointerEventPass.Main)
+                .changes
+                .firstOrNull { it.id == down.id }
+                ?: return@awaitEachGesture
+            if (change.isConsumed) return@awaitEachGesture
+
+            velocityTracker.addPosition(change.uptimeMillis, change.position)
+            val delta = change.positionChange()
+            drag += delta
+
+            if (!change.pressed) return@awaitEachGesture
+            if (
+                shouldClaimHorizontalSwipe(
+                    dx = drag.x,
+                    dy = drag.y,
+                    touchSlop = touchSlop,
+                    dominance = CAROUSEL_SWIPE_DOMINANCE,
+                )
+            ) {
+                firstDelta = delta
+                change.consume()
+                break
+            }
+            if (abs(drag.x) > touchSlop || abs(drag.y) > touchSlop) {
+                return@awaitEachGesture
+            }
+        }
+
+        val dragDeltas = Channel<Float>(capacity = Channel.UNLIMITED)
+        val releaseVelocity = CompletableDeferred<Float?>()
+        pointerScope.launch {
+            pagerState.scroll(MutatePriority.UserInput) {
+                for (delta in dragDeltas) scrollBy(delta)
+                releaseVelocity.await()?.let { velocity ->
+                    with(flingBehavior) { performFling(velocity) }
+                }
+            }
+        }
+        dragDeltas.trySend(-firstDelta.x)
+
+        var released = false
+        try {
+            while (true) {
+                val change = awaitPointerEvent(PointerEventPass.Main)
+                    .changes
+                    .firstOrNull { it.id == down.id }
+                    ?: break
+                if (change.isConsumed) break
+
+                velocityTracker.addPosition(change.uptimeMillis, change.position)
+                val delta = change.positionChange()
+                change.consume()
+                dragDeltas.trySend(-delta.x)
+
+                if (!change.pressed) {
+                    releaseVelocity.complete(-velocityTracker.calculateVelocity().x)
+                    released = true
+                    break
+                }
+            }
+        } finally {
+            if (!released) releaseVelocity.complete(null)
+            dragDeltas.close()
+        }
+    }
+}
 
 /**
  * Image display for pre-parsed [Segment.Image] list from [EventModel.media.images].
@@ -118,6 +226,7 @@ internal fun EventMediaGrid(
         }
 
         val pagerState = rememberPagerState(pageCount = { images.size })
+        val flingBehavior = PagerDefaults.flingBehavior(state = pagerState)
 
         Column(
             modifier = modifier.fillMaxWidth(),
@@ -125,6 +234,8 @@ internal fun EventMediaGrid(
         ) {
             HorizontalPager(
                 state = pagerState,
+                flingBehavior = flingBehavior,
+                userScrollEnabled = false,
                 modifier = Modifier
                     .fillMaxWidth()
                     .aspectRatio(frameAspect, matchHeightConstraintsFirst = false)
@@ -137,7 +248,11 @@ internal fun EventMediaGrid(
                         .fillMaxSize()
                         .clickable {
                             if (onImageClick != null) onImageClick(page) else fullscreenIndex = page
-                        },
+                        }
+                        .feedMediaPagerGestures(
+                            pagerState = pagerState,
+                            flingBehavior = flingBehavior,
+                        ),
                     contentAlignment = Alignment.Center,
                 ) {
                     AsyncImage(
