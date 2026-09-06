@@ -7,7 +7,6 @@ import androidx.compose.animation.core.tween
 import androidx.compose.animation.Crossfade
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -30,7 +29,6 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -39,7 +37,6 @@ import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
@@ -58,6 +55,7 @@ import com.unsilence.app.ui.common.EmptyState
 import com.unsilence.app.ui.common.LoadingScreen
 import com.unsilence.app.ui.common.LocalAppSessionKey
 import com.unsilence.app.ui.common.LocalShowSnackbar
+import com.unsilence.app.ui.common.tabSwipe
 import com.unsilence.app.ui.theme.AppType
 import com.unsilence.app.ui.shared.EngagementSnapshot
 import com.unsilence.app.ui.shared.pollActionCallbacks
@@ -332,8 +330,6 @@ fun FeedScreen(
             )
         } else {
             // ── Swipe left/right to switch Notes ↔ Conversations ──────────
-            val swipeDrag = remember { mutableFloatStateOf(0f) }
-
             Crossfade(
             targetState = when {
                 coldStartState == FeedViewModel.ColdStartState.LOADING -> "loading"
@@ -349,23 +345,11 @@ fun FeedScreen(
             label = "feedState",
             modifier = Modifier
                 .fillMaxSize()
-                .pointerInput(contentFilter) {
-                    detectHorizontalDragGestures(
-                        onDragEnd = {
-                            val threshold = 100.dp.toPx()
-                            if (swipeDrag.floatValue > threshold && contentFilter == FeedContentFilter.REPLIES_ONLY) {
-                                viewModel.setContentFilter(FeedContentFilter.NOTES_ONLY)
-                            } else if (swipeDrag.floatValue < -threshold && contentFilter == FeedContentFilter.NOTES_ONLY) {
-                                viewModel.setContentFilter(FeedContentFilter.REPLIES_ONLY)
-                            }
-                            swipeDrag.floatValue = 0f
-                        },
-                        onDragCancel = { swipeDrag.floatValue = 0f },
-                        onHorizontalDrag = { _, dragAmount ->
-                            swipeDrag.floatValue += dragAmount
-                        },
-                    )
-                },
+                .tabSwipe(
+                    key = contentFilter,
+                    onPrevious = { if (contentFilter == FeedContentFilter.REPLIES_ONLY) viewModel.setContentFilter(FeedContentFilter.NOTES_ONLY) },
+                    onNext = { if (contentFilter == FeedContentFilter.NOTES_ONLY) viewModel.setContentFilter(FeedContentFilter.REPLIES_ONLY) },
+                ),
         ) { screenState ->
         when (screenState) {
             "loading" -> {
