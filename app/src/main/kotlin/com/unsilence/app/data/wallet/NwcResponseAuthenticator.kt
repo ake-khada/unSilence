@@ -31,6 +31,16 @@ internal data class AuthenticatedNwcResponse(
     val payload: JsonObject,
 )
 
+/** Why a response tied to the outstanding request failed authentication. */
+internal enum class NwcCorrelatedRejection {
+    MALFORMED_EVENT,
+    INVALID_SIGNATURE,
+    DECRYPTION_FAILED,
+    MALFORMED_PAYLOAD,
+    WRONG_RESULT_TYPE,
+    WRONG_PAYLOAD_ID,
+}
+
 /**
  * Authenticates and decrypts one NIP-47 response event.
  *
@@ -43,7 +53,9 @@ internal fun authenticateNwcResponse(
     event: JsonObject,
     expected: NwcResponseExpectation,
     decrypt: (String) -> String?,
+    onCorrelatedRejection: (NwcCorrelatedRejection) -> Unit,
 ): AuthenticatedNwcResponse? {
+    var correlated = false
     return try {
         val kind = event.numberField("kind")?.toIntExactOrNull() ?: return null
         if (kind != NWC_RESPONSE_KIND) return null
@@ -55,29 +67,50 @@ internal fun authenticateNwcResponse(
         if (tags.none { it.size >= 2 && it[0] == "e" && it[1] == expected.requestEventId }) {
             return null
         }
+        correlated = true
 
-        val id = event.stringField("id") ?: return null
-        val createdAt = event.numberField("created_at") ?: return null
-        val content = event.stringField("content") ?: return null
-        val signature = event.stringField("sig") ?: return null
+        val id = event.stringField("id")
+            ?: return rejected(NwcCorrelatedRejection.MALFORMED_EVENT, onCorrelatedRejection)
+        val createdAt = event.numberField("created_at")
+            ?: return rejected(NwcCorrelatedRejection.MALFORMED_EVENT, onCorrelatedRejection)
+        val content = event.stringField("content")
+            ?: return rejected(NwcCorrelatedRejection.MALFORMED_EVENT, onCorrelatedRejection)
+        val signature = event.stringField("sig")
+            ?: return rejected(NwcCorrelatedRejection.MALFORMED_EVENT, onCorrelatedRejection)
         if (!verifyNostrEventFields(id, pubkey, createdAt, kind, tags, content, signature)) {
-            return null
+            return rejected(NwcCorrelatedRejection.INVALID_SIGNATURE, onCorrelatedRejection)
         }
 
-        val plaintext = decrypt(content) ?: return null
-        val payload = NostrJson.parseToJsonElement(plaintext) as? JsonObject ?: return null
-        if (payload.stringField("result_type") != expected.resultType) return null
+        val plaintext = decrypt(content)
+            ?: return rejected(NwcCorrelatedRejection.DECRYPTION_FAILED, onCorrelatedRejection)
+        val payload = runCatching { NostrJson.parseToJsonElement(plaintext) }.getOrNull() as? JsonObject
+            ?: return rejected(NwcCorrelatedRejection.MALFORMED_PAYLOAD, onCorrelatedRejection)
+        if (payload.stringField("result_type") != expected.resultType) {
+            return rejected(NwcCorrelatedRejection.WRONG_RESULT_TYPE, onCorrelatedRejection)
+        }
 
         // Older NIP-47 payloads do not define an id. If a wallet mirrors the
         // extension unSilence sends, however, it must match this request.
         if (payload.containsKey("id") && payload.stringField("id") != expected.requestPayloadId) {
-            return null
+            return rejected(NwcCorrelatedRejection.WRONG_PAYLOAD_ID, onCorrelatedRejection)
         }
 
         AuthenticatedNwcResponse(payload)
     } catch (_: Exception) {
-        null
+        if (correlated) {
+            rejected(NwcCorrelatedRejection.MALFORMED_EVENT, onCorrelatedRejection)
+        } else {
+            null
+        }
     }
+}
+
+private fun rejected(
+    reason: NwcCorrelatedRejection,
+    onCorrelatedRejection: (NwcCorrelatedRejection) -> Unit,
+): AuthenticatedNwcResponse? {
+    onCorrelatedRejection(reason)
+    return null
 }
 
 /** Preserve the existing payment error-code-to-message contract. */

@@ -114,6 +114,21 @@ class NwcResponseAuthenticatorTest {
     }
 
     @Test
+    fun `correlated rejection reports why a wallet response was ignored`() = runTest {
+        var rejection: NwcCorrelatedRejection? = null
+
+        val response = authenticateNwcResponse(
+            event = paymentEvent(payloadId = "old-request"),
+            expected = paymentExpectation(),
+            decrypt = ::decrypt,
+            onCorrelatedRejection = { rejection = it },
+        )
+
+        assertNull(response)
+        assertEquals(NwcCorrelatedRejection.WRONG_PAYLOAD_ID, rejection)
+    }
+
+    @Test
     fun `standard response without optional payload id remains compatible`() = runTest {
         val response = authenticate(paymentEvent(payloadId = null), paymentExpectation(), ::decrypt)
 
@@ -239,7 +254,12 @@ class NwcResponseAuthenticatorTest {
         event: JsonObject,
         expected: NwcResponseExpectation,
         decrypt: (String) -> String?,
-    ): AuthenticatedNwcResponse? = authenticateNwcResponse(event, expected, decrypt)
+    ): AuthenticatedNwcResponse? = authenticateNwcResponse(
+        event = event,
+        expected = expected,
+        decrypt = decrypt,
+        onCorrelatedRejection = {},
+    )
 
     private fun decrypt(ciphertext: String): String =
         Nip04.decrypt(ciphertext, clientPrivate, walletKeys.pubKey)

@@ -53,7 +53,10 @@ private const val KEY_RELAY  = "wallet_relay"
 private const val KEY_SECRET = "wallet_secret"
 private const val KEY_OWNER  = "owner_pubkey"
 private const val BALANCE_TTL_MS = 60_000L
-private const val PAYMENT_TIMEOUT_MS = 45_000L
+// Lightning routing can legitimately outlast the fast relay/network legs. Keep
+// listening without ever resending the payment; timeout remains an unknown state.
+private const val PAYMENT_RESPONSE_TIMEOUT_MS = 90_000L
+private val DIAGNOSTIC_CONTROL_REGEX = Regex("[\\p{Cc}\\p{Cf}]+")
 
 class WalletPaymentPendingException(message: String) : Exception(message)
 
@@ -259,18 +262,22 @@ class NwcManager @Inject constructor(
         private val sendMutex = Mutex()
         private val pending = AtomicReference<PendingPayment?>(null)
         private val subId = "nwc-resp-${System.currentTimeMillis()}"
+        private val relayLabel = creds.conn.relayUrl.toUri().host ?: "unknown"
 
         @Volatile var isClosed: Boolean = false
             private set
         @Volatile private var webSocket: WebSocket? = null
+        @Volatile private var authRecoveryInFlight = false
 
         fun connect() {
+            Log.i(TAG, "Payment socket connecting: relay=$relayLabel")
             val request = Request.Builder().url(creds.conn.relayUrl).build()
             webSocket = okHttpClient.newWebSocket(request, listener())
         }
 
         fun close(reason: String) {
             isClosed = true
+            Log.i(TAG, "Payment socket closing: relay=$relayLabel reason=$reason")
             if (!ready.isCompleted) {
                 ready.complete(Result.failure(Exception("Wallet relay closed: $reason")))
             }
@@ -335,10 +342,12 @@ class NwcManager @Inject constructor(
                 close("send failed")
                 return@withLock Result.failure(IllegalStateException("Wallet relay disconnected before payment was sent"))
             }
+            Log.i(TAG, "Payment request queued: relay=$relayLabel request=${signed.id.take(8)}")
 
             try {
-                withTimeout(PAYMENT_TIMEOUT_MS) { payment.deferred.await() }
+                withTimeout(PAYMENT_RESPONSE_TIMEOUT_MS) { payment.deferred.await() }
             } catch (e: TimeoutCancellationException) {
+                Log.w(TAG, "Payment response timeout: relay=$relayLabel request=${signed.id.take(8)}")
                 close("payment timeout")
                 Result.failure(
                     WalletPaymentPendingException(
@@ -354,7 +363,11 @@ class NwcManager @Inject constructor(
 
         private fun listener() = object : WebSocketListener() {
             override fun onOpen(webSocket: WebSocket, response: Response) {
-                webSocket.send(responseSubscription())
+                if (!webSocket.send(responseSubscription())) {
+                    fail(Exception("Wallet relay disconnected before response subscription was sent"))
+                    return
+                }
+                Log.i(TAG, "Payment socket open: relay=$relayLabel")
                 if (!ready.isCompleted) ready.complete(Result.success(Unit))
             }
 
@@ -366,12 +379,20 @@ class NwcManager @Inject constructor(
                     "AUTH" -> {
                         val challenge = (msg.getOrNull(1) as? JsonPrimitive)?.content
                         if (challenge.isNullOrBlank()) return
+                        authRecoveryInFlight = true
+                        Log.i(TAG, "Payment relay requested authentication: relay=$relayLabel")
                         scope.launch {
                             if (sendAuthResponse(webSocket, creds, challenge)) {
-                                webSocket.send(responseSubscription())
-                                pending.get()?.eventCmd?.let { webSocket.send(it) }
+                                val subscriptionQueued = webSocket.send(responseSubscription())
+                                val paymentQueued = pending.get()?.eventCmd?.let { webSocket.send(it) } ?: true
+                                authRecoveryInFlight = false
+                                if (!subscriptionQueued || !paymentQueued) {
+                                    fail(Exception("Wallet relay disconnected during authentication recovery"))
+                                    return@launch
+                                }
                                 if (!ready.isCompleted) ready.complete(Result.success(Unit))
                             } else {
+                                authRecoveryInFlight = false
                                 fail(Exception("Wallet relay authentication failed"))
                             }
                         }
@@ -381,12 +402,20 @@ class NwcManager @Inject constructor(
                         handleEventOk(msg)
                         return
                     }
-                    "NOTICE" -> return
+                    "NOTICE" -> {
+                        val reason = diagnosticMessage((msg.getOrNull(1) as? JsonPrimitive)?.content.orEmpty())
+                        Log.w(TAG, "Payment relay notice: relay=$relayLabel reason=$reason")
+                        return
+                    }
                     "CLOSED" -> {
+                        val closedSubId = (msg.getOrNull(1) as? JsonPrimitive)?.content ?: return
+                        if (closedSubId != subId) return
                         val reason = (msg.getOrNull(2) as? JsonPrimitive)?.content.orEmpty()
-                        if (reason.startsWith("auth-required", ignoreCase = true)) {
-                            fail(Exception("Wallet relay requires authentication but did not provide a challenge"))
+                        if (reason.startsWith("auth-required", ignoreCase = true) && authRecoveryInFlight) {
+                            Log.i(TAG, "Payment response subscription awaiting authentication: relay=$relayLabel")
+                            return
                         }
+                        fail(Exception("Wallet relay closed its response subscription: ${diagnosticMessage(reason)}"))
                         return
                     }
                     "EVENT" -> handleResponseEvent(msg)
@@ -419,11 +448,19 @@ class NwcManager @Inject constructor(
             if (eventId != payment.requestEventId) return
             val success = (msg.getOrNull(2) as? JsonPrimitive)?.booleanOrNull ?: return
             val message = (msg.getOrNull(3) as? JsonPrimitive)?.content.orEmpty()
-            if (success) return
+            if (success) {
+                Log.i(TAG, "Payment request accepted: relay=$relayLabel request=${eventId.take(8)}")
+                return
+            }
 
-            if (message.contains("auth", ignoreCase = true)) return
+            if (message.contains("auth", ignoreCase = true)) {
+                Log.i(TAG, "Payment request awaiting authentication: relay=$relayLabel request=${eventId.take(8)}")
+                return
+            }
             if (pending.compareAndSet(payment, null)) {
-                payment.deferred.complete(Result.failure(Exception("Wallet relay rejected payment request: ${message.take(120)}")))
+                val reason = diagnosticMessage(message)
+                Log.w(TAG, "Payment request rejected: relay=$relayLabel request=${eventId.take(8)} reason=$reason")
+                payment.deferred.complete(Result.failure(Exception("Wallet relay rejected payment request: $reason")))
             }
         }
 
@@ -443,16 +480,33 @@ class NwcManager @Inject constructor(
                         Nip04.decrypt(encrypted, creds.nwcPrivKeyBytes, creds.walletPubBytes)
                     }.getOrNull()
                 },
+                onCorrelatedRejection = { reason ->
+                    Log.w(
+                        TAG,
+                        "Payment response rejected: relay=$relayLabel " +
+                            "request=${payment.requestEventId.take(8)} reason=$reason",
+                    )
+                },
             ) ?: return
             val result = payInvoiceResult(response)
 
             if (pending.compareAndSet(payment, null)) {
+                Log.i(
+                    TAG,
+                    "Payment response accepted: relay=$relayLabel " +
+                        "request=${payment.requestEventId.take(8)} success=${result.isSuccess}",
+                )
                 payment.deferred.complete(result)
             }
         }
 
         private fun fail(cause: Throwable) {
             isClosed = true
+            Log.w(
+                TAG,
+                "Payment socket failed: relay=$relayLabel request=${pending.get()?.requestEventId?.take(8) ?: "none"} " +
+                    "cause=${cause::class.java.simpleName} message=${diagnosticMessage(cause.message.orEmpty())}",
+            )
             if (!ready.isCompleted) ready.complete(Result.failure(cause))
             pending.getAndSet(null)?.deferred?.complete(Result.failure(cause))
             webSocket?.close(1000, "failed")
@@ -584,6 +638,9 @@ class NwcManager @Inject constructor(
                             Nip04.decrypt(encrypted, nwcPrivKeyBytes, walletPubBytes)
                         }.getOrNull()
                     },
+                    onCorrelatedRejection = { reason ->
+                        Log.w(TAG, "Balance response rejected: relay=${creds.conn.relayUrl.toUri().host ?: "unknown"} reason=$reason")
+                    },
                 ) ?: return
                 if (deferred.complete(balanceMsats(response))) {
                     webSocket.close(1000, "done")
@@ -616,6 +673,12 @@ class NwcManager @Inject constructor(
     private fun nextRequestPayloadId(): String = requestPayloadIds.updateAndGet { previous ->
         maxOf(System.currentTimeMillis(), previous + 1L)
     }.toString()
+
+    private fun diagnosticMessage(raw: String): String = raw
+        .replace(DIAGNOSTIC_CONTROL_REGEX, " ")
+        .trim()
+        .take(120)
+        .ifBlank { "unspecified" }
 
     /**
      * Parses a nostr+walletconnect:// or nostrwalletconnect:// URI.
