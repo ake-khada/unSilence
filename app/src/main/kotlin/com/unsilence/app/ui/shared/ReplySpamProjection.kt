@@ -205,7 +205,7 @@ private class WorkingCluster(first: SpamCandidate) {
 }
 
 private fun tokenSignature(content: String): TokenSignature? {
-    val withoutMention = contentWithoutAtMostOnePersonMention(content) ?: return null
+    val withoutMention = contentWithoutPersonMentions(content)
     val structuralContent = LINK_REFERENCE_REGEX.replace(withoutMention, " ")
     if (structuralContent.length < MIN_CONTENT_WORDS * 4) return null
 
@@ -242,22 +242,19 @@ private fun tokenSignature(content: String): TokenSignature? {
 
 /**
  * BIP-39-shaped payload without depending on a fixed word list: eight or more
- * comma-separated lowercase ASCII words. One person mention may appear as a
- * separate token or beside one word; this closes the campaign's one-mention
- * evasion. Link-only segments are ignored; digits and general sentence
- * punctuation in the remaining payload still reject the shape.
+ * comma-separated lowercase ASCII words. Person mentions and link-only
+ * segments are structural metadata and are ignored; adding more references
+ * cannot make an otherwise matching payload legitimate. Digits and general
+ * sentence punctuation in the remaining payload still reject the shape.
  */
 internal fun isSeedPhraseShape(content: String): Boolean {
-    var mentionCount = 0
     var wordCount = 0
     content.split(',').forEach { segment ->
         var segmentMentions = 0
         val withoutMention = PERSON_MENTION_REGEX.replace(segment) {
-            mentionCount += 1
             segmentMentions += 1
             ""
         }
-        if (mentionCount > 1) return false
 
         var linkCount = 0
         val word = LINK_REFERENCE_REGEX.replace(withoutMention) {
@@ -275,18 +272,11 @@ internal fun isSeedPhraseShape(content: String): Boolean {
 }
 
 /**
- * Person references are structural metadata for clustering, not prose. Allow
- * one because reply spam commonly tags the thread author; more than one is a
- * materially broader linked-content shape and remains ineligible.
+ * Person references are structural metadata for clustering, not prose. Strip
+ * all of them so adding more tagged accounts cannot disable detection.
  */
-private fun contentWithoutAtMostOnePersonMention(content: String): String? {
-    var mentionCount = 0
-    val withoutMention = PERSON_MENTION_REGEX.replace(content) {
-        mentionCount += 1
-        ""
-    }
-    return withoutMention.takeIf { mentionCount <= 1 }
-}
+private fun contentWithoutPersonMentions(content: String): String =
+    PERSON_MENTION_REGEX.replace(content, " ")
 
 private fun signaturesMatch(first: TokenSignature, second: TokenSignature): Boolean {
     val shared = first.tokens.count { it in second.tokens }
