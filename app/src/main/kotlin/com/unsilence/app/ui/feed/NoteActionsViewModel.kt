@@ -24,8 +24,10 @@ import com.unsilence.app.data.relay.toEventJson
 import com.unsilence.app.data.relay.OgMetadata
 import com.unsilence.app.data.relay.ProfilePipeline
 import com.unsilence.app.data.relay.RelayPool
+import com.unsilence.app.data.relay.RelayPreferencesStore
 import com.unsilence.app.data.relay.WotHydrationCoalescer
 import com.unsilence.app.data.relay.boundedSeenRelayHints
+import com.unsilence.app.data.relay.bridgeFallbackRelayTargets
 import com.unsilence.app.data.relay.wotSubjectsForFeedRows
 import com.unsilence.app.data.model.eventAddressableCoordinate
 import com.unsilence.app.data.model.ReportType
@@ -98,6 +100,7 @@ class NoteActionsViewModel @Inject constructor(
     private val keyManager: KeyManager,
     private val signingManager: SigningManager,
     private val relayPool: RelayPool,
+    private val relayPreferencesStore: RelayPreferencesStore,
     private val profilePipeline: ProfilePipeline,
     private val userRepository: UserRepository,
     private val memoryEventStore: MemoryEventStore,
@@ -138,6 +141,38 @@ class NoteActionsViewModel @Inject constructor(
 
     /** MES sidecar cache lookup — pre-parsed EventModel for rendering. */
     fun getEventModel(eventId: String) = memoryEventStore.getOrParseEventModel(eventId)
+
+    /** Live row for a quoted long-form coordinate. */
+    fun articleRowFlow(coord: String): Flow<FeedRow?> = memoryEventStore.articleRowByCoordFlow(coord)
+
+    /**
+     * Resolve a quoted long-form through its author relays and configured indexers.
+     * This is fire-and-forget so composition observes [articleRowFlow] rather than
+     * holding UI state around a network request.
+     */
+    fun ensureArticle(coord: String, author: String, dTag: String, hints: List<String>) {
+        if (memoryEventStore.articleRowByCoord(coord) != null) return
+        viewModelScope.launch {
+            val relays = buildSet {
+                addAll(hints)
+                addAll(memoryEventStore.lookupWriteRelaysFor(author))
+                addAll(relayPreferencesStore.indexerRelayUrlsSnapshot())
+            }.toList()
+            relayPool.fetchArticleByCoord(relays, author, dTag)
+            if (memoryEventStore.articleRowByCoord(coord) == null) {
+                val bridgeTargets = bridgeFallbackRelayTargets(relays)
+                if (bridgeTargets.isNotEmpty()) {
+                    relayPool.fetchArticleByCoord(bridgeTargets, author, dTag)
+                }
+            }
+        }
+    }
+
+    /** Hydrate a resolved top-level embedded article's engagement once. */
+    fun hydrateEngagement(rows: List<FeedRow>) {
+        if (rows.isEmpty()) return
+        cardHydrator.hydrateEngagement(rows, 0, rows.lastIndex)
+    }
 
     /** Read at action-sheet open so relay observations that arrived after card creation are included. */
     fun relayProvenance(eventId: String) = relayProvenanceItems(

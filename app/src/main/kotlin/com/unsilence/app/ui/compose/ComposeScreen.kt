@@ -92,6 +92,8 @@ import com.unsilence.app.ui.common.LocalShowSnackbar
 import com.unsilence.app.ui.common.rememberAvatarImageRequest
 import com.unsilence.app.ui.drafts.CloseDraftSheet
 import com.unsilence.app.ui.feed.ComposePreviewCard
+import com.unsilence.app.ui.feed.NoteActionsViewModel
+import com.unsilence.app.ui.feed.eventCardServices
 import com.unsilence.app.ui.theme.AppType
 import com.unsilence.app.ui.theme.Black
 import com.unsilence.app.ui.theme.BorderFaint
@@ -119,6 +121,9 @@ fun ComposeScreen(
     viewModel: ComposeViewModel = hiltViewModel(
         key = "compose-${LocalAppSessionKey.current}",
     ),
+    actionsViewModel: NoteActionsViewModel = hiltViewModel(
+        key = "note-actions-${LocalAppSessionKey.current}",
+    ),
 ) {
     val pubkeyHex      = viewModel.pubkeyHex
     val userAvatarUrl by viewModel.userAvatarUrl.collectAsStateWithLifecycle()
@@ -145,6 +150,7 @@ fun ComposeScreen(
     val pinnedShortcodes  by viewModel.pinnedEmojiShortcodes.collectAsStateWithLifecycle()
     val pendingEmoji      by viewModel.pendingEmojiInsert.collectAsStateWithLifecycle()
     val showSnackbar = LocalShowSnackbar.current
+    val previewServices = remember(actionsViewModel) { actionsViewModel.eventCardServices() }
 
     // Article comments preview/post like a reply (parent card + "Replying" chrome);
     // the VM routes to the NIP-22 kind-1111 path via articleCommentTarget.
@@ -809,13 +815,7 @@ fun ComposeScreen(
                                 model = previewModel,
                                 ownPubkey = pubkeyHex,
                                 ownProfile = userEntity,
-                                lookupProfile = { viewModel.lookupProfile(it) },
-                                lookupEvent = { id, _ -> viewModel.lookupEvent(id) },
-                                lookupModel = { viewModel.lookupModel(it) },
-                                fetchOgMetadata = { viewModel.fetchOgMetadata(it) },
-                                hasCachedOgMetadata = { viewModel.hasCachedOgMetadata(it) },
-                                imageDimensionCache = viewModel.imageDimensionCache,
-                                thumbnailCache = viewModel.videoThumbnailCache,
+                                services = previewServices,
                             )
                         } else {
                             Text(

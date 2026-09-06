@@ -220,9 +220,6 @@ class ComposeViewModel @Inject constructor(
     private val wotHydrationCoalescer: WotHydrationCoalescer,
     private val imageCompressor: ImageCompressor,
     private val videoTranscoder: VideoTranscoder,
-    val ogFetcher: com.unsilence.app.data.relay.OgFetcher,
-    val imageDimensionCache: com.unsilence.app.ui.feed.ImageDimensionCache,
-    val videoThumbnailCache: com.unsilence.app.ui.feed.VideoThumbnailCache,
 ) : ViewModel() {
 
     private val restoredEditor = decodeComposeEditor(
@@ -528,23 +525,6 @@ class ComposeViewModel @Inject constructor(
             settingsStore.setPinnedEmojiShortcodes(updated)
         }
     }
-
-    // ── ContentFlow lookup delegates ───────────────────────────────────────
-
-    suspend fun lookupProfile(pubkey: String): com.unsilence.app.data.memory.UserEntity? =
-        memoryEventStore.getUserEntity(pubkey)
-
-    fun lookupEvent(eventId: String): com.unsilence.app.data.memory.EventEntity? =
-        memoryEventStore.getEventEntity(eventId)
-
-    fun lookupModel(eventId: String): com.unsilence.app.data.model.EventModel? =
-        memoryEventStore.getOrParseEventModel(eventId)
-
-    suspend fun fetchOgMetadata(url: String): com.unsilence.app.data.relay.OgMetadata? =
-        ogFetcher.fetch(url)
-
-    fun hasCachedOgMetadata(url: String): Boolean =
-        ogFetcher.hasCached(url)
 
     fun updateTextBlock(id: String, text: String) {
         _blocks.update { blocks ->

@@ -26,26 +26,19 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import androidx.media3.exoplayer.ExoPlayer
 import com.unsilence.app.data.memory.FeedRow
 import com.unsilence.app.data.memory.EventEntity
-import com.unsilence.app.data.memory.SensitiveContentMode
 import com.unsilence.app.data.memory.UserEntity
-import com.unsilence.app.data.memory.WotLookup
 import com.unsilence.app.data.memory.toEventModel
 import com.unsilence.app.data.model.ContentParser
 import com.unsilence.app.data.model.EventModel
-import com.unsilence.app.data.model.VideoRenderModel
 import com.unsilence.app.data.model.resolveDisplayModel
-import com.unsilence.app.data.relay.FeedWotDisplayMode
-import com.unsilence.app.data.relay.OgMetadata
-import com.unsilence.app.ui.common.ShimmerNoteCard
 import com.unsilence.app.ui.feed.AvatarImage
 import com.unsilence.app.ui.feed.ContentFlow
 import com.unsilence.app.ui.feed.EventCard
-import com.unsilence.app.ui.feed.EventReferenceTarget
-import com.unsilence.app.ui.feed.ImageDimensionCache
-import com.unsilence.app.ui.feed.VideoThumbnailCache
+import com.unsilence.app.ui.feed.EventCardHost
+import com.unsilence.app.ui.feed.EventCardParent
+import com.unsilence.app.ui.feed.EventCardPresentation
 import com.unsilence.app.ui.feed.collectProfileAsState
 import com.unsilence.app.ui.feed.looksLikeHexPubkey
 import com.unsilence.app.ui.feed.relativeTime
@@ -53,9 +46,7 @@ import com.unsilence.app.ui.feed.buildReplyParentReference
 import com.unsilence.app.ui.theme.AppType
 import com.unsilence.app.ui.theme.Spacing
 import com.unsilence.app.ui.theme.TextSecondary
-import com.unsilence.app.data.wallet.ZapRequest
 import com.unsilence.app.ui.feed.NoteActionsViewModel
-import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.Flow
 
 @androidx.compose.runtime.Stable
@@ -71,45 +62,6 @@ fun NoteActionsViewModel.pollActionCallbacks() = PollActionCallbacks(
     responses = ::pollResponsesFlow,
     load = ::loadPollResponses,
     vote = ::votePoll,
-)
-
-/**
- * Parameters bundle for engagement actions — avoids 15-parameter lambda pollution.
- */
-@androidx.compose.runtime.Stable
-data class EventActionCallbacks(
-    val onNoteClick: (String) -> Unit,
-    val onComment: (eventId: String) -> Unit,
-    val onAuthorClick: (pubkey: String) -> Unit,
-    val onHashtagClick: (String) -> Unit,
-    val onQuote: (String) -> Unit,
-    val onArticleClick: (FeedRow) -> Unit,
-    val react: (eventId: String, pubkey: String, emoji: String, customEmojiUrl: String?) -> Unit,
-    val onReactLongPress: ((eventId: String, pubkey: String) -> Unit)? = null,
-    val pinnedEmojis: () -> List<com.unsilence.app.data.memory.CustomEmoji> = { emptyList() },
-    val repost: (eventId: String, pubkey: String, relayUrl: String) -> Unit,
-    val zap: (eventId: String, pubkey: String, relayUrl: String, request: ZapRequest) -> Unit,
-    val saveNwcUri: (String) -> Unit,
-    val lookupProfile: (suspend (String) -> UserEntity?)? = null,
-    val lookupProfileWithHints: (suspend (String, List<String>) -> UserEntity?)? = null,
-    val lookupEvent: (suspend (String, List<String>) -> EventEntity?)? = null,
-    val lookupEventWithAuthor: (suspend (String, List<String>, String?) -> EventEntity?)? = null,
-    val lookupEventReference: (suspend (EventReferenceTarget) -> EventEntity?)? = null,
-    val fetchOgMetadata: (suspend (String) -> OgMetadata?)? = null,
-    val hasCachedOgMetadata: ((String) -> Boolean)? = null,
-    val profileFlow: ((String) -> StateFlow<UserEntity?>)? = null,
-    /** Per-event stats observation. Cards collect this so engagement counts
-     *  update reactively without going through a list-wide signal trigger.
-     *  Falls back to the snapshot in FeedRow when null. */
-    val statsFlow: ((String) -> StateFlow<com.unsilence.app.data.memory.EventStats>)? = null,
-    val onLongPress: ((FeedRow) -> Unit)? = null,
-    val zapDetailsForEvent: ((String) -> List<com.unsilence.app.data.memory.ZapDetail>)? = null,
-    val repostPubkeysForEvent: ((String) -> List<String>)? = null,
-    val reactionsForEvent: ((String) -> List<com.unsilence.app.data.memory.ReactionInfo>)? = null,
-    val wotLookup: ((String) -> WotLookup?)? = null,
-    val feedWotDisplayMode: FeedWotDisplayMode = FeedWotDisplayMode.NUMBERS,
-    val onWotSubjectsVisible: (Collection<String>) -> Unit,
-    val poll: PollActionCallbacks? = null,
 )
 
 /**
@@ -157,24 +109,17 @@ internal fun EngagementSnapshot.forEvent(eventId: String): EventEngagementSnapsh
  *
  * [showThreadParents] — when true (Conversations tab), replies are grouped
  * with a compact parent note card above them, connected by a vertical line.
- * Parent notes are fetched via [EventActionCallbacks.lookupEvent] (MES + relay).
+ * Parent notes are fetched through [EventCardHost] (MES + relay).
  */
 fun LazyListScope.eventFeedItems(
     events: List<FeedRow>,
     engagement: EngagementSnapshot,
-    callbacks: EventActionCallbacks,
-    videoScope: VideoPlaybackScope? = null,
+    host: EventCardHost,
     role: CardRole = CardRole.Feed,
     newEventIds: Set<String> = emptySet(),
-    onNewPostAnimated: (String) -> Unit = {},
-    thumbnailCache: VideoThumbnailCache? = null,
-    imageDimensionCache: ImageDimensionCache? = null,
+    onNewPostAnimated: ((String) -> Unit)? = null,
     showThreadParents: Boolean = false,
-    eventModelProvider: ((String) -> EventModel?)? = null,
-    sensitiveMode: SensitiveContentMode = SensitiveContentMode.SHOW,
 ) {
-    // Resolve the screen-collected immutable snapshot once per items-builder pass.
-    val pinnedEmojis = callbacks.pinnedEmojis()
     items(
         items = events,
         key = { it.id },
@@ -188,31 +133,21 @@ fun LazyListScope.eventFeedItems(
                 parentId = parentId,
                 replyRow = row,
                 engagement = engagement,
-                callbacks = callbacks,
-                pinnedEmojis = pinnedEmojis,
-                videoScope = videoScope,
+                host = host,
                 role = role,
-                isNewPost = row.id in newEventIds,
-                onNewPostAnimated = { onNewPostAnimated(row.id) },
-                thumbnailCache = thumbnailCache,
-                imageDimensionCache = imageDimensionCache,
-                eventModelProvider = eventModelProvider,
-                sensitiveMode = sensitiveMode,
+                newPostAnimated = if (row.id in newEventIds) {
+                    onNewPostAnimated?.let { callback -> { callback(row.id) } }
+                } else null,
             )
         } else {
             EventFeedItem(
                 row = row,
                 engagement = engagement,
-                callbacks = callbacks,
-                pinnedEmojis = pinnedEmojis,
-                videoScope = videoScope,
+                host = host,
                 role = role,
-                isNewPost = row.id in newEventIds,
-                onNewPostAnimated = { onNewPostAnimated(row.id) },
-                thumbnailCache = thumbnailCache,
-                imageDimensionCache = imageDimensionCache,
-                eventModelProvider = eventModelProvider,
-                sensitiveMode = sensitiveMode,
+                newPostAnimated = if (row.id in newEventIds) {
+                    onNewPostAnimated?.let { callback -> { callback(row.id) } }
+                } else null,
             )
         }
         FeedDivider()
@@ -228,16 +163,9 @@ private fun ThreadedReplyItem(
     parentId: String?,
     replyRow: FeedRow,
     engagement: EngagementSnapshot,
-    callbacks: EventActionCallbacks,
-    pinnedEmojis: List<com.unsilence.app.data.memory.CustomEmoji>,
-    videoScope: VideoPlaybackScope?,
+    host: EventCardHost,
     role: CardRole,
-    isNewPost: Boolean,
-    onNewPostAnimated: () -> Unit,
-    thumbnailCache: VideoThumbnailCache? = null,
-    imageDimensionCache: ImageDimensionCache? = null,
-    eventModelProvider: ((String) -> EventModel?)? = null,
-    sensitiveMode: SensitiveContentMode = SensitiveContentMode.SHOW,
+    newPostAnimated: (() -> Unit)?,
 ) {
     // Resolve from MES, then source/tag hints, author outbox, and finally the
     // address coordinate. The wire-derived reference survives snapshot deletion.
@@ -251,23 +179,15 @@ private fun ThreadedReplyItem(
     }
     val parentEvent by produceState<EventEntity?>(null, parentReference) {
         val reference = parentReference ?: return@produceState
-        value = callbacks.lookupEventReference?.invoke(reference)
-            ?: reference.eventId?.let { id ->
-                callbacks.lookupEventWithAuthor?.invoke(
-                    id,
-                    reference.relayHints,
-                    reference.authorPubkey,
-                ) ?: callbacks.lookupEvent?.invoke(id, reference.relayHints)
-            }
+        value = host.lookupEvent(reference)
     }
     val parentAuthor by produceState<UserEntity?>(null, parentEvent?.pubkey) {
         val pk = parentEvent?.pubkey
         if (pk != null) {
-            value = callbacks.lookupProfileWithHints?.invoke(
+            value = host.lookupProfile(
                 pk,
                 (listOf(replyRow.relayUrl) + replyRow.relaysSeen).distinct(),
             )
-                ?: callbacks.lookupProfile?.invoke(pk)
         }
     }
 
@@ -275,18 +195,11 @@ private fun ThreadedReplyItem(
     EventFeedItem(
         row = replyRow,
         engagement = engagement,
-        callbacks = callbacks,
-        pinnedEmojis = pinnedEmojis,
-        videoScope = videoScope,
+        host = host,
         role = role,
-        isNewPost = isNewPost,
-        onNewPostAnimated = onNewPostAnimated,
-        thumbnailCache = thumbnailCache,
-        imageDimensionCache = imageDimensionCache,
+        newPostAnimated = newPostAnimated,
         parentEvent = parentEvent,
         parentAuthor = parentAuthor,
-        eventModelProvider = eventModelProvider,
-        sensitiveMode = sensitiveMode,
     )
 }
 
@@ -299,32 +212,16 @@ private fun ThreadedReplyItem(
 internal fun ThreadParentCard(
     event: EventEntity,
     author: UserEntity?,
-    onNoteClick: (String) -> Unit,
-    onHashtagClick: (String) -> Unit,
-    lookupProfile: (suspend (String) -> UserEntity?)? = null,
-    profileFlow: ((String) -> StateFlow<UserEntity?>)? = null,
-    lookupModel: ((String) -> EventModel?)? = null,
-    lookupEvent: (suspend (String, List<String>) -> EventEntity?)? = null,
-    onAuthorClick: (String) -> Unit = {},
-    fetchOgMetadata: (suspend (String) -> OgMetadata?)? = null,
-    imageDimensionCache: ImageDimensionCache? = null,
-    thumbnailCache: VideoThumbnailCache? = null,
-    exoPlayer: ExoPlayer? = null,
-    isActiveVideo: Boolean = false,
-    activeVideoUrl: String? = null,
-    isFullscreen: Boolean = false,
-    onOpenFullscreen: () -> Unit = {},
-    isMuted: Boolean = true,
-    onToggleMute: () -> Unit = {},
-    onVideoModelsResolved: ((List<VideoRenderModel>) -> Unit)? = null,
-    sensitiveMode: SensitiveContentMode = SensitiveContentMode.SHOW,
-    wotLookup: ((String) -> WotLookup?)? = null,
-    feedWotDisplayMode: FeedWotDisplayMode = FeedWotDisplayMode.NUMBERS,
-    onWotSubjectsVisible: (Collection<String>) -> Unit = {},
-    modifier: Modifier = Modifier,
+    host: EventCardHost,
+    videoOwnerId: String,
+    modifier: Modifier,
 ) {
+    val actions = host.actions
+    val services = host.services
+    val surface = host.surface
+    val lookupProfile: suspend (String) -> UserEntity? = { pubkey -> host.lookupProfile(pubkey) }
     val sourceModel = remember(event.id) {
-        lookupModel?.invoke(event.id) ?: runCatching {
+        services.lookupModel(event.id) ?: runCatching {
             ContentParser.parse(
                 id = event.id, pubkey = event.pubkey, kind = event.kind,
                 content = event.content, tagsJson = event.tags,
@@ -335,15 +232,15 @@ internal fun ThreadParentCard(
             )
         }.getOrNull()
     }
-    val model = remember(sourceModel, lookupModel) {
-        sourceModel?.resolveDisplayModel { id -> lookupModel?.invoke(id) }
+    val model = remember(sourceModel, services.lookupModel) {
+        sourceModel?.resolveDisplayModel(modelProvider = services.lookupModel)
     }
     val displayPubkey = model?.pubkey ?: event.pubkey
     val displayCreatedAt = model?.createdAt ?: event.createdAt
-    val liveAuthor = collectProfileAsState(displayPubkey, profileFlow)
+    val liveAuthor = collectProfileAsState(displayPubkey, surface.profileFlow)
     val effectiveAuthor = liveAuthor ?: author.takeIf { displayPubkey == event.pubkey }
     LaunchedEffect(displayPubkey) {
-        onWotSubjectsVisible(listOf(displayPubkey))
+        surface.onWotSubjectsVisible(listOf(displayPubkey))
     }
 
     Column(
@@ -356,7 +253,7 @@ internal fun ThreadParentCard(
                 shape = RoundedCornerShape(12.dp),
             )
             .clip(RoundedCornerShape(12.dp))
-            .clickable { onNoteClick(model?.navigateId ?: event.id) }
+            .clickable { actions.onNoteClick(model?.navigateId ?: event.id) }
             .padding(12.dp),
     ) {
         // Compact header: avatar + name + timestamp
@@ -367,7 +264,7 @@ internal fun ThreadParentCard(
                 modifier = Modifier.size(24.dp),
                 sizeDp = 24.dp,
                 lookupProfile = lookupProfile,
-                profileFlow = profileFlow,
+                profileFlow = surface.profileFlow,
             )
             Spacer(Modifier.width(6.dp))
             Text(
@@ -381,11 +278,11 @@ internal fun ThreadParentCard(
                 overflow = TextOverflow.Ellipsis,
                 modifier = Modifier.weight(1f),
             )
-            val lookup = wotLookup?.invoke(displayPubkey)
+            val lookup = surface.wotLookup?.invoke(displayPubkey)
             Spacer(Modifier.width(6.dp))
             WotFeedMetaTimestamp(
                 lookup = lookup,
-                mode = feedWotDisplayMode,
+                mode = surface.feedWotDisplayMode,
                 timestamp = relativeTime(displayCreatedAt),
                 timestampColor = Color.White.copy(alpha = 0.4f),
             )
@@ -395,34 +292,15 @@ internal fun ThreadParentCard(
             Spacer(Modifier.height(4.dp))
             // NIP-36: gate on the parent's own content-warning.
             EmbeddedSensitiveGate(
-                mode = sensitiveMode,
+                mode = surface.sensitiveMode,
                 sensitive = event.hasContentWarning || model.warnings.hasContentWarning,
                 reason = event.contentWarningReason ?: model.warnings.reason,
             ) {
                 ContentFlow(
                     model               = model,
                     role                = CardRole.Embedded,
-                    onNoteClick         = onNoteClick,
-                    onAuthorClick       = onAuthorClick,
-                    onHashtagClick      = onHashtagClick,
-                    lookupProfile       = lookupProfile,
-                    profileFlow         = profileFlow,
-                    lookupEvent         = lookupEvent,
-                    lookupModel         = lookupModel,
-                    fetchOgMetadata     = fetchOgMetadata,
-                    imageDimensionCache = imageDimensionCache,
-                    thumbnailCache      = thumbnailCache,
-                    exoPlayer           = exoPlayer,
-                    isActiveVideo       = isActiveVideo,
-                    activeVideoUrl      = activeVideoUrl,
-                    isFullscreen        = isFullscreen,
-                    onOpenFullscreen    = onOpenFullscreen,
-                    isMuted             = isMuted,
-                    onToggleMute        = onToggleMute,
-                    onVideoModelsResolved = onVideoModelsResolved,
-                    wotLookup           = wotLookup,
-                    feedWotDisplayMode  = feedWotDisplayMode,
-                    onWotSubjectsVisible = onWotSubjectsVisible,
+                    host                = host,
+                    videoOwnerId        = videoOwnerId,
                     nestDepth           = 1,
                     knownLightningAddress = effectiveAuthor?.lud16,
                 )
@@ -442,79 +320,21 @@ internal fun ThreadParentCard(
 internal fun EventFeedItem(
     row: FeedRow,
     engagement: EngagementSnapshot,
-    callbacks: EventActionCallbacks,
-    pinnedEmojis: List<com.unsilence.app.data.memory.CustomEmoji>,
-    videoScope: VideoPlaybackScope?,
+    host: EventCardHost,
     role: CardRole,
-    isNewPost: Boolean,
-    onNewPostAnimated: () -> Unit,
-    thumbnailCache: VideoThumbnailCache? = null,
-    imageDimensionCache: ImageDimensionCache? = null,
+    newPostAnimated: (() -> Unit)? = null,
     parentEvent: EventEntity? = null,
     parentAuthor: UserEntity? = null,
-    eventModelProvider: ((String) -> EventModel?)? = null,
-    sensitiveMode: SensitiveContentMode = SensitiveContentMode.SHOW,
 ) {
     val model = remember(row.id) {
-        eventModelProvider?.invoke(row.id) ?: row.toEventModel()
+        host.services.lookupModel(row.id) ?: row.toEventModel()
     }
     val rowRelayHints = remember(row.id, row.relayUrl, row.relaysSeen) {
         (listOf(row.relayUrl) + row.relaysSeen).filter { it.isNotBlank() }.distinct()
     }
-    val lookupProfile: (suspend (String) -> UserEntity?)? = callbacks.lookupProfileWithHints?.let { hintedLookup ->
-        { pubkey: String -> hintedLookup(pubkey, rowRelayHints) }
-    } ?: callbacks.lookupProfile
-    val lookupEvent: (suspend (String, List<String>) -> EventEntity?)? = callbacks.lookupEvent?.let { lookup ->
-        { eventId: String, declaredHints: List<String> ->
-            lookup(eventId, (rowRelayHints + declaredHints).distinct())
-        }
-    }
-    val lookupEventWithAuthor: (suspend (String, List<String>, String?) -> EventEntity?)? =
-        callbacks.lookupEventWithAuthor?.let { lookup ->
-            { eventId: String, declaredHints: List<String>, authorPubkey: String? ->
-                lookup(eventId, (rowRelayHints + declaredHints).distinct(), authorPubkey)
-            }
-        }
-    val lookupEventReference: (suspend (EventReferenceTarget) -> EventEntity?)? =
-        callbacks.lookupEventReference?.let { lookup ->
-            { target: EventReferenceTarget ->
-                lookup(target.copy(relayHints = (rowRelayHints + target.relayHints).distinct()))
-            }
-        }
+    val rowHost = remember(host, rowRelayHints) { host.withRelayHints(rowRelayHints) }
     val eventEngagement = remember(model.engagementId, engagement) {
         engagement.forEvent(model.engagementId)
-    }
-
-    // ── Remembered lambdas — stable across recompositions ─────────────────
-    // Use model.engagementId / model.pubkey so kind-6 reposts target
-    // the ORIGINAL event, not the repost wrapper.
-    val onReact = remember(model.engagementId, model.pubkey) {
-        { callbacks.react(model.engagementId, model.pubkey, "+", null) }
-    }
-    val onReactLongPress = remember(model.engagementId, model.pubkey) {
-        { callbacks.onReactLongPress?.invoke(model.engagementId, model.pubkey) ?: Unit }
-    }
-    val onReactWithEmoji: (com.unsilence.app.data.memory.CustomEmoji) -> Unit =
-        remember(model.engagementId, model.pubkey) {
-            { emoji -> callbacks.react(model.engagementId, model.pubkey, ":${emoji.shortcode}:", emoji.url) }
-        }
-    val onRepost = remember(model.engagementId, model.pubkey, row.relayUrl) {
-        { callbacks.repost(model.engagementId, model.pubkey, row.relayUrl) }
-    }
-    val onZap: (ZapRequest) -> Unit = remember(model.engagementId, model.pubkey, row.relayUrl) {
-        { req: ZapRequest -> callbacks.zap(model.engagementId, model.pubkey, row.relayUrl, req) }
-    }
-    val onToggleMute = remember(videoScope) {
-        { videoScope?.toggleMute(); Unit }
-    }
-    val onOpenFullscreen = remember(videoScope, row.id) {
-        { videoScope?.openFullscreen(row.id); Unit }
-    }
-    val onNewPostAnimatedCb = remember(row.id) {
-        { onNewPostAnimated() }
-    }
-    val onComment = remember(model.navigateId) {
-        { callbacks.onComment(model.navigateId) }
     }
 
     EventCard(
@@ -522,52 +342,12 @@ internal fun EventFeedItem(
         row                 = row,
         role                = role,
         engagement          = eventEngagement,
-        onNoteClick         = callbacks.onNoteClick,
-        onComment           = onComment,
-        onAuthorClick       = callbacks.onAuthorClick,
-        onHashtagClick      = callbacks.onHashtagClick,
-        onQuote             = callbacks.onQuote,
-        onArticleClick      = callbacks.onArticleClick,
-        onReact             = onReact,
-        onReactLongPress    = onReactLongPress,
-        pinnedEmojis        = pinnedEmojis,
-        onReactWithEmoji    = onReactWithEmoji,
-        onRepost            = onRepost,
-        onZap               = onZap,
-        onSaveNwcUri        = callbacks.saveNwcUri,
-        lookupProfile       = lookupProfile,
-        lookupEvent         = lookupEvent,
-        lookupEventWithAuthor = lookupEventWithAuthor,
-        lookupEventReference = lookupEventReference,
-        lookupModel         = eventModelProvider,
-        fetchOgMetadata     = callbacks.fetchOgMetadata,
-        hasCachedOgMetadata = callbacks.hasCachedOgMetadata,
-        profileFlow         = callbacks.profileFlow,
-        statsFlow           = callbacks.statsFlow,
-        zapDetailsForEvent  = callbacks.zapDetailsForEvent,
-        repostPubkeysForEvent = callbacks.repostPubkeysForEvent,
-        reactionsForEvent   = callbacks.reactionsForEvent,
-        imageDimensionCache = imageDimensionCache,
-        thumbnailCache      = thumbnailCache,
-        exoPlayer           = videoScope?.exoPlayer,
-        isMuted             = videoScope?.isMuted ?: true,
-        onToggleMute        = onToggleMute,
-        isActiveVideo       = videoScope?.isActiveVideo(row.id) ?: false,
-        activeVideoUrl      = videoScope?.activeVideoUrl,
-        isFullscreen        = videoScope?.showFullscreenVideo ?: false,
-        onOpenFullscreen    = onOpenFullscreen,
-        onVideoModelsResolved = { models -> videoScope?.registerVideoModels(row.id, models) },
-        isNewPost           = isNewPost,
-        onNewPostAnimated   = onNewPostAnimatedCb,
-        parentEvent         = parentEvent,
-        parentAuthor        = parentAuthor,
-        onLongPress         = callbacks.onLongPress?.let { lp -> { lp(row) } },
-        sensitiveMode       = sensitiveMode,
-        isSensitive         = row.hasContentWarning,
-        contentWarningReason = row.contentWarningReason,
-        wotLookup           = callbacks.wotLookup,
-        feedWotDisplayMode  = callbacks.feedWotDisplayMode,
-        onWotSubjectsVisible = callbacks.onWotSubjectsVisible,
-        pollActions          = callbacks.poll,
+        host                = rowHost,
+        presentation        = EventCardPresentation(
+            newPostAnimated = newPostAnimated,
+            parent = parentEvent?.let {
+                EventCardParent(it, parentAuthor)
+            },
+        ),
     )
 }

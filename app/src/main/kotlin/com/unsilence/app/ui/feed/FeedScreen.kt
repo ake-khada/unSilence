@@ -60,7 +60,6 @@ import com.unsilence.app.ui.common.LocalAppSessionKey
 import com.unsilence.app.ui.common.LocalShowSnackbar
 import com.unsilence.app.ui.theme.AppType
 import com.unsilence.app.ui.shared.EngagementSnapshot
-import com.unsilence.app.ui.shared.EventActionCallbacks
 import com.unsilence.app.ui.shared.pollActionCallbacks
 import com.unsilence.app.ui.shared.CardRole
 import com.unsilence.app.ui.shared.PostActionsHost
@@ -222,40 +221,46 @@ fun FeedScreen(
             zapFlash = zapFlash,
         )
     }
-    val callbacks = remember(viewModel, actionsViewModel, pinnedEmojis, wotLookups, feedWotDisplayMode) {
-        EventActionCallbacks(
-            onNoteClick = onNoteClick,
-            onComment = onComment,
-            onAuthorClick = onAuthorClick,
-            onHashtagClick = onHashtagClick,
-            onQuote = onQuote,
-            onArticleClick = { articleRow = it },
-            react = { id, pk, emoji, url -> actionsViewModel.react(id, pk, emoji, url) },
-            onReactLongPress = { id, pk ->
-                emojiReactTarget = id to pk
-                showFullEmojiPicker = true
-            },
-            pinnedEmojis = { pinnedEmojis },
-            repost = { id, pk, relay -> actionsViewModel.repost(id, pk, relay) },
-            zap = { id, pk, relay, req -> actionsViewModel.zap(id, pk, relay, req) },
-            saveNwcUri = { actionsViewModel.saveNwcUri(it) },
-            lookupProfile = actionsViewModel::lookupProfile,
-            lookupProfileWithHints = actionsViewModel::lookupProfileWithHints,
-            lookupEvent = { id, hints -> actionsViewModel.lookupEvent(id, hints) },
-            lookupEventWithAuthor = { id, hints, authorPk -> actionsViewModel.lookupEvent(id, hints, authorPk) },
-            lookupEventReference = actionsViewModel::lookupEvent,
-            fetchOgMetadata = actionsViewModel::fetchOgMetadata,
-            hasCachedOgMetadata = actionsViewModel::hasCachedOgMetadata,
+    val cardHost = remember(
+        viewModel,
+        actionsViewModel,
+        pinnedEmojis,
+        wotLookups,
+        feedWotDisplayMode,
+        videoScope,
+        sensitiveMode,
+        onNoteClick,
+        onComment,
+        onAuthorClick,
+        onHashtagClick,
+        onQuote,
+    ) {
+        actionsViewModel.eventCardHost(
+            actions = EventCardActions(
+                onNoteClick = onNoteClick,
+                onComment = { _, model -> onComment(model.navigateId) },
+                onAuthorClick = onAuthorClick,
+                onHashtagClick = onHashtagClick,
+                onQuote = onQuote,
+                onArticleClick = { articleRow = it },
+                onReactLongPress = { id, pk ->
+                    emojiReactTarget = id to pk
+                    showFullEmojiPicker = true
+                },
+                onLongPress = { row -> actionsRow = row },
+            ),
             profileFlow = viewModel::profileFlow,
             statsFlow = viewModel::statsFlow,
             zapDetailsForEvent = viewModel::zapDetailsForEvent,
             repostPubkeysForEvent = viewModel::repostPubkeysForEvent,
             reactionsForEvent = viewModel::reactionsForEvent,
+            pinnedEmojis = pinnedEmojis,
+            videoScope = videoScope,
+            sensitiveMode = sensitiveMode,
             wotLookup = { pubkey -> wotLookups[pubkey] },
             feedWotDisplayMode = feedWotDisplayMode,
             onWotSubjectsVisible = viewModel::requestWotHydration,
-            poll = actionsViewModel.pollActionCallbacks(),
-            onLongPress = { row -> actionsRow = row },
+            pollActions = actionsViewModel.pollActionCallbacks(),
         )
     }
 
@@ -312,13 +317,9 @@ fun FeedScreen(
             ImmersiveVideoFeed(
                 items = immersiveItems,
                 holder = actionsViewModel.sharedPlayerHolder,
-                thumbnailCache = actionsViewModel.videoThumbnailCache,
-                imageDimensionCache = actionsViewModel.imageDimensionCache,
-                callbacks = callbacks,
+                host = cardHost,
                 engagement = engagement,
                 threadViewModel = immersiveThreadViewModel,
-                eventModelProvider = actionsViewModel::getEventModel,
-                sensitiveMode = sensitiveMode,
                 isLoadingMore = isLoadingMore,
                 onLoadMore = viewModel::loadMore,
                 onPageSettled = { row ->
@@ -431,16 +432,11 @@ fun FeedScreen(
                     eventFeedItems(
                         events = events,
                         engagement = engagement,
-                        callbacks = callbacks,
-                        videoScope = videoScope,
+                        host = cardHost,
                         role = CardRole.Feed,
                         newEventIds = liveArrivalIds,
                         onNewPostAnimated = { viewModel.clearLiveArrival(it) },
-                        thumbnailCache = actionsViewModel.videoThumbnailCache,
-                        imageDimensionCache = actionsViewModel.imageDimensionCache,
                         showThreadParents = showThreadParents,
-                        eventModelProvider = actionsViewModel::getEventModel,
-                        sensitiveMode = sensitiveMode,
                     )
 
                     if (currentFeedType is FeedType.Global &&

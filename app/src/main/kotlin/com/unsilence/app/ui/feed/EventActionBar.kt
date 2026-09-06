@@ -84,13 +84,13 @@ internal fun EventActionBar(
     zapFlash: NoteActionsViewModel.ZapFlashState?,
     zapEnabled: Boolean = true,
     drawerOpen: Boolean = false,
-    onChevronTap: () -> Unit = {},
+    onChevronTap: () -> Unit,
     onNoteClick: () -> Unit,
-    onComment: () -> Unit = {},
+    onComment: () -> Unit,
     onReact: () -> Unit,
-    onReactLongPress: () -> Unit = {},
+    onReactLongPress: () -> Unit,
     pinnedEmojis: List<com.unsilence.app.data.memory.CustomEmoji> = emptyList(),
-    onReactWithEmoji: (com.unsilence.app.data.memory.CustomEmoji) -> Unit = {},
+    onReactWithEmoji: (com.unsilence.app.data.memory.CustomEmoji) -> Unit,
     onRepost: () -> Unit,
     onQuote: (String) -> Unit,
     onZap: (ZapRequest) -> Unit,
@@ -306,7 +306,7 @@ internal fun EventReactButton(
     onTap: () -> Unit,
     onOpenFullPicker: () -> Unit,
     pinnedEmojis: List<com.unsilence.app.data.memory.CustomEmoji> = emptyList(),
-    onSelectEmoji: (com.unsilence.app.data.memory.CustomEmoji) -> Unit = {},
+    onSelectEmoji: (com.unsilence.app.data.memory.CustomEmoji) -> Unit,
 ) {
     val tint = if (hasReacted) Like else ActionTint
     var showStrip by remember { mutableStateOf(false) }

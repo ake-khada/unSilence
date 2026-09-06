@@ -162,12 +162,18 @@ fun ArticleReaderScreen(
     // Tapping any hashtag (inline body span or topic chip) leaves the article for
     // that tag's feed — close the reader first, else the destination opens hidden
     // behind this Dialog and the tap looks dead.
-    val onHashtagTap: (String) -> Unit = { tag -> onHashtagClick(tag); onDismiss() }
+    val onHashtagTap: (String) -> Unit = remember(onHashtagClick, onDismiss) {
+        { tag -> onHashtagClick(tag); onDismiss() }
+    }
 
     // Profile/thread navigation must close the reader first — otherwise the
     // destination opens BEHIND this Dialog and the tap looks dead.
-    val onAuthorTap: (String) -> Unit = { pubkey -> onDismiss(); onAuthorClick(pubkey) }
-    val onNoteTap: (String) -> Unit = { id -> onDismiss(); onNoteClick(id) }
+    val onAuthorTap: (String) -> Unit = remember(onDismiss, onAuthorClick) {
+        { pubkey -> onDismiss(); onAuthorClick(pubkey) }
+    }
+    val onNoteTap: (String) -> Unit = remember(onDismiss, onNoteClick) {
+        { id -> onDismiss(); onNoteClick(id) }
+    }
 
     // ── Comments (NIP-22 kind-1111 + legacy kind-1 by a-coordinate) ──────────
     // Dedicated VM owns the comment machinery + display providers; comment ACTIONS
@@ -327,6 +333,63 @@ fun ArticleReaderScreen(
         videoModelProvider = commentActionsVm::getVideoRenderModels,
         cachedModelProvider = commentActionsVm::getCachedEventModel,
     )
+    val commentCardHost = remember(
+        articleReaderVm,
+        commentActionsVm,
+        pinnedEmojis,
+        commentVideoScope,
+        sensitiveMode,
+        wotLookups,
+        feedWotDisplayMode,
+        onNoteTap,
+        onAuthorTap,
+        onHashtagTap,
+        onQuote,
+        articleCoord,
+        articleRelayHint,
+        model.engagementId,
+        model.pubkey,
+    ) {
+        commentActionsVm.eventCardHost(
+            actions = EventCardActions(
+                onNoteClick = onNoteTap,
+                onComment = { comment, _ ->
+                    if (comment.kind == 1111 && articleCoord != null) {
+                        commentTarget = ArticleCommentTarget(
+                            articleId = model.engagementId,
+                            articleCoord = articleCoord,
+                            articlePubkey = model.pubkey,
+                            articleRelayHint = articleRelayHint,
+                            parentId = comment.id,
+                            parentKind = comment.kind,
+                            parentPubkey = comment.pubkey,
+                            parentRelayHint = comment.relayUrl.takeIf { it.isNotBlank() },
+                        )
+                    } else {
+                        legacyReplyToEventId = comment.id
+                    }
+                },
+                onAuthorClick = onAuthorTap,
+                onHashtagClick = onHashtagTap,
+                onQuote = onQuote,
+                onArticleClick = { onNoteTap(it.id) },
+                onReactLongPress = null,
+                onLongPress = { commentActionsRow = it },
+            ),
+            profileFlow = articleReaderVm::profileFlow,
+            statsFlow = articleReaderVm::statsFlow,
+            zapDetailsForEvent = articleReaderVm::zapDetailsForEvent,
+            repostPubkeysForEvent = articleReaderVm::repostPubkeysForEvent,
+            reactionsForEvent = articleReaderVm::reactionsForEvent,
+            pinnedEmojis = pinnedEmojis,
+            videoScope = commentVideoScope,
+            sensitiveMode = sensitiveMode,
+            wotLookup = { key -> wotLookups[key] },
+            feedWotDisplayMode = feedWotDisplayMode,
+            onWotSubjectsVisible = articleReaderVm::requestWotHydration,
+            pollActions = pollActions,
+        )
+    }
     // Auto-reveal the engagement drawer when the chevron opens it: it sits at the
     // bottom of the article item, so without this it expands off-screen. Wait for the
     // expand to lay out, then scroll it into view (slides up under the bar).
@@ -682,76 +745,18 @@ fun ArticleReaderScreen(
                                                 commentActionsVm.getEventModel(comment.id) ?: comment.toEventModel()
                                             }
                                             EventCard(
-                                                model                 = cModel,
-                                                row                   = comment,
-                                                role                  = CardRole.Reply,
-                                                engagement            = EventEngagementSnapshot(isNwcConfigured = isNwcConfigured),
-                                                isFocused             = comment.id == focusedCommentId,
-                                                onNoteClick           = onNoteTap,
-                                                onComment             = {
-                                                    // kind-1111 comment → NIP-22 reply (kind-1111).
-                                                    // legacy kind-1 comment → normal kind-1 reply, but opened
-                                                    // as a LOCAL compose overlay (NIP-22 forbids 1111 replies to
-                                                    // kind-1; onNoteClick would open the thread behind the reader).
-                                                    if (comment.kind == 1111 && articleCoord != null) {
-                                                        commentTarget = ArticleCommentTarget(
-                                                            articleId = model.engagementId,
-                                                            articleCoord = articleCoord,
-                                                            articlePubkey = model.pubkey,
-                                                            articleRelayHint = articleRelayHint,
-                                                            parentId = comment.id,
-                                                            parentKind = comment.kind,
-                                                            parentPubkey = comment.pubkey,
-                                                            parentRelayHint = comment.relayUrl.takeIf { it.isNotBlank() },
-                                                        )
-                                                    } else {
-                                                        legacyReplyToEventId = comment.id
-                                                    }
-                                                },
-                                                onAuthorClick         = onAuthorTap,
-                                                onHashtagClick        = onHashtagTap,
-                                                onQuote               = onQuote,
-                                                onArticleClick        = { onNoteTap(it.id) },
-                                                onReact               = { commentActionsVm.react(comment.id, comment.pubkey) },
-                                                onReactLongPress      = {},
-                                                pinnedEmojis          = pinnedEmojis,
-                                                onReactWithEmoji      = { emoji -> commentActionsVm.react(comment.id, comment.pubkey, ":${emoji.shortcode}:", emoji.url) },
-                                                onRepost              = { commentActionsVm.repost(comment.id, comment.pubkey, comment.relayUrl) },
-                                                onZap                 = { req -> commentActionsVm.zap(comment.id, comment.pubkey, comment.relayUrl, req) },
-                                                onSaveNwcUri          = { uri -> commentActionsVm.saveNwcUri(uri) },
-                                                lookupProfile         = commentActionsVm::lookupProfile,
-                                                lookupEvent           = { id, hints -> commentActionsVm.lookupEvent(id, hints) },
-                                                lookupEventWithAuthor = { id, hints, authorPk -> commentActionsVm.lookupEvent(id, hints, authorPk) },
-                                                lookupEventReference = commentActionsVm::lookupEvent,
-                                                lookupModel           = commentActionsVm::getEventModel,
-                                                fetchOgMetadata       = commentActionsVm::fetchOgMetadata,
-                                                hasCachedOgMetadata   = commentActionsVm::hasCachedOgMetadata,
-                                                profileFlow           = articleReaderVm::profileFlow,
-                                                statsFlow             = articleReaderVm::statsFlow,
-                                                zapDetailsForEvent    = articleReaderVm::zapDetailsForEvent,
-                                                repostPubkeysForEvent = articleReaderVm::repostPubkeysForEvent,
-                                                reactionsForEvent     = articleReaderVm::reactionsForEvent,
-                                                imageDimensionCache   = commentActionsVm.imageDimensionCache,
-                                                thumbnailCache        = commentActionsVm.videoThumbnailCache,
-                                                exoPlayer             = commentVideoScope.exoPlayer,
-                                                isMuted               = commentVideoScope.isMuted,
-                                                onToggleMute          = { commentVideoScope.toggleMute() },
-                                                isActiveVideo         = commentVideoScope.isActiveVideo(comment.id),
-                                                activeVideoUrl        = commentVideoScope.activeVideoUrl,
-                                                isFullscreen          = commentVideoScope.showFullscreenVideo,
-                                                onOpenFullscreen      = { commentVideoScope.openFullscreen(comment.id) },
-                                                onVideoModelsResolved = { models ->
-                                                    commentVideoScope.registerVideoModels(comment.id, models)
-                                                },
-                                                sensitiveMode         = sensitiveMode,
-                                                isSensitive           = comment.hasContentWarning,
-                                                contentWarningReason  = comment.contentWarningReason,
-                                                onLongPress           = { commentActionsRow = comment },
-                                                wotLookup             = { key -> wotLookups[key] },
-                                                feedWotDisplayMode    = feedWotDisplayMode,
-                                                onWotSubjectsVisible  = articleReaderVm::requestWotHydration,
-                                                pollActions           = pollActions,
-                                                onNewPostAnimated     = {},
+                                                model = cModel,
+                                                row = comment,
+                                                role = CardRole.Reply,
+                                                engagement = EventEngagementSnapshot(
+                                                    isNwcConfigured = isNwcConfigured,
+                                                ),
+                                                host = commentCardHost.withRelayHints(
+                                                    listOf(comment.relayUrl) + comment.relaysSeen,
+                                                ),
+                                                presentation = EventCardPresentation(
+                                                    focused = comment.id == focusedCommentId,
+                                                ),
                                             )
                                         }
                                     }

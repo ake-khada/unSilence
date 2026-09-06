@@ -86,7 +86,6 @@ import com.unsilence.app.data.memory.WotLookup
 import com.unsilence.app.data.memory.toEventModel
 import com.unsilence.app.data.model.EventModel
 import com.unsilence.app.ui.shared.EngagementSnapshot
-import com.unsilence.app.ui.shared.EventActionCallbacks
 import com.unsilence.app.ui.shared.WotInlineLabel
 import com.unsilence.app.ui.common.rememberPowerSaveMode
 import com.unsilence.app.ui.theme.AppType
@@ -114,18 +113,21 @@ private val VIDEO_CORNER_RADIUS = 6.dp
 internal fun ImmersiveVideoFeed(
     items: List<ImmersiveVideoItem>,
     holder: SharedPlayerHolder,
-    thumbnailCache: VideoThumbnailCache,
-    imageDimensionCache: ImageDimensionCache,
-    callbacks: EventActionCallbacks,
+    host: EventCardHost,
     engagement: EngagementSnapshot,
     threadViewModel: ThreadViewModel,
-    eventModelProvider: (String) -> EventModel?,
-    sensitiveMode: SensitiveContentMode,
     isLoadingMore: Boolean,
     onLoadMore: () -> Unit,
     onPageSettled: (com.unsilence.app.data.memory.FeedRow) -> Unit,
     onExit: () -> Unit,
 ) {
+    val thumbnailCache = requireNotNull(host.services.thumbnailCache) {
+        "Immersive video requires a thumbnail cache"
+    }
+    val eventModelProvider: (String) -> EventModel? = { id ->
+        host.services.lookupModel(id)
+    }
+    val sensitiveMode = host.surface.sensitiveMode
     var sessionItems by remember {
         mutableStateOf(mergeImmersiveItems(emptyList(), items))
     }
@@ -233,7 +235,7 @@ internal fun ImmersiveVideoFeed(
         val item = settledItem ?: return@LaunchedEffect
         anchoredContentId = item.contentId
         onPageSettled(item.row)
-        callbacks.onWotSubjectsVisible(setOf(item.authorPubkey))
+        host.surface.onWotSubjectsVisible(setOf(item.authorPubkey))
         if (settledItemBlocked) {
             player.playWhenReady = false
             paused = true
@@ -352,7 +354,7 @@ internal fun ImmersiveVideoFeed(
                         }
                     }
                 },
-                onLongPress = { callbacks.onLongPress?.invoke(item.row) },
+                onLongPress = { host.actions.onLongPress?.invoke(item.row) },
             )
         }
 
@@ -385,7 +387,7 @@ internal fun ImmersiveVideoFeed(
         settledItem?.let { item ->
             ImmersiveAuthorBar(
                 item = item,
-                callbacks = callbacks,
+                host = host,
                 eventModelProvider = eventModelProvider,
                 playing = !paused && !settledItemBlocked,
                 onOpenSheet = { sheetEventId = item.contentId },
@@ -402,21 +404,15 @@ internal fun ImmersiveVideoFeed(
 
     val sheetItem = sheetEventId?.let { id -> sessionItems.firstOrNull { it.contentId == id } }
     if (sheetItem != null) {
+        val sheetModel = eventModelProvider(sheetItem.contentId) ?: sheetItem.row.toEventModel()
+        val dismissSheet = remember { { sheetEventId = null } }
         ImmersiveEngagementSheet(
             item = sheetItem,
-            model = eventModelProvider(sheetItem.contentId) ?: sheetItem.row.toEventModel(),
-            callbacks = callbacks,
+            model = sheetModel,
+            host = host,
             engagement = engagement,
             threadViewModel = threadViewModel,
-            eventModelProvider = eventModelProvider,
-            thumbnailCache = thumbnailCache,
-            imageDimensionCache = imageDimensionCache,
-            sensitiveMode = sensitiveMode,
-            onDismiss = { sheetEventId = null },
-            onReply = { eventId ->
-                sheetEventId = null
-                callbacks.onComment(eventId)
-            },
+            onDismiss = dismissSheet,
         )
     }
 }
@@ -624,7 +620,7 @@ private fun VideoCornerMasks(
 @Composable
 private fun ImmersiveAuthorBar(
     item: ImmersiveVideoItem,
-    callbacks: EventActionCallbacks,
+    host: EventCardHost,
     eventModelProvider: (String) -> EventModel?,
     playing: Boolean,
     onOpenSheet: () -> Unit,
@@ -635,7 +631,9 @@ private fun ImmersiveAuthorBar(
     // while the player author bar always represents the original target author.
     val authorPubkey = item.authorPubkey
     val rowDescribesAuthor = row.pubkey == authorPubkey
-    val profile = collectProfileAsState(authorPubkey, callbacks.profileFlow)
+    val lookupProfile: suspend (String) -> com.unsilence.app.data.memory.UserEntity? =
+        { pubkey -> host.lookupProfile(pubkey) }
+    val profile = collectProfileAsState(authorPubkey, host.surface.profileFlow)
     val displayName = profile?.displayName?.takeIf { it.isNotBlank() }
         ?: profile?.name?.takeIf { it.isNotBlank() && !looksLikeHexPubkey(it) }
         ?: row.displayName.takeIf { rowDescribesAuthor }
@@ -684,11 +682,11 @@ private fun ImmersiveAuthorBar(
                 pubkey = authorPubkey,
                 picture = profile?.picture ?: row.authorPicture.takeIf { rowDescribesAuthor },
                 sizeDp = 34.dp,
-                lookupProfile = callbacks.lookupProfile,
-                profileFlow = callbacks.profileFlow,
+                lookupProfile = lookupProfile,
+                profileFlow = host.surface.profileFlow,
                 modifier = Modifier
                     .size(34.dp)
-                    .clickable { callbacks.onAuthorClick(authorPubkey) },
+                    .clickable { host.actions.onAuthorClick(authorPubkey) },
             )
             Spacer(Modifier.width(Spacing.small))
             Row(
@@ -704,7 +702,7 @@ private fun ImmersiveAuthorBar(
                     overflow = TextOverflow.Ellipsis,
                     modifier = Modifier.weight(1f, fill = false),
                 )
-                val lookup = callbacks.wotLookup?.invoke(authorPubkey)
+                val lookup = host.surface.wotLookup?.invoke(authorPubkey)
                 if (lookup is WotLookup.Scored) {
                     Spacer(Modifier.width(Spacing.small))
                     WotInlineLabel(assertion = lookup.assertion, prefix = "")

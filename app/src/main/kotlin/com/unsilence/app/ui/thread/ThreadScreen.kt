@@ -46,9 +46,12 @@ import com.unsilence.app.ui.common.LocalShowSnackbar
 import com.unsilence.app.ui.common.ShimmerNoteCard
 import com.unsilence.app.ui.feed.ArticleReaderScreen
 import com.unsilence.app.ui.feed.EventCard
+import com.unsilence.app.ui.feed.EventCardActions
+import com.unsilence.app.ui.feed.EventCardPresentation
 import com.unsilence.app.ui.feed.FullScreenVideoDialog
 import com.unsilence.app.ui.feed.NoteActionsViewModel
 import com.unsilence.app.ui.feed.engagementId
+import com.unsilence.app.ui.feed.eventCardHost
 import com.unsilence.app.ui.shared.CardRole
 import com.unsilence.app.ui.shared.EngagementSnapshot
 import com.unsilence.app.ui.shared.FeedDivider
@@ -151,6 +154,48 @@ fun ThreadScreen(
         videoModelProvider = actionsViewModel::getVideoRenderModels,
         cachedModelProvider = actionsViewModel::getCachedEventModel,
     )
+    val cardHost = remember(
+        viewModel,
+        actionsViewModel,
+        pinnedEmojis,
+        videoScope,
+        sensitiveMode,
+        wotLookups,
+        feedWotDisplayMode,
+        onComment,
+        onAuthorClick,
+        onHashtagClick,
+        onQuote,
+    ) {
+        actionsViewModel.eventCardHost(
+            actions = EventCardActions(
+                onNoteClick = { /* The focused thread already owns this destination. */ },
+                onComment = { row, _ -> onComment(row.id) },
+                onAuthorClick = onAuthorClick,
+                onHashtagClick = onHashtagClick,
+                onQuote = onQuote,
+                onArticleClick = { articleRow = it },
+                onReactLongPress = { id, pubkey ->
+                    emojiReactTarget = id to pubkey
+                    showFullEmojiPicker = true
+                },
+                onLongPress = { actionsRow = it },
+            ),
+            profileFlow = viewModel::profileFlow,
+            statsFlow = viewModel::statsFlow,
+            zapDetailsForEvent = viewModel::zapDetailsForEvent,
+            repostPubkeysForEvent = viewModel::repostPubkeysForEvent,
+            reactionsForEvent = viewModel::reactionsForEvent,
+            pinnedEmojis = pinnedEmojis,
+            videoScope = videoScope,
+            sensitiveMode = sensitiveMode,
+            wotLookup = { key -> wotLookups[key] },
+            feedWotDisplayMode = feedWotDisplayMode,
+            // The ThreadViewModel hydrates the complete visible row set as one batch.
+            onWotSubjectsVisible = {},
+            pollActions = pollActions,
+        )
+    }
 
     @OptIn(FlowPreview::class)
     LaunchedEffect(allThreadRows, state.focusedNote?.id, cardWidthPx) {
@@ -258,63 +303,16 @@ fun ThreadScreen(
                                     actionsViewModel.getEventModel(note.id) ?: note.toEventModel()
                                 }
                                 EventCard(
-                                    model               = focusedModel,
-                                    row                 = note,
-                                    role                = if (note.kind == 30023) CardRole.Article else CardRole.Thread,
-                                    engagement          = engagement.forEvent(focusedModel.engagementId),
-                                    isFocused           = state.focusedReplyId == null,
-                                    onNoteClick         = { /* already on thread */ },
-                                    onComment           = { onComment(note.id) },
-                                    onAuthorClick       = onAuthorClick,
-                                    onHashtagClick      = onHashtagClick,
-                                    onQuote             = onQuote,
-                                    onArticleClick      = { articleRow = it },
-                                    onReact             = { actionsViewModel.react(note.id, note.pubkey) },
-                                    onReactLongPress    = {
-                                        emojiReactTarget = note.id to note.pubkey
-                                        showFullEmojiPicker = true
-                                    },
-                                    pinnedEmojis        = pinnedEmojis,
-                                    onReactWithEmoji    = { emoji ->
-                                        actionsViewModel.react(note.id, note.pubkey, ":${emoji.shortcode}:", emoji.url)
-                                    },
-                                    onRepost            = { actionsViewModel.repost(note.id, note.pubkey, note.relayUrl) },
-                                    onZap               = { req -> actionsViewModel.zap(note.id, note.pubkey, note.relayUrl, req) },
-                                    onSaveNwcUri        = { uri -> actionsViewModel.saveNwcUri(uri) },
-                                    lookupProfile       = actionsViewModel::lookupProfile,
-                                    lookupEvent         = { id, hints -> actionsViewModel.lookupEvent(id, hints) },
-                                    lookupEventWithAuthor = { id, hints, authorPk -> actionsViewModel.lookupEvent(id, hints, authorPk) },
-                                    lookupEventReference = actionsViewModel::lookupEvent,
-                                    lookupModel         = actionsViewModel::getEventModel,
-                                    fetchOgMetadata     = actionsViewModel::fetchOgMetadata,
-                                    hasCachedOgMetadata = actionsViewModel::hasCachedOgMetadata,
-                                    profileFlow         = viewModel::profileFlow,
-                                    statsFlow           = viewModel::statsFlow,
-                                    zapDetailsForEvent  = viewModel::zapDetailsForEvent,
-                                    repostPubkeysForEvent = viewModel::repostPubkeysForEvent,
-                                    reactionsForEvent   = viewModel::reactionsForEvent,
-                                    imageDimensionCache = actionsViewModel.imageDimensionCache,
-                                    thumbnailCache      = actionsViewModel.videoThumbnailCache,
-                                    exoPlayer           = videoScope.exoPlayer,
-                                    isMuted             = videoScope.isMuted,
-                                    onToggleMute        = { videoScope.toggleMute() },
-                                    isActiveVideo       = videoScope.isActiveVideo(note.id),
-                                    activeVideoUrl      = videoScope.activeVideoUrl,
-                                    isFullscreen        = videoScope.showFullscreenVideo,
-                                    onOpenFullscreen    = { videoScope.openFullscreen(note.id) },
-                                    onVideoModelsResolved = { models ->
-                                        videoScope.registerVideoModels(note.id, models)
-                                    },
-                                    sensitiveMode       = sensitiveMode,
-                                    isSensitive         = note.hasContentWarning,
-                                    contentWarningReason = note.contentWarningReason,
-                                    onLongPress         = { actionsRow = note },
-                                    wotLookup           = { key -> wotLookups[key] },
-                                    feedWotDisplayMode  = feedWotDisplayMode,
-                                    // ThreadViewModel hydrates the complete visible row set as a batch.
-                                    onWotSubjectsVisible = {},
-                                    onNewPostAnimated   = {},
-                                    pollActions         = pollActions,
+                                    model = focusedModel,
+                                    row = note,
+                                    role = if (note.kind == 30023) CardRole.Article else CardRole.Thread,
+                                    engagement = engagement.forEvent(focusedModel.engagementId),
+                                    host = cardHost.withRelayHints(
+                                        listOf(note.relayUrl) + note.relaysSeen,
+                                    ),
+                                    presentation = EventCardPresentation(
+                                        focused = state.focusedReplyId == null,
+                                    ),
                                 )
                                 FeedDivider()
                             }
@@ -389,63 +387,16 @@ fun ThreadScreen(
                                                     actionsViewModel.getEventModel(reply.id) ?: reply.toEventModel()
                                                 }
                                                 EventCard(
-                                                    model               = replyModel,
-                                                    row                 = reply,
-                                                    role                = CardRole.Reply,
-                                                    engagement          = engagement.forEvent(replyModel.engagementId),
-                                                    isFocused           = reply.id == state.focusedReplyId,
-                                                    onNoteClick         = { /* already viewing thread */ },
-                                                    onComment           = { onComment(reply.id) },
-                                                    onAuthorClick       = onAuthorClick,
-                                                    onHashtagClick      = onHashtagClick,
-                                                    onQuote             = onQuote,
-                                                    onArticleClick      = { articleRow = it },
-                                                    onReact             = { actionsViewModel.react(reply.id, reply.pubkey) },
-                                                    onReactLongPress    = {
-                                                        emojiReactTarget = reply.id to reply.pubkey
-                                                        showFullEmojiPicker = true
-                                                    },
-                                                    pinnedEmojis        = pinnedEmojis,
-                                                    onReactWithEmoji    = { emoji ->
-                                                        actionsViewModel.react(reply.id, reply.pubkey, ":${emoji.shortcode}:", emoji.url)
-                                                    },
-                                                    onRepost            = { actionsViewModel.repost(reply.id, reply.pubkey, reply.relayUrl) },
-                                                    onZap               = { req -> actionsViewModel.zap(reply.id, reply.pubkey, reply.relayUrl, req) },
-                                                    onSaveNwcUri        = { uri -> actionsViewModel.saveNwcUri(uri) },
-                                                    lookupProfile       = actionsViewModel::lookupProfile,
-                                                    lookupEvent         = { id, hints -> actionsViewModel.lookupEvent(id, hints) },
-                                                    lookupEventWithAuthor = { id, hints, authorPk -> actionsViewModel.lookupEvent(id, hints, authorPk) },
-                                                    lookupEventReference = actionsViewModel::lookupEvent,
-                                                    lookupModel         = actionsViewModel::getEventModel,
-                                                    fetchOgMetadata     = actionsViewModel::fetchOgMetadata,
-                                                    hasCachedOgMetadata = actionsViewModel::hasCachedOgMetadata,
-                                                    profileFlow         = viewModel::profileFlow,
-                                                    statsFlow           = viewModel::statsFlow,
-                                                    zapDetailsForEvent  = viewModel::zapDetailsForEvent,
-                                                    repostPubkeysForEvent = viewModel::repostPubkeysForEvent,
-                                                    reactionsForEvent   = viewModel::reactionsForEvent,
-                                                    imageDimensionCache = actionsViewModel.imageDimensionCache,
-                                                    thumbnailCache      = actionsViewModel.videoThumbnailCache,
-                                                    exoPlayer           = videoScope.exoPlayer,
-                                                    isMuted             = videoScope.isMuted,
-                                                    onToggleMute        = { videoScope.toggleMute() },
-                                                    isActiveVideo       = videoScope.isActiveVideo(reply.id),
-                                                    activeVideoUrl      = videoScope.activeVideoUrl,
-                                                    isFullscreen        = videoScope.showFullscreenVideo,
-                                                    onOpenFullscreen    = { videoScope.openFullscreen(reply.id) },
-                                                    onVideoModelsResolved = { models ->
-                                                        videoScope.registerVideoModels(reply.id, models)
-                                                    },
-                                                    sensitiveMode       = sensitiveMode,
-                                                    isSensitive         = reply.hasContentWarning,
-                                                    contentWarningReason = reply.contentWarningReason,
-                                                    onLongPress         = { actionsRow = reply },
-                                                    wotLookup           = { key -> wotLookups[key] },
-                                                    feedWotDisplayMode  = feedWotDisplayMode,
-                                                    // ThreadViewModel hydrates the complete visible row set as a batch.
-                                                    onWotSubjectsVisible = {},
-                                                    onNewPostAnimated   = {},
-                                                    pollActions         = pollActions,
+                                                    model = replyModel,
+                                                    row = reply,
+                                                    role = CardRole.Reply,
+                                                    engagement = engagement.forEvent(replyModel.engagementId),
+                                                    host = cardHost.withRelayHints(
+                                                        listOf(reply.relayUrl) + reply.relaysSeen,
+                                                    ),
+                                                    presentation = EventCardPresentation(
+                                                        focused = reply.id == state.focusedReplyId,
+                                                    ),
                                                 )
                                             }
                                         }

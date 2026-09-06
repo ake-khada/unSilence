@@ -81,7 +81,8 @@ import com.unsilence.app.ui.feed.NostrRichText
 import com.unsilence.app.ui.feed.engagementId
 import com.unsilence.app.ui.feed.toCompactSats
 import com.unsilence.app.ui.shared.EngagementSnapshot
-import com.unsilence.app.ui.shared.EventActionCallbacks
+import com.unsilence.app.ui.feed.EventCardActions
+import com.unsilence.app.ui.feed.eventCardHost
 import com.unsilence.app.ui.shared.CardRole
 import com.unsilence.app.ui.shared.NostrAddressDisplay
 import com.unsilence.app.ui.shared.SelfDeclaredNostrAddressText
@@ -182,11 +183,18 @@ fun ProfileScreen(
     }
 
     // Intercept avatar tap: own pubkey → scroll to top, other → navigate
-    val interceptedAuthorClick: (String) -> Unit = { tappedPubkey ->
-        if (tappedPubkey == viewModel.pubkeyHex) {
-            scope.launch { listState.animateScrollToItem(0) }
-        } else {
-            onAuthorClick(tappedPubkey)
+    val interceptedAuthorClick: (String) -> Unit = remember(
+        viewModel.pubkeyHex,
+        scope,
+        listState,
+        onAuthorClick,
+    ) {
+        { tappedPubkey ->
+            if (tappedPubkey == viewModel.pubkeyHex) {
+                scope.launch { listState.animateScrollToItem(0) }
+            } else {
+                onAuthorClick(tappedPubkey)
+            }
         }
     }
     val showThreadParents = selectedTab == ProfileTab.REPLIES
@@ -217,40 +225,48 @@ fun ProfileScreen(
         )
     }
     val pinnedEmojis by actionsViewModel.pinnedEmojis.collectAsStateWithLifecycle()
-    val callbacks = remember(viewModel, actionsViewModel, pinnedEmojis, wotLookups, feedWotDisplayMode) { EventActionCallbacks(
-        onNoteClick = onNoteClick,
-        onComment = onComment,
-        onAuthorClick = interceptedAuthorClick,
-        onHashtagClick = onHashtagClick,
-        onQuote = onQuote,
-        onArticleClick = { articleRow = it },
-        react = { id, pk, emoji, url -> actionsViewModel.react(id, pk, emoji, url) },
-        onReactLongPress = { id, pk ->
-            emojiReactTarget = id to pk
-            showFullEmojiPicker = true
-        },
-        pinnedEmojis = { pinnedEmojis },
-        repost = { id, pk, relay -> actionsViewModel.repost(id, pk, relay) },
-        zap = { id, pk, relay, req -> actionsViewModel.zap(id, pk, relay, req) },
-        saveNwcUri = { actionsViewModel.saveNwcUri(it) },
-        lookupProfile = actionsViewModel::lookupProfile,
-        lookupProfileWithHints = actionsViewModel::lookupProfileWithHints,
-        lookupEvent = { id, hints -> actionsViewModel.lookupEvent(id, hints) },
-        lookupEventWithAuthor = { id, hints, authorPk -> actionsViewModel.lookupEvent(id, hints, authorPk) },
-        lookupEventReference = actionsViewModel::lookupEvent,
-        fetchOgMetadata = actionsViewModel::fetchOgMetadata,
-        hasCachedOgMetadata = actionsViewModel::hasCachedOgMetadata,
-        profileFlow = viewModel::profileFlow,
-        statsFlow = viewModel::statsFlow,
-        zapDetailsForEvent = viewModel::zapDetailsForEvent,
-        repostPubkeysForEvent = viewModel::repostPubkeysForEvent,
-        reactionsForEvent = viewModel::reactionsForEvent,
-        wotLookup = { key -> wotLookups[key] },
-        feedWotDisplayMode = feedWotDisplayMode,
-        poll = actionsViewModel.pollActionCallbacks(),
-        onWotSubjectsVisible = viewModel::requestWotHydration,
-        onLongPress = { row -> actionsRow = row },
-    ) }
+    val cardHost = remember(
+        viewModel,
+        actionsViewModel,
+        pinnedEmojis,
+        wotLookups,
+        feedWotDisplayMode,
+        videoScope,
+        sensitiveMode,
+        onNoteClick,
+        onComment,
+        interceptedAuthorClick,
+        onHashtagClick,
+        onQuote,
+    ) {
+        actionsViewModel.eventCardHost(
+            actions = EventCardActions(
+                onNoteClick = onNoteClick,
+                onComment = { _, model -> onComment(model.navigateId) },
+                onAuthorClick = interceptedAuthorClick,
+                onHashtagClick = onHashtagClick,
+                onQuote = onQuote,
+                onArticleClick = { articleRow = it },
+                onReactLongPress = { id, pk ->
+                    emojiReactTarget = id to pk
+                    showFullEmojiPicker = true
+                },
+                onLongPress = { row -> actionsRow = row },
+            ),
+            profileFlow = viewModel::profileFlow,
+            statsFlow = viewModel::statsFlow,
+            zapDetailsForEvent = viewModel::zapDetailsForEvent,
+            repostPubkeysForEvent = viewModel::repostPubkeysForEvent,
+            reactionsForEvent = viewModel::reactionsForEvent,
+            pinnedEmojis = pinnedEmojis,
+            videoScope = videoScope,
+            sensitiveMode = sensitiveMode,
+            wotLookup = { key -> wotLookups[key] },
+            feedWotDisplayMode = feedWotDisplayMode,
+            onWotSubjectsVisible = viewModel::requestWotHydration,
+            pollActions = actionsViewModel.pollActionCallbacks(),
+        )
+    }
 
     val displayName = user?.displayName?.takeIf { it.isNotBlank() }
         ?: user?.name?.takeIf { it.isNotBlank() }
@@ -521,14 +537,9 @@ fun ProfileScreen(
                 eventFeedItems(
                     events = posts,
                     engagement = engagement,
-                    callbacks = callbacks,
-                    videoScope = videoScope,
+                    host = cardHost,
                     role = CardRole.Profile,
-                    thumbnailCache = actionsViewModel.videoThumbnailCache,
-                    imageDimensionCache = actionsViewModel.imageDimensionCache,
                     showThreadParents = showThreadParents,
-                    eventModelProvider = actionsViewModel::getEventModel,
-                    sensitiveMode = sensitiveMode,
                 )
             }
 
