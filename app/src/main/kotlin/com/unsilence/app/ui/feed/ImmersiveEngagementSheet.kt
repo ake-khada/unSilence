@@ -40,12 +40,10 @@ import androidx.compose.ui.platform.LocalWindowInfo
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import com.unsilence.app.data.memory.SensitiveContentMode
 import com.unsilence.app.data.model.EventModel
 import com.unsilence.app.data.wallet.ZapRequest
 import com.unsilence.app.ui.shared.CardRole
 import com.unsilence.app.ui.shared.EngagementSnapshot
-import com.unsilence.app.ui.shared.EventActionCallbacks
 import com.unsilence.app.ui.shared.EventFeedItem
 import com.unsilence.app.ui.shared.forEvent
 import com.unsilence.app.ui.theme.AppType
@@ -64,15 +62,10 @@ import com.unsilence.app.ui.thread.ThreadViewModel
 internal fun ImmersiveEngagementSheet(
     item: ImmersiveVideoItem,
     model: EventModel,
-    callbacks: EventActionCallbacks,
+    host: EventCardHost,
     engagement: EngagementSnapshot,
     threadViewModel: ThreadViewModel,
-    eventModelProvider: (String) -> EventModel?,
-    thumbnailCache: VideoThumbnailCache,
-    imageDimensionCache: ImageDimensionCache,
-    sensitiveMode: SensitiveContentMode,
     onDismiss: () -> Unit,
-    onReply: (String) -> Unit,
 ) {
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     val density = LocalDensity.current
@@ -88,20 +81,29 @@ internal fun ImmersiveEngagementSheet(
         threadViewModel.loadThread(model.navigateId)
     }
 
-    val replyCallbacks = remember(callbacks, threadViewModel, threadWotLookups, onReply) {
-        callbacks.copy(
-            profileFlow = threadViewModel::profileFlow,
-            statsFlow = threadViewModel::statsFlow,
-            zapDetailsForEvent = threadViewModel::zapDetailsForEvent,
-            repostPubkeysForEvent = threadViewModel::repostPubkeysForEvent,
-            reactionsForEvent = threadViewModel::reactionsForEvent,
-            wotLookup = { pubkey -> threadWotLookups[pubkey] },
-            onWotSubjectsVisible = {},
-            onComment = onReply,
+    val replyHost = remember(host, threadViewModel, threadWotLookups, onDismiss) {
+        host.copy(
+            actions = host.actions.copy(
+                onComment = { row, rowModel ->
+                    onDismiss()
+                    host.actions.onComment(row, rowModel)
+                },
+            ),
+            surface = host.surface.copy(
+                profileFlow = threadViewModel::profileFlow,
+                statsFlow = threadViewModel::statsFlow,
+                zapDetailsForEvent = threadViewModel::zapDetailsForEvent,
+                repostPubkeysForEvent = threadViewModel::repostPubkeysForEvent,
+                reactionsForEvent = threadViewModel::reactionsForEvent,
+                videoScope = null,
+                wotLookup = { pubkey -> threadWotLookups[pubkey] },
+                // The ThreadViewModel hydrates the sheet's visible rows as a batch.
+                onWotSubjectsVisible = {},
+            ),
         )
     }
 
-    val liveStats = callbacks.statsFlow?.let { statsFlow ->
+    val liveStats = host.surface.statsFlow?.let { statsFlow ->
         key(model.engagementId) {
             statsFlow(model.engagementId).collectAsStateWithLifecycle().value
         }
@@ -109,10 +111,12 @@ internal fun ImmersiveEngagementSheet(
     val eventEngagement = remember(model.engagementId, engagement) {
         engagement.forEvent(model.engagementId)
     }
-    val authorProfile = collectProfileAsState(model.pubkey, callbacks.profileFlow)
+    val lookupProfile: suspend (String) -> com.unsilence.app.data.memory.UserEntity? =
+        { pubkey -> host.lookupProfile(pubkey) }
+    val authorProfile = collectProfileAsState(model.pubkey, host.surface.profileFlow)
     val zapEnabled = authorProfile == null || !authorProfile.lud16.isNullOrBlank()
     var drawerOpen by remember(model.engagementId) { mutableStateOf(false) }
-    val pinnedEmojis = callbacks.pinnedEmojis()
+    val pinnedEmojis = host.surface.pinnedEmojis
 
     ModalBottomSheet(
         onDismissRequest = onDismiss,
@@ -146,19 +150,19 @@ internal fun ImmersiveEngagementSheet(
                             ?: row.displayName.takeIf { rowDescribesAuthor },
                         nip05 = authorProfile?.nip05 ?: row.authorNip05.takeIf { rowDescribesAuthor },
                         createdAt = model.createdAt,
-                        onAuthorClick = callbacks.onAuthorClick,
-                        onNoteClick = { callbacks.onNoteClick(model.navigateId) },
-                        lookupProfile = callbacks.lookupProfile,
-                        profileFlow = callbacks.profileFlow,
-                        wotLookup = callbacks.wotLookup,
-                        feedWotDisplayMode = callbacks.feedWotDisplayMode,
+                        onAuthorClick = host.actions.onAuthorClick,
+                        onNoteClick = { host.actions.onNoteClick(model.navigateId) },
+                        lookupProfile = lookupProfile,
+                        profileFlow = host.surface.profileFlow,
+                        wotLookup = host.surface.wotLookup,
+                        feedWotDisplayMode = host.surface.feedWotDisplayMode,
                     )
                     InlineText(
                         segments = model.segments,
-                        lookupProfile = callbacks.lookupProfile,
-                        onAuthorClick = callbacks.onAuthorClick,
-                        onHashtagClick = callbacks.onHashtagClick,
-                        onTextClick = { callbacks.onNoteClick(model.navigateId) },
+                        lookupProfile = lookupProfile,
+                        onAuthorClick = host.actions.onAuthorClick,
+                        onHashtagClick = host.actions.onHashtagClick,
+                        onTextClick = { host.actions.onNoteClick(model.navigateId) },
                         customEmojis = model.customEmojis,
                         modifier = Modifier.padding(
                             horizontal = Spacing.medium,
@@ -185,15 +189,18 @@ internal fun ImmersiveEngagementSheet(
                         zapEnabled = zapEnabled,
                         drawerOpen = drawerOpen,
                         onChevronTap = { drawerOpen = !drawerOpen },
-                        onNoteClick = { callbacks.onNoteClick(model.navigateId) },
-                        onComment = { onReply(model.navigateId) },
-                        onReact = { callbacks.react(model.engagementId, model.pubkey, "+", null) },
+                        onNoteClick = { host.actions.onNoteClick(model.navigateId) },
+                        onComment = {
+                            onDismiss()
+                            host.actions.onComment(row, model)
+                        },
+                        onReact = { host.services.react(model.engagementId, model.pubkey, "+", null) },
                         onReactLongPress = {
-                            callbacks.onReactLongPress?.invoke(model.engagementId, model.pubkey)
+                            host.actions.onReactLongPress?.invoke(model.engagementId, model.pubkey)
                         },
                         pinnedEmojis = pinnedEmojis,
                         onReactWithEmoji = { emoji ->
-                            callbacks.react(
+                            host.services.react(
                                 model.engagementId,
                                 model.pubkey,
                                 ":${emoji.shortcode}:",
@@ -201,13 +208,13 @@ internal fun ImmersiveEngagementSheet(
                             )
                         },
                         onRepost = {
-                            callbacks.repost(model.engagementId, model.pubkey, row.relayUrl)
+                            host.services.repost(model.engagementId, model.pubkey, row.relayUrl)
                         },
-                        onQuote = callbacks.onQuote,
+                        onQuote = host.actions.onQuote,
                         onZap = { request: ZapRequest ->
-                            callbacks.zap(model.engagementId, model.pubkey, row.relayUrl, request)
+                            host.services.zap(model.engagementId, model.pubkey, row.relayUrl, request)
                         },
-                        onSaveNwcUri = callbacks.saveNwcUri,
+                        onSaveNwcUri = host.services.saveNwcUri,
                     )
                     AnimatedVisibility(
                         visible = drawerOpen,
@@ -216,13 +223,13 @@ internal fun ImmersiveEngagementSheet(
                     ) {
                         EngagementDrawer(
                             eventId = model.engagementId,
-                            statsFlow = callbacks.statsFlow,
-                            zapDetailsForEvent = callbacks.zapDetailsForEvent,
-                            repostPubkeysForEvent = callbacks.repostPubkeysForEvent,
-                            reactionsForEvent = callbacks.reactionsForEvent,
-                            profileFlow = callbacks.profileFlow,
-                            lookupProfile = callbacks.lookupProfile,
-                            onProfileTap = callbacks.onAuthorClick,
+                            statsFlow = host.surface.statsFlow,
+                            zapDetailsForEvent = host.surface.zapDetailsForEvent,
+                            repostPubkeysForEvent = host.surface.repostPubkeysForEvent,
+                            reactionsForEvent = host.surface.reactionsForEvent,
+                            profileFlow = host.surface.profileFlow,
+                            lookupProfile = lookupProfile,
+                            onProfileTap = host.actions.onAuthorClick,
                         )
                     }
                     HorizontalDivider(color = BorderFaint)
@@ -263,16 +270,8 @@ internal fun ImmersiveEngagementSheet(
                         EventFeedItem(
                             row = depthRow.row,
                             engagement = engagement,
-                            callbacks = replyCallbacks,
-                            pinnedEmojis = pinnedEmojis,
-                            videoScope = null,
+                            host = replyHost,
                             role = CardRole.Reply,
-                            isNewPost = false,
-                            onNewPostAnimated = {},
-                            thumbnailCache = thumbnailCache,
-                            imageDimensionCache = imageDimensionCache,
-                            eventModelProvider = eventModelProvider,
-                            sensitiveMode = sensitiveMode,
                         )
                     }
                 }
@@ -283,7 +282,10 @@ internal fun ImmersiveEngagementSheet(
                 modifier = Modifier
                     .fillMaxWidth()
                     .background(Surface2)
-                    .clickable { onReply(model.navigateId) }
+                    .clickable {
+                        onDismiss()
+                        host.actions.onComment(row, model)
+                    }
                     .padding(horizontal = Spacing.medium, vertical = 12.dp),
             ) {
                 androidx.compose.foundation.layout.Row(

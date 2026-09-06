@@ -24,22 +24,15 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
-import androidx.media3.exoplayer.ExoPlayer
 import com.unsilence.app.data.memory.EventEntity
-import com.unsilence.app.data.memory.UserEntity
-import com.unsilence.app.data.memory.WotLookup
 import com.unsilence.app.data.model.ContentParser
 import com.unsilence.app.data.model.EventModel
-import com.unsilence.app.data.model.VideoRenderModel
 import com.unsilence.app.data.model.resolveDisplayModel
-import com.unsilence.app.data.relay.FeedWotDisplayMode
-import com.unsilence.app.data.relay.OgMetadata
 import com.unsilence.app.ui.shared.CardRole
 import com.unsilence.app.ui.theme.AppType
 import com.unsilence.app.ui.theme.Spacing
 import com.unsilence.app.ui.theme.SurfaceVariant
 import com.unsilence.app.ui.theme.TextSecondary
-import kotlinx.coroutines.flow.StateFlow
 
 private data class EmptyRepostState(
     val event: EventEntity? = null,
@@ -55,36 +48,15 @@ fun EmptyRepostBody(
     relayHints: List<String>,
     targetAuthorPubkey: String?,
     proxyUrl: String?,
-    lookupEventWithAuthor: (suspend (String, List<String>, String?) -> EventEntity?)?,
-    lookupEventReference: (suspend (EventReferenceTarget) -> EventEntity?)?,
-    lookupProfile: (suspend (String) -> UserEntity?)?,
-    profileFlow: ((String) -> StateFlow<UserEntity?>)? = null,
-    lookupModel: ((String) -> EventModel?)?,
-    fetchOgMetadata: (suspend (String) -> OgMetadata?)?,
-    hasCachedOgMetadata: ((String) -> Boolean)? = null,
-    imageDimensionCache: ImageDimensionCache?,
-    onNoteClick: (String) -> Unit,
-    onAuthorClick: (String) -> Unit,
-    onHashtagClick: (String) -> Unit,
-    // Video env — forwarded so a poster-less reposted video gets the MMR
-    // first-frame (thumbnailCache) instead of a dark placeholder, and so the
-    // target video can attach the shared player when this row is active.
-    thumbnailCache: VideoThumbnailCache? = null,
-    exoPlayer: ExoPlayer? = null,
-    isActiveVideo: Boolean = false,
-    activeVideoUrl: String? = null,
-    isFullscreen: Boolean = false,
-    onOpenFullscreen: () -> Unit = {},
-    isMuted: Boolean = true,
-    onToggleMute: () -> Unit = {},
-    onVideoModelsResolved: ((List<VideoRenderModel>) -> Unit)? = null,
-    sensitiveMode: com.unsilence.app.data.memory.SensitiveContentMode =
-        com.unsilence.app.data.memory.SensitiveContentMode.SHOW,
-    wotLookup: ((String) -> WotLookup?)? = null,
-    feedWotDisplayMode: FeedWotDisplayMode = FeedWotDisplayMode.NUMBERS,
-    onWotSubjectsVisible: (Collection<String>) -> Unit = {},
+    host: EventCardHost,
+    videoOwnerId: String,
 ) {
     val uriHandler = LocalUriHandler.current
+    val actions = host.actions
+    val services = host.services
+    val surface = host.surface
+    val lookupProfile: suspend (String) -> com.unsilence.app.data.memory.UserEntity? =
+        { pubkey -> host.lookupProfile(pubkey) }
     val reference = buildRepostTargetReference(
         eventId = targetId,
         addressCoordinate = addressCoordinate,
@@ -92,14 +64,9 @@ fun EmptyRepostBody(
         relayHints = relayHints,
     )
     val state by produceState(EmptyRepostState(), reference) {
-        val ev = reference?.let { ref ->
-            lookupEventReference?.invoke(ref)
-                ?: ref.eventId?.let { id ->
-                    lookupEventWithAuthor?.invoke(id, ref.relayHints, ref.authorPubkey)
-                }
-        }
+        val ev = reference?.let { ref -> host.lookupEvent(ref) }
         if (ev != null) {
-            val cachedModel = lookupModel?.invoke(ev.id)
+            val cachedModel = services.lookupModel(ev.id)
             val model = cachedModel ?: runCatching {
                 ContentParser.parse(
                     id = ev.id,
@@ -119,7 +86,7 @@ fun EmptyRepostBody(
             // only already-verified MES models, with the shared cycle/depth
             // guard; otherwise show the stable unavailable state instead of a
             // header followed by an inexplicably blank body.
-            val displayModel = model?.resolveDisplayModel { id -> lookupModel?.invoke(id) }
+            val displayModel = model?.resolveDisplayModel(modelProvider = services.lookupModel)
             value = if (displayModel != null) {
                 EmptyRepostState(event = ev, model = displayModel, loading = false)
             } else {
@@ -137,7 +104,7 @@ fun EmptyRepostBody(
         }
         state.event != null && state.model != null -> {
             val resolvedModel = state.model!!
-            val targetProfile = collectProfileAsState(resolvedModel.pubkey, profileFlow)
+            val targetProfile = collectProfileAsState(resolvedModel.pubkey, surface.profileFlow)
             // Render inline using ContentFlow — same pipeline as native posts.
             // The target header is sourced from the independently verified
             // fetched event, never from the wrapper's untrusted p-tag hint.
@@ -150,45 +117,23 @@ fun EmptyRepostBody(
                         ?: targetProfile?.name?.takeIf { it.isNotBlank() && !looksLikeHexPubkey(it) },
                     nip05 = targetProfile?.nip05,
                     createdAt = resolvedModel.createdAt,
-                    onAuthorClick = onAuthorClick,
-                    onNoteClick = { onNoteClick(resolvedModel.navigateId) },
+                    onAuthorClick = actions.onAuthorClick,
+                    onNoteClick = { actions.onNoteClick(resolvedModel.navigateId) },
                     lookupProfile = lookupProfile,
-                    profileFlow = profileFlow,
-                    wotLookup = wotLookup,
-                    feedWotDisplayMode = feedWotDisplayMode,
+                    profileFlow = surface.profileFlow,
+                    wotLookup = surface.wotLookup,
+                    feedWotDisplayMode = surface.feedWotDisplayMode,
                 )
                 com.unsilence.app.ui.shared.EmbeddedSensitiveGate(
-                    mode = sensitiveMode,
+                    mode = surface.sensitiveMode,
                     sensitive = resolvedModel.warnings.hasContentWarning,
                     reason = resolvedModel.warnings.reason,
                 ) {
                     ContentFlow(
                         model               = resolvedModel,
                         role                = CardRole.Embedded,
-                        onNoteClick         = onNoteClick,
-                        onAuthorClick       = onAuthorClick,
-                        onHashtagClick      = onHashtagClick,
-                        lookupProfile       = lookupProfile,
-                        profileFlow         = profileFlow,
-                        lookupEvent         = lookupEventWithAuthor?.let { lookup ->
-                            { id, hints -> lookup(id, hints, null) }
-                        },
-                        lookupModel         = lookupModel,
-                        fetchOgMetadata     = fetchOgMetadata,
-                        hasCachedOgMetadata = hasCachedOgMetadata,
-                        imageDimensionCache = imageDimensionCache,
-                        thumbnailCache      = thumbnailCache,
-                        exoPlayer           = exoPlayer,
-                        isActiveVideo       = isActiveVideo,
-                        activeVideoUrl      = activeVideoUrl,
-                        isFullscreen        = isFullscreen,
-                        onOpenFullscreen    = onOpenFullscreen,
-                        isMuted             = isMuted,
-                        onToggleMute        = onToggleMute,
-                        onVideoModelsResolved = onVideoModelsResolved,
-                        wotLookup           = wotLookup,
-                        feedWotDisplayMode  = feedWotDisplayMode,
-                        onWotSubjectsVisible = onWotSubjectsVisible,
+                        host                = host,
+                        videoOwnerId        = videoOwnerId,
                         nestDepth           = 0,
                         knownLightningAddress = targetProfile?.lud16,
                     )
@@ -206,7 +151,7 @@ fun EmptyRepostBody(
                         if (proxyUrl != null) {
                             runCatching { uriHandler.openUri(proxyUrl) }
                         } else {
-                            targetId?.let(onNoteClick)
+                            targetId?.let(actions.onNoteClick)
                         }
                     }
                     .padding(horizontal = Spacing.medium, vertical = Spacing.small),

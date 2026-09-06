@@ -85,12 +85,13 @@ import com.unsilence.app.data.memory.FeedRow
 import com.unsilence.app.data.memory.toEventModel
 import com.unsilence.app.ui.common.LocalOpenEmojiSettings
 import com.unsilence.app.ui.feed.ArticleReaderScreen
+import com.unsilence.app.ui.feed.EventCardActions
 import com.unsilence.app.ui.feed.EmojiPickerSheet
 import com.unsilence.app.ui.feed.NoteActionsViewModel
 import com.unsilence.app.ui.feed.engagementId
+import com.unsilence.app.ui.feed.eventCardHost
 import com.unsilence.app.ui.shared.EngagementSnapshot
 import com.unsilence.app.ui.shared.FeedDivider
-import com.unsilence.app.ui.shared.EventActionCallbacks
 import com.unsilence.app.ui.shared.CardRole
 import com.unsilence.app.ui.shared.PostActionsHost
 import com.unsilence.app.ui.shared.WotImpersonationBadge
@@ -177,15 +178,84 @@ fun SearchScreen(
     // keyboard doesn't linger over the destination (profile / note / article).
     // clearFocus() (not just hide()) ensures the text field releases focus so the
     // IME stays down instead of popping back.
-    val onAuthorClickDismiss: (String) -> Unit = { pubkey ->
-        keyboardController?.hide()
-        focusManager.clearFocus()
-        onAuthorClick(pubkey)
+    val onAuthorClickDismiss: (String) -> Unit = remember(
+        keyboardController,
+        focusManager,
+        onAuthorClick,
+    ) {
+        { pubkey ->
+            keyboardController?.hide()
+            focusManager.clearFocus()
+            onAuthorClick(pubkey)
+        }
     }
-    val onNoteClickDismiss: (String) -> Unit = { id ->
-        keyboardController?.hide()
-        focusManager.clearFocus()
-        onNoteClick(id)
+    val onNoteClickDismiss: (String) -> Unit = remember(
+        keyboardController,
+        focusManager,
+        onNoteClick,
+    ) {
+        { id ->
+            keyboardController?.hide()
+            focusManager.clearFocus()
+            onNoteClick(id)
+        }
+    }
+    val onArticleClickDismiss: (FeedRow) -> Unit = remember(keyboardController, focusManager) {
+        { row ->
+            keyboardController?.hide()
+            focusManager.clearFocus()
+            articleRow = row
+        }
+    }
+    val onCardReactLongPress: (String, String) -> Unit = remember {
+        { id, pubkey ->
+            emojiReactTarget = id to pubkey
+            showFullEmojiPicker = true
+        }
+    }
+    val onCardLongPress: (FeedRow) -> Unit = remember {
+        { row -> actionsRow = row }
+    }
+    val cardHost = remember(
+        onNoteClickDismiss,
+        onComment,
+        onAuthorClickDismiss,
+        onHashtagClick,
+        onQuote,
+        actionsViewModel,
+        onArticleClickDismiss,
+        onCardReactLongPress,
+        pinnedEmojis,
+        viewModel,
+        wotLookups,
+        feedWotDisplayMode,
+        onCardLongPress,
+        sensitiveMode,
+    ) {
+        actionsViewModel.eventCardHost(
+            actions = EventCardActions(
+                onNoteClick = onNoteClickDismiss,
+                onComment = { _, model -> onComment(model.navigateId) },
+                onAuthorClick = onAuthorClickDismiss,
+                onHashtagClick = onHashtagClick,
+                onQuote = onQuote,
+                onArticleClick = onArticleClickDismiss,
+                onReactLongPress = onCardReactLongPress,
+                onLongPress = onCardLongPress,
+            ),
+            profileFlow = viewModel::profileFlow,
+            statsFlow = viewModel::statsFlow,
+            zapDetailsForEvent = viewModel::zapDetailsForEvent,
+            repostPubkeysForEvent = viewModel::repostPubkeysForEvent,
+            reactionsForEvent = viewModel::reactionsForEvent,
+            pinnedEmojis = pinnedEmojis,
+            videoScope = null,
+            sensitiveMode = sensitiveMode,
+            wotLookup = { pubkey -> wotLookups[pubkey] },
+            feedWotDisplayMode = feedWotDisplayMode,
+            onWotSubjectsVisible = viewModel::requestWotHydration,
+            pollActions = actionsViewModel.pollActionCallbacks(),
+        )
     }
     val onEntityClickDismiss: (DeepLinkTarget) -> Unit = { target ->
         keyboardController?.hide()
@@ -478,17 +548,6 @@ fun SearchScreen(
                             reactedIds, repostedIds, zappedIds, isNwcConfigured,
                             zapLoadingIds, optimisticSats, zapFlash,
                         )
-                        val callbacks = rememberCallbacks(
-                            onNoteClickDismiss, onComment, onAuthorClickDismiss, onHashtagClick,
-                            onQuote, actionsViewModel,
-                            { keyboardController?.hide(); focusManager.clearFocus(); articleRow = it },
-                            { id, pk -> emojiReactTarget = id to pk; showFullEmojiPicker = true },
-                            pinnedEmojis,
-                            viewModel,
-                            wotLookups,
-                            feedWotDisplayMode,
-                            { row -> actionsRow = row },
-                        )
                         LazyColumn(state = noteListState, modifier = Modifier.fillMaxSize()) {
                             state.entityTarget?.let { target ->
                                 item(key = "entity:${entityResultKey(target)}") {
@@ -517,13 +576,8 @@ fun SearchScreen(
                             eventFeedItems(
                                 events = state.noteResults,
                                 engagement = engagement,
-                                callbacks = callbacks,
-                                videoScope = null,
+                                host = cardHost,
                                 role = CardRole.Search,
-                                thumbnailCache = actionsViewModel.videoThumbnailCache,
-                                imageDimensionCache = actionsViewModel.imageDimensionCache,
-                                eventModelProvider = actionsViewModel::getEventModel,
-                                sensitiveMode = sensitiveMode,
                             )
                         }
                     }
@@ -579,17 +633,6 @@ fun SearchScreen(
                             reactedIds, repostedIds, zappedIds, isNwcConfigured,
                             zapLoadingIds, optimisticSats, zapFlash,
                         )
-                        val callbacks = rememberCallbacks(
-                            onNoteClickDismiss, onComment, onAuthorClickDismiss, onHashtagClick,
-                            onQuote, actionsViewModel,
-                            { keyboardController?.hide(); focusManager.clearFocus(); articleRow = it },
-                            { id, pk -> emojiReactTarget = id to pk; showFullEmojiPicker = true },
-                            pinnedEmojis,
-                            viewModel,
-                            wotLookups,
-                            feedWotDisplayMode,
-                            { row -> actionsRow = row },
-                        )
                         LazyColumn(state = noteListState, modifier = Modifier.fillMaxSize()) {
                             noteTarget?.let { target ->
                                 item(key = "entity:${entityResultKey(target)}") {
@@ -605,13 +648,8 @@ fun SearchScreen(
                             eventFeedItems(
                                 events = results,
                                 engagement = engagement,
-                                callbacks = callbacks,
-                                videoScope = null,
+                                host = cardHost,
                                 role = CardRole.Search,
-                                thumbnailCache = actionsViewModel.videoThumbnailCache,
-                                imageDimensionCache = actionsViewModel.imageDimensionCache,
-                                eventModelProvider = actionsViewModel::getEventModel,
-                                sensitiveMode = sensitiveMode,
                             )
                         }
                     }
@@ -881,67 +919,6 @@ private fun rememberEngagement(
         reactedIds = reactedIds, repostedIds = repostedIds, zappedIds = zappedIds,
         isNwcConfigured = isNwcConfigured, zapLoadingIds = zapLoadingIds,
         optimisticZapSats = optimisticSats, zapFlash = zapFlash,
-    )
-}
-
-@Composable
-private fun rememberCallbacks(
-    onNoteClick: (String) -> Unit,
-    onComment: (String) -> Unit,
-    onAuthorClick: (String) -> Unit,
-    onHashtagClick: (String) -> Unit,
-    onQuote: (String) -> Unit,
-    actionsViewModel: NoteActionsViewModel,
-    onArticleClick: (FeedRow) -> Unit,
-    onReactLongPress: (String, String) -> Unit,
-    pinnedEmojis: List<com.unsilence.app.data.memory.CustomEmoji>,
-    viewModel: SearchViewModel,
-    wotLookups: Map<String, WotLookup>,
-    feedWotDisplayMode: FeedWotDisplayMode,
-    onLongPress: (FeedRow) -> Unit,
-): EventActionCallbacks = remember(
-    onNoteClick,
-    onComment,
-    onAuthorClick,
-    onHashtagClick,
-    onQuote,
-    actionsViewModel,
-    pinnedEmojis,
-    viewModel,
-    wotLookups,
-    feedWotDisplayMode,
-    onLongPress,
-) {
-    EventActionCallbacks(
-        onNoteClick = onNoteClick,
-        onComment = onComment,
-        onAuthorClick = onAuthorClick,
-        onHashtagClick = onHashtagClick,
-        onQuote = onQuote,
-        onArticleClick = onArticleClick,
-        react = { id, pk, emoji, url -> actionsViewModel.react(id, pk, emoji, url) },
-        onReactLongPress = { id, pk -> onReactLongPress(id, pk) },
-        pinnedEmojis = { pinnedEmojis },
-        repost = { id, pk, relay -> actionsViewModel.repost(id, pk, relay) },
-        zap = { id, pk, relay, req -> actionsViewModel.zap(id, pk, relay, req) },
-        saveNwcUri = { actionsViewModel.saveNwcUri(it) },
-        lookupProfile = actionsViewModel::lookupProfile,
-        lookupProfileWithHints = actionsViewModel::lookupProfileWithHints,
-        lookupEvent = { id, hints -> actionsViewModel.lookupEvent(id, hints) },
-        lookupEventWithAuthor = { id, hints, authorPk -> actionsViewModel.lookupEvent(id, hints, authorPk) },
-        lookupEventReference = actionsViewModel::lookupEvent,
-        fetchOgMetadata = actionsViewModel::fetchOgMetadata,
-        hasCachedOgMetadata = actionsViewModel::hasCachedOgMetadata,
-        profileFlow = viewModel::profileFlow,
-        statsFlow = viewModel::statsFlow,
-        zapDetailsForEvent = viewModel::zapDetailsForEvent,
-        repostPubkeysForEvent = viewModel::repostPubkeysForEvent,
-        reactionsForEvent = viewModel::reactionsForEvent,
-        wotLookup = { pubkey -> wotLookups[pubkey] },
-        feedWotDisplayMode = feedWotDisplayMode,
-        poll = actionsViewModel.pollActionCallbacks(),
-        onWotSubjectsVisible = viewModel::requestWotHydration,
-        onLongPress = onLongPress,
     )
 }
 

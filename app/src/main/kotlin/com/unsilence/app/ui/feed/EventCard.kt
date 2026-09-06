@@ -45,19 +45,15 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import androidx.media3.exoplayer.ExoPlayer
 import coil3.compose.AsyncImage
-import com.unsilence.app.data.memory.EventEntity
+import com.unsilence.app.data.memory.CustomEmoji
 import com.unsilence.app.data.memory.FeedRow
+import com.unsilence.app.data.memory.SensitiveContentMode
 import com.unsilence.app.data.memory.UserEntity
-import com.unsilence.app.data.memory.WotLookup
 import com.unsilence.app.data.model.EventModel
 import com.unsilence.app.data.model.RepostPayload
-import com.unsilence.app.data.model.VideoRenderModel
-import com.unsilence.app.data.relay.FeedWotDisplayMode
-import com.unsilence.app.data.relay.OgMetadata
+import com.unsilence.app.data.wallet.ZapRequest
 import com.unsilence.app.ui.common.rememberWidthImageRequest
-import com.unsilence.app.data.memory.SensitiveContentMode
 import com.unsilence.app.ui.shared.CardRole
 import com.unsilence.app.ui.shared.EventEngagementSnapshot
 import com.unsilence.app.ui.shared.SensitiveContentHiddenCard
@@ -66,11 +62,45 @@ import com.unsilence.app.ui.theme.AppType
 import com.unsilence.app.ui.theme.Sizing
 import com.unsilence.app.ui.theme.Spacing
 import com.unsilence.app.ui.theme.SurfaceVariant
-import com.unsilence.app.data.wallet.ZapRequest
 import com.unsilence.app.ui.theme.TextSecondary
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.withTimeoutOrNull
+
+private data class BoundEventActions(
+    val react: () -> Unit,
+    val reactLongPress: () -> Unit,
+    val reactWithEmoji: (CustomEmoji) -> Unit,
+    val repost: () -> Unit,
+    val zap: (ZapRequest) -> Unit,
+    val longPress: (() -> Unit)?,
+)
+
+@Composable
+private fun rememberBoundEventActions(
+    model: EventModel,
+    row: FeedRow,
+    host: EventCardHost,
+): BoundEventActions = remember(host.actions, host.services, model.engagementId, model.pubkey, row) {
+    BoundEventActions(
+        react = { host.services.react(model.engagementId, model.pubkey, "+", null) },
+        reactLongPress = {
+            host.actions.onReactLongPress?.invoke(model.engagementId, model.pubkey) ?: Unit
+        },
+        reactWithEmoji = { emoji ->
+            host.services.react(
+                model.engagementId,
+                model.pubkey,
+                ":${emoji.shortcode}:",
+                emoji.url,
+            )
+        },
+        repost = { host.services.repost(model.engagementId, model.pubkey, row.relayUrl) },
+        zap = { request ->
+            host.services.zap(model.engagementId, model.pubkey, row.relayUrl, request)
+        },
+        longPress = host.actions.onLongPress?.let { callback -> { callback(row) } },
+    )
+}
 
 /**
  * Unified event card — replaces NoteCard + ArticleCard.
@@ -85,63 +115,19 @@ fun EventCard(
     row: FeedRow,
     role: CardRole,
     engagement: EventEngagementSnapshot,
-    onNoteClick: (String) -> Unit,
-    onComment: () -> Unit,
-    onAuthorClick: (String) -> Unit,
-    onHashtagClick: (String) -> Unit,
-    onQuote: (String) -> Unit,
-    onArticleClick: (FeedRow) -> Unit,
-    onReact: () -> Unit,
-    onReactLongPress: () -> Unit,
-    pinnedEmojis: List<com.unsilence.app.data.memory.CustomEmoji> = emptyList(),
-    onReactWithEmoji: (com.unsilence.app.data.memory.CustomEmoji) -> Unit,
-    onRepost: () -> Unit,
-    onZap: (ZapRequest) -> Unit,
-    onSaveNwcUri: (String) -> Unit,
-    lookupProfile: (suspend (String) -> UserEntity?)?,
-    lookupEvent: (suspend (String, List<String>) -> EventEntity?)?,
-    lookupEventWithAuthor: (suspend (String, List<String>, String?) -> EventEntity?)? = null,
-    lookupEventReference: (suspend (EventReferenceTarget) -> EventEntity?)? = null,
-    lookupModel: ((String) -> EventModel?)? = null,
-    fetchOgMetadata: (suspend (String) -> OgMetadata?)?,
-    hasCachedOgMetadata: ((String) -> Boolean)? = null,
-    profileFlow: ((String) -> StateFlow<UserEntity?>)?,
-    statsFlow: ((String) -> StateFlow<com.unsilence.app.data.memory.EventStats>)? = null,
-    zapDetailsForEvent: ((String) -> List<com.unsilence.app.data.memory.ZapDetail>)? = null,
-    repostPubkeysForEvent: ((String) -> List<String>)? = null,
-    reactionsForEvent: ((String) -> List<com.unsilence.app.data.memory.ReactionInfo>)? = null,
-    imageDimensionCache: ImageDimensionCache?,
-    thumbnailCache: VideoThumbnailCache?,
-    // Video
-    exoPlayer: ExoPlayer? = null,
-    isMuted: Boolean = true,
-    onToggleMute: () -> Unit,
-    isActiveVideo: Boolean = false,
-    activeVideoUrl: String? = null,
-    isFullscreen: Boolean = false,
-    onOpenFullscreen: () -> Unit,
-    onVideoModelsResolved: ((List<VideoRenderModel>) -> Unit)? = null,
-    // New-post animation
-    isNewPost: Boolean = false,
-    onNewPostAnimated: () -> Unit,
-    // Thread focus flash
-    isFocused: Boolean = false,
-    // Thread parent (Conversations tab)
-    parentEvent: EventEntity? = null,
-    parentAuthor: UserEntity? = null,
-    // Long-press actions
-    onLongPress: (() -> Unit)? = null,
-    // NIP-36 content warning
-    sensitiveMode: SensitiveContentMode = SensitiveContentMode.SHOW,
-    isSensitive: Boolean = false,
-    contentWarningReason: String? = null,
-    wotLookup: ((String) -> WotLookup?)? = null,
-    feedWotDisplayMode: FeedWotDisplayMode = FeedWotDisplayMode.NUMBERS,
-    onWotSubjectsVisible: (Collection<String>) -> Unit,
-    pollActions: com.unsilence.app.ui.shared.PollActionCallbacks? = null,
+    host: EventCardHost,
+    presentation: EventCardPresentation = EventCardPresentation(),
     modifier: Modifier = Modifier,
 ) {
     val haptics = LocalHapticFeedback.current
+    val actions = host.actions
+    val services = host.services
+    val surface = host.surface
+    val lookupProfile: suspend (String) -> UserEntity? = { pubkey -> host.lookupProfile(pubkey) }
+    val boundActions = rememberBoundEventActions(model, row, host)
+    val newPostAnimated = presentation.newPostAnimated
+    val isNewPost = newPostAnimated != null
+    val isFocused = presentation.focused
 
     // Card flash animation — new-post arrival or thread focus highlight
     val flashAlpha = remember { Animatable(if (isNewPost || isFocused) 1f else 0f) }
@@ -149,7 +135,7 @@ fun EventCard(
         if (isNewPost) {
             flashAlpha.snapTo(1f)
             flashAlpha.animateTo(0f, tween(durationMillis = 1000))
-            onNewPostAnimated()
+            newPostAnimated()
         }
     }
     LaunchedEffect(isFocused) {
@@ -161,12 +147,14 @@ fun EventCard(
 
     // NIP-36 blur/hide state — tap to reveal, per-card
     var revealed by remember { mutableStateOf(false) }
-    val showBlur = sensitiveMode == SensitiveContentMode.BLUR && isSensitive && !revealed
-    val hideWhole = sensitiveMode == SensitiveContentMode.HIDE && isSensitive
+    val showBlur = surface.sensitiveMode == SensitiveContentMode.BLUR &&
+        row.hasContentWarning && !revealed
+    val hideWhole = surface.sensitiveMode == SensitiveContentMode.HIDE &&
+        row.hasContentWarning
 
     // Resolve source profile for repost header (kind-6 wrapper author).
     val liveSourceProfile = if (model.repost != null) {
-        collectProfileAsState(model.sourcePubkey, profileFlow)
+        collectProfileAsState(model.sourcePubkey, surface.profileFlow)
     } else null
     val sourceProfile = liveSourceProfile?.takeIf { !it.picture.isNullOrBlank() }
         ?: if (model.repost != null && row.pubkey == model.sourcePubkey) {
@@ -184,10 +172,10 @@ fun EventCard(
     // Fallback profile fetch for reposts when the source's profile hasn't
     // arrived yet — the existing AvatarImage `lookupProfile` debounce covers
     // most cases; this LaunchedEffect catches the long tail.
-    if (model.repost != null && sourceProfile?.picture.isNullOrBlank() && lookupProfile != null) {
+    if (model.repost != null && sourceProfile?.picture.isNullOrBlank()) {
         LaunchedEffect(model.sourcePubkey) {
             delay(1500)
-            lookupProfile(model.sourcePubkey)
+            host.lookupProfile(model.sourcePubkey)
         }
     }
 
@@ -201,7 +189,7 @@ fun EventCard(
     // a fallback when the flow hasn't emitted yet, so the first frame after
     // mount doesn't flash empty avatars on rows whose profiles MES already
     // has cached.
-    val authorProfile = collectProfileAsState(model.pubkey, profileFlow)
+    val authorProfile = collectProfileAsState(model.pubkey, surface.profileFlow)
 
     // For repost cards, model.pubkey is the inner (effective) author and
     // model.sourcePubkey is the wrapper author. authorProfile reactively
@@ -217,9 +205,9 @@ fun EventCard(
     // State when the slot recycles to a different event. Without this,
     // the State holds the previous event's counts for one or more frames
     // after the slot diffs to a new ID.
-    val liveStats = if (statsFlow != null) {
+    val liveStats = if (surface.statsFlow != null) {
         key(model.engagementId) {
-            statsFlow(model.engagementId).collectAsStateWithLifecycle().value
+            surface.statsFlow.invoke(model.engagementId).collectAsStateWithLifecycle().value
         }
     } else null
     val liveReplyCount    = liveStats?.replyCount    ?: row.replyCount
@@ -231,7 +219,7 @@ fun EventCard(
     if (role == CardRole.Article || role == CardRole.EmbeddedArticle || model.article != null) {
         if (hideWhole) {
             SensitiveContentHiddenCard(
-                reason = contentWarningReason,
+                reason = row.contentWarningReason,
                 modifier = modifier.padding(horizontal = Spacing.medium, vertical = Spacing.small),
             )
         } else {
@@ -245,34 +233,16 @@ fun EventCard(
                         repostCount = liveRepostCount,
                         reactionCount = liveReactionCount,
                         zapTotalSats = liveZapTotalSats,
-                        onNoteClick = onNoteClick,
-                        onComment = onComment,
-                        onArticleClick = onArticleClick,
-                        onReact = onReact,
-                        onReactLongPress = onReactLongPress,
-                        pinnedEmojis = pinnedEmojis,
-                        onReactWithEmoji = onReactWithEmoji,
-                        onRepost = onRepost,
-                        onQuote = onQuote,
-                        onZap = onZap,
-                        onSaveNwcUri = onSaveNwcUri,
-                        onAuthorClick = onAuthorClick,
-                        statsFlow = statsFlow,
-                        profileFlow = profileFlow,
-                        lookupProfile = lookupProfile,
-                        zapDetailsForEvent = zapDetailsForEvent,
-                        repostPubkeysForEvent = repostPubkeysForEvent,
-                        reactionsForEvent = reactionsForEvent,
                         sourceProfile = sourceProfile,
-                        wotLookup = wotLookup,
-                        feedWotDisplayMode = feedWotDisplayMode,
                         role = role,
+                        host = host,
+                        boundActions = boundActions,
                         modifier = modifier,
                     )
                 }
                 SensitiveContentRevealOverlay(
                     visible = showBlur,
-                    reason = contentWarningReason,
+                    reason = row.contentWarningReason,
                     onReveal = { revealed = true },
                     modifier = Modifier.align(Alignment.Center),
                 )
@@ -299,8 +269,8 @@ fun EventCard(
         // stay long-press-free to avoid nested gesture ambiguity; tapping
         // their own body still opens the quote.
         val contentInteractionSource = remember { MutableInteractionSource() }
-        val longPressModifier = if (onLongPress != null) {
-            Modifier.pointerInput(onLongPress) {
+        val longPressModifier = if (boundActions.longPress != null) {
+            Modifier.pointerInput(boundActions.longPress) {
                 awaitEachGesture {
                     val down = awaitFirstDown(requireUnconsumed = false)
                     val cancelled = withTimeoutOrNull(viewConfiguration.longPressTimeoutMillis) {
@@ -315,7 +285,7 @@ fun EventCard(
                     }
                     if (cancelled == null) {
                         haptics.performHapticFeedback(HapticFeedbackType.LongPress)
-                        onLongPress()
+                        boundActions.longPress()
                         do {
                             val ev = awaitPointerEvent(PointerEventPass.Initial)
                             ev.changes.forEach { it.consume() }
@@ -330,7 +300,7 @@ fun EventCard(
             modifier = longPressModifier.clickable(
                 interactionSource = contentInteractionSource,
                 indication = null,
-            ) { onNoteClick(model.navigateId) },
+            ) { actions.onNoteClick(model.navigateId) },
         ) {
         // Author header. Picture/displayName/nip05 read live from authorProfile
         // (profileFlow) when present, falling back to the FeedRow snapshot for
@@ -356,12 +326,12 @@ fun EventCard(
                 ?: "${model.pubkey.take(6)}…${model.pubkey.takeLast(4)}",
             nip05       = authorProfile?.nip05 ?: if (isRepost) null else row.authorNip05,
             createdAt   = model.createdAt,
-            onAuthorClick = onAuthorClick,
-            onNoteClick = { onNoteClick(model.navigateId) },
+            onAuthorClick = actions.onAuthorClick,
+            onNoteClick = { actions.onNoteClick(model.navigateId) },
             lookupProfile = lookupProfile,
-            profileFlow   = profileFlow,
-            wotLookup     = wotLookup,
-            feedWotDisplayMode = feedWotDisplayMode,
+            profileFlow   = surface.profileFlow,
+            wotLookup     = surface.wotLookup,
+            feedWotDisplayMode = surface.feedWotDisplayMode,
             repostSourcePubkey = if (isRepost) model.sourcePubkey else null,
             repostSourceProfile = if (isRepost) sourceProfile else null,
             repostSourceCreatedAt = repostTimestamp,
@@ -369,33 +339,13 @@ fun EventCard(
         )
 
         // Thread parent card (Conversations tab)
-        if (parentEvent != null) {
+        presentation.parent?.let { parent ->
             ThreadParentCard(
-                event               = parentEvent,
-                author              = parentAuthor,
-                onNoteClick         = onNoteClick,
-                onHashtagClick      = onHashtagClick,
-                lookupProfile       = lookupProfile,
-                profileFlow         = profileFlow,
-                lookupModel         = lookupModel,
-                lookupEvent         = lookupEvent,
-                onAuthorClick       = onAuthorClick,
-                fetchOgMetadata     = fetchOgMetadata,
-                imageDimensionCache = imageDimensionCache,
-                thumbnailCache      = thumbnailCache,
-                exoPlayer           = exoPlayer,
-                isActiveVideo       = isActiveVideo,
-                activeVideoUrl      = activeVideoUrl,
-                isFullscreen        = isFullscreen,
-                onOpenFullscreen    = onOpenFullscreen,
-                isMuted             = isMuted,
-                onToggleMute        = onToggleMute,
-                onVideoModelsResolved = onVideoModelsResolved,
-                sensitiveMode       = sensitiveMode,
-                wotLookup           = wotLookup,
-                feedWotDisplayMode  = feedWotDisplayMode,
-                onWotSubjectsVisible = onWotSubjectsVisible,
-                modifier            = Modifier.padding(bottom = Spacing.small),
+                event = parent.event,
+                author = parent.author,
+                host = host,
+                videoOwnerId = row.id,
+                modifier = Modifier.padding(bottom = Spacing.small),
             )
         }
 
@@ -404,7 +354,7 @@ fun EventCard(
         // non-feed surfaces — profile/thread — and preserves thread structure).
         if (hideWhole) {
             SensitiveContentHiddenCard(
-                reason = contentWarningReason,
+                reason = row.contentWarningReason,
                 modifier = Modifier.padding(horizontal = Spacing.medium, vertical = Spacing.small),
             )
         } else
@@ -414,30 +364,8 @@ fun EventCard(
                 ContentFlow(
                     model               = model,
                     role                = role,
-                    onNoteClick         = onNoteClick,
-                    onAuthorClick       = onAuthorClick,
-                    onHashtagClick      = onHashtagClick,
-                    lookupProfile       = lookupProfile,
-                    profileFlow         = profileFlow,
-                    lookupEvent         = lookupEvent,
-                    lookupEventWithAuthor = lookupEventWithAuthor,
-                    lookupModel         = lookupModel,
-                    fetchOgMetadata     = fetchOgMetadata,
-                    hasCachedOgMetadata = hasCachedOgMetadata,
-                    imageDimensionCache = imageDimensionCache,
-                    isActiveVideo       = isActiveVideo,
-                    activeVideoUrl      = activeVideoUrl,
-                    isFullscreen        = isFullscreen,
-                    onOpenFullscreen    = onOpenFullscreen,
-                    exoPlayer           = exoPlayer,
-                    isMuted             = isMuted,
-                    onToggleMute        = onToggleMute,
-                    thumbnailCache      = thumbnailCache,
-                    onVideoModelsResolved = onVideoModelsResolved,
-                    sensitiveMode       = sensitiveMode,
-                    wotLookup           = wotLookup,
-                    feedWotDisplayMode  = feedWotDisplayMode,
-                    onWotSubjectsVisible = onWotSubjectsVisible,
+                    host                = host,
+                    videoOwnerId        = row.id,
                     knownLightningAddress = authorProfile?.lud16,
                 )
 
@@ -448,12 +376,12 @@ fun EventCard(
                         pollCreatedAt = model.createdAt,
                         poll = model.poll,
                         sourceRelay = model.relayUrl,
-                        callbacks = pollActions,
+                        callbacks = surface.pollActions,
                         lookupProfile = lookupProfile,
-                        profileFlow = profileFlow,
-                        wotLookup = wotLookup,
-                        onVoterClick = onAuthorClick,
-                        onWotSubjectsVisible = onWotSubjectsVisible,
+                        profileFlow = surface.profileFlow,
+                        wotLookup = surface.wotLookup,
+                        onVoterClick = actions.onAuthorClick,
+                        onWotSubjectsVisible = surface.onWotSubjectsVisible,
                         modifier = Modifier.padding(horizontal = Spacing.medium, vertical = Spacing.small),
                     )
                 }
@@ -475,37 +403,15 @@ fun EventCard(
                         ).distinct(),
                         targetAuthorPubkey = model.repost.targetAuthorHint,
                         proxyUrl = model.repost.proxyUrl,
-                        lookupEventWithAuthor = lookupEventWithAuthor,
-                        lookupEventReference = lookupEventReference,
-                        lookupProfile = lookupProfile,
-                        profileFlow = profileFlow,
-                        lookupModel = lookupModel,
-                        fetchOgMetadata = fetchOgMetadata,
-                        hasCachedOgMetadata = hasCachedOgMetadata,
-                        imageDimensionCache = imageDimensionCache,
-                        onNoteClick = onNoteClick,
-                        onAuthorClick = onAuthorClick,
-                        onHashtagClick = onHashtagClick,
-                        thumbnailCache = thumbnailCache,
-                        exoPlayer = exoPlayer,
-                        isActiveVideo = isActiveVideo,
-                        activeVideoUrl = activeVideoUrl,
-                        isFullscreen = isFullscreen,
-                        onOpenFullscreen = onOpenFullscreen,
-                        isMuted = isMuted,
-                        onToggleMute = onToggleMute,
-                        onVideoModelsResolved = onVideoModelsResolved,
-                        sensitiveMode = sensitiveMode,
-                        wotLookup = wotLookup,
-                        feedWotDisplayMode = feedWotDisplayMode,
-                        onWotSubjectsVisible = onWotSubjectsVisible,
+                        host = host,
+                        videoOwnerId = row.id,
                     )
                 }
             }
 
             SensitiveContentRevealOverlay(
                 visible = showBlur,
-                reason = contentWarningReason,
+                reason = row.contentWarningReason,
                 onReveal = { revealed = true },
                 modifier = Modifier.align(Alignment.Center),
             )
@@ -537,16 +443,16 @@ fun EventCard(
             zapEnabled      = zapEnabled,
             drawerOpen      = drawerOpen,
             onChevronTap    = { drawerOpen = !drawerOpen },
-            onNoteClick     = { onNoteClick(model.navigateId) },
-            onComment          = onComment,
-            onReact            = onReact,
-            onReactLongPress   = onReactLongPress,
-            pinnedEmojis       = pinnedEmojis,
-            onReactWithEmoji   = onReactWithEmoji,
-            onRepost           = onRepost,
-            onQuote            = onQuote,
-            onZap              = onZap,
-            onSaveNwcUri       = onSaveNwcUri,
+            onNoteClick     = { actions.onNoteClick(model.navigateId) },
+            onComment          = { actions.onComment(row, model) },
+            onReact            = boundActions.react,
+            onReactLongPress   = boundActions.reactLongPress,
+            pinnedEmojis       = surface.pinnedEmojis,
+            onReactWithEmoji   = boundActions.reactWithEmoji,
+            onRepost           = boundActions.repost,
+            onQuote            = actions.onQuote,
+            onZap              = boundActions.zap,
+            onSaveNwcUri       = services.saveNwcUri,
         )
 
         AnimatedVisibility(
@@ -556,13 +462,13 @@ fun EventCard(
         ) {
             EngagementDrawer(
                 eventId               = model.engagementId,
-                statsFlow             = statsFlow,
-                zapDetailsForEvent    = zapDetailsForEvent,
-                repostPubkeysForEvent = repostPubkeysForEvent,
-                reactionsForEvent     = reactionsForEvent,
-                profileFlow           = profileFlow,
+                statsFlow             = surface.statsFlow,
+                zapDetailsForEvent    = surface.zapDetailsForEvent,
+                repostPubkeysForEvent = surface.repostPubkeysForEvent,
+                reactionsForEvent     = surface.reactionsForEvent,
+                profileFlow           = surface.profileFlow,
                 lookupProfile         = lookupProfile,
-                onProfileTap          = onAuthorClick,
+                onProfileTap          = actions.onAuthorClick,
             )
         }
     }
@@ -612,31 +518,17 @@ private fun ArticleLayout(
     repostCount: Int,
     reactionCount: Int,
     zapTotalSats: Long,
-    onNoteClick: (String) -> Unit,
-    onComment: () -> Unit = {},
-    onArticleClick: (FeedRow) -> Unit,
-    onReact: () -> Unit,
-    onReactLongPress: () -> Unit = {},
-    pinnedEmojis: List<com.unsilence.app.data.memory.CustomEmoji> = emptyList(),
-    onReactWithEmoji: (com.unsilence.app.data.memory.CustomEmoji) -> Unit = {},
-    onRepost: () -> Unit,
-    onQuote: (String) -> Unit,
-    onZap: (ZapRequest) -> Unit,
-    onSaveNwcUri: (String) -> Unit,
-    onAuthorClick: (String) -> Unit = {},
-    statsFlow: ((String) -> StateFlow<com.unsilence.app.data.memory.EventStats>)? = null,
-    profileFlow: ((String) -> StateFlow<UserEntity?>)? = null,
-    lookupProfile: (suspend (String) -> UserEntity?)? = null,
-    zapDetailsForEvent: ((String) -> List<com.unsilence.app.data.memory.ZapDetail>)? = null,
-    repostPubkeysForEvent: ((String) -> List<String>)? = null,
-    reactionsForEvent: ((String) -> List<com.unsilence.app.data.memory.ReactionInfo>)? = null,
-    sourceProfile: UserEntity? = null,
-    wotLookup: ((String) -> WotLookup?)? = null,
-    feedWotDisplayMode: FeedWotDisplayMode = FeedWotDisplayMode.NUMBERS,
-    role: CardRole = CardRole.Article,
-    modifier: Modifier = Modifier,
+    sourceProfile: UserEntity?,
+    role: CardRole,
+    host: EventCardHost,
+    boundActions: BoundEventActions,
+    modifier: Modifier,
 ) {
     val article = model.article
+    val actions = host.actions
+    val services = host.services
+    val surface = host.surface
+    val lookupProfile: suspend (String) -> UserEntity? = { pubkey -> host.lookupProfile(pubkey) }
 
     // Resolve the EFFECTIVE author reactively (model.pubkey = inner author for a
     // 6/16 repost). For reposts the FeedRow author.* fields belong to the REPOSTER
@@ -644,13 +536,13 @@ private fun ArticleLayout(
     // path (see the standard-layout AuthorHeader) so a reposted article never shows
     // the reposter's identity.
     val isRepost = model.repost != null
-    val articleAuthorProfile = collectProfileAsState(model.pubkey, profileFlow)
+    val articleAuthorProfile = collectProfileAsState(model.pubkey, surface.profileFlow)
 
     Column(
         modifier = modifier
             .fillMaxWidth()
             .padding(horizontal = Spacing.medium, vertical = Spacing.small)
-            .clickable { onArticleClick(row) },
+            .clickable { actions.onArticleClick(row) },
     ) {
         // Author row
         val repostTimestamp = if (isRepost && role != CardRole.Thread && role != CardRole.Reply) {
@@ -668,12 +560,12 @@ private fun ArticleLayout(
                 ?: "${model.pubkey.take(6)}…${model.pubkey.takeLast(4)}",
             nip05       = articleAuthorProfile?.nip05 ?: if (isRepost) null else row.authorNip05,
             createdAt   = model.createdAt,
-            onAuthorClick = onAuthorClick,
-            onNoteClick = { onArticleClick(row) },
+            onAuthorClick = actions.onAuthorClick,
+            onNoteClick = { actions.onArticleClick(row) },
             lookupProfile = lookupProfile,
-            profileFlow   = profileFlow,
-            wotLookup     = wotLookup,
-            feedWotDisplayMode = feedWotDisplayMode,
+            profileFlow   = surface.profileFlow,
+            wotLookup     = surface.wotLookup,
+            feedWotDisplayMode = surface.feedWotDisplayMode,
             repostSourcePubkey = if (isRepost) model.sourcePubkey else null,
             repostSourceProfile = if (isRepost) sourceProfile else null,
             repostSourceCreatedAt = repostTimestamp,
@@ -757,16 +649,16 @@ private fun ArticleLayout(
                     zapFlash        = engagement.zapFlash,
                     drawerOpen      = drawerOpen,
                     onChevronTap    = { drawerOpen = !drawerOpen },
-                    onNoteClick     = { onNoteClick(row.id) },
-                    onComment          = onComment,
-                    onReact            = onReact,
-                    onReactLongPress   = onReactLongPress,
-                    pinnedEmojis       = pinnedEmojis,
-                    onReactWithEmoji   = onReactWithEmoji,
-                    onRepost           = onRepost,
-                    onQuote            = onQuote,
-                    onZap              = onZap,
-                    onSaveNwcUri       = onSaveNwcUri,
+                    onNoteClick     = { actions.onNoteClick(row.id) },
+                    onComment          = { actions.onComment(row, model) },
+                    onReact            = boundActions.react,
+                    onReactLongPress   = boundActions.reactLongPress,
+                    pinnedEmojis       = surface.pinnedEmojis,
+                    onReactWithEmoji   = boundActions.reactWithEmoji,
+                    onRepost           = boundActions.repost,
+                    onQuote            = actions.onQuote,
+                    onZap              = boundActions.zap,
+                    onSaveNwcUri       = services.saveNwcUri,
                 )
 
                 AnimatedVisibility(
@@ -776,13 +668,13 @@ private fun ArticleLayout(
                 ) {
                     EngagementDrawer(
                         eventId               = model.engagementId,
-                        statsFlow             = statsFlow,
-                        zapDetailsForEvent    = zapDetailsForEvent,
-                        repostPubkeysForEvent = repostPubkeysForEvent,
-                        reactionsForEvent     = reactionsForEvent,
-                        profileFlow           = profileFlow,
+                        statsFlow             = surface.statsFlow,
+                        zapDetailsForEvent    = surface.zapDetailsForEvent,
+                        repostPubkeysForEvent = surface.repostPubkeysForEvent,
+                        reactionsForEvent     = surface.reactionsForEvent,
+                        profileFlow           = surface.profileFlow,
                         lookupProfile         = lookupProfile,
-                        onProfileTap          = onAuthorClick,
+                        onProfileTap          = actions.onAuthorClick,
                     )
                 }
             }

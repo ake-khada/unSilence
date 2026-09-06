@@ -15,7 +15,6 @@ import com.unsilence.app.data.relay.FeedWotDisplayMode
 import com.unsilence.app.data.relay.RelayPool
 import com.unsilence.app.data.relay.RelayPreferencesStore
 import com.unsilence.app.data.relay.WotHydrationCoalescer
-import com.unsilence.app.data.relay.bridgeFallbackRelayTargets
 import com.unsilence.app.data.relay.wotLookupSnapshot
 import com.unsilence.app.ui.shared.TimelineCardData
 import com.unsilence.app.ui.shared.ModeratedReplyRow
@@ -172,32 +171,6 @@ class ArticleReaderViewModel @Inject constructor(
         val subjects = pubkeys.toSet()
         _wotSubjects.update { current -> current + subjects }
         wotHydrationCoalescer.requestHydration(subjects)
-    }
-
-    // ── Quoted/embedded article resolution (for the canonical card) ───────────
-
-    /** The article FeedRow for a coordinate, live from MES (null until resolved). */
-    fun articleRowFlow(coord: String): Flow<FeedRow?> = memoryEventStore.articleRowByCoordFlow(coord)
-
-    /** Fire-and-forget fetch of an absent article by coord. No-op if cached.
-     *  Engagement hydration is keyed to the resolved row in EmbeddedArticleCard,
-     *  so both cached and newly fetched articles take the same path. */
-    fun ensureArticle(coord: String, author: String, dTag: String, hints: List<String>) {
-        if (memoryEventStore.articleRowByCoord(coord) != null) return
-        viewModelScope.launch {
-            val relays = buildSet {
-                addAll(hints)
-                addAll(memoryEventStore.lookupWriteRelaysFor(author))
-                addAll(relayPreferencesStore.indexerRelayUrlsSnapshot())
-            }.toList()
-            relayPool.fetchArticleByCoord(relays, author, dTag)
-            if (memoryEventStore.articleRowByCoord(coord) == null) {
-                val bridgeTargets = bridgeFallbackRelayTargets(relays)
-                if (bridgeTargets.isNotEmpty()) {
-                    relayPool.fetchArticleByCoord(bridgeTargets, author, dTag)
-                }
-            }
-        }
     }
 
     // ── Display providers for comment EventCards (MES-backed, cached) ──────────

@@ -30,17 +30,14 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.hilt.navigation.compose.hiltViewModel
 import com.unsilence.app.data.memory.UserEntity
 import com.unsilence.app.data.model.Segment
-import com.unsilence.app.ui.common.LocalAppSessionKey
 import com.unsilence.app.ui.theme.AppType
 import com.unsilence.app.ui.theme.Brand
 import com.unsilence.app.ui.theme.Spacing
 import com.unsilence.app.ui.theme.TextSecondary
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
 
@@ -60,14 +57,10 @@ private const val ADDRESS_FAILURE_VISIBLE_MS = 1_800L
 @Composable
 internal fun AddressChip(
     segment: Segment.QuoteAddress,
-    onNoteClick: (String) -> Unit,
-    lookupProfile: (suspend (String) -> UserEntity?)? = null,
-    profileFlow: ((String) -> StateFlow<UserEntity?>)? = null,
-    modifier: Modifier = Modifier,
+    host: EventCardHost,
+    modifier: Modifier,
 ) {
-    val actionsVm: NoteActionsViewModel = hiltViewModel(
-        key = "note-actions-${LocalAppSessionKey.current}",
-    )
+    val lookupProfile: suspend (String) -> UserEntity? = { pubkey -> host.lookupProfile(pubkey) }
     val coroutineScope = rememberCoroutineScope()
     val target = remember(segment.kind, segment.author, segment.dTag, segment.hints) {
         EventReferenceTarget(
@@ -90,9 +83,9 @@ internal fun AddressChip(
     }
 
     val lookedUpAuthor by produceState<UserEntity?>(null, segment.author) {
-        if (lookupProfile != null) value = lookupProfile(segment.author)
+        value = lookupProfile(segment.author)
     }
-    val liveAuthor = collectProfileAsState(segment.author, profileFlow)
+    val liveAuthor = collectProfileAsState(segment.author, host.surface.profileFlow)
     val author = liveAuthor ?: lookedUpAuthor
 
     val kindLabel = when (segment.kind) {
@@ -114,7 +107,7 @@ internal fun AddressChip(
                 coroutineScope.launch {
                     val event = try {
                         withTimeoutOrNull(ADDRESS_RESOLUTION_TIMEOUT_MS) {
-                            actionsVm.lookupEvent(target)
+                            host.lookupEvent(target)
                         }
                     } catch (cancelled: CancellationException) {
                         throw cancelled
@@ -123,7 +116,7 @@ internal fun AddressChip(
                     }
                     if (event != null) {
                         resolutionState = AddressResolutionState.IDLE
-                        onNoteClick(event.id)
+                        host.actions.onNoteClick(event.id)
                     } else {
                         resolutionState = AddressResolutionState.FAILED
                     }
@@ -139,7 +132,7 @@ internal fun AddressChip(
                     modifier = Modifier.size(24.dp),
                     sizeDp   = 24.dp,
                     lookupProfile = lookupProfile,
-                    profileFlow = profileFlow,
+                    profileFlow = host.surface.profileFlow,
                 )
                 Spacer(Modifier.width(6.dp))
                 Text(

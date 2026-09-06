@@ -1,14 +1,11 @@
 package com.unsilence.app.ui.feed
 
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.ui.draw.drawBehind
-import androidx.compose.ui.geometry.Size
-import androidx.compose.ui.draw.clip
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -17,28 +14,22 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalWindowInfo
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import androidx.media3.exoplayer.ExoPlayer
-import com.unsilence.app.data.memory.EventEntity
-import com.unsilence.app.data.memory.SensitiveContentMode
-import com.unsilence.app.data.memory.UserEntity
-import com.unsilence.app.data.memory.WotLookup
 import com.unsilence.app.data.model.EventModel
 import com.unsilence.app.data.model.PaymentTarget
 import com.unsilence.app.data.model.Segment
-import com.unsilence.app.data.model.VideoRenderModel
 import com.unsilence.app.data.model.shouldRenderAsCard
-import com.unsilence.app.data.relay.FeedWotDisplayMode
-import com.unsilence.app.data.relay.OgMetadata
 import com.unsilence.app.ui.shared.CardRole
 import com.unsilence.app.ui.theme.AppType
 import com.unsilence.app.ui.theme.Spacing
 import com.unsilence.app.ui.theme.Surface2
 import com.unsilence.app.ui.theme.TextSecondary
-import kotlinx.coroutines.flow.StateFlow
 
 /** Maximum number of OG preview cards rendered per note. */
 private const val MAX_OG_CARDS = 1
@@ -64,41 +55,26 @@ private const val COLLAPSED_CARD_CHROME_DP = 104f
 internal fun ContentFlow(
     model: EventModel,
     role: CardRole,
-    onNoteClick: (String) -> Unit,
-    onAuthorClick: (String) -> Unit,
-    onHashtagClick: (String) -> Unit,
-    lookupProfile: (suspend (String) -> UserEntity?)?,
-    profileFlow: ((String) -> StateFlow<UserEntity?>)? = null,
-    lookupEvent: (suspend (String, List<String>) -> EventEntity?)?,
-    lookupEventWithAuthor: (suspend (String, List<String>, String?) -> EventEntity?)? = null,
-    lookupModel: ((String) -> EventModel?)? = null,
-    fetchOgMetadata: (suspend (String) -> OgMetadata?)?,
-    hasCachedOgMetadata: ((String) -> Boolean)? = null,
-    imageDimensionCache: ImageDimensionCache?,
-    isActiveVideo: Boolean = false,
-    activeVideoUrl: String? = null,
-    isFullscreen: Boolean = false,
-    onOpenFullscreen: () -> Unit = {},
-    exoPlayer: ExoPlayer? = null,
-    isMuted: Boolean = true,
-    onToggleMute: () -> Unit = {},
-    thumbnailCache: VideoThumbnailCache? = null,
-    onVideoModelsResolved: ((List<VideoRenderModel>) -> Unit)? = null,
-    sensitiveMode: SensitiveContentMode = SensitiveContentMode.SHOW,
-    wotLookup: ((String) -> WotLookup?)? = null,
-    feedWotDisplayMode: FeedWotDisplayMode = FeedWotDisplayMode.NUMBERS,
-    onWotSubjectsVisible: (Collection<String>) -> Unit = {},
+    host: EventCardHost,
+    videoOwnerId: String,
+    onOpenFullscreen: (() -> Unit)? = null,
     nestDepth: Int = 0,
     knownLightningAddress: String? = null,
     modifier: Modifier = Modifier,
 ) {
+    val actions = host.actions
+    val services = host.services
+    val surface = host.surface
+    val videoScope = surface.videoScope
+    val lookupProfile: suspend (String) -> com.unsilence.app.data.memory.UserEntity? =
+        { pubkey -> host.lookupProfile(pubkey) }
     val navigateId = model.navigateId
     val showVideo = role != CardRole.Article
     val isEmbedded = role == CardRole.Embedded
     val videoModels = remember(model.media.videos) { model.media.videos.map { it.model } }
 
-    LaunchedEffect(model.id, videoModels) {
-        if (videoModels.isNotEmpty()) onVideoModelsResolved?.invoke(videoModels)
+    LaunchedEffect(model.id, videoOwnerId, videoModels) {
+        if (videoModels.isNotEmpty()) videoScope?.registerVideoModels(videoOwnerId, videoModels)
     }
 
     // Collapsed long-note budget: keep the whole card close to 80% of the
@@ -170,9 +146,9 @@ internal fun ContentFlow(
                 if (runForInline.isNotEmpty()) InlineText(
                     segments      = runForInline,
                     lookupProfile = lookupProfile,
-                    onAuthorClick = onAuthorClick,
-                    onHashtagClick = onHashtagClick,
-                    onTextClick   = { onNoteClick(navigateId) },
+                    onAuthorClick = actions.onAuthorClick,
+                    onHashtagClick = actions.onHashtagClick,
+                    onTextClick   = { actions.onNoteClick(navigateId) },
                     customEmojis  = model.customEmojis,
                     maxLines      = maxLines,
                     overflow      = overflow,
@@ -200,11 +176,11 @@ internal fun ContentFlow(
                 for (link in ogToRender) {
                     OgPreviewCard(
                         url               = link.url,
-                        fetchOgMetadata   = fetchOgMetadata,
-                        hasCachedOgMetadata = hasCachedOgMetadata,
-                        imageDimensionCache = imageDimensionCache,
+                        fetchOgMetadata   = services.fetchOgMetadata,
+                        hasCachedOgMetadata = services.hasCachedOgMetadata,
+                        imageDimensionCache = services.imageDimensionCache,
                         onDirectImageClick = if (isEmbedded) {
-                            { onNoteClick(navigateId) }
+                            { actions.onNoteClick(navigateId) }
                         } else null,
                         showMinimalFallback = true,
                         modifier          = Modifier
@@ -242,12 +218,12 @@ internal fun ContentFlow(
                         .filterIsInstance<Segment.Image>()
                     EventMediaGrid(
                         images              = images,
-                        imageDimensionCache = imageDimensionCache,
+                        imageDimensionCache = services.imageDimensionCache,
                         // Embedded quote images should open the quoted note, not
                         // the parent card's media viewer. Top-level images keep
                         // fullscreen media behavior.
                         onImageClick        = if (isEmbedded) {
-                            { onNoteClick(navigateId) }
+                            { actions.onNoteClick(navigateId) }
                         } else null,
                         modifier            = Modifier
                             .padding(horizontal = hPad)
@@ -263,14 +239,15 @@ internal fun ContentFlow(
                         .filterIsInstance<Segment.Video>()
                     EventVideoGrid(
                         videos           = videos,
-                        isActiveVideo    = if (showVideo) isActiveVideo else false,
-                        activeVideoUrl   = activeVideoUrl,
-                        isFullscreen     = isFullscreen,
-                        onOpenFullscreen = onOpenFullscreen,
-                        exoPlayer        = if (showVideo) exoPlayer else null,
-                        isMuted          = isMuted,
-                        onToggleMute     = onToggleMute,
-                        thumbnailCache   = thumbnailCache,
+                        isActiveVideo    = showVideo && videoScope?.isActiveVideo(videoOwnerId) == true,
+                        activeVideoUrl   = videoScope?.activeVideoUrl,
+                        isFullscreen     = videoScope?.showFullscreenVideo == true,
+                        onOpenFullscreen = onOpenFullscreen
+                            ?: { videoScope?.openFullscreen(videoOwnerId) ?: Unit },
+                        exoPlayer        = if (showVideo) videoScope?.exoPlayer else null,
+                        isMuted          = videoScope?.isMuted ?: true,
+                        onToggleMute     = { videoScope?.toggleMute() ?: Unit },
+                        thumbnailCache   = services.thumbnailCache,
                         modifier         = Modifier
                             .padding(horizontal = hPad)
                             .padding(bottom = Spacing.small),
@@ -281,29 +258,8 @@ internal fun ContentFlow(
                     val seg = model.segments[i] as Segment.QuoteEvent
                     QuoteCard(
                         segment         = seg,
-                        onNoteClick     = onNoteClick,
-                        onAuthorClick   = onAuthorClick,
-                        onHashtagClick  = onHashtagClick,
-                        lookupEvent     = if (seg.author != null && lookupEventWithAuthor != null) {
-                            { id, hints -> lookupEventWithAuthor.invoke(id, hints, seg.author) }
-                        } else lookupEvent,
-                        lookupProfile   = lookupProfile,
-                        profileFlow     = profileFlow,
-                        lookupModel     = lookupModel,
-                        fetchOgMetadata = fetchOgMetadata,
-                        hasCachedOgMetadata = hasCachedOgMetadata,
-                        imageDimensionCache = imageDimensionCache,
-                        exoPlayer       = if (showVideo) exoPlayer else null,
-                        isActiveVideo   = if (showVideo) isActiveVideo else false,
-                        activeVideoUrl  = activeVideoUrl,
-                        isMuted         = isMuted,
-                        onToggleMute    = onToggleMute,
-                        thumbnailCache  = thumbnailCache,
-                        onVideoModelsResolved = onVideoModelsResolved,
-                        sensitiveMode   = sensitiveMode,
-                        wotLookup       = wotLookup,
-                        feedWotDisplayMode = feedWotDisplayMode,
-                        onWotSubjectsVisible = onWotSubjectsVisible,
+                        host            = host,
+                        videoOwnerId    = videoOwnerId,
                         nestDepth       = nestDepth,
                         modifier        = Modifier
                             .padding(horizontal = hPad)
@@ -319,23 +275,15 @@ internal fun ContentFlow(
                     if (seg.kind == 30023) {
                         // Quoted long-form → the canonical article card (same as feed).
                         EmbeddedArticleCard(
-                            coord         = "30023:${seg.author}:${seg.dTag}",
-                            author        = seg.author,
-                            dTag          = seg.dTag,
-                            hints         = seg.hints,
-                            onNoteClick   = onNoteClick,
-                            onAuthorClick = onAuthorClick,
-                            onHashtagClick = onHashtagClick,
+                            segment       = seg,
+                            host          = host,
                             nestDepth     = nestDepth,
-                            sensitiveMode = sensitiveMode,
                             modifier      = chipMod,
                         )
                     } else {
                         AddressChip(
                             segment       = seg,
-                            onNoteClick   = onNoteClick,
-                            lookupProfile = lookupProfile,
-                            profileFlow   = profileFlow,
+                            host          = host,
                             modifier      = chipMod,
                         )
                     }
@@ -361,9 +309,9 @@ internal fun ContentFlow(
                     InlineText(
                         segments      = seg.segments,
                         lookupProfile = lookupProfile,
-                        onAuthorClick = onAuthorClick,
-                        onHashtagClick = onHashtagClick,
-                        onTextClick   = { onNoteClick(navigateId) },
+                        onAuthorClick = actions.onAuthorClick,
+                        onHashtagClick = actions.onHashtagClick,
+                        onTextClick   = { actions.onNoteClick(navigateId) },
                         customEmojis  = model.customEmojis,
                         maxLines      = maxLines,
                         overflow      = overflow,
