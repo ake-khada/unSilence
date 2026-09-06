@@ -79,6 +79,7 @@ class VideoPlaybackScope(
     internal var confirmationAttempts: Int = 0
     internal var confirmationFires: Int = 0
     internal var starvationWatchdogLoggedTicks: Int = 0
+    internal var lastScrollObservedAtElapsedMs: Long = 0L
     internal var modelsResolvedLogged: Boolean = false
     internal var modelsResolvedAtElapsedMs: Long = 0L
     internal var playbackRequestedAtElapsedMs: Long = 0L
@@ -462,6 +463,11 @@ fun rememberVideoPlaybackScope(
             .map { (currentIds, layoutInfo) ->
                 scope.mapPasses += 1
 
+                val isScrolling = listState.isScrollInProgress
+                if (isScrolling) {
+                    scope.lastScrollObservedAtElapsedMs = SystemClock.elapsedRealtime()
+                }
+
                 // Fullscreen freeze
                 if (showFullscreenRef.value) return@map activeRef.value
 
@@ -474,7 +480,7 @@ fun rememberVideoPlaybackScope(
                 // activation (e.g. ThreadScreen loads items asynchronously).
                 val now = System.currentTimeMillis()
                 val visibleCount = layoutInfo.visibleItemsInfo.size
-                if (!listState.isScrollInProgress && activeRef.value != null) {
+                if (!isScrolling && activeRef.value != null) {
                     if (visibleCount != scope.lastVisibleItemCount && scope.lastVisibleItemCount >= 0) {
                         scope.lastLayoutShiftAt = now
                     }
@@ -606,7 +612,18 @@ fun rememberVideoPlaybackScope(
             delay(5_000)
 
             val currentModels = scope.videoRenderModels
-            if (scope.activeVideoNoteId != null || currentModels.isEmpty()) {
+            val isScrolling = listState.isScrollInProgress
+            val nowElapsedMs = SystemClock.elapsedRealtime()
+            val millisSinceLastScroll = scope.lastScrollObservedAtElapsedMs
+                .takeIf { it > 0L }
+                ?.let { nowElapsedMs - it }
+            if (!shouldEvaluateVideoStarvation(
+                    activeVideoNoteId = scope.activeVideoNoteId,
+                    hasVideoModels = currentModels.isNotEmpty(),
+                    isScrollInProgress = isScrolling,
+                    millisSinceLastScroll = millisSinceLastScroll,
+                )
+            ) {
                 scope.starvationWatchdogLoggedTicks = 0
                 continue
             }
@@ -644,7 +661,8 @@ fun rememberVideoPlaybackScope(
                     "visibility=${bestVisibleVideo.second} mapPasses=${scope.mapPasses} " +
                     "confirmationAttempts=${scope.confirmationAttempts} " +
                     "confirmationFires=${scope.confirmationFires} " +
-                    "scrolling=${listState.isScrollInProgress}",
+                    "scrolling=$isScrolling " +
+                    "stationaryForMs=${millisSinceLastScroll ?: "scope-lifetime"}",
             )
         }
     }
@@ -657,3 +675,20 @@ private fun VideoPlaybackScope.playbackRequestElapsedMs(): Long =
         .takeIf { it > 0L }
         ?.let { SystemClock.elapsedRealtime() - it }
         ?: -1L
+
+/**
+ * A moving list is not starved: candidate churn and confirmation cancellation are
+ * expected while rows cross the viewport. After scrolling ends, leave one complete
+ * confirmation window before diagnosing a stationary visible video as stuck.
+ */
+internal fun shouldEvaluateVideoStarvation(
+    activeVideoNoteId: String?,
+    hasVideoModels: Boolean,
+    isScrollInProgress: Boolean,
+    millisSinceLastScroll: Long?,
+): Boolean =
+    activeVideoNoteId == null &&
+        hasVideoModels &&
+        !isScrollInProgress &&
+        (millisSinceLastScroll == null ||
+            millisSinceLastScroll >= VideoPlaybackScope.ACTIVATION_CONFIRMATION_MS)
