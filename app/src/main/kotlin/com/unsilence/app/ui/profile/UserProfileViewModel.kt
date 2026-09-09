@@ -14,6 +14,7 @@ import com.unsilence.app.data.memory.WotLookup
 import com.unsilence.app.data.memory.ZapDetail
 import com.unsilence.app.data.model.ReportType
 import com.unsilence.app.data.relay.FeedWotDisplayMode
+import com.unsilence.app.data.relay.FollowerCount
 import com.unsilence.app.data.relay.ImpersonationRisk
 import com.unsilence.app.data.relay.ProtectedProfile
 import com.unsilence.app.data.relay.detectImpersonationRisk
@@ -26,6 +27,7 @@ import com.unsilence.app.data.relay.SubRequest
 import com.unsilence.app.data.relay.TimelineMerge
 import com.unsilence.app.data.relay.TimelineService
 import com.unsilence.app.data.relay.WotHydrationCoalescer
+import com.unsilence.app.data.relay.reconciledFollowerCount
 import com.unsilence.app.data.relay.wotLookupSnapshot
 import com.unsilence.app.data.relay.wotSubjectsForFeedRows
 import com.unsilence.app.data.repository.UserRepository
@@ -50,6 +52,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.flowOn
@@ -230,8 +233,19 @@ class UserProfileViewModel @Inject constructor(
     fun reactionsForEvent(eventId: String): List<ReactionInfo> =
         timelineCardData.reactionsForEvent(eventId)
 
-    /** Approximate follower count from NIP-45 COUNT via antiprimal.net. */
-    val followerCount = MutableStateFlow<Long?>(null)
+    private val indexedFollowerCount = MutableStateFlow<Long?>(null)
+    internal val followerCount: StateFlow<FollowerCount> = combine(
+        _pubkeyHex,
+        indexedFollowerCount,
+        memoryEventStore.followsSignalFlow,
+    ) { target, indexed, _ ->
+        reconciledFollowerCount(
+            indexedCount = indexed,
+            knownFollowers = target?.let { memoryEventStore.followersOf(it).size } ?: 0,
+        )
+    }.distinctUntilChanged()
+        .flowOn(Dispatchers.Default)
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), FollowerCount.Unknown)
     /** Following count parsed from the user's kind-3 event p-tags. */
     val followingCount = MutableStateFlow<Long?>(null)
 
@@ -280,10 +294,10 @@ class UserProfileViewModel @Inject constructor(
         currentHandle = null
         lastSubGroup = null
         lastSubPubkey = null
+        indexedFollowerCount.value = null
         _pubkeyHex.value = pubkey
         memoryEventStore.viewedPubkey = pubkey
         selectedTab.value = ProfileTab.NOTES
-        followerCount.value = null
         followingCount.value = null
         _events.value = emptyList()
         _contentFilter.value = FeedContentFilter.NOTES_ONLY
@@ -297,7 +311,7 @@ class UserProfileViewModel @Inject constructor(
 
         // Fetch the integrity-checked follower count (MES-cached and pipeline-deduped).
         viewModelScope.launch(Dispatchers.IO) {
-            profilePipeline.fetchFollowerCount(pubkey)?.let { followerCount.value = it }
+            profilePipeline.fetchFollowerCount(pubkey)?.let { indexedFollowerCount.value = it }
         }
         viewModelScope.launch(Dispatchers.IO) {
             profilePipeline.fetchProfileRelayFacts(pubkey)

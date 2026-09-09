@@ -463,7 +463,7 @@ fun ProfileScreen(
                     Spacer(Modifier.size(Spacing.large))
                     StatLabel(
                         label = "Followers",
-                        value = followerCount?.let(::formatFollowerCount) ?: "—",
+                        value = formatFollowerCount(followerCount),
                         onClick = { onConnectionsClick(ConnectionsTab.Followers) },
                     )
                     Spacer(Modifier.size(Spacing.large))

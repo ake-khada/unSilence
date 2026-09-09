@@ -48,6 +48,7 @@ import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import coil3.compose.AsyncImage
 import com.unsilence.app.data.memory.WotLookup
+import com.unsilence.app.data.relay.FollowerCount
 import com.unsilence.app.data.relay.formatFollowerCount
 import com.unsilence.app.ui.common.IdentIcon
 import com.unsilence.app.ui.common.LocalAppSessionKey
@@ -223,7 +224,7 @@ fun ConnectionsScreen(
 private fun ConnectionsTabs(
     selected: ConnectionsTab,
     onSelected: (ConnectionsTab) -> Unit,
-    followerCount: Long?,
+    followerCount: FollowerCount,
 ) {
     Row(
         modifier = Modifier
@@ -243,7 +244,10 @@ private fun ConnectionsTabs(
                     text = if (tab == ConnectionsTab.Following) {
                         "Following"
                     } else {
-                        followerCount?.let { "Followers ${formatFollowerCount(it)}" } ?: "Followers"
+                        when (followerCount) {
+                            FollowerCount.Unknown -> "Followers"
+                            else -> "Followers ${formatFollowerCount(followerCount)}"
+                        }
                     },
                     color = if (active) Color.White else Text3,
                     fontSize = AppType.body,

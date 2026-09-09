@@ -22,6 +22,8 @@ import com.unsilence.app.data.relay.TimelineMerge
 import com.unsilence.app.data.relay.TimelineService
 import com.unsilence.app.data.relay.WotHydrationCoalescer
 import com.unsilence.app.data.relay.FeedWotDisplayMode
+import com.unsilence.app.data.relay.FollowerCount
+import com.unsilence.app.data.relay.reconciledFollowerCount
 import com.unsilence.app.data.relay.wotLookupSnapshot
 import com.unsilence.app.data.relay.wotSubjectsForFeedRows
 import com.unsilence.app.data.repository.EditableProfileMetadata
@@ -42,6 +44,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.emptyFlow
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.map
@@ -98,8 +101,15 @@ class ProfileViewModel @Inject constructor(
     private var profileSaveJob: Job? = null
     private val profileSaveGeneration = AtomicLong(0L)
 
-    /** Init coroutines write this field, so it must be initialized before any init block. */
-    val followerCount = MutableStateFlow<Long?>(null)
+    private val indexedFollowerCount = MutableStateFlow<Long?>(null)
+    internal val followerCount: StateFlow<FollowerCount> = if (pubkeyHex == null) {
+        MutableStateFlow(FollowerCount.Unknown)
+    } else {
+        combine(indexedFollowerCount, memoryEventStore.followersFlow(pubkeyHex)) { indexed, known ->
+            reconciledFollowerCount(indexedCount = indexed, knownFollowers = known.size)
+        }.distinctUntilChanged()
+            .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), FollowerCount.Unknown)
+    }
 
     fun uploadProfileImage(
         uri: Uri,
@@ -236,7 +246,7 @@ class ProfileViewModel @Inject constructor(
 
             // Fetch the integrity-checked follower count (MES-cached and pipeline-deduped).
             viewModelScope.launch(Dispatchers.IO) {
-                profilePipeline.fetchFollowerCount(pubkeyHex)?.let { followerCount.value = it }
+                profilePipeline.fetchFollowerCount(pubkeyHex)?.let { indexedFollowerCount.value = it }
             }
             viewModelScope.launch(Dispatchers.IO) {
                 profilePipeline.fetchProfileRelayFacts(pubkeyHex)
