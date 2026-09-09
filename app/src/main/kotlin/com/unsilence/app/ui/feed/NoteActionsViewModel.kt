@@ -899,9 +899,7 @@ class NoteActionsViewModel @Inject constructor(
 
         val curatedFallback = run {
             val ownPk = pubkeyHex.orEmpty()
-            memoryEventStore.getReadWriteRelayConfigs(ownPk)
-                .filter { it.marker == null || it.marker == "read" }
-                .mapNotNull { normalizeRelayUrl(it.url) }
+            memoryEventStore.readRelaysFor(ownPk)
                 .ifEmpty { GLOBAL_RELAY_URLS }
         }
 

@@ -346,6 +346,8 @@ class AppBootstrapper @Inject constructor(
         relayPool.refreshBlockedRelays()
 
         // Step 5: Connect to global relays — feed subscriptions start HERE
+        // Deliberately project the post-discovery snapshot instead of re-reading MES: snapshot
+        // restore and live metadata may advance its relay indexes concurrently during bootstrap.
         val readRelays = freshRelays
             .filter { it.marker == null || it.marker == "read" }
             .map { it.url }

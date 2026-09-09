@@ -92,6 +92,16 @@ internal fun shouldSurfaceTrustedHydrationFailure(
     subject in requestedSubjects && lookup(subject) == WotLookup.Pending
 }
 
+internal fun shouldShowFeedLoading(
+    resetView: Boolean,
+    hadActiveHandle: Boolean,
+    hasVisibleEvents: Boolean,
+): Boolean = when {
+    hasVisibleEvents -> false
+    resetView -> true
+    else -> !hadActiveHandle
+}
+
 sealed class FeedType {
     data object Global    : FeedType()
     data object Following : FeedType()
@@ -626,6 +636,9 @@ class FeedViewModel @Inject constructor(
      *   2. Reset state ONLY on actual feed switch (= React component remount via key)
      *   3. Capture `since` from existing events (= jumble's `const since = events[0]?.created_at`)
      *   4. Subscribe; route batched events via handleBatch, live-tail via handleNew
+     *
+     * MES seeds the feed only when [resetView] is true. Background metadata resubscriptions
+     * widen relay coverage without re-injecting relay-agnostic cached events mid-session.
      */
     private suspend fun setupSubscription(key: ResubKey, resetView: Boolean) {
         refreshTimeoutJob?.cancel()
@@ -652,19 +665,16 @@ class FeedViewModel @Inject constructor(
         currentHandle?.close()
         currentHandle = null
 
-        // Pre-load MES cached events for instant render (mirrors Jumble's
-        // setStoredEvents(fromIndexedDB) and the original resubscribe() flow).
+        // Seed from MES only for a user-initiated reset. Background resubscriptions retain
+        // the live list and admit subsequent content exclusively through their relay REQs.
         lastActivitySweepKey = null
         if (resetView) resetTrustedCandidateSweep()
-        val cachedEvents = loadCachedEvents(key.type, key.filter)
+        val cachedEvents = if (resetView) loadCachedEvents(key.type, key.filter) else emptyList()
         if (resetView) {
             _events.value = cachedEvents
             _newEvents.value = emptyList()
             _liveArrivalIds.value = emptySet()
             setAtTop(true)
-        } else {
-            // Background metaVer resubscribe: widen relay coverage, keep scroll position
-            _events.update { TimelineMerge.merge(it, cachedEvents) }
         }
 
         val subRequests = buildSubRequests(key.type, key.filter)
@@ -674,9 +684,11 @@ class FeedViewModel @Inject constructor(
             return
         }
 
-        _isLoading.value = (resetView || !hadActiveHandle) &&
-            cachedEvents.isEmpty() &&
-            _events.value.isEmpty()
+        _isLoading.value = shouldShowFeedLoading(
+            resetView = resetView,
+            hadActiveHandle = hadActiveHandle,
+            hasVisibleEvents = _events.value.isNotEmpty(),
+        )
 
         // Admission gate for relay batches arriving after subscription starts.
         // resetView=true (user-initiated switch): null → TimelineMerge.merge handles
@@ -1039,7 +1051,7 @@ class FeedViewModel @Inject constructor(
             ?.let { memoryEventStore.getBlockedRelayUrls(it).toSet() }
             ?: emptySet()
         val readRelays = ownPubkey
-            ?.let { memoryEventStore.getReadWriteRelayConfigs(it).map { c -> c.url } }
+            ?.let(memoryEventStore::readRelaysFor)
             ?: emptyList()
         // Narrow relays by the session feed filter where NIP-01 can express it
         // (kinds + since). FeedRows remains the source of truth because kind-1

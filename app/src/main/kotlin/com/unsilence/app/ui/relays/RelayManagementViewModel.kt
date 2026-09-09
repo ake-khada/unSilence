@@ -386,9 +386,7 @@ class RelayManagementViewModel @Inject constructor(
             memoryEventStore.insert(signedToNostrEvent(signed))
 
             val eventJson = toEventJson(signed)
-            val writeUrls = memoryEventStore.getReadWriteRelayConfigs(pk)
-                .filter { it.marker == null || it.marker == "write" }
-                .map { it.url }
+            val writeUrls = memoryEventStore.writeRelaysFor(pk)
             val indexerUrls = relayPreferencesStore.indexerRelayUrlsSnapshot()
             val targets = (writeUrls + indexerUrls).distinct()
             relayPool.publishToRelays(eventJson, targets)
@@ -430,9 +428,7 @@ class RelayManagementViewModel @Inject constructor(
             memoryEventStore.insert(signedToNostrEvent(signed))
 
             val eventJson = toEventJson(signed)
-            val writeUrls = memoryEventStore.getReadWriteRelayConfigs(pk)
-                .filter { it.marker == null || it.marker == "write" }
-                .map { it.url }
+            val writeUrls = memoryEventStore.writeRelaysFor(pk)
             val indexerUrls = relayPreferencesStore.indexerRelayUrlsSnapshot()
             relayPool.publishToRelays(eventJson, (writeUrls + indexerUrls).distinct())
             Log.w("RelayMgmt", "RELAY-LIST published kind=30002 set=${payload.dTag} id=${signed.id.take(8)}… tags: " +

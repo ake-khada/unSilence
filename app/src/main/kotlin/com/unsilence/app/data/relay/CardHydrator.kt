@@ -1168,11 +1168,7 @@ class CardHydrator @Inject constructor(
 
         // Resolve own read relays + blocked relays once per batch.
         val ownPk = memoryEventStore.ownPubkey
-        val ownReadRelays = if (ownPk != null) {
-            memoryEventStore.getReadWriteRelayConfigs(ownPk)
-                .filter { it.marker == null || it.marker == "read" }
-                .mapNotNull { normalizeRelayUrl(it.url) }
-        } else emptyList()
+        val ownReadRelays = ownPk?.let(memoryEventStore::readRelaysFor).orEmpty()
         val blockedRelays = ownPk
             ?.let { memoryEventStore.getBlockedRelayUrls(it).toSet() }
             ?: emptySet()
