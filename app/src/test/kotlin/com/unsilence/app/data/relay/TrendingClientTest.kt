@@ -17,6 +17,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Test
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicLong
 
 @OptIn(ExperimentalCoroutinesApi::class)
 class TrendingClientTest {
@@ -74,7 +75,7 @@ class TrendingClientTest {
             val phaseOne = awaitItem()
             assertEquals(listOf("nostr", "kotlin", "android"), phaseOne?.hashtags?.map { it.tag })
             assertEquals("early", phaseOne?.profiles?.first { it.pubkey == pubkeyA }?.name)
-            assertEquals(0L, phaseOne?.profiles?.first { it.pubkey == pubkeyA }?.followerCount)
+            assertNull(phaseOne?.profiles?.first { it.pubkey == pubkeyA }?.followerCount)
 
             profiles[pubkeyA] = UserEntity(pubkey = pubkeyA, displayName = "Hydrated", picture = "https://example.com/a.jpg")
             transport.warmGate?.complete(Unit)
@@ -138,6 +139,72 @@ class TrendingClientTest {
         client.refresh(forceRefresh = true)
 
         assertEquals(99L, client.data.value?.profiles?.first()?.followerCount)
+    }
+
+    @Test
+    fun `failed count remains unresolved instead of becoming zero`() = runTest {
+        val transport = FakeTrendingTransport().apply {
+            events = listOf(trendingEvent(pubkeyA, "nostr"))
+        }
+        val client = TrendingClient(transport, { null }, backgroundScope)
+
+        client.refresh(forceRefresh = true)
+
+        assertNull(client.data.value?.profiles?.first()?.followerCount)
+    }
+
+    @Test
+    fun `current count miss uses retry freshness even when an older count survives`() = runTest {
+        val nowMs = AtomicLong(1_000L)
+        val transport = FakeTrendingTransport().apply {
+            events = listOf(trendingEvent(pubkeyA, "nostr"))
+            counts = mapOf(pubkeyA to 99L)
+        }
+        val client = TrendingClient(
+            transport = transport,
+            profileLookup = { null },
+            scope = backgroundScope,
+            nowMs = nowMs::get,
+        )
+        client.refresh(forceRefresh = true)
+
+        transport.counts = emptyMap()
+        client.refresh(forceRefresh = true)
+        assertEquals(99L, client.data.value?.profiles?.first()?.followerCount)
+        assertEquals(2, transport.fetchCalls.get())
+
+        nowMs.addAndGet(59_999L)
+        client.refresh()
+        assertEquals(2, transport.fetchCalls.get())
+
+        nowMs.incrementAndGet()
+        client.refresh()
+        assertEquals(3, transport.fetchCalls.get())
+    }
+
+    @Test
+    fun `current count success keeps the full freshness window`() = runTest {
+        val nowMs = AtomicLong(1_000L)
+        val transport = FakeTrendingTransport().apply {
+            events = listOf(trendingEvent(pubkeyA, "nostr"))
+            counts = mapOf(pubkeyA to 0L)
+        }
+        val client = TrendingClient(
+            transport = transport,
+            profileLookup = { null },
+            scope = backgroundScope,
+            nowMs = nowMs::get,
+        )
+        client.refresh(forceRefresh = true)
+
+        nowMs.addAndGet(599_999L)
+        client.refresh()
+        assertEquals(1, transport.fetchCalls.get())
+
+        nowMs.incrementAndGet()
+        client.refresh()
+        assertEquals(2, transport.fetchCalls.get())
+        assertEquals(0L, client.data.value?.profiles?.first()?.followerCount)
     }
 
     private fun trendingEvent(pubkey: String, vararg hashtags: String): JsonObject =

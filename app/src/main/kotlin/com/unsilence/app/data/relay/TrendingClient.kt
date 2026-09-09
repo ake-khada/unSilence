@@ -38,6 +38,7 @@ import javax.inject.Singleton
 import kotlin.coroutines.resume
 
 private const val TRENDING_RELAY_URL = "wss://trending.relays.land"
+internal const val TRENDING_CANDIDATE_LIMIT = 32
 
 data class TrendingHashtag(val tag: String, val score: Double)
 
@@ -48,7 +49,8 @@ data class TrendingProfile(
     val picture: String?,
     val about: String?,
     val nip05: String?,
-    val followerCount: Long,
+    /** Null means unresolved; zero is retained only when a COUNT relay answered zero. */
+    val followerCount: Long?,
 )
 
 data class TrendingData(
@@ -67,6 +69,7 @@ class TrendingClient internal constructor(
     private val transport: TrendingTransport,
     private val profileLookup: (String) -> UserEntity?,
     private val scope: CoroutineScope,
+    private val nowMs: () -> Long = { System.currentTimeMillis() },
 ) {
     @Inject constructor(
         okHttpClient: OkHttpClient,
@@ -79,6 +82,7 @@ class TrendingClient internal constructor(
     )
 
     private val lastFetchMs = AtomicLong(0L)
+    private val freshnessWindowMs = AtomicLong(TRENDING_FRESH_MS)
     private val refreshMutex = Mutex()
 
     private val _data = MutableStateFlow<TrendingData?>(null)
@@ -107,7 +111,7 @@ class TrendingClient internal constructor(
     }
 
     private fun isFresh(): Boolean =
-        _data.value != null && System.currentTimeMillis() - lastFetchMs.get() < STALENESS_MS
+        _data.value != null && nowMs() - lastFetchMs.get() < freshnessWindowMs.get()
 
     private suspend fun doRefresh(): Unit = coroutineScope {
         val warm = launch {
@@ -135,10 +139,9 @@ class TrendingClient internal constructor(
         _data.value = TrendingData(
             hashtags = topHashtags,
             profiles = topAuthorPubkeys.map { pubkey ->
-                toProfile(pubkey, previousCounts[pubkey] ?: 0L)
+                toProfile(pubkey, previousCounts[pubkey])
             },
         )
-        lastFetchMs.set(System.currentTimeMillis())
 
         warm.join()
         val enriched = topAuthorPubkeys.map { pubkey ->
@@ -152,11 +155,18 @@ class TrendingClient internal constructor(
                 } catch (_: Exception) {
                     null
                 }
-                toProfile(pubkey, count ?: previousCounts[pubkey] ?: 0L)
+                toProfile(pubkey, count ?: previousCounts[pubkey]) to (count != null)
             }
         }.awaitAll()
 
-        _data.value = TrendingData(hashtags = topHashtags, profiles = enriched)
+        _data.value = TrendingData(
+            hashtags = topHashtags,
+            profiles = enriched.map { it.first },
+        )
+        freshnessWindowMs.set(
+            if (enriched.any { it.second }) TRENDING_FRESH_MS else TRENDING_RETRY_MS,
+        )
+        lastFetchMs.set(nowMs())
     }
 
     private fun aggregate(events: List<JsonObject>): Pair<List<TrendingHashtag>, List<String>> {
@@ -189,7 +199,7 @@ class TrendingClient internal constructor(
         return topHashtags to topAuthorPubkeys
     }
 
-    private fun toProfile(pubkey: String, followerCount: Long): TrendingProfile {
+    private fun toProfile(pubkey: String, followerCount: Long?): TrendingProfile {
         val user = profileLookup(pubkey)
         return TrendingProfile(
             pubkey = pubkey,
@@ -203,8 +213,8 @@ class TrendingClient internal constructor(
     }
 
     companion object {
-        private const val STALENESS_MS = 10 * 60 * 1000L
-        private const val TRENDING_CANDIDATE_LIMIT = 32
+        private const val TRENDING_FRESH_MS = 10 * 60 * 1000L
+        private const val TRENDING_RETRY_MS = 60_000L
         private const val COUNT_TIMEOUT_MS = 2_500L
     }
 }
