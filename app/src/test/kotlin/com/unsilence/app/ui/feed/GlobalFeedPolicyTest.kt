@@ -190,6 +190,57 @@ class GlobalFeedPolicyTest {
         )
     }
 
+    @Test
+    fun `feed loading policy does not flash during an active background resubscribe`() {
+        assertFalse(
+            shouldShowFeedLoading(
+                resetView = false,
+                hadActiveHandle = true,
+                hasVisibleEvents = false,
+            ),
+        )
+    }
+
+    @Test
+    fun `feed loading policy covers an empty resubscribe with no active handle`() {
+        assertTrue(
+            shouldShowFeedLoading(
+                resetView = false,
+                hadActiveHandle = false,
+                hasVisibleEvents = false,
+            ),
+        )
+    }
+
+    @Test
+    fun `feed loading policy stays hidden whenever events are visible`() {
+        assertFalse(
+            shouldShowFeedLoading(
+                resetView = true,
+                hadActiveHandle = false,
+                hasVisibleEvents = true,
+            ),
+        )
+        assertFalse(
+            shouldShowFeedLoading(
+                resetView = false,
+                hadActiveHandle = false,
+                hasVisibleEvents = true,
+            ),
+        )
+    }
+
+    @Test
+    fun `feed loading policy shows for an empty user initiated reset`() {
+        assertTrue(
+            shouldShowFeedLoading(
+                resetView = true,
+                hadActiveHandle = true,
+                hasVisibleEvents = false,
+            ),
+        )
+    }
+
     private fun scored(pubkey: String): WotLookup.Scored = WotLookup.Scored(
         WotAssertionEntity(
             subjectPubkey = pubkey,

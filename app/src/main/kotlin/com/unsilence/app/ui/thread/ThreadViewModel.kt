@@ -7,7 +7,6 @@ import com.unsilence.app.data.memory.EventEntity
 import com.unsilence.app.data.memory.FeedRow
 import com.unsilence.app.data.memory.MemoryEventStore
 import com.unsilence.app.data.relay.GLOBAL_RELAY_URLS
-import com.unsilence.app.data.relay.normalizeRelayUrl
 import com.unsilence.app.data.relay.CardHydrator
 import com.unsilence.app.data.relay.OutboxRelayResolver
 import com.unsilence.app.data.relay.RelayPool
@@ -376,9 +375,7 @@ class ThreadViewModel @Inject constructor(
         tappedId = eventId
         viewModelScope.launch {
             val ownPubkey = pubkeyHex ?: ""
-            val ownReadRelays = memoryEventStore.getReadWriteRelayConfigs(ownPubkey)
-                .filter { it.marker == null || it.marker == "read" }
-                .mapNotNull { normalizeRelayUrl(it.url) }
+            val ownReadRelays = memoryEventStore.readRelaysFor(ownPubkey)
             val blockedRelays = memoryEventStore.getBlockedRelayUrls(ownPubkey).toSet()
 
             // External nevent hints are load-bearing when the event is absent from
