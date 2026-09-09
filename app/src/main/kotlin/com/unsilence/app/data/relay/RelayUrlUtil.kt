@@ -75,6 +75,13 @@ val FOLLOWER_INDEX_RELAY_URLS = listOf(
     "wss://relay.damus.io",
 )
 
+/** NIP-50 defaults used when an account has no published search-relay list. */
+val DEFAULT_SEARCH_RELAY_URLS = listOf(
+    "wss://nostr.wine",
+    "wss://relay.noswhere.com",
+    "wss://search.nos.today",
+)
+
 /** Hardcoded global relay defaults — single source of truth for fallbacks. */
 val GLOBAL_RELAY_URLS = listOf(
     "wss://relay.damus.io",

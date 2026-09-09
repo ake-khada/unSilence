@@ -17,6 +17,7 @@ import com.unsilence.app.data.memory.MuteList
 import com.unsilence.app.data.memory.normalizedMutedHashtags
 import com.unsilence.app.data.memory.WotLookup
 import com.unsilence.app.data.memory.ZapDetail
+import com.unsilence.app.data.relay.DEFAULT_SEARCH_RELAY_URLS
 import com.unsilence.app.data.relay.FeedWotDisplayMode
 import com.unsilence.app.data.relay.ImpersonationRisk
 import com.unsilence.app.data.relay.ProtectedProfile
@@ -351,7 +352,7 @@ class SearchViewModel @Inject constructor(
 
                     val ownPubkey = keyManager.getPublicKeyHex() ?: ""
                     val userSearchRelays = memoryEventStore.getSearchRelayUrls(ownPubkey)
-                    val searchRelays = userSearchRelays.ifEmpty { DEFAULT_SEARCH_RELAYS }
+                    val searchRelays = userSearchRelays.ifEmpty { DEFAULT_SEARCH_RELAY_URLS }
 
                     // Generate token and set it BEFORE sending any REQ so the collector
                     // is ready to accept the first fast result.
@@ -567,12 +568,6 @@ class SearchViewModel @Inject constructor(
     }
 
     companion object {
-        val DEFAULT_SEARCH_RELAYS = listOf(
-            "wss://nostr.wine",
-            "wss://relay.noswhere.com",
-            "wss://search.nos.today",
-        )
-
         /**
          * Returns the lowercase hashtag value for an explicit hashtag query, or null.
          */

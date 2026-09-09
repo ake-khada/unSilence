@@ -18,17 +18,18 @@ import com.unsilence.app.data.memory.WotProviderDescriptor
 import com.unsilence.app.data.relay.AccountMetadataFetchResult
 import com.unsilence.app.data.relay.CardHydrator
 import com.unsilence.app.data.relay.ConnectionPurpose
+import com.unsilence.app.data.relay.DEFAULT_SEARCH_RELAY_URLS
 import com.unsilence.app.data.relay.EventProcessor
+import com.unsilence.app.data.relay.GLOBAL_RELAY_URLS
 import com.unsilence.app.data.relay.MuteListFetchResult
 import com.unsilence.app.data.relay.ProfileResolver
-import com.unsilence.app.data.relay.RelayPool
 import com.unsilence.app.data.relay.RelayMessageTap
+import com.unsilence.app.data.relay.RelayPool
 import com.unsilence.app.data.relay.RelayTapMessage
-import com.unsilence.app.data.relay.WotProviderSource
 import com.unsilence.app.data.relay.TrendingClient
+import com.unsilence.app.data.relay.WotProviderSource
 import com.unsilence.app.data.relay.canMaterializeEmptyContactList
 import com.unsilence.app.data.relay.normalizeRelayUrl
-import com.unsilence.app.data.relay.GLOBAL_RELAY_URLS
 import com.unsilence.app.data.relay.shouldSkipBootstrapWotFetch
 import com.unsilence.app.data.relay.wotProviderDescriptorFromPrefs
 import com.unsilence.app.data.relay.wotTargetsHash
@@ -103,13 +104,6 @@ private val DEFAULT_INDEXER_URLS = listOf(
     "wss://user.kindpag.es",
     "wss://directory.yabu.me",
     "wss://profiles.nostr1.com",
-)
-
-/** Default search relays — seeded if none found after bootstrap fetch. */
-private val DEFAULT_SEARCH_URLS = listOf(
-    "wss://nostr.wine",
-    "wss://relay.noswhere.com",
-    "wss://search.nos.today",
 )
 
 @Singleton
@@ -459,7 +453,7 @@ class AppBootstrapper @Inject constructor(
         // Seed kind 10007 search relays in MES if none exist after fetch
         val existingSearch = memoryEventStore.getSearchRelayUrls(pubkeyHex)
         if (existingSearch.isEmpty()) {
-            for (url in DEFAULT_SEARCH_URLS) {
+            for (url in DEFAULT_SEARCH_RELAY_URLS) {
                 memoryEventStore.addSearchRelay(pubkeyHex, url)
             }
         }
