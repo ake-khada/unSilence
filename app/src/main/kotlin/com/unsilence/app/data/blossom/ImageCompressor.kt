@@ -71,8 +71,9 @@ class ImageCompressor @Inject constructor(
      * Prepares an image for file-backed upload without retaining the source bytes.
      * ORIGINAL preserves encoded pixels where the container supports a verified,
      * orientation-only metadata rewrite. Read-only metadata containers are safely
-     * re-encoded. Other modes sample-decode at no more than twice the target, scale
-     * once to the exact output size, and compress directly into a cache file.
+     * re-encoded. Animation-bearing containers unsupported by the bitmap ladder stay
+     * byte-verbatim at every quality. Other images sample-decode at no more than twice
+     * the target, scale once to the exact output size, and compress into a cache file.
      */
     suspend fun prepareImage(
         uri: Uri,
@@ -88,7 +89,7 @@ class ImageCompressor @Inject constructor(
             ?.takeIf { it.startsWith("image/") }
             ?: sourceMime
 
-        if (maxDimension <= 0) {
+        if (shouldUseOriginalImagePreparation(maxDimension, effectiveSourceMime)) {
             when (originalImageMetadataMode(effectiveSourceMime)) {
                 OriginalImageMetadataMode.REENCODE -> {
                     return@withContext reencodeForPrivacy(uri, bounds, orientation)

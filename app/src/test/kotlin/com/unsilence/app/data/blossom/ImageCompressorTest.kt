@@ -33,6 +33,25 @@ class ImageCompressorTest {
     }
 
     @Test
+    fun `only gif animation is preserved verbatim by mime policy`() {
+        assertTrue(preservesAnimationVerbatim("image/gif"))
+        assertTrue(preservesAnimationVerbatim(" IMAGE/GIF; charset=binary "))
+        assertFalse(preservesAnimationVerbatim("image/webp"))
+        assertFalse(preservesAnimationVerbatim("image/png"))
+        assertFalse(preservesAnimationVerbatim(null))
+    }
+
+    @Test
+    fun `standard quality routes gif around bitmap encoding but still encodes photos`() {
+        val standardMaxDimension = AttachmentQuality.STANDARD.imageSettings().first
+
+        assertTrue(shouldUseOriginalImagePreparation(standardMaxDimension, "image/gif"))
+        assertFalse(shouldUseOriginalImagePreparation(standardMaxDimension, "image/jpeg"))
+        assertFalse(shouldUseOriginalImagePreparation(standardMaxDimension, "image/png"))
+        assertTrue(shouldUseOriginalImagePreparation(0, "image/jpeg"))
+    }
+
+    @Test
     fun `orientation-only policy removes private attributes and retains rotation`() {
         val attributes = mutableMapOf(
             ExifInterface.TAG_ORIENTATION to ExifInterface.ORIENTATION_ROTATE_90.toString(),
