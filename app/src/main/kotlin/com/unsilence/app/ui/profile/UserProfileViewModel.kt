@@ -30,6 +30,7 @@ import com.unsilence.app.data.relay.WotHydrationCoalescer
 import com.unsilence.app.data.relay.reconciledFollowerCount
 import com.unsilence.app.data.relay.wotLookupSnapshot
 import com.unsilence.app.data.relay.wotSubjectsForFeedRows
+import com.unsilence.app.data.relay.wotVerifiedFollowers
 import com.unsilence.app.data.repository.UserRepository
 import com.unsilence.app.data.repository.FollowBatchPublisher
 import com.unsilence.app.data.repository.FollowPublishResult
@@ -238,16 +239,26 @@ class UserProfileViewModel @Inject constructor(
         _pubkeyHex,
         indexedFollowerCount,
         memoryEventStore.followsSignalFlow,
-    ) { target, indexed, _ ->
+        memoryEventStore.wotSignalFlow,
+    ) { target, indexed, _, _ ->
         reconciledFollowerCount(
             indexedCount = indexed,
             knownFollowers = target?.let { memoryEventStore.followersOf(it).size } ?: 0,
+            trustedFollowerEstimate = target?.let { wotVerifiedFollowers(memoryEventStore.wotFor(it)) },
         )
     }.distinctUntilChanged()
         .flowOn(Dispatchers.Default)
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), FollowerCount.Unknown)
-    /** Following count parsed from the user's kind-3 event p-tags. */
-    val followingCount = MutableStateFlow<Long?>(null)
+
+    /** Exact following count when the subject's kind-3 is resolved; null while unknown. */
+    val followingCount: StateFlow<Long?> = combine(
+        _pubkeyHex,
+        memoryEventStore.followsSignalFlow,
+    ) { target, _ ->
+        target?.let { memoryEventStore.getFollows(it)?.size?.toLong() }
+    }.distinctUntilChanged()
+        .flowOn(Dispatchers.Default)
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
 
     val isOwnProfile: StateFlow<Boolean> = _pubkeyHex
         .map { target -> target != null && target == myPubkey }
@@ -298,7 +309,6 @@ class UserProfileViewModel @Inject constructor(
         _pubkeyHex.value = pubkey
         memoryEventStore.viewedPubkey = pubkey
         selectedTab.value = ProfileTab.NOTES
-        followingCount.value = null
         _events.value = emptyList()
         _contentFilter.value = FeedContentFilter.NOTES_ONLY
         _wotSubjects.value = setOf(pubkey)
@@ -317,10 +327,9 @@ class UserProfileViewModel @Inject constructor(
             profilePipeline.fetchProfileRelayFacts(pubkey)
         }
 
-        // Fetch following count
+        // Refresh the kind-3 that drives the reactive following count.
         viewModelScope.launch(Dispatchers.IO) {
-            val count = relayPool.fetchFollowingCount(pubkey)
-            if (count != null) followingCount.value = count
+            relayPool.refreshFollowList(pubkey)
         }
 
         // Eager pipeline: refs + engagement pre-fetched in batch.

@@ -41,9 +41,10 @@ internal fun shouldSurfaceFollowerLoadFailure(
 ): Boolean = !fetchCompleted && !hasFollowers
 
 /**
- * Preserves the distinction between an indexed estimate and a locally proven lower bound.
- * Indexed values may use approximate display rounding; [FollowerCount.AtLeast] values must use
- * raw digits because rounding upward would assert a floor the local contact lists do not prove.
+ * Preserves the distinction between third-party estimates and a lower bound established by local
+ * signed contact lists. Relay COUNT and the selected trusted-assertion provider may contribute to
+ * [FollowerCount.Indexed]; only locally held contact lists can produce [FollowerCount.AtLeast].
+ * Lower bounds use raw digits because rounding upward would assert a floor we cannot prove.
  */
 internal sealed interface FollowerCount {
     data object Unknown : FollowerCount
@@ -53,12 +54,23 @@ internal sealed interface FollowerCount {
     data class AtLeast(val value: Long) : FollowerCount
 }
 
-internal fun reconciledFollowerCount(indexedCount: Long?, knownFollowers: Int): FollowerCount {
+internal fun reconciledFollowerCount(
+    indexedCount: Long?,
+    knownFollowers: Int,
+    trustedFollowerEstimate: Long?,
+): FollowerCount {
+    val relayEstimate = indexedCount?.takeIf { it >= 0L }
+    val providerEstimate = trustedFollowerEstimate?.takeIf { it >= 0L }
+    val indexedEstimate = when {
+        relayEstimate == null -> providerEstimate
+        providerEstimate == null -> relayEstimate
+        else -> maxOf(relayEstimate, providerEstimate)
+    }
     val knownCount = knownFollowers.coerceAtLeast(0).toLong()
     return when {
-        indexedCount == null && knownCount == 0L -> FollowerCount.Unknown
-        indexedCount == null -> FollowerCount.AtLeast(knownCount)
-        knownCount <= indexedCount -> FollowerCount.Indexed(indexedCount)
+        indexedEstimate == null && knownCount == 0L -> FollowerCount.Unknown
+        indexedEstimate == null -> FollowerCount.AtLeast(knownCount)
+        knownCount <= indexedEstimate -> FollowerCount.Indexed(indexedEstimate)
         else -> FollowerCount.AtLeast(knownCount)
     }
 }

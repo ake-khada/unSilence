@@ -15,6 +15,7 @@ import com.unsilence.app.data.relay.nextFollowersCursor
 import com.unsilence.app.data.relay.reconciledFollowerCount
 import com.unsilence.app.data.relay.shouldSurfaceFollowerLoadFailure
 import com.unsilence.app.data.relay.wotRank
+import com.unsilence.app.data.relay.wotVerifiedFollowers
 import com.unsilence.app.data.repository.UserRepository
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.Dispatchers
@@ -167,6 +168,9 @@ class ConnectionsViewModel @Inject constructor(
             followerCount = reconciledFollowerCount(
                 indexedCount = loading.indexedFollowerCount,
                 knownFollowers = membership.followers.size,
+                trustedFollowerEstimate = wotVerifiedFollowers(
+                    memoryEventStore.wotFor(membership.subject),
+                ),
             ),
         )
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), ConnectionsUiState())

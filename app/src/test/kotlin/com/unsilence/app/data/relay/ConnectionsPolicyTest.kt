@@ -61,23 +61,89 @@ class ConnectionsPolicyTest {
 
     @Test
     fun `no index and no known followers is unknown`() {
-        assertEquals(FollowerCount.Unknown, reconciledFollowerCount(null, 0))
+        assertEquals(
+            FollowerCount.Unknown,
+            reconciledFollowerCount(null, 0, trustedFollowerEstimate = null),
+        )
     }
 
     @Test
     fun `known followers without an index are a lower bound`() {
-        assertEquals(FollowerCount.AtLeast(3L), reconciledFollowerCount(null, 3))
+        assertEquals(
+            FollowerCount.AtLeast(3L),
+            reconciledFollowerCount(null, 3, trustedFollowerEstimate = null),
+        )
     }
 
     @Test
     fun `index consistent with known followers remains indexed`() {
-        assertEquals(FollowerCount.Indexed(5L), reconciledFollowerCount(5L, 3))
-        assertEquals(FollowerCount.Indexed(3L), reconciledFollowerCount(3L, 3))
+        assertEquals(
+            FollowerCount.Indexed(5L),
+            reconciledFollowerCount(5L, 3, trustedFollowerEstimate = null),
+        )
+        assertEquals(
+            FollowerCount.Indexed(3L),
+            reconciledFollowerCount(3L, 3, trustedFollowerEstimate = null),
+        )
     }
 
     @Test
     fun `known followers above the index expose the proven lower bound`() {
-        assertEquals(FollowerCount.AtLeast(3L), reconciledFollowerCount(1L, 3))
+        assertEquals(
+            FollowerCount.AtLeast(3L),
+            reconciledFollowerCount(1L, 3, trustedFollowerEstimate = null),
+        )
+    }
+
+    @Test
+    fun `trusted provider count joins the index estimate without claiming local proof`() {
+        assertEquals(
+            FollowerCount.Indexed(25L),
+            reconciledFollowerCount(null, 13, trustedFollowerEstimate = 25L),
+        )
+        assertEquals(
+            FollowerCount.Indexed(25L),
+            reconciledFollowerCount(13L, 13, trustedFollowerEstimate = 25L),
+        )
+    }
+
+    @Test
+    fun `strongest third party follower estimate wins`() {
+        assertEquals(
+            FollowerCount.Indexed(25L),
+            reconciledFollowerCount(25L, 13, trustedFollowerEstimate = 20L),
+        )
+        assertEquals(
+            FollowerCount.Indexed(30L),
+            reconciledFollowerCount(25L, 13, trustedFollowerEstimate = 30L),
+        )
+        val largeEstimate = reconciledFollowerCount(
+            indexedCount = 1_200L,
+            knownFollowers = 13,
+            trustedFollowerEstimate = 5_000L,
+        )
+        assertEquals(FollowerCount.Indexed(5_000L), largeEstimate)
+        assertEquals("~5k", formatFollowerCount(largeEstimate))
+    }
+
+    @Test
+    fun `local proof above every estimate remains a lower bound`() {
+        assertEquals(
+            FollowerCount.AtLeast(30L),
+            reconciledFollowerCount(13L, 30, trustedFollowerEstimate = 25L),
+        )
+    }
+
+    @Test
+    fun `zero trusted estimate is indexed while negative estimates are ignored`() {
+        assertEquals(
+            FollowerCount.Indexed(0L),
+            reconciledFollowerCount(null, 0, trustedFollowerEstimate = 0L),
+        )
+        assertEquals(
+            FollowerCount.Unknown,
+            reconciledFollowerCount(-1L, 0, trustedFollowerEstimate = -2L),
+        )
     }
 
     @Test

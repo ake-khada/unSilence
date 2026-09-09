@@ -26,6 +26,7 @@ import com.unsilence.app.data.relay.FollowerCount
 import com.unsilence.app.data.relay.reconciledFollowerCount
 import com.unsilence.app.data.relay.wotLookupSnapshot
 import com.unsilence.app.data.relay.wotSubjectsForFeedRows
+import com.unsilence.app.data.relay.wotVerifiedFollowers
 import com.unsilence.app.data.repository.EditableProfileMetadata
 import com.unsilence.app.data.repository.ProfileMetadataPublisher
 import com.unsilence.app.data.repository.ProfilePublishResult
@@ -105,9 +106,18 @@ class ProfileViewModel @Inject constructor(
     internal val followerCount: StateFlow<FollowerCount> = if (pubkeyHex == null) {
         MutableStateFlow(FollowerCount.Unknown)
     } else {
-        combine(indexedFollowerCount, memoryEventStore.followersFlow(pubkeyHex)) { indexed, known ->
-            reconciledFollowerCount(indexedCount = indexed, knownFollowers = known.size)
+        combine(
+            indexedFollowerCount,
+            memoryEventStore.followersFlow(pubkeyHex),
+            memoryEventStore.wotSignalFlow,
+        ) { indexed, known, _ ->
+            reconciledFollowerCount(
+                indexedCount = indexed,
+                knownFollowers = known.size,
+                trustedFollowerEstimate = wotVerifiedFollowers(memoryEventStore.wotFor(pubkeyHex)),
+            )
         }.distinctUntilChanged()
+            .flowOn(Dispatchers.Default)
             .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), FollowerCount.Unknown)
     }
 
@@ -283,11 +293,14 @@ class ProfileViewModel @Inject constructor(
     fun reactionsForEvent(eventId: String): List<ReactionInfo> =
         timelineCardData.reactionsForEvent(eventId)
 
-    /** Live following count from MES follows index. */
-    val followingCount: StateFlow<Int> = pubkeyHex?.let { pk ->
-        memoryEventStore.followsFlow(pk).map { it.size }
-            .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), 0)
-    } ?: MutableStateFlow(0)
+    /** Exact following count when the owner's kind-3 is resolved; null while unknown. */
+    val followingCount: StateFlow<Long?> = pubkeyHex?.let { pk ->
+        memoryEventStore.followsSignalFlow
+            .map { memoryEventStore.getFollows(pk)?.size?.toLong() }
+            .distinctUntilChanged()
+            .flowOn(Dispatchers.Default)
+            .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
+    } ?: MutableStateFlow(null)
 
     /**
      * Reconcile the owner's replaceable contact list whenever the profile tab
