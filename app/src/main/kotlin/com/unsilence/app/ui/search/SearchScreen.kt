@@ -139,6 +139,7 @@ fun SearchScreen(
     val sensitiveMode   by viewModel.sensitiveContentMode.collectAsStateWithLifecycle()
     val trendingHashtags by viewModel.trendingHashtags.collectAsStateWithLifecycle()
     val trendingUsers   by viewModel.trendingUsers.collectAsStateWithLifecycle()
+    val trendingWotLookups by viewModel.trendingWotLookups.collectAsStateWithLifecycle()
     val wotLookups      by viewModel.wotLookups.collectAsStateWithLifecycle()
     val feedWotDisplayMode by viewModel.feedWotDisplayMode.collectAsStateWithLifecycle()
     val reactedIds      by actionsViewModel.reactedEventIds.collectAsStateWithLifecycle()
@@ -476,6 +477,7 @@ fun SearchScreen(
                         TrendingDiscovery(
                             hashtags = trendingHashtags,
                             users = trendingUsers,
+                            wotLookups = trendingWotLookups,
                             onHashtagClick = { tag ->
                                 viewModel.search("#$tag")
                                 pendingSearch = true
@@ -912,6 +914,7 @@ private fun rememberEngagement(
 private fun TrendingDiscovery(
     hashtags: List<Pair<String, Int>>,
     users: List<UserEntity>,
+    wotLookups: Map<String, WotLookup>,
     onHashtagClick: (String) -> Unit,
     onUserClick: (String) -> Unit,
 ) {
@@ -993,7 +996,11 @@ private fun TrendingDiscovery(
             }
             items(users.size) { index ->
                 val user = users[index]
-                TrendingUserRow(user = user, onClick = { onUserClick(user.pubkey) })
+                TrendingUserRow(
+                    user = user,
+                    wotLookup = wotLookups[user.pubkey],
+                    onClick = { onUserClick(user.pubkey) },
+                )
                 if (index < users.lastIndex) {
                     HorizontalDivider(
                         color     = BorderFaint,
@@ -1040,7 +1047,11 @@ private fun HashtagPill(tag: String, count: Int, filled: Boolean, onClick: () ->
 }
 
 @Composable
-private fun TrendingUserRow(user: UserEntity, onClick: () -> Unit) {
+private fun TrendingUserRow(
+    user: UserEntity,
+    wotLookup: WotLookup?,
+    onClick: () -> Unit,
+) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -1080,11 +1091,12 @@ private fun TrendingUserRow(user: UserEntity, onClick: () -> Unit) {
             }
             // npub + follower count in mono
             val npub = remember(user.pubkey) { shortNpub(user.pubkey) }
+            val followerCount = trendingFollowerCountLabel(user.followerCount, wotLookup)
             val meta = buildString {
                 append(npub)
-                if (user.followerCount != null && user.followerCount > 0) {
+                if (followerCount != null) {
                     append(" \u00B7 ")
-                    append(formatCount(user.followerCount))
+                    append(followerCount)
                     append(" followers")
                 }
             }
