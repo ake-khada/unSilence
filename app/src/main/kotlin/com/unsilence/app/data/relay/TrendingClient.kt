@@ -267,20 +267,34 @@ private class NetworkTrendingTransport(
     }
 
     override suspend fun warmCountRelay() {
-        relayPool.connectAndAwait(
-            listOf(ANTIPRIMAL_RELAY_URL),
-            timeoutMs = 3_000,
-            forceEvict = true,
-        )
+        coroutineScope {
+            FOLLOWER_COUNT_RELAY_URLS.map { relayUrl ->
+                async {
+                    relayPool.connectAndAwait(
+                        listOf(relayUrl),
+                        timeoutMs = 3_000,
+                        forceEvict = true,
+                    )
+                }
+            }.awaitAll()
+        }
     }
 
-    override suspend fun fetchFollowerCount(pubkey: String): Long? =
-        relayPool.sendCount(
-            relayUrl = ANTIPRIMAL_RELAY_URL,
-            filter = buildJsonObject {
-                put("kinds", buildJsonArray { add(JsonPrimitive(3)) })
-                put("#p", buildJsonArray { add(JsonPrimitive(pubkey)) })
-            },
-            timeoutMs = 2_500L,
-        )?.takeUnless(Nip45CountResult::limited)?.count
+    override suspend fun fetchFollowerCount(pubkey: String): Long? {
+        val filter = buildJsonObject {
+            put("kinds", buildJsonArray { add(JsonPrimitive(3)) })
+            put("#p", buildJsonArray { add(JsonPrimitive(pubkey)) })
+        }
+        return coroutineScope {
+            FOLLOWER_COUNT_RELAY_URLS.map { relayUrl ->
+                async {
+                    relayPool.sendCount(
+                        relayUrl = relayUrl,
+                        filter = filter,
+                        timeoutMs = 2_500L,
+                    )
+                }
+            }.awaitAll()
+        }.let(::maxFollowerCount)
+    }
 }
