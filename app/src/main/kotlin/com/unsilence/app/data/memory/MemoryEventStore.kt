@@ -4818,10 +4818,12 @@ class MemoryEventStore @Inject constructor(
 
     fun followsFlow(pubkey: String): Flow<Set<String>> =
         _followsSignal.map { getFollows(pubkey) ?: emptySet() }
+            .distinctUntilChanged()
             .flowOn(Dispatchers.Default)
 
     fun followersFlow(pubkey: String): Flow<Set<String>> =
         _followsSignal.map { followersOf(pubkey) }
+            .distinctUntilChanged()
             .flowOn(Dispatchers.Default)
 
     fun profileFlow(pubkey: String): Flow<NostrEvent?> =

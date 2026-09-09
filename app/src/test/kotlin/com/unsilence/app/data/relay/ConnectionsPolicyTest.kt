@@ -8,6 +8,13 @@ import org.junit.Test
 
 class ConnectionsPolicyTest {
     @Test
+    fun `follower discovery retains count relay redundancy`() {
+        assertTrue(FOLLOWER_INDEX_RELAY_URLS.containsAll(FOLLOWER_COUNT_RELAY_URLS))
+        assertTrue("wss://purplepag.es" in FOLLOWER_INDEX_RELAY_URLS)
+        assertTrue("wss://user.kindpag.es" in FOLLOWER_INDEX_RELAY_URLS)
+    }
+
+    @Test
     fun `latest contact list wins and removes stale follower after unfollow`() {
         val subject = "subject"
         val events = listOf(
@@ -43,6 +50,40 @@ class ConnectionsPolicyTest {
         assertEquals(99L, nextFollowersCursor(100L))
         assertEquals(0L, nextFollowersCursor(1L))
         assertNull(nextFollowersCursor(0L))
+    }
+
+    @Test
+    fun `partial follower refresh only surfaces failure without usable rows`() {
+        assertTrue(shouldSurfaceFollowerLoadFailure(fetchCompleted = false, hasFollowers = false))
+        assertFalse(shouldSurfaceFollowerLoadFailure(fetchCompleted = false, hasFollowers = true))
+        assertFalse(shouldSurfaceFollowerLoadFailure(fetchCompleted = true, hasFollowers = false))
+    }
+
+    @Test
+    fun `no index and no known followers is unknown`() {
+        assertEquals(FollowerCount.Unknown, reconciledFollowerCount(null, 0))
+    }
+
+    @Test
+    fun `known followers without an index are a lower bound`() {
+        assertEquals(FollowerCount.AtLeast(3L), reconciledFollowerCount(null, 3))
+    }
+
+    @Test
+    fun `index consistent with known followers remains indexed`() {
+        assertEquals(FollowerCount.Indexed(5L), reconciledFollowerCount(5L, 3))
+        assertEquals(FollowerCount.Indexed(3L), reconciledFollowerCount(3L, 3))
+    }
+
+    @Test
+    fun `known followers above the index expose the proven lower bound`() {
+        assertEquals(FollowerCount.AtLeast(3L), reconciledFollowerCount(1L, 3))
+    }
+
+    @Test
+    fun `lower bound formatting uses raw digits without approximate rounding`() {
+        assertEquals("340+", formatFollowerCount(FollowerCount.AtLeast(340L)))
+        assertFalse(formatFollowerCount(FollowerCount.AtLeast(340L)).contains("~"))
     }
 
     @Test

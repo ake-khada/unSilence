@@ -35,6 +35,34 @@ internal fun followsViewer(follows: Set<String>?, viewerPubkey: String?): Boolea
 internal fun nextFollowersCursor(oldestCreatedAt: Long): Long? =
     oldestCreatedAt.takeIf { it > 0L }?.minus(1L)?.coerceAtLeast(0L)
 
+internal fun shouldSurfaceFollowerLoadFailure(
+    fetchCompleted: Boolean,
+    hasFollowers: Boolean,
+): Boolean = !fetchCompleted && !hasFollowers
+
+/**
+ * Preserves the distinction between an indexed estimate and a locally proven lower bound.
+ * Indexed values may use approximate display rounding; [FollowerCount.AtLeast] values must use
+ * raw digits because rounding upward would assert a floor the local contact lists do not prove.
+ */
+internal sealed interface FollowerCount {
+    data object Unknown : FollowerCount
+
+    data class Indexed(val value: Long) : FollowerCount
+
+    data class AtLeast(val value: Long) : FollowerCount
+}
+
+internal fun reconciledFollowerCount(indexedCount: Long?, knownFollowers: Int): FollowerCount {
+    val knownCount = knownFollowers.coerceAtLeast(0).toLong()
+    return when {
+        indexedCount == null && knownCount == 0L -> FollowerCount.Unknown
+        indexedCount == null -> FollowerCount.AtLeast(knownCount)
+        knownCount <= indexedCount -> FollowerCount.Indexed(indexedCount)
+        else -> FollowerCount.AtLeast(knownCount)
+    }
+}
+
 internal data class Nip45CountResult(
     val count: Long,
     val limited: Boolean,
@@ -69,4 +97,10 @@ internal fun formatFollowerCount(count: Long): String {
     val whole = hundredthsOfMillion / 100L
     val fraction = (hundredthsOfMillion % 100L).toString().padStart(2, '0').trimEnd('0')
     return if (fraction.isEmpty()) "~${whole}M" else "~$whole.${fraction}M"
+}
+
+internal fun formatFollowerCount(count: FollowerCount): String = when (count) {
+    FollowerCount.Unknown -> "—"
+    is FollowerCount.Indexed -> formatFollowerCount(count.value)
+    is FollowerCount.AtLeast -> "${count.value}+"
 }

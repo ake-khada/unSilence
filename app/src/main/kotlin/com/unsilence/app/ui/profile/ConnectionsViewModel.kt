@@ -6,11 +6,14 @@ import com.unsilence.app.data.auth.KeyManager
 import com.unsilence.app.data.memory.MemoryEventStore
 import com.unsilence.app.data.memory.UserEntity
 import com.unsilence.app.data.memory.WotLookup
+import com.unsilence.app.data.relay.FollowerCount
+import com.unsilence.app.data.relay.ProfilePipeline
+import com.unsilence.app.data.relay.RelayPool
 import com.unsilence.app.data.relay.WotHydrationCoalescer
 import com.unsilence.app.data.relay.followsViewer
 import com.unsilence.app.data.relay.nextFollowersCursor
-import com.unsilence.app.data.relay.ProfilePipeline
-import com.unsilence.app.data.relay.RelayPool
+import com.unsilence.app.data.relay.reconciledFollowerCount
+import com.unsilence.app.data.relay.shouldSurfaceFollowerLoadFailure
 import com.unsilence.app.data.relay.wotRank
 import com.unsilence.app.data.repository.UserRepository
 import dagger.hilt.android.lifecycle.HiltViewModel
@@ -37,7 +40,7 @@ data class ConnectionRow(
     val followsViewer: Boolean,
 )
 
-data class ConnectionsUiState(
+internal data class ConnectionsUiState(
     val subjectPubkey: String = "",
     val selectedTab: ConnectionsTab = ConnectionsTab.Following,
     val rows: List<ConnectionRow> = emptyList(),
@@ -45,7 +48,7 @@ data class ConnectionsUiState(
     val loadingMore: Boolean = false,
     val hasMoreFollowers: Boolean = true,
     val loadFailed: Boolean = false,
-    val followerCount: Long? = null,
+    val followerCount: FollowerCount = FollowerCount.Unknown,
 )
 
 private data class ConnectionMembership(
@@ -60,8 +63,7 @@ private data class ConnectionsLoading(
     val followers: Boolean,
     val moreFollowers: Boolean,
     val hasMoreFollowers: Boolean,
-    val failedTab: ConnectionsTab?,
-    val followerCount: Long?,
+    val indexedFollowerCount: Long?,
 )
 
 @HiltViewModel
@@ -82,8 +84,9 @@ class ConnectionsViewModel @Inject constructor(
     private val loadingFollowers = MutableStateFlow(false)
     private val loadingMoreFollowers = MutableStateFlow(false)
     private val hasMoreFollowers = MutableStateFlow(true)
-    private val failedTab = MutableStateFlow<ConnectionsTab?>(null)
-    private val followerCount = MutableStateFlow<Long?>(null)
+    private val followingFailed = MutableStateFlow(false)
+    private val followersFailed = MutableStateFlow(false)
+    private val indexedFollowerCount = MutableStateFlow<Long?>(null)
     private var followersCursor: Long? = null
     private var initializedKey: Pair<String, ConnectionsTab>? = null
     private val followerVerificationMutex = Mutex()
@@ -109,20 +112,24 @@ class ConnectionsViewModel @Inject constructor(
         loadingFollowers,
         loadingMoreFollowers,
         hasMoreFollowers,
-        followerCount,
+        indexedFollowerCount,
     ) { following, followers, moreFollowers, hasMore, count ->
-        ConnectionsLoading(following, followers, moreFollowers, hasMore, null, count)
+        ConnectionsLoading(
+            following = following,
+            followers = followers,
+            moreFollowers = moreFollowers,
+            hasMoreFollowers = hasMore,
+            indexedFollowerCount = count,
+        )
     }
 
-    private val loadingState = combine(baseLoadingState, failedTab) { loading, failed ->
-        loading.copy(failedTab = failed)
-    }
-
-    val uiState: StateFlow<ConnectionsUiState> = combine(
+    internal val uiState: StateFlow<ConnectionsUiState> = combine(
         membership,
         hydrationSignal,
-        loadingState,
-    ) { membership, _, loading ->
+        baseLoadingState,
+        followingFailed,
+        followersFailed,
+    ) { membership, _, loading, followingFailure, followersFailure ->
         val pubkeys = if (membership.tab == ConnectionsTab.Following) {
             membership.following
         } else {
@@ -152,8 +159,15 @@ class ConnectionsViewModel @Inject constructor(
             },
             loadingMore = loading.moreFollowers,
             hasMoreFollowers = loading.hasMoreFollowers,
-            loadFailed = loading.failedTab == membership.tab,
-            followerCount = loading.followerCount,
+            // Rows are authenticated MES state; a freshness failure must never hide them.
+            loadFailed = when (membership.tab) {
+                ConnectionsTab.Following -> followingFailure
+                ConnectionsTab.Followers -> followersFailure
+            } && rows.isEmpty(),
+            followerCount = reconciledFollowerCount(
+                indexedCount = loading.indexedFollowerCount,
+                knownFollowers = membership.followers.size,
+            ),
         )
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), ConnectionsUiState())
 
@@ -165,11 +179,11 @@ class ConnectionsViewModel @Inject constructor(
         selectedTab.value = initialTab
         followersCursor = null
         followerPubkeys.value = emptySet()
-        followerCount.value = null
+        indexedFollowerCount.value = null
         hasMoreFollowers.value = true
 
         viewModelScope.launch(Dispatchers.IO) {
-            followerCount.value = profilePipeline.fetchFollowerCount(pubkey)
+            indexedFollowerCount.value = profilePipeline.fetchFollowerCount(pubkey)
         }
 
         viewModelScope.launch {
@@ -179,12 +193,12 @@ class ConnectionsViewModel @Inject constructor(
             if (memoryEventStore.getFollows(pubkey) == null) {
                 loadingFollowing.value = true
                 try {
-                    failedTab.value = null
+                    followingFailed.value = false
                     check(relayPool.fetchLatestFollowLists(listOf(pubkey)))
                 } catch (cancelled: CancellationException) {
                     throw cancelled
                 } catch (_: Exception) {
-                    failedTab.value = ConnectionsTab.Following
+                    followingFailed.value = true
                 } finally {
                     loadingFollowing.value = false
                 }
@@ -220,7 +234,7 @@ class ConnectionsViewModel @Inject constructor(
         val subject = subjectPubkey.value.takeIf { it.isNotBlank() } ?: return
         if (loadingFollowers.value || loadingMoreFollowers.value || !hasMoreFollowers.value) return
         if (initial) loadingFollowers.value = true else loadingMoreFollowers.value = true
-        failedTab.value = null
+        followersFailed.value = false
         viewModelScope.launch(Dispatchers.IO) {
             try {
                 coroutineScope {
@@ -248,7 +262,13 @@ class ConnectionsViewModel @Inject constructor(
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (_: Exception) {
-                failedTab.value = ConnectionsTab.Followers
+                if (shouldSurfaceFollowerLoadFailure(
+                        fetchCompleted = false,
+                        hasFollowers = followerPubkeys.value.isNotEmpty(),
+                    )
+                ) {
+                    followersFailed.value = true
+                }
             } finally {
                 loadingFollowers.value = false
                 loadingMoreFollowers.value = false
@@ -261,14 +281,14 @@ class ConnectionsViewModel @Inject constructor(
             ConnectionsTab.Following -> {
                 val subject = subjectPubkey.value.takeIf { it.isNotBlank() } ?: return
                 loadingFollowing.value = true
-                failedTab.value = null
+                followingFailed.value = false
                 viewModelScope.launch(Dispatchers.IO) {
                     try {
                         check(relayPool.fetchLatestFollowLists(listOf(subject)))
                     } catch (cancelled: CancellationException) {
                         throw cancelled
                     } catch (_: Exception) {
-                        failedTab.value = ConnectionsTab.Following
+                        followingFailed.value = true
                     } finally {
                         loadingFollowing.value = false
                     }
@@ -285,11 +305,26 @@ class ConnectionsViewModel @Inject constructor(
                 followerPubkeys.value = emptySet()
                 return
             }
+            // Candidate contact lists have already passed EventProcessor verification.
+            // Publish them before the relay freshness pass so partial indexes remain useful.
+            followerPubkeys.value = candidates
+            requestVisibleRows(candidates.take(30))
+
             val changedCandidates = candidates.filter { author ->
                 memoryEventStore.getFollowsCreatedAt(author) != verifiedContactListVersions[author]
             }
-            if (changedCandidates.isNotEmpty()) {
-                check(relayPool.fetchLatestFollowLists(changedCandidates))
+            val freshnessComplete = if (changedCandidates.isEmpty()) {
+                true
+            } else {
+                try {
+                    relayPool.fetchLatestFollowLists(changedCandidates)
+                } catch (cancelled: CancellationException) {
+                    throw cancelled
+                } catch (_: Exception) {
+                    false
+                }
+            }
+            if (freshnessComplete) {
                 changedCandidates.forEach { author ->
                     memoryEventStore.getFollowsCreatedAt(author)?.let { createdAt ->
                         verifiedContactListVersions[author] = createdAt
@@ -298,6 +333,10 @@ class ConnectionsViewModel @Inject constructor(
             }
             val confirmed = memoryEventStore.followersOf(subject)
             followerPubkeys.value = confirmed
+            followersFailed.value = shouldSurfaceFollowerLoadFailure(
+                fetchCompleted = freshnessComplete,
+                hasFollowers = confirmed.isNotEmpty(),
+            )
             requestVisibleRows(confirmed.take(30))
         }
     }

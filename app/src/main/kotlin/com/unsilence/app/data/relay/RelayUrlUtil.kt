@@ -67,11 +67,17 @@ val FOLLOWER_COUNT_RELAY_URLS = listOf(
     "wss://relay.damus.io",
 )
 
-/** Broad kind-3 indexes used for follower candidate discovery and verification. */
+/**
+ * Redundant kind-3 discovery set: specialist indexes plus broad general relays.
+ * Unhealthy members remain cheap because the capability breaker skips them, while
+ * retaining the full set lets recovered relays contribute again automatically.
+ */
 val FOLLOWER_INDEX_RELAY_URLS = listOf(
     ANTIPRIMAL_RELAY_URL,
     "wss://purplepag.es",
     "wss://user.kindpag.es",
+    "wss://nos.lol",
+    "wss://relay.damus.io",
 )
 
 /** Hardcoded global relay defaults — single source of truth for fallbacks. */
