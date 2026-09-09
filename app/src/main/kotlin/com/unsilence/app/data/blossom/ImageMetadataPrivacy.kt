@@ -9,6 +9,15 @@ internal enum class OriginalImageMetadataMode {
     COPY,
 }
 
+/** Containers whose animation cannot survive the bitmap re-encode ladder. */
+internal fun preservesAnimationVerbatim(mimeType: String?): Boolean =
+    mimeType?.substringBefore(';')?.trim()?.equals("image/gif", ignoreCase = true) == true
+
+internal fun shouldUseOriginalImagePreparation(
+    maxDimension: Int,
+    mimeType: String?,
+): Boolean = maxDimension <= 0 || preservesAnimationVerbatim(mimeType)
+
 /**
  * ExifInterface can read more formats than it can safely rewrite. Keep this
  * decision explicit so a readable HEIF/AVIF is never mistaken for writable.
