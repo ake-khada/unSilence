@@ -113,6 +113,61 @@ class LeanNetworkPolicyTest {
     }
 
     @Test
+    fun `skipped indexes do not consume refresh slots or reduce author relay depth`() {
+        val writeRelays = (1..6).map { "wss://write-$it.example" }
+        val indexRelays = listOf(
+            "wss://dead-one.example",
+            "wss://dead-two.example",
+            "wss://index-one.example",
+            "wss://index-two.example",
+            "wss://index-three.example",
+        )
+        val availableIndexes = availableFollowRefreshIndexRelays(indexRelays) { "dead" in it }
+
+        val targets = followRefreshRelayTargets(
+            writeRelayUrls = writeRelays,
+            indexRelayUrls = availableIndexes,
+            limit = 8,
+        )
+
+        assertEquals(
+            listOf(
+                "wss://write-1.example",
+                "wss://write-2.example",
+                "wss://index-one.example",
+                "wss://index-two.example",
+                "wss://index-three.example",
+                "wss://write-3.example",
+                "wss://write-4.example",
+                "wss://write-5.example",
+            ),
+            targets,
+        )
+        assertEquals(5, targets.count { "write-" in it })
+        assertFalse(targets.any { "dead" in it })
+    }
+
+    @Test
+    fun `entirely skipped index set falls back to unfiltered indexes`() {
+        val indexRelays = listOf("wss://index-one.example", "wss://index-two.example")
+        val availableIndexes = availableFollowRefreshIndexRelays(indexRelays) { true }
+
+        assertEquals(indexRelays, availableIndexes)
+        assertEquals(
+            listOf(
+                "wss://write.example",
+                "wss://index-one.example",
+                "wss://index-two.example",
+            ),
+            followRefreshRelayTargets(
+                writeRelayUrls = listOf("wss://write.example"),
+                indexRelayUrls = availableIndexes,
+                limit = 4,
+            ),
+        )
+    }
+
+    @Test
     fun `follow refresh skips fresh success and throttles a recent failed attempt`() {
         val now = 100_000L
 

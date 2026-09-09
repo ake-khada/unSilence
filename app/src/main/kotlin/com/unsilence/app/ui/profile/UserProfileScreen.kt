@@ -567,7 +567,7 @@ fun UserProfileScreen(
                 ) {
                     StatLabel(
                         label = "Following",
-                        value = followingCount?.let { "$it" } ?: "—",
+                        value = followingCount?.toString() ?: "—",
                         onClick = { onConnectionsClick(ConnectionsTab.Following) },
                     )
                     Spacer(Modifier.size(Spacing.large))

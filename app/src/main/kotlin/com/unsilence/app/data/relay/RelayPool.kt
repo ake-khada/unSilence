@@ -186,6 +186,19 @@ internal fun followRefreshRelayTargets(
     return selected.take(limit)
 }
 
+/**
+ * Prevents relays already cooling down from consuming a bounded refresh slot.
+ * If every index is cooling down, retain the original set so timed backoff never
+ * becomes a permanent inability to refresh.
+ */
+internal fun availableFollowRefreshIndexRelays(
+    indexRelayUrls: Collection<String>,
+    shouldSkip: (String) -> Boolean,
+): List<String> {
+    val indexes = indexRelayUrls.mapNotNull(::normalizeRelayUrl).distinct()
+    return indexes.filterNot(shouldSkip).ifEmpty { indexes }
+}
+
 internal fun shouldRunFollowRefresh(
     forceRefresh: Boolean,
     nowMs: Long,
@@ -2185,9 +2198,14 @@ class RelayPool @Inject constructor(
 
             val mes = memoryEventStore.get()
             val declaredWriteRelays = mes.writeRelaysFor(pubkeyHex)
-            val targets = followRefreshRelayTargets(
-                writeRelayUrls = declaredWriteRelays,
+            val fetchWriteRelays = declaredWriteRelays.ifEmpty { GLOBAL_RELAY_URLS }
+            val availableIndexRelays = availableFollowRefreshIndexRelays(
                 indexRelayUrls = FOLLOWER_INDEX_RELAY_URLS,
+                shouldSkip = relayCapabilitiesStore::shouldSkip,
+            )
+            val targets = followRefreshRelayTargets(
+                writeRelayUrls = fetchWriteRelays,
+                indexRelayUrls = availableIndexRelays,
                 limit = MAX_FOLLOW_REFRESH_RELAYS,
             )
             if (targets.isEmpty()) return@withContext false
@@ -2239,9 +2257,13 @@ class RelayPool @Inject constructor(
         withContext(Dispatchers.IO) {
             val writeRelays = memoryEventStore.get().writeRelaysFor(pubkeyHex)
                 .ifEmpty { GLOBAL_RELAY_URLS }
+            val availableIndexRelays = availableFollowRefreshIndexRelays(
+                indexRelayUrls = FOLLOWER_INDEX_RELAY_URLS,
+                shouldSkip = relayCapabilitiesStore::shouldSkip,
+            )
             val targets = followRefreshRelayTargets(
                 writeRelayUrls = writeRelays,
-                indexRelayUrls = FOLLOWER_INDEX_RELAY_URLS,
+                indexRelayUrls = availableIndexRelays,
                 limit = MAX_PROFILE_METADATA_REFRESH_RELAYS,
             )
             if (targets.isEmpty()) return@withContext ProfileMetadataRefreshResult.UNAVAILABLE
@@ -2335,12 +2357,6 @@ class RelayPool @Inject constructor(
             }
             result
         }
-
-    /** Best-effort refresh; offline callers still receive the MES-known count. */
-    suspend fun fetchFollowingCount(pubkeyHex: String): Long? {
-        refreshFollowList(pubkeyHex)
-        return memoryEventStore.get().getFollows(pubkeyHex)?.size?.toLong()
-    }
 
     /**
      * Extract the subscription ID from an EOSE message without JSON parsing.
