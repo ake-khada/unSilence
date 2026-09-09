@@ -57,12 +57,8 @@ fun normalizeRelayUrl(raw: String): String? {
     return url
 }
 
-/** NIP-45 COUNT + WoT relay (antiprimal.net). */
-const val ANTIPRIMAL_RELAY_URL = "wss://antiprimal.net"
-
 /** Independent COUNT indexes. Results are approximate; callers take the maximum. */
 val FOLLOWER_COUNT_RELAY_URLS = listOf(
-    ANTIPRIMAL_RELAY_URL,
     "wss://nos.lol",
     "wss://relay.damus.io",
 )
@@ -73,7 +69,6 @@ val FOLLOWER_COUNT_RELAY_URLS = listOf(
  * retaining the full set lets recovered relays contribute again automatically.
  */
 val FOLLOWER_INDEX_RELAY_URLS = listOf(
-    ANTIPRIMAL_RELAY_URL,
     "wss://purplepag.es",
     "wss://user.kindpag.es",
     "wss://nos.lol",

@@ -17,7 +17,6 @@ import com.unsilence.app.data.memory.MuteList
 import com.unsilence.app.data.memory.normalizedMutedHashtags
 import com.unsilence.app.data.memory.WotLookup
 import com.unsilence.app.data.memory.ZapDetail
-import com.unsilence.app.data.relay.ANTIPRIMAL_RELAY_URL
 import com.unsilence.app.data.relay.FeedWotDisplayMode
 import com.unsilence.app.data.relay.ImpersonationRisk
 import com.unsilence.app.data.relay.ProtectedProfile
@@ -572,7 +571,6 @@ class SearchViewModel @Inject constructor(
             "wss://nostr.wine",
             "wss://relay.noswhere.com",
             "wss://search.nos.today",
-            ANTIPRIMAL_RELAY_URL,
         )
 
         /**

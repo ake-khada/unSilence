@@ -28,7 +28,6 @@ import com.unsilence.app.data.relay.WotProviderSource
 import com.unsilence.app.data.relay.TrendingClient
 import com.unsilence.app.data.relay.canMaterializeEmptyContactList
 import com.unsilence.app.data.relay.normalizeRelayUrl
-import com.unsilence.app.data.relay.ANTIPRIMAL_RELAY_URL
 import com.unsilence.app.data.relay.GLOBAL_RELAY_URLS
 import com.unsilence.app.data.relay.shouldSkipBootstrapWotFetch
 import com.unsilence.app.data.relay.wotProviderDescriptorFromPrefs
@@ -111,7 +110,6 @@ private val DEFAULT_SEARCH_URLS = listOf(
     "wss://nostr.wine",
     "wss://relay.noswhere.com",
     "wss://search.nos.today",
-    ANTIPRIMAL_RELAY_URL,
 )
 
 @Singleton
