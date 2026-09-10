@@ -468,7 +468,7 @@ fun ThreadScreen(
         canDelete = { row -> actionsViewModel.isOwnPubkey(row.pubkey) },
         onMuteUser = actionsViewModel::muteUser,
         onReport = { row, type -> actionsViewModel.reportEvent(row.id, row.pubkey, type) },
-        onDelete = { row -> actionsViewModel.deleteEvent(row.id, row.pubkey, row.relayUrl) },
+        onDelete = { row -> actionsViewModel.deleteEvent(row.id, row.pubkey) },
         eventModelProvider = actionsViewModel::getEventModel,
         relayProvenance = actionsViewModel::relayProvenance,
         onDismiss = { actionsRow = null },

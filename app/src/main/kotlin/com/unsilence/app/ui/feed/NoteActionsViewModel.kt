@@ -84,6 +84,9 @@ private const val CARD_WINDOW_REFERENCE_CAP = 4
 private const val CARD_WINDOW_ARTICLE_CAP = 2
 private const val CARD_WINDOW_ENGAGEMENT_LOOKAHEAD = 6
 private const val CARD_WINDOW_ENGAGEMENT_DEBOUNCE_MS = 250L
+private const val ENGAGEMENT_PUBLISH_MAX_OWN_WRITE = 4
+private const val ENGAGEMENT_PUBLISH_MAX_AUTHOR_READ = 4
+private const val ENGAGEMENT_PUBLISH_MAX_RELAYS = 8
 private const val ZAP_REQUEST_MAX_RELAYS = 6
 private const val ZAP_REQUEST_MAX_AUTHOR_WRITE_RELAYS = 4
 private const val ZAP_REQUEST_MAX_OWN_READ_RELAYS = 2
@@ -210,7 +213,6 @@ class NoteActionsViewModel @Inject constructor(
         validOptionIds: Set<String>,
         multipleChoice: Boolean,
         responseRelays: List<String>,
-        sourceRelay: String,
         endsAt: Long?,
     ) {
         viewModelScope.launch(Dispatchers.IO) {
@@ -237,7 +239,7 @@ class NoteActionsViewModel @Inject constructor(
             }
 
             val targets = responseRelays.mapNotNull(::normalizeRelayUrl).distinct().take(6)
-                .ifEmpty { engagementTargets(pollId, pollAuthorPubkey, sourceRelay) }
+                .ifEmpty { engagementTargets(pollAuthorPubkey) }
             relayPool.publish(toEventJson(signed), targets)
             memoryEventStore.insert(signedEventToNostrEvent(signed, rootId = pollId))
             snapshotScheduler.scheduleImmediate()
@@ -251,7 +253,6 @@ class NoteActionsViewModel @Inject constructor(
         validOptionIds = request.validOptionIds,
         multipleChoice = request.multipleChoice,
         responseRelays = request.responseRelays,
-        sourceRelay = request.sourceRelay,
         endsAt = request.endsAt,
     )
 
@@ -451,18 +452,23 @@ class NoteActionsViewModel @Inject constructor(
 
     // ── Public actions ────────────────────────────────────────────────────────
 
-    /** Outbox-correct target relays for publishing an engagement event (H20c) —
-     *  own write + target author's read/inbox + the event's seen relays + hints +
-     *  optional fallback; NEVER a broadcast. Falls back to GLOBAL only if empty. */
-    private fun engagementTargets(targetId: String, targetAuthor: String, fallbackHint: String?): List<String> {
+    /** Own outbox plus target-author inbox relays for engagement publishes. */
+    private fun engagementTargets(targetAuthor: String): List<String> {
         val own = pubkeyHex
         return engagementPublishRelays(
             ownWrite         = own?.let { memoryEventStore.writeRelaysFor(it) } ?: emptyList(),
             targetAuthorRead = memoryEventStore.readRelaysFor(targetAuthor),
-            eventSeen        = memoryEventStore.getNostrEvent(targetId)?.relaysSeen?.toList() ?: emptyList(),
-            relayHints       = memoryEventStore.relayHintsForEvent(targetId),
-            fallbackHint     = fallbackHint,
             blocked          = own?.let { memoryEventStore.getBlockedRelayUrls(it).toSet() } ?: emptySet(),
+        ).ifEmpty { GLOBAL_RELAY_URLS }
+    }
+
+    /** Own write relays for deleting an original event published through our outbox. */
+    private fun ownEventDeletionTargets(ownPubkey: String): List<String> {
+        val blocked = memoryEventStore.getBlockedRelayUrls(ownPubkey).toSet()
+        return normalizedPublishRelays(
+            relayUrls = memoryEventStore.writeRelaysFor(ownPubkey),
+            blocked = blocked,
+            maxRelays = Int.MAX_VALUE,
         ).ifEmpty { GLOBAL_RELAY_URLS }
     }
 
@@ -538,7 +544,7 @@ class NoteActionsViewModel @Inject constructor(
             memoryEventStore.insert(signedEventToNostrEvent(signed))
             snapshotScheduler.scheduleImmediate()
             if (addingDefaultReaction) clearPendingReactionWhenStored(eventId)
-            relayPool.publish(toEventJson(signed), engagementTargets(eventId, eventPubkey, null))
+            relayPool.publish(toEventJson(signed), engagementTargets(eventPubkey))
         }
     }
 
@@ -554,7 +560,7 @@ class NoteActionsViewModel @Inject constructor(
     fun repost(eventId: String, eventPubkey: String, eventRelayUrl: String) {
         viewModelScope.launch(Dispatchers.IO) {
             if (hasOwnRepostForTarget(eventId)) {
-                deleteOwnRepost(eventId, eventPubkey, eventRelayUrl)
+                deleteOwnRepost(eventId, eventPubkey)
                 return@launch
             }
             val nowSeconds = System.currentTimeMillis() / 1000L
@@ -601,7 +607,7 @@ class NoteActionsViewModel @Inject constructor(
             // Optimistic insert → MES actor-index updates → repostedEventIdsFlow re-emits
             memoryEventStore.insert(signedEventToNostrEvent(signed, rootId = eventId))
             snapshotScheduler.scheduleImmediate()
-            relayPool.publish(toEventJson(signed), engagementTargets(eventId, eventPubkey, relayHint))
+            relayPool.publish(toEventJson(signed), engagementTargets(eventPubkey))
         }
     }
 
@@ -613,7 +619,7 @@ class NoteActionsViewModel @Inject constructor(
         reportRepository.reportEvent(eventId, authorPubkey, type)
     }
 
-    fun deleteEvent(eventId: String, eventPubkey: String, eventRelayUrl: String?) {
+    fun deleteEvent(eventId: String, eventPubkey: String) {
         viewModelScope.launch(Dispatchers.IO) {
             val own = pubkeyHex
             if (own == null || own != eventPubkey) {
@@ -631,7 +637,7 @@ class NoteActionsViewModel @Inject constructor(
             }
             publishDeletionRequest(
                 deletedEvents = listOf(original),
-                relayTargets = engagementTargets(eventId, eventPubkey, eventRelayUrl),
+                relayTargets = ownEventDeletionTargets(own),
                 signingError = "Delete failed — signing rejected (check Amber permissions)",
             )
         }
@@ -651,7 +657,7 @@ class NoteActionsViewModel @Inject constructor(
         }
         publishDeletionRequest(
             deletedEvents = deletedEvents,
-            relayTargets = engagementTargets(eventId, eventPubkey, null),
+            relayTargets = engagementTargets(eventPubkey),
             signingError = "Unlike failed — signing rejected (check Amber permissions)",
         )
     }
@@ -663,7 +669,7 @@ class NoteActionsViewModel @Inject constructor(
         return targetKeys.any { memoryEventStore.reactionEventIdsForTarget(own, it).isNotEmpty() }
     }
 
-    private suspend fun deleteOwnRepost(eventId: String, eventPubkey: String, eventRelayUrl: String) {
+    private suspend fun deleteOwnRepost(eventId: String, eventPubkey: String) {
         val own = pubkeyHex ?: return
         val targetKeys = listOfNotNull(eventId, memoryEventStore.articleCoordForEvent(eventId)).distinct()
         val deletedEvents = targetKeys
@@ -675,13 +681,9 @@ class NoteActionsViewModel @Inject constructor(
             _actionError.tryEmit("Unboost failed — original repost not found")
             return
         }
-        val relayHint = memoryEventStore.getNostrEvent(eventId)
-            ?.relaysSeen
-            ?.firstOrNull { it.isNotBlank() }
-            ?: eventRelayUrl
         publishDeletionRequest(
             deletedEvents = deletedEvents,
-            relayTargets = engagementTargets(eventId, eventPubkey, relayHint),
+            relayTargets = engagementTargets(eventPubkey),
             signingError = "Unboost failed — signing rejected (check Amber permissions)",
         )
     }
@@ -1229,32 +1231,56 @@ internal fun buildRepostDescriptor(
 }
 
 /**
- * Target relay set for publishing an engagement event (reaction/repost) — the
- * outbox-correct destinations, NOT a broadcast to every open socket (H20c) and
- * NOT the read-path resolveEngagementRelays (that's for FETCHING engagement).
- * = own write + the target author's read/inbox + the event's seen relays + stored
- * hints + an optional UI fallback; normalized, blocked-filtered, deduped. Pure +
- * testable. The caller snapshots relaysSeen via .toList() before passing it
- * (it's a ConcurrentHashMap.newKeySet mutated on other threads).
+ * Target relay set for publishing a reaction/repost: the user's own NIP-65 write
+ * relays (their outbox) plus the target author's NIP-65 read relays (their inbox).
+ * Both buckets are required for durable own-client state and recipient delivery.
+ * Each bucket and the total are capped; event-seen relays and hints are deliberately
+ * excluded because their speculative union caused unbounded, unconfigured fan-out.
  */
 internal fun engagementPublishRelays(
     ownWrite: List<String>,
     targetAuthorRead: List<String>,
-    eventSeen: Collection<String>,
-    relayHints: Collection<String>,
-    fallbackHint: String?,
     blocked: Set<String>,
+    maxOwnWrite: Int = ENGAGEMENT_PUBLISH_MAX_OWN_WRITE,
+    maxAuthorRead: Int = ENGAGEMENT_PUBLISH_MAX_AUTHOR_READ,
+    maxRelays: Int = ENGAGEMENT_PUBLISH_MAX_RELAYS,
 ): List<String> {
+    if (maxRelays <= 0) return emptyList()
     val blockedNorm = blocked.mapNotNull { normalizeRelayUrl(it) }.toSet()
-    return buildList {
-        addAll(ownWrite)
-        addAll(targetAuthorRead)
-        addAll(eventSeen)
-        addAll(relayHints)
-        fallbackHint?.takeIf { it.isNotBlank() }?.let { add(it) }
-    }.mapNotNull { normalizeRelayUrl(it) }
-        .filter { it !in blockedNorm }
-        .distinct()
+    val result = ArrayList<String>(maxRelays.coerceAtMost(8))
+
+    fun append(urls: Iterable<String>, maxFromBucket: Int) {
+        if (maxFromBucket <= 0 || result.size >= maxRelays) return
+        var addedFromBucket = 0
+        for (raw in urls) {
+            if (addedFromBucket >= maxFromBucket || result.size >= maxRelays) break
+            val normalized = normalizeRelayUrl(raw) ?: continue
+            if (normalized in blockedNorm || normalized in result) continue
+            result += normalized
+            addedFromBucket++
+        }
+    }
+
+    append(ownWrite, maxOwnWrite)
+    append(targetAuthorRead, maxAuthorRead)
+    return result
+}
+
+private fun normalizedPublishRelays(
+    relayUrls: Iterable<String>,
+    blocked: Set<String>,
+    maxRelays: Int,
+): List<String> {
+    if (maxRelays <= 0) return emptyList()
+    val blockedNorm = blocked.mapNotNull { normalizeRelayUrl(it) }.toSet()
+    val result = ArrayList<String>(maxRelays.coerceAtMost(8))
+    for (raw in relayUrls) {
+        val normalized = normalizeRelayUrl(raw) ?: continue
+        if (normalized in blockedNorm || normalized in result) continue
+        result += normalized
+        if (result.size >= maxRelays) break
+    }
+    return result
 }
 
 /**
