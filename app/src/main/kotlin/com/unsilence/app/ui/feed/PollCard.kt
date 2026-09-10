@@ -73,7 +73,6 @@ data class PollVoteRequest(
     val validOptionIds: Set<String>,
     val multipleChoice: Boolean,
     val responseRelays: List<String>,
-    val sourceRelay: String,
     val endsAt: Long?,
 )
 
@@ -322,7 +321,6 @@ fun PollCard(
                             validOptionIds = optionIds,
                             multipleChoice = poll.multipleChoice,
                             responseRelays = poll.responseRelays,
-                            sourceRelay = sourceRelay,
                             endsAt = poll.endsAt,
                         ))
                     },
