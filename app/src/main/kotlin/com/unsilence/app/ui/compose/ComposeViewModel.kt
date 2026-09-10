@@ -26,6 +26,7 @@ import com.unsilence.app.data.drafts.DraftPoll
 import com.unsilence.app.data.drafts.DraftPollOption
 import com.unsilence.app.data.drafts.toBlob
 import com.unsilence.app.data.drafts.toDraftAttachment
+import com.unsilence.app.data.init.InitGate
 import com.unsilence.app.data.memory.CustomEmoji
 import com.unsilence.app.data.memory.MemoryEventStore
 import com.unsilence.app.data.memory.UserEntity
@@ -34,8 +35,10 @@ import com.unsilence.app.data.memory.NostrEvent
 import com.unsilence.app.data.model.EventModel
 import com.unsilence.app.data.model.resolveDisplayModel
 import com.unsilence.app.data.settings.SettingsStore
+import com.unsilence.app.data.relay.GLOBAL_RELAY_URLS
 import com.unsilence.app.data.relay.RelayPool
 import com.unsilence.app.data.relay.WotHydrationCoalescer
+import com.unsilence.app.data.relay.normalizeRelayUrl
 import com.unsilence.app.data.relay.sortMentionsByWotRank
 import com.unsilence.app.data.relay.toEventJson
 import com.unsilence.app.data.relay.wotLookupSnapshot
@@ -66,10 +69,27 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import javax.inject.Inject
 
 private const val TAG = "ComposeViewModel"
 private const val MENTION_SEARCH_RESULT_LIMIT = 50
+private const val PUBLISH_RELAY_READINESS_TIMEOUT_MS = 2_500L
+
+/**
+ * Resolves compose publish targets without leaking an unresolved outbox to default relays.
+ * A bounded-wait timeout may still use write relays already known from verified metadata.
+ */
+internal fun resolveComposePublishRelays(
+    configuredWriteRelays: List<String>,
+    relayListSettled: Boolean,
+    fallbackRelays: List<String>,
+): List<String> =
+    when {
+        configuredWriteRelays.isNotEmpty() -> configuredWriteRelays
+        relayListSettled -> fallbackRelays
+        else -> emptyList()
+    }
 
 internal class ComposeSessionGate(initialSessionKey: String? = null) {
     var activeSessionKey: String? = initialSessionKey
@@ -220,6 +240,7 @@ class ComposeViewModel @Inject constructor(
     private val wotHydrationCoalescer: WotHydrationCoalescer,
     private val imageCompressor: ImageCompressor,
     private val videoTranscoder: VideoTranscoder,
+    private val initGate: InitGate,
 ) : ViewModel() {
 
     private val restoredEditor = decodeComposeEditor(
@@ -1411,15 +1432,33 @@ class ComposeViewModel @Inject constructor(
         insertIntoMes: suspend () -> Unit,
     ) {
         val ownPk = pubkeyHex ?: ""
-        val writeRelays = memoryEventStore.writeRelaysFor(ownPk)
-            .mapNotNull { com.unsilence.app.data.relay.normalizeRelayUrl(it) }
-            .ifEmpty { com.unsilence.app.data.relay.GLOBAL_RELAY_URLS }
+        if (!initGate.relaysReady) {
+            withTimeoutOrNull(PUBLISH_RELAY_READINESS_TIMEOUT_MS) {
+                initGate.awaitRelays()
+            }
+        }
+        val relayListSettled = initGate.relaysReady
+        val writeRelays = resolveComposePublishRelays(
+            configuredWriteRelays = memoryEventStore.writeRelaysFor(ownPk)
+                .mapNotNull(::normalizeRelayUrl),
+            relayListSettled = relayListSettled,
+            fallbackRelays = GLOBAL_RELAY_URLS,
+        )
 
-        // H20 Commit 1 instrumentation: record the INTENDED outbox target set (own
-        // write relays). Contrast with RelayPool.publish()'s "actually-sent-to" line —
-        // publish broadcasts to every open socket, so a gap here exposes the
-        // outbox-model violation + bandwidth over-broadcast on record.
-        Log.w(TAG, "PUBLISH: event=$eventId targets=write$writeRelays (count=${writeRelays.size})")
+        // Record the intended outbox target set before RelayPool reports actual dispatch.
+        // The readiness bit distinguishes a configured empty list from a timed-out load.
+        Log.w(
+            TAG,
+            "PUBLISH: event=$eventId settled=$relayListSettled " +
+                "targets=write$writeRelays (count=${writeRelays.size})",
+        )
+        if (writeRelays.isEmpty()) {
+            _sendState.value = SendState.Failed(
+                reason = "Your relay list is still loading. Try again in a moment.",
+                confirmation = confirmation,
+            )
+            return
+        }
 
         // Enter Publishing state with all relays Pending
         val statusMap = ConcurrentHashMap<String, RelayPublishStatus>()
