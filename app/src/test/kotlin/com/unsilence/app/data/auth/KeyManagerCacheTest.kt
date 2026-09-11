@@ -21,7 +21,7 @@ class KeyManagerCacheTest {
     private val cacheField: Field = KeyManager::class.java
         .getDeclaredField("cachedPubKeyHex").apply { isAccessible = true }
 
-    private fun createKeyManager(): KeyManager {
+    private fun createKeyManager(commitSucceeds: Boolean = true): KeyManager {
         // Allocate without constructor via Java's internal Unsafe
         val unsafeClass = Class.forName("sun.misc.Unsafe")
         val theUnsafe = unsafeClass.getDeclaredField("theUnsafe").apply { isAccessible = true }.get(null)
@@ -31,7 +31,7 @@ class KeyManagerCacheTest {
         // Inject stub prefs via the lazy delegate field
         val prefsField = KeyManager::class.java.getDeclaredField("prefs\$delegate")
         prefsField.isAccessible = true
-        prefsField.set(km, lazy<SharedPreferences> { StubSharedPreferences() })
+        prefsField.set(km, lazy<SharedPreferences> { StubSharedPreferences(commitSucceeds) })
         return km
     }
 
@@ -63,6 +63,32 @@ class KeyManagerCacheTest {
         cacheField.set(km, "should-be-cleared")
         km.savePrivateKey("a".repeat(64))
         assertNull("Cache must be invalidated after savePrivateKey", cacheField.get(km))
+    }
+
+    @Test
+    fun `importKey reports success after preferences commit`() {
+        val km = createKeyManager()
+        val key = "a".repeat(64)
+
+        assertTrue(km.importKey(key))
+        assertEquals(key, km.getPrivateKeyHex())
+    }
+
+    @Test
+    fun `importKey reports failure when preferences commit fails`() {
+        val km = createKeyManager(commitSucceeds = false)
+
+        assertFalse(km.importKey("a".repeat(64)))
+    }
+
+    @Test
+    fun `invalid import leaves the stored key unchanged`() {
+        val km = createKeyManager()
+        val key = "a".repeat(64)
+        km.savePrivateKey(key)
+
+        assertFalse(km.importKey("not a private key"))
+        assertEquals(key, km.getPrivateKeyHex())
     }
 
     @Test
@@ -134,7 +160,7 @@ class KeyManagerCacheTest {
     }
 
     /** Minimal SharedPreferences stub — all reads return null/false/0. */
-    private class StubSharedPreferences : SharedPreferences {
+    private class StubSharedPreferences(private val commitSucceeds: Boolean) : SharedPreferences {
         private val data = mutableMapOf<String, Any?>()
         override fun getString(key: String?, defValue: String?) = data[key] as? String ?: defValue
         override fun contains(key: String?) = data.containsKey(key)
@@ -144,12 +170,15 @@ class KeyManagerCacheTest {
         override fun getFloat(key: String?, defValue: Float) = defValue
         override fun getBoolean(key: String?, defValue: Boolean) = data[key] as? Boolean ?: defValue
         override fun getStringSet(key: String?, dv: MutableSet<String>?) = dv
-        override fun edit(): SharedPreferences.Editor = StubEditor(data)
+        override fun edit(): SharedPreferences.Editor = StubEditor(data, commitSucceeds)
         override fun registerOnSharedPreferenceChangeListener(l: SharedPreferences.OnSharedPreferenceChangeListener?) {}
         override fun unregisterOnSharedPreferenceChangeListener(l: SharedPreferences.OnSharedPreferenceChangeListener?) {}
     }
 
-    private class StubEditor(private val data: MutableMap<String, Any?>) : SharedPreferences.Editor {
+    private class StubEditor(
+        private val data: MutableMap<String, Any?>,
+        private val commitSucceeds: Boolean,
+    ) : SharedPreferences.Editor {
         override fun putString(key: String?, value: String?) = apply { data[key!!] = value }
         override fun putStringSet(key: String?, values: MutableSet<String>?) = apply { data[key!!] = values }
         override fun putInt(key: String?, value: Int) = apply { data[key!!] = value }
@@ -158,7 +187,7 @@ class KeyManagerCacheTest {
         override fun putBoolean(key: String?, value: Boolean) = apply { data[key!!] = value }
         override fun remove(key: String?) = apply { data.remove(key) }
         override fun clear() = apply { data.clear() }
-        override fun commit() = true
+        override fun commit() = commitSucceeds
         override fun apply() {}
     }
 }

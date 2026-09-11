@@ -103,9 +103,9 @@ class KeyManager @Inject constructor(
 
     /**
      * Stores a private key (hex). Derives and caches nothing — pubkey is derived on demand.
-     * Overwrites any existing key.
+     * Overwrites any existing key; returns whether the encrypted preferences were committed.
      */
-    fun savePrivateKey(hexKey: String) {
+    fun savePrivateKey(hexKey: String): Boolean {
         require(isValidPrivateKeyScalar(hexKey)) {
             "Private key must be a valid 32-byte secp256k1 scalar"
         }
@@ -115,7 +115,7 @@ class KeyManager @Inject constructor(
         // the OLD Amber pubkey instead of deriving from this key. commit() (not
         // apply()) — bootstrap reads auth state immediately after and it must
         // survive process death.
-        prefs.edit()
+        return prefs.edit()
             .putString(KEY_PRIV_HEX, hexKey.lowercase())
             .remove(KEY_PUB_HEX)
             .remove(KEY_SIGNER_TYPE)
@@ -148,7 +148,7 @@ class KeyManager @Inject constructor(
 
     /**
      * Accepts either a 64-char hex private key or an nsec1… bech32 string.
-     * Returns true and saves on success; returns false if the input is unrecognisable.
+     * Returns true only after a valid key is committed; false for invalid input or a failed save.
      */
     fun importKey(input: String): Boolean {
         val trimmed = input.trim()
@@ -167,8 +167,7 @@ class KeyManager @Inject constructor(
         // value instead of trusting that implementation detail. The helper is
         // deliberately non-throwing for malformed decoder output.
         if (hexKey == null || !isValidPrivateKeyScalar(hexKey)) return false
-        savePrivateKey(hexKey)
-        return true
+        return savePrivateKey(hexKey)
     }
 
     /**
