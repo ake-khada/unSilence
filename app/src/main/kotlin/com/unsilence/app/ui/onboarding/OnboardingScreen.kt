@@ -42,9 +42,11 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalUriHandler
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -198,7 +200,7 @@ fun OnboardingScreen(keyManager: KeyManager, onComplete: () -> Unit) {
                     Text("Paste from clipboard", fontSize = AppType.body)
                 }
             } else {
-                // Show pasted key with send icon
+                // Confirm the paste without exposing key material.
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -208,7 +210,7 @@ fun OnboardingScreen(keyManager: KeyManager, onComplete: () -> Unit) {
                     horizontalArrangement = Arrangement.SpaceBetween,
                 ) {
                     Text(
-                        text       = importText,
+                        text       = "Key pasted \u2014 tap to import",
                         color      = White,
                         fontSize   = AppType.body,
                         maxLines   = 1,
@@ -217,10 +219,13 @@ fun OnboardingScreen(keyManager: KeyManager, onComplete: () -> Unit) {
                     )
                     IconButton(onClick = {
                         if (keyManager.importKey(importText)) {
+                            // Clear only after the key is persisted, before leaving onboarding.
+                            clipboardManager.setText(AnnotatedString(""))
+                            importText = ""
                             onComplete()
                         } else {
                             importText = ""
-                            importError = "Invalid key \u2014 copy an nsec1\u2026 or 64-char hex key"
+                            importError = "Invalid key or unable to save \u2014 retry with an nsec1\u2026 or 64-char hex key"
                         }
                     }) {
                         Icon(
@@ -239,7 +244,8 @@ fun OnboardingScreen(keyManager: KeyManager, onComplete: () -> Unit) {
                     text     = importError!!,
                     color    = Color(0xFFCF6679),
                     fontSize = AppType.caption,
-                    modifier = Modifier.padding(top = Spacing.micro),
+                    textAlign = TextAlign.Center,
+                    modifier = Modifier.fillMaxWidth().padding(top = Spacing.micro),
                 )
             }
         }
