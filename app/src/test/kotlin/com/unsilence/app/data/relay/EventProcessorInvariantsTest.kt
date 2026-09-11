@@ -204,27 +204,37 @@ class EventProcessorInvariantsTest {
         )
     }
 
-    // ── Test 4: Spam filter for kind 1 starting with "{" ────────────────────
+    // ── Test 4: Content retention and exact protocol filtering ─────────────
 
     @Test
-    fun `content starting with brace is filtered for kind 1`() = runTest {
-        // Spam: kind 1 with JSON content → rejected
-        val (spamRaw, spamRelay) = rawEvent(seed = 10, kind = 1, content = """{"spam":true}""")
-        processor.process(spamRaw, spamRelay)
+    fun `kind 1 prose beginning with a brace is stored unchanged`() = runTest {
+        val content = "{ my thoughts on nostr"
+        val (raw, relay) = rawEvent(seed = 10, content = content)
+
+        processor.process(raw, relay)
+        processor.drainForTest()
+
+        assertEquals(content, store.getNostrEvent(eventId(10))?.content)
+    }
+
+    @Test
+    fun `JSON notes are stored for the display policy to classify`() = runTest {
+        val jsonContent = """{"spam":true}"""
+        val (jsonRaw, jsonRelay) = rawEvent(seed = 10, kind = 1, content = jsonContent)
+        processor.process(jsonRaw, jsonRelay)
 
         // Control: kind 1 with normal text → accepted
         val (normalRaw, normalRelay) = rawEvent(seed = 11, kind = 1, content = "normal post")
         processor.process(normalRaw, normalRelay)
 
-        // Control: kind 0 with JSON content → accepted (spam filter is kind-1 only)
+        // Control: kind 0 profile JSON still reaches the store.
         val (profileRaw, profileRelay) = rawEvent(seed = 12, kind = 0, content = """{"name":"alice"}""")
         processor.process(profileRaw, profileRelay)
 
         processor.drainForTest()
 
-        // Spam event rejected
-        val spamEvents = store.eventsByIds(setOf(eventId(10)))
-        assertTrue("Spam event should be rejected", spamEvents.isEmpty())
+        // JSON classification must not irreversibly remove notes at ingestion.
+        assertEquals(jsonContent, store.getNostrEvent(eventId(10))?.content)
 
         // Normal kind-1 accepted
         val normalEvents = store.eventsByIds(setOf(eventId(11)))
@@ -233,6 +243,19 @@ class EventProcessorInvariantsTest {
         // Kind-0 profile with JSON accepted
         val profileEvents = store.eventsByIds(setOf(eventId(12)))
         assertEquals("Kind-0 profile with JSON content should be stored", 1, profileEvents.size)
+    }
+
+    @Test
+    fun `xitchat broadcast marker remains filtered only for kind 1`() = runTest {
+        val content = "xitchat-broadcast-v1-payload"
+        val (noteRaw, relay) = rawEvent(seed = 13, content = content)
+        val (articleRaw, _) = rawEvent(seed = 14, kind = 30023, content = content)
+        processor.process(noteRaw, relay)
+        processor.process(articleRaw, relay)
+        processor.drainForTest()
+
+        assertNull(store.getNostrEvent(eventId(13)))
+        assertEquals(content, store.getNostrEvent(eventId(14))?.content)
     }
 
     // ── Test 5: Kind 3 updates follows via direct path (NOT channeled) ─────
