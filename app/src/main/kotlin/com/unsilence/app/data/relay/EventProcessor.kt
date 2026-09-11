@@ -419,11 +419,9 @@ class EventProcessor @Inject constructor(
             ?.getOrNull(1)?.toLongOrNull()
         if (expiration != null && expiration < nowSeconds) return
 
-        // Skip machine-generated spam: JSON payloads and broadcast protocols
-        // posted as kind-1 notes. Normal notes are always plain text/markdown.
-        if (nostrEvent.kind == 1 &&
-            (nostrEvent.content.startsWith("{") || nostrEvent.content.startsWith("xitchat-broadcast-v1-"))
-        ) return
+        // Reject the explicit broadcast protocol marker, not brace-prefixed prose.
+        // JSON artifact filtering belongs to the reversible display policy.
+        if (nostrEvent.kind == 1 && nostrEvent.content.startsWith("xitchat-broadcast-v1-")) return
 
         // 5 replays bounded deletion tombstones; 10040 retries owner discovery.
         // MES enforces deletion authorship and registry staleness on every pass.

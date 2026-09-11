@@ -19,6 +19,7 @@ class GlobalFeedPolicyTest {
         assertTrue(isJsonArtifact("  \n {" + "\"type\":\"bridge\"}" + " \t"))
 
         assertFalse(isJsonArtifact("""{"type":"bridge"} human note"""))
+        assertFalse(isJsonArtifact("{ my thoughts on nostr"))
         assertFalse(isJsonArtifact("A human note with {braces} in it"))
         assertFalse(isJsonArtifact(""))
         assertFalse(isJsonArtifact("   \n\t"))
