@@ -7,8 +7,9 @@ import com.unsilence.app.data.memory.MemoryEventStore
 import com.unsilence.app.data.memory.NostrEvent
 import com.unsilence.app.data.memory.WotLookup
 import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
@@ -44,7 +45,7 @@ class EventProcessorInvariantsTest {
     }
 
     @Before
-    fun setUp() {
+    fun setUp() = runBlocking {
         store = MemoryEventStore(object : MuteKeyProvider {}, stubTimelineServiceProvider())
         processor = EventProcessor(store, SignatureVerifier())
         processor.setTestVerifier(passVerifier)

@@ -59,12 +59,13 @@ private const val VERIFIED_CACHE_TRIM = 256
  *  3. SINGLE VERIFIED ENVELOPE — Subscription receives the same decoded,
  *     id-checked, Schnorr-verified NostrEvent that feeds MES.
  *
- *  4. PRIORITY LANES — two channels:
+ *  4. PRIORITY LANES — three channels:
  *       HOT  (cap 500): feed content, including all NIP-71 video kinds, flushed every 100 ms.
  *       COLD (cap 500): kinds 0, 7, 9735           — background data, flushed every 2 s.
+ *       CONTROL (cap 2000): deletions and control-plane state, flushed every 150 ms.
  *
  *  5. BATCHED WRITES — drainer coroutines collect from their channel, then call
- *     MemoryEventStore.insert() for deduplicated batches.
+ *     MemoryEventStore.insertBatch() for deduplicated batches.
  *
  *  6. WRITE COALESCING — before each flush, duplicates are removed by primary key so
  *     that one event arriving from 5 relays produces exactly one insert.
@@ -98,15 +99,18 @@ class EventProcessor @Inject constructor(
 
     // ── Testing support ──────────────────────────────────────────────────────
 
-    // Stops drainers and switches scope. Tests call drainForTest() instead of
-    // relying on the infinite drainer loops (which don't terminate in test dispatchers).
-    internal fun setTestScope(testScope: CoroutineScope) {
+    // Await cancelled drainers before switching scope: a lingering receive can
+    // otherwise steal the test's first queued event. Tests can then start() the
+    // real drainers, or use drainForTest() for synchronous routing tests.
+    internal suspend fun setTestScope(testScope: CoroutineScope) {
+        val previousDrainers = drainerJob
         stop()
+        previousDrainers?.join()
         scope = testScope
     }
 
     /**
-     * Drain both channels and flush once. Tests call this after process()
+     * Drain all channels and flush once. Tests call this after process()
      * to push events through the channel→flushBatch→MemoryEventStore path
      * without needing the infinite drainer loops.
      */
@@ -206,22 +210,20 @@ class EventProcessor @Inject constructor(
 
     /** HOT lane: feed content, including all NIP-71 video kinds. Flushed every 100 ms.
      *  Capacity 500: initial load from 19 relays × 500 limit = up to 9 500 kind 1 events
-     *  can burst in before the first drain. trySend drops silently, so we size generously. */
+     *  can burst in before the first drain. Failed enqueues release dedup for a later copy. */
     private val hotChannel  = Channel<NostrEvent>(capacity = 500)
 
     /** COLD lane: background data (kind 0, 7, 9735). Flushed every 2 s. */
     private val coldChannel = Channel<NostrEvent>(capacity = 500)
 
-    /** CONTROL lane: control-plane kinds (10002, 10006, 10007, 10012, 10040,
+    /** CONTROL lane: deletions (5) and control-plane kinds (10002, 10006, 10007, 10012, 10040,
      *  30002, 30166, 30382, 30385). Flushed every 150 ms via [MemoryEventStore.insertBatch]
-     *  so signal bumps coalesce — a 1000-event monitor burst produces ONE
-     *  _relayMonitorSignal bump instead of 1000.
+     *  so signal bumps coalesce within each batch of up to 500 events.
      *
      *  Capacity 2000 sized for the largest observed burst (1175 kind-30166
      *  monitor events from a single fetchRelayMonitors call) plus headroom
-     *  for parallel kind-10002 fetches (≤300 follows). trySend drops silently
-     *  if the drainer can't keep up; control-plane events are re-fetched on
-     *  next bootstrap. */
+     *  for parallel kind-10002 fetches (≤300 follows). Failed enqueues release
+     *  dedup so a later copy can retry without blocking relay consumption. */
     private val controlChannel = Channel<NostrEvent>(capacity = 2000)
 
     private var drainerJob: Job? = null
@@ -332,7 +334,10 @@ class EventProcessor @Inject constructor(
         if (!verifySig(event)) return
         val trustedEvent = event.withParsedRepostMetadata()
 
-        val canonical = verifiedEvents.putIfAbsent(trustedEvent.id, trustedEvent) ?: trustedEvent
+        // Deletions replay bounded tombstones; retaining their arbitrary payloads
+        // here would undo MES's derived-only retention policy. Verify every arrival.
+        val canonical = if (trustedEvent.kind == 5) trustedEvent
+        else verifiedEvents.putIfAbsent(trustedEvent.id, trustedEvent) ?: trustedEvent
         trimVerifiedCacheIfNeeded()
         val relayed = canonical.forRelay(relayUrl)
         if (subscriptionId != null) {
@@ -420,9 +425,9 @@ class EventProcessor @Inject constructor(
             (nostrEvent.content.startsWith("{") || nostrEvent.content.startsWith("xitchat-broadcast-v1-"))
         ) return
 
-        // 10040 intentionally bypasses seenIds; MES handles own-pubkey and
-        // created_at staleness, and duplicate 10040s are rare.
-        if (nostrEvent.kind != 10040) {
+        // 5 replays bounded deletion tombstones; 10040 retries owner discovery.
+        // MES enforces deletion authorship and registry staleness on every pass.
+        if (nostrEvent.kind != 5 && nostrEvent.kind != 10040) {
             if (seenIds.putIfAbsent(nostrEvent.id, Unit) != null) {
                 memoryEventStore.addRelaySeen(nostrEvent.id, nostrEvent.relayUrl)
                 return
@@ -437,7 +442,7 @@ class EventProcessor @Inject constructor(
             Log.d(TAG, "Kind-3 direct path: pubkey=${nostrEvent.pubkey.take(8)}… $followCount follows (createdAt=${nostrEvent.createdAt})")
         }
         // Control-plane events → CONTROL channel (separate lane, batched).
-        // 10002 for outbox prefetch, 10006/10007/10012/10063/30002 for relay config
+        // 5 for deletions, 10002 for outbox prefetch, 10006/10007/10012/10063/30002 for relay config
         // UI, 10040 for NIP-85 provider registry, 30382 for user WoT assertions,
         // 30385 for relay trust scores, 30166 for relay monitors (hundreds arrive
         // in burst — capacity-2000 channel handles the largest observed burst).
@@ -445,11 +450,11 @@ class EventProcessor @Inject constructor(
         // Kind-10012 relay set refs are resolved inside flushControlBatch.
         val isControlKind = when (nostrEvent.kind) {
             30382 -> memoryEventStore.isActiveWotProvider(nostrEvent.pubkey)
-            10000, 10002, 10006, 10007, 10012, 10030, 10040, 10063, 30002, 30030, 30166, 30385 -> true
+            5, 10000, 10002, 10006, 10007, 10012, 10030, 10040, 10063, 30002, 30030, 30166, 30385 -> true
             else -> false
         }
         if (isControlKind) {
-            controlChannel.trySend(nostrEvent)
+            enqueue(controlChannel, nostrEvent)
         }
 
         // ── Priority lanes ───────────────────────────────────────────────────
@@ -465,9 +470,15 @@ class EventProcessor @Inject constructor(
             val isHot = nostrEvent.kind == 1 || nostrEvent.kind == 6 || nostrEvent.kind == 16 || nostrEvent.kind == 20 ||
                 nostrEvent.kind == 21 || nostrEvent.kind == 22 || nostrEvent.kind == 34235 || nostrEvent.kind == 34236 ||
                 nostrEvent.kind == 1068 || nostrEvent.kind == 30023 || nostrEvent.kind == 1111
-            // trySend is non-suspending: drops if full rather than blocking relay consumption.
-            // Channels are sized so drops are extremely rare under realistic Nostr traffic.
-            if (isHot) hotChannel.trySend(nostrEvent) else coldChannel.trySend(nostrEvent)
+            enqueue(if (isHot) hotChannel else coldChannel, nostrEvent)
+        }
+    }
+
+    /** Never block relay reads or retain a dedup reservation for a failed enqueue. */
+    private fun enqueue(channel: Channel<NostrEvent>, event: NostrEvent) {
+        if (channel.trySend(event).isFailure) {
+            seenIds.remove(event.id)
+            Log.w(TAG, "Enqueue failed: kind=${event.kind} id=${event.id.take(8)}; dedup released for retry")
         }
     }
 
@@ -485,10 +496,9 @@ class EventProcessor @Inject constructor(
             if (first != null) {
                 buffer.add(first)
                 // Drain any already-queued items without blocking (non-suspending)
-                var next = hotChannel.tryReceive().getOrNull()
-                while (next != null && buffer.size < 100) {
+                while (buffer.size < 100) {
+                    val next = hotChannel.tryReceive().getOrNull() ?: break
                     buffer.add(next)
-                    next = hotChannel.tryReceive().getOrNull()
                 }
             }
             if (buffer.isNotEmpty()) {
@@ -508,10 +518,9 @@ class EventProcessor @Inject constructor(
             val first = withTimeoutOrNull(2_000L) { coldChannel.receive() }
             if (first != null) {
                 buffer.add(first)
-                var next = coldChannel.tryReceive().getOrNull()
-                while (next != null && buffer.size < 200) {
+                while (buffer.size < 200) {
+                    val next = coldChannel.tryReceive().getOrNull() ?: break
                     buffer.add(next)
-                    next = coldChannel.tryReceive().getOrNull()
                 }
             }
             if (buffer.isNotEmpty()) {
@@ -528,11 +537,11 @@ class EventProcessor @Inject constructor(
      * Coalesces signal bumps for kind-10002/10006/10007/10012/10040/30002/30166/
      * 30382/30385 bursts that previously hit MES one event at a time and bumped
      * _relayConfigSignal / _wotSignal / _trustScoreSignal / _relayMonitorSignal once per
-     * event. A 1175-event relay-monitor burst now produces one bump.
+     * event. Each batch of up to 500 events produces one bump per affected signal.
      *
      * Window of 150 ms is short enough that user-perceived latency for
      * kind-10002 outbox routing remains <200 ms, but long enough to let
-     * a 1000-event burst coalesce into a single batch.
+     * queued events coalesce into batches.
      */
     private suspend fun drainControl() {
         val buffer = ArrayDeque<NostrEvent>(500)
@@ -540,10 +549,9 @@ class EventProcessor @Inject constructor(
             val first = withTimeoutOrNull(150L) { controlChannel.receive() }
             if (first != null) {
                 buffer.add(first)
-                var next = controlChannel.tryReceive().getOrNull()
-                while (next != null && buffer.size < 500) {
+                while (buffer.size < 500) {
+                    val next = controlChannel.tryReceive().getOrNull() ?: break
                     buffer.add(next)
-                    next = controlChannel.tryReceive().getOrNull()
                 }
             }
             if (buffer.isNotEmpty()) {
