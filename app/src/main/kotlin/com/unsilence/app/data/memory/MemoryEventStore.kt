@@ -149,6 +149,14 @@ private const val MAX_FUTURE_DRIFT_SECONDS = 60L
 private const val EVICTION_SAFETY_SWEEP_INTERVAL = 5_000
 private const val WOT_ASSERTION_CAP = 5_000
 private const val WOT_ASSERTION_TRIM = 500
+internal const val DELETION_TOMBSTONE_CAP = 5_000
+internal const val DELETION_TOMBSTONE_TRIM = 500
+internal const val MAX_DELETION_TARGETS = 100
+internal const val MAX_DELETION_COORDINATE_CHARS = 1_024
+internal const val OWN_DELETION_HISTORY_CAP = 500
+internal const val OWN_DELETION_HISTORY_TRIM = 50
+internal const val OWN_DELETION_MAX_CHARS = 16 * 1024
+internal const val OWN_DELETION_MAX_TAG_FIELDS = 512
 private val CONTENT_KINDS = setOf(
     1, 6, 7, 1018, 1068, 9734, 9735, 16, 20, 21, 22, 34235, 34236, 30023, 1111,
 )
@@ -157,7 +165,8 @@ private val OWN_PROFILE_CONTENT_KINDS = PROFILE_NOTE_REPLY_EVENT_KIND_SET + 3002
 /** Max comments surfaced per article (bounds the rendered list + scan). */
 private const val ARTICLE_COMMENT_CAP = 200
 private val NOTIFICATION_KINDS = setOf(1, 6, 7, 1018, 9735, 16, 1111)
-private val DERIVED_ONLY_KINDS = setOf(30166, 30382)
+// Kind-5 keeps only tombstones plus a separate, bounded owner history for snapshots.
+private val DERIVED_ONLY_KINDS = setOf(5, 30166, 30382)
 private val COUNTED_NIP22_PARENT_KINDS = setOf(21, 22, 34235, 34236, 1111)
 
 /** Live-memory caps. Snapshot persistence has separate, lower bounds. */
@@ -807,14 +816,21 @@ class MemoryEventStore @Inject constructor(
     private val engagementCapped: MutableSet<String> = ConcurrentHashMap.newKeySet()
 
     private data class DeletionTombstone(val pubkey: String, val createdAt: Long)
+    // Event targets may be unknown: isolate each deletion signer's claim until
+    // the target arrives, so a non-author cannot overwrite the author's tombstone.
     private val deletedEventTombstones = ConcurrentHashMap<String, DeletionTombstone>()
+    // Address coordinates already contain the author, checked before insertion.
     private val deletedAddressableTombstones = ConcurrentHashMap<String, DeletionTombstone>()
+    private val ownDeletionHistory = ConcurrentHashMap<String, NostrEvent>()
 
     /** Set by AppBootstrapper after login — used as anchor for LRU eviction. */
     @Volatile var ownPubkey: String? = null
         set(value) {
-            if (field == value) return
-            field = value
+            synchronized(ownDeletionHistory) {
+                if (field == value) return
+                ownDeletionHistory.clear()
+                field = value
+            }
             privateZapPendingSignal.update { it + 1L }
         }
 
@@ -1409,7 +1425,7 @@ class MemoryEventStore @Inject constructor(
         if (event.kind in DERIVED_ONLY_KINDS) {
             return insertDerivedOnly(event, dirty)
         }
-        if (event.kind != 5 && isDeletedByTombstone(event)) return false
+        if (isDeletedByTombstone(event)) return false
 
         // 1. Dedup: putIfAbsent returns null if novel
         val existing = eventsById.putIfAbsent(event.id, event)
@@ -1485,7 +1501,6 @@ class MemoryEventStore @Inject constructor(
             3 -> handleFollows(event, dirty)
             6, 16 -> handleRepost(event, dirty)
             7 -> handleReaction(event, dirty)
-            5 -> handleDeletion(event, dirty)
             9734 -> handleZapRequest(event)
             10000 -> handleMuteList(event)
             10002 -> handleRelayList(event, dirty)
@@ -1510,6 +1525,11 @@ class MemoryEventStore @Inject constructor(
     private fun insertDerivedOnly(event: NostrEvent, dirty: InsertDirty): Boolean {
         pendingRelays.remove(event.id)
         return when (event.kind) {
+            5 -> {
+                handleDeletion(event, dirty)
+                retainOwnDeletion(event)
+                true
+            }
             30166 -> handleRelayMonitor(event, dirty)
             30382 -> handleWotAssertion(event, dirty)
             else -> false
@@ -1716,9 +1736,13 @@ class MemoryEventStore @Inject constructor(
         }
     }
 
+    /** A single request may affect at most [MAX_DELETION_TARGETS] event/address references. */
     private fun handleDeletion(event: NostrEvent, dirty: InsertDirty) {
+        var processedTargets = 0
         for (tag in event.tags) {
-            if (tag.size < 2) continue
+            if (processedTargets >= MAX_DELETION_TARGETS) break
+            if (tag.size < 2 || (tag[0] != "e" && tag[0] != "a")) continue
+            processedTargets++
             when (tag[0]) {
                 "e" -> deleteReferencedEvent(
                     eventId = tag[1],
@@ -1733,6 +1757,40 @@ class MemoryEventStore @Inject constructor(
                     dirty = dirty,
                 )
             }
+        }
+    }
+
+    /**
+     * Keep bounded own deletion history across restart, in the existing snapshot
+     * event section. Remote requests never enter raw-event or relay-hint indexes.
+     * Oversized own payloads still apply their bounded targets, but are not retained;
+     * never truncate signed fields and leave a now-invalid id/signature on the result.
+     */
+    private fun retainOwnDeletion(event: NostrEvent) {
+        if (event.pubkey != ownPubkey) return
+        var charsLeft = OWN_DELETION_MAX_CHARS - event.content.length -
+            event.id.length - event.pubkey.length - event.sig.length
+        if (charsLeft < 0) return
+        // Count lists and fields too: many empty strings must not evade the text bound.
+        var fieldsLeft = OWN_DELETION_MAX_TAG_FIELDS
+        for (tag in event.tags) {
+            if (--fieldsLeft < 0) return
+            for (field in tag) {
+                if (--fieldsLeft < 0) return
+                charsLeft -= field.length
+                if (charsLeft < 0) return
+            }
+        }
+        synchronized(ownDeletionHistory) {
+            if (event.pubkey != ownPubkey || ownDeletionHistory.containsKey(event.id)) return
+            ownDeletionHistory[event.id] = event.copy(
+                tags = event.tags.map { it.toList() },
+                relayUrl = "",
+                relaysSeen = ConcurrentHashMap.newKeySet(),
+            )
+            if (ownDeletionHistory.size <= OWN_DELETION_HISTORY_CAP) return
+            val oldest = ownDeletionHistory.values.sortedBy { it.createdAt }.take(OWN_DELETION_HISTORY_TRIM)
+            for (request in oldest) ownDeletionHistory.remove(request.id, request)
         }
     }
 
@@ -1842,7 +1900,7 @@ class MemoryEventStore @Inject constructor(
     }
 
     private fun isDeletedByTombstone(event: NostrEvent): Boolean {
-        val eventTombstone = deletedEventTombstones[event.id]
+        val eventTombstone = deletedEventTombstones["${event.id}:${event.pubkey}"]
         if (eventTombstone != null && eventTombstone.pubkey == event.pubkey) return true
         val coord = addressableCoordinate(event) ?: return false
         val addressableTombstone = deletedAddressableTombstones[coord]
@@ -1853,18 +1911,50 @@ class MemoryEventStore @Inject constructor(
 
     fun isDeleted(event: NostrEvent): Boolean = isDeletedByTombstone(event)
 
+    /**
+     * Best-effort suppression, bounded per map. Eviction may let a re-fetched event
+     * reappear until its deletion is received again; that is preferable to exhausting
+     * the heap. Remote tombstones are session-local; bounded own deletion history
+     * rebuilds the user's tombstones during snapshot restore.
+     *
+     * Serialize insert-and-trim so concurrent writers cannot bypass the cap. Reads
+     * remain lock-free, and the oldest-first scan runs only once per trim batch.
+     */
+    private fun recordDeletionTombstone(
+        tombstones: ConcurrentHashMap<String, DeletionTombstone>,
+        key: String,
+        pubkey: String,
+        createdAt: Long,
+    ) = synchronized(tombstones) {
+        val existing = tombstones[key]
+        // Replaying an older deletion must not weaken a newer address cutoff.
+        if (existing == null || existing.createdAt < createdAt) {
+            tombstones[key] = DeletionTombstone(pubkey, createdAt)
+        }
+        trimDeletionTombstonesIfNeeded(tombstones)
+    }
+
+    private fun trimDeletionTombstonesIfNeeded(tombstones: ConcurrentHashMap<String, DeletionTombstone>) {
+        if (tombstones.size <= DELETION_TOMBSTONE_CAP) return
+        val oldest = tombstones.entries.sortedBy { it.value.createdAt }.take(DELETION_TOMBSTONE_TRIM)
+        for (entry in oldest) tombstones.remove(entry.key, entry.value)
+    }
+
     private fun deleteReferencedAddressable(
         coordinate: String,
         deletionPubkey: String,
         deletionCreatedAt: Long,
         dirty: InsertDirty,
     ) {
+        if (coordinate.length > MAX_DELETION_COORDINATE_CHARS) return
         val parts = coordinate.split(":", limit = 3)
         if (parts.size < 3 || parts[1] != deletionPubkey) return
-        deletedAddressableTombstones[coordinate] = DeletionTombstone(deletionPubkey, deletionCreatedAt)
+        recordDeletionTombstone(deletedAddressableTombstones, coordinate, deletionPubkey, deletionCreatedAt)
 
         val storedKey = "${parts[1]}:${parts[0]}:${parts[2]}"
         val storedId = replaceableByCoordinate[storedKey] ?: articleIdByCoord[coordinate] ?: return
+        val stored = eventsById[storedId] ?: return
+        if (stored.createdAt > deletionCreatedAt) return
         deleteReferencedEvent(storedId, deletionPubkey, deletionCreatedAt, dirty)
     }
 
@@ -1874,13 +1964,15 @@ class MemoryEventStore @Inject constructor(
         deletionCreatedAt: Long,
         dirty: InsertDirty,
     ) {
+        // Wire event ids are 64-character hashes; never retain arbitrary-size tag text.
+        if (eventId.length > 64 || eventId.isBlank()) return
         val existing = eventsById[eventId]
         if (existing == null) {
-            deletedEventTombstones[eventId] = DeletionTombstone(deletionPubkey, deletionCreatedAt)
+            recordDeletionTombstone(deletedEventTombstones, "$eventId:$deletionPubkey", deletionPubkey, deletionCreatedAt)
             return
         }
         if (existing.kind == 5 || existing.pubkey != deletionPubkey) return
-        deletedEventTombstones[eventId] = DeletionTombstone(deletionPubkey, deletionCreatedAt)
+        recordDeletionTombstone(deletedEventTombstones, "$eventId:$deletionPubkey", deletionPubkey, deletionCreatedAt)
         deleteStoredEvent(existing, dirty)
     }
 
@@ -6011,11 +6103,16 @@ class MemoryEventStore @Inject constructor(
 
     // ─── Snapshot persistence ───────────────────────────────────────────────
 
+    /** Snapshot/test view of the bounded, signed owner history; no remote payloads. */
+    internal fun ownDeletionHistorySnapshot(owner: String?): List<NostrEvent> = synchronized(ownDeletionHistory) {
+        ownDeletionHistory.values.filter { it.pubkey == owner }
+    }
+
     private fun snapshotEventSelection(): SnapshotEventSelection {
         val own = ownPubkey
         val followed = own?.let { followsByPubkey[it] }.orEmpty()
         return selectSnapshotEventsForPersistence(
-            events = eventsById.values.toList(),
+            events = eventsById.values + ownDeletionHistorySnapshot(own),
             ownPubkey = own,
             followedPubkeys = followed,
             lastTouchedAt = lastTouchedAt,
@@ -7273,7 +7370,7 @@ class MemoryEventStore @Inject constructor(
             insertDerivedOnly(event, snapshotDirtySink)
             return
         }
-        if (event.kind != 5 && isDeletedByTombstone(event)) return
+        if (isDeletedByTombstone(event)) return
 
         eventsById[event.id] = event
         contentAdmissionIndex.track(
@@ -7326,7 +7423,6 @@ class MemoryEventStore @Inject constructor(
         val sink = snapshotDirtySink
         when (event.kind) {
             0 -> handleProfile(event)
-            5 -> handleDeletion(event, sink)
             3 -> handleFollows(event, sink)
             10000 -> handleMuteList(event)
             10002 -> handleRelayList(event, sink)
@@ -7559,6 +7655,7 @@ class MemoryEventStore @Inject constructor(
         repostEventIdsByActorTarget.clear()
         deletedEventTombstones.clear()
         deletedAddressableTombstones.clear()
+        synchronized(ownDeletionHistory) { ownDeletionHistory.clear() }
         actorAccessedAt.clear()
         _followsSignal.value++
         _actionSignal.value++
@@ -7628,6 +7725,7 @@ class MemoryEventStore @Inject constructor(
         repostEventIdsByActorTarget.clear()
         deletedEventTombstones.clear()
         deletedAddressableTombstones.clear()
+        synchronized(ownDeletionHistory) { ownDeletionHistory.clear() }
         actorAccessedAt.clear()
         engagementCapped.clear()
         profileAnchoredIds.clear()
