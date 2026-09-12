@@ -1,5 +1,10 @@
 package com.unsilence.app.data.relay
 
+import app.cash.turbine.test
+import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.test.runCurrent
+import kotlinx.coroutines.test.runTest
+import okhttp3.Protocol
 import okhttp3.Request
 import okhttp3.Response
 import okhttp3.WebSocket
@@ -20,7 +25,205 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicReference
 
+@OptIn(ExperimentalCoroutinesApi::class)
 class RelayPoolInvariantsTest {
+    @Test
+    fun `cold start publishes connecting and connected without a lifecycle refresh`() = runTest {
+        val fixture = RegistryFixture()
+        fixture.registry.connectionStates.test {
+            assertEquals(emptyMap<String, RelayState>(), awaitItem())
+
+            fixture.acquire()
+            assertEquals(mapOf(TEST_RELAY to RelayState.CONNECTING), awaitItem())
+
+            fixture.sockets.open(0)
+            assertEquals(mapOf(TEST_RELAY to RelayState.CONNECTED), awaitItem())
+            assertEquals(1, fixture.sockets.created.size)
+        }
+    }
+
+    @Test
+    fun `opening console after sockets connect reads their current states`() = runTest {
+        val fixture = RegistryFixture()
+        fixture.acquire()
+        fixture.sockets.open(0)
+
+        fixture.registry.connectionStates.test {
+            assertEquals(mapOf(TEST_RELAY to RelayState.CONNECTED), awaitItem())
+            assertEquals(1, fixture.sockets.created.size)
+        }
+    }
+
+    @Test
+    fun `failure and remote close update status independently of other sockets`() = runTest {
+        val fixture = RegistryFixture()
+        val otherRelay = "wss://other.example"
+        fixture.acquire()
+        fixture.acquire(otherRelay)
+        fixture.sockets.open(0)
+        fixture.sockets.open(1)
+
+        fixture.registry.connectionStates.test {
+            assertEquals(
+                mapOf(TEST_RELAY to RelayState.CONNECTED, otherRelay to RelayState.CONNECTED),
+                awaitItem(),
+            )
+            fixture.sockets.fail(0)
+            assertEquals(
+                mapOf(TEST_RELAY to RelayState.FAILED, otherRelay to RelayState.CONNECTED),
+                awaitItem(),
+            )
+            fixture.sockets.closeFromRelay(1)
+            assertEquals(
+                mapOf(TEST_RELAY to RelayState.FAILED, otherRelay to RelayState.DISCONNECTED),
+                awaitItem(),
+            )
+        }
+    }
+
+    @Test
+    fun `background close and foreground replacement remain observable`() = runTest {
+        val fixture = RegistryFixture()
+        val first = fixture.acquire()
+        fixture.sockets.open(0)
+
+        fixture.registry.connectionStates.test {
+            assertEquals(mapOf(TEST_RELAY to RelayState.CONNECTED), awaitItem())
+            first.close()
+            assertEquals(mapOf(TEST_RELAY to RelayState.DISCONNECTED), awaitItem())
+
+            val replacement = fixture.acquire()
+            assertNotSame(first, replacement)
+            assertEquals(mapOf(TEST_RELAY to RelayState.CONNECTING), awaitItem())
+            fixture.sockets.open(1)
+            assertEquals(mapOf(TEST_RELAY to RelayState.CONNECTED), awaitItem())
+
+            // OkHttp can finish old callbacks after the replacement has opened.
+            fixture.sockets.fail(0)
+            fixture.sockets.closeFromRelay(0)
+            runCurrent()
+            expectNoEvents()
+            assertSame(replacement, fixture.registry.connections[TEST_RELAY])
+        }
+    }
+
+    @Test
+    fun `removal cannot detach a replacement and removed callbacks stay absent`() = runTest {
+        val fixture = RegistryFixture()
+        val first = fixture.acquire()
+        fixture.sockets.fail(0)
+        val replacement = fixture.acquire()
+        fixture.sockets.open(1)
+
+        fixture.registry.connectionStates.test {
+            assertEquals(mapOf(TEST_RELAY to RelayState.CONNECTED), awaitItem())
+            assertNull(fixture.registry.remove(TEST_RELAY, first))
+            runCurrent()
+            expectNoEvents()
+
+            assertSame(replacement, fixture.registry.remove(TEST_RELAY, replacement))
+            assertTrue(fixture.registry.connections.isEmpty())
+            replacement.close()
+            assertEquals(emptyMap<String, RelayState>(), awaitItem())
+            fixture.sockets.open(0)
+            fixture.sockets.fail(1)
+            runCurrent()
+            expectNoEvents()
+        }
+    }
+
+    @Test
+    fun `unconditional removal publishes the remaining membership`() = runTest {
+        val fixture = RegistryFixture()
+        val first = fixture.acquire()
+        val otherRelay = "wss://other.example"
+        fixture.acquire(otherRelay)
+
+        fixture.registry.connectionStates.test {
+            assertEquals(2, awaitItem().size)
+            assertSame(first, fixture.registry.remove(TEST_RELAY))
+            assertEquals(mapOf(otherRelay to RelayState.CONNECTING), awaitItem())
+            assertNull(fixture.registry.remove(TEST_RELAY))
+            runCurrent()
+            expectNoEvents()
+        }
+    }
+
+    @Test
+    fun `teardown publishes empty before close and the next session starts fresh`() = runTest {
+        val fixture = RegistryFixture()
+        fixture.acquire()
+        fixture.acquire("wss://other.example")
+        fixture.sockets.open(0)
+        fixture.sockets.open(1)
+
+        fixture.registry.connectionStates.test {
+            assertEquals(2, awaitItem().size)
+            val detached = fixture.registry.clear()
+            assertEquals(2, detached.size)
+            assertTrue(fixture.registry.connections.isEmpty())
+            assertEquals(emptyMap<String, RelayState>(), awaitItem())
+            detached.forEach { it.close() }
+            fixture.sockets.fail(0)
+            runCurrent()
+            expectNoEvents()
+
+            fixture.acquire()
+            assertEquals(mapOf(TEST_RELAY to RelayState.CONNECTING), awaitItem())
+            fixture.sockets.open(2)
+            assertEquals(mapOf(TEST_RELAY to RelayState.CONNECTED), awaitItem())
+        }
+    }
+
+    @Test
+    fun `resubscribing after unobserved changes reads current sockets without reconnecting`() = runTest {
+        val fixture = RegistryFixture()
+        fixture.acquire()
+        fixture.sockets.open(0)
+        fixture.registry.connectionStates.test {
+            assertEquals(mapOf(TEST_RELAY to RelayState.CONNECTED), awaitItem())
+        }
+
+        fixture.sockets.fail(0)
+        fixture.acquire()
+        fixture.sockets.open(1)
+
+        fixture.registry.connectionStates.test {
+            assertEquals(mapOf(TEST_RELAY to RelayState.CONNECTED), awaitItem())
+            assertEquals(2, fixture.sockets.created.size)
+        }
+    }
+
+    @Test
+    fun `reusing a healthy socket neither reconnects nor republishes identical status`() = runTest {
+        val fixture = RegistryFixture()
+        val connection = fixture.acquire()
+        fixture.sockets.open(0)
+
+        fixture.registry.connectionStates.test {
+            assertEquals(mapOf(TEST_RELAY to RelayState.CONNECTED), awaitItem())
+            assertSame(connection, fixture.acquire())
+            runCurrent()
+            expectNoEvents()
+            assertEquals(1, fixture.sockets.created.size)
+        }
+    }
+
+    @Test
+    fun `ephemeral sockets never enter pooled status`() = runTest {
+        val fixture = RegistryFixture()
+        fixture.registry.connectionStates.test {
+            assertEquals(emptyMap<String, RelayState>(), awaitItem())
+            val ephemeral = RelayConnection("wss://ephemeral.example", fixture.sockets)
+            ephemeral.connect()
+            fixture.sockets.open(0)
+            runCurrent()
+            expectNoEvents()
+            assertTrue(fixture.registry.connections.isEmpty())
+            ephemeral.close()
+        }
+    }
+
     @Test
     fun `reference fetch kinds retain addressable NIP-71 targets`() {
         assertTrue(16 in EVENT_REFERENCE_FETCH_KINDS)
@@ -32,10 +235,10 @@ class RelayPoolInvariantsTest {
     @Test
     fun `concurrent reconnects to same relay become one WebSocket`() {
         val sockets = CountingWebSocketFactory()
-        val connections = ConcurrentHashMap<String, RelayConnection>()
-        val registry = RelayConnectionRegistry(connections, Any()) { url ->
+        val registry = RelayConnectionRegistry(Any()) { url ->
             RelayConnection(url, sockets)
         }
+        val connections = registry.connections
         val ready = CountDownLatch(10)
         val start = CountDownLatch(1)
         val done = CountDownLatch(10)
@@ -76,10 +279,10 @@ class RelayPoolInvariantsTest {
     @Test
     fun `stale replacement closes old socket and resets one-shot ownership`() {
         val sockets = CountingWebSocketFactory()
-        val connections = ConcurrentHashMap<String, RelayConnection>()
-        val registry = RelayConnectionRegistry(connections, Any()) { url ->
+        val registry = RelayConnectionRegistry(Any()) { url ->
             RelayConnection(url, sockets)
         }
+        val connections = registry.connections
         val counts = ConcurrentHashMap<String, AtomicInteger>()
         val queues = ConcurrentHashMap<String, ConcurrentLinkedQueue<String>>()
         val owners = ConcurrentHashMap<RelayOneShotOwnerKey, RelayConnection>()
@@ -234,6 +437,17 @@ class RelayPoolInvariantsTest {
         assertEquals(1, evictionCalls)
     }
 
+    private class RegistryFixture {
+        val sockets = CountingWebSocketFactory()
+        val registry = RelayConnectionRegistry(Any()) { url -> RelayConnection(url, sockets) }
+
+        fun acquire(url: String = TEST_RELAY): RelayConnection = registry.acquire(
+            url,
+            transportAllowed = { true },
+            canCreateNew = { true },
+        )!!.connection
+    }
+
     private class CountingWebSocketFactory : WebSocket.Factory {
         val created = mutableListOf<FakeWebSocket>()
 
@@ -245,6 +459,24 @@ class RelayPoolInvariantsTest {
         fun fail(index: Int) {
             val socket = created[index]
             socket.listener.onFailure(socket, IOException("synthetic failure"), null)
+        }
+
+        @Synchronized
+        fun open(index: Int) {
+            val socket = created[index]
+            val response = Response.Builder()
+                .request(socket.request())
+                .protocol(Protocol.HTTP_1_1)
+                .code(101)
+                .message("Switching Protocols")
+                .build()
+            socket.listener.onOpen(socket, response)
+        }
+
+        @Synchronized
+        fun closeFromRelay(index: Int) {
+            val socket = created[index]
+            socket.listener.onClosed(socket, 1000, "normal close")
         }
     }
 
