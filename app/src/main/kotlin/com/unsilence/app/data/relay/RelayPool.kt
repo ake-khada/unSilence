@@ -10,6 +10,7 @@ import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
@@ -455,13 +456,12 @@ class RelayPool @Inject constructor(
     // inbound message processing.
     private val wsDispatcher = Dispatchers.IO.limitedParallelism(8)
     private val scope = CoroutineScope(SupervisorJob() + wsDispatcher)
-    private val connections = ConcurrentHashMap<String, RelayConnection>()
     private val socketLifecycleLock = Any()
     private val connectionRegistry = RelayConnectionRegistry(
-        connections = connections,
         lifecycleLock = socketLifecycleLock,
         createConnection = relayConnectionFactory::create,
     )
+    private val connections get() = connectionRegistry.connections
     private val socketTransportSuspended = AtomicBoolean(false)
 
     /** Relay URLs deferred during network-down/DNS-degraded. Drained with jitter
@@ -573,7 +573,6 @@ class RelayPool @Inject constructor(
             pooled.forEach { it.close() }
             ephemeral.forEach { it.close() }
         }
-        updateConnectionStates()
         Log.d(TAG, "Background socket suspend: pooled=${pooled.size} ephemeral=${ephemeral.size}")
     }
 
@@ -909,7 +908,7 @@ class RelayPool @Inject constructor(
         url: String,
         clearPurposes: Boolean = false,
     ): RelayConnection? = synchronized(socketLifecycleLock) {
-        val removed = connections.remove(url) ?: return@synchronized null
+        val removed = connectionRegistry.remove(url) ?: return@synchronized null
         resetConnectionScopedState(url)
         connectionLastActivity.remove(url)
         if (clearPurposes) connectionPurposes.remove(url)
@@ -921,7 +920,7 @@ class RelayPool @Inject constructor(
         expected: RelayConnection,
         clearPurposes: Boolean = false,
     ): RelayConnection? = synchronized(socketLifecycleLock) {
-        if (!connections.remove(url, expected)) return@synchronized null
+        if (connectionRegistry.remove(url, expected) == null) return@synchronized null
         resetConnectionScopedState(url)
         connectionLastActivity.remove(url)
         if (clearPurposes) connectionPurposes.remove(url)
@@ -1344,8 +1343,7 @@ class RelayPool @Inject constructor(
         }
     }
 
-    private val _connectionStates = MutableStateFlow<Map<String, RelayState>>(emptyMap())
-    val connectionStates: StateFlow<Map<String, RelayState>> get() = _connectionStates.asStateFlow()
+    val connectionStates: Flow<Map<String, RelayState>> get() = connectionRegistry.connectionStates
 
     /** Emits (token, eventId) pairs for events arriving on search-notes-* subscriptions. */
     private val _searchResults = MutableSharedFlow<SearchResult>(extraBufferCapacity = 256)
@@ -1387,10 +1385,6 @@ class RelayPool @Inject constructor(
     /** True when a relay has been marked auth-unavailable this session. */
     override fun isAuthUnavailable(url: String): Boolean =
         normalizeRelayUrl(url)?.let { it in authUnavailableRelays } ?: false
-
-    private fun updateConnectionStates() {
-        _connectionStates.value = connections.mapValues { it.value.state.value }
-    }
 
     /** Clear transient caches. Called on logout. */
     fun clearCaches() {
@@ -5405,7 +5399,6 @@ class RelayPool @Inject constructor(
                     // A WebSocket open is not proof of recovery. Preserve/increase the
                     // backoff if it flaps, and reset only after a healthy connection window.
                     reconnectAttempts[url] = (attempt + 1).coerceAtMost(8)
-                    updateConnectionStates()
                     _onRelayReconnected.tryEmit(url)
                     // Resend persistent own-mute-live subscription if this relay carries it
                     if (url in liveMuteSubRelays) {
@@ -5680,9 +5673,8 @@ class RelayPool @Inject constructor(
         // Map-before-close: snapshot then clear under the same lock used by
         // send/install/remove so no one-shot can attach during teardown.
         val (snapshot, ephemeralSnapshot) = synchronized(socketLifecycleLock) {
-            val pooled = ArrayList(connections.values)
+            val pooled = connectionRegistry.clear()
             val ephemeral = ArrayList(activeEphemeralConnections)
-            connections.clear()
             connectionPurposes.clear()
             profileFetchAttempted.clear()
             hintedProfileFetchAttempted.clear()

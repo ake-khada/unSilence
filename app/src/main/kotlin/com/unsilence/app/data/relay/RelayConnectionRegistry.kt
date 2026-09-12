@@ -1,5 +1,12 @@
 package com.unsilence.app.data.relay
 
+import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.flatMapLatest
+import kotlinx.coroutines.flow.flowOf
 import okhttp3.OkHttpClient
 import java.util.concurrent.ConcurrentHashMap
 import javax.inject.Inject
@@ -28,7 +35,7 @@ internal data class RelayConnectionClaim(
 )
 
 /**
- * Owns the atomic install-or-reuse decision for pooled relay connections.
+ * Owns pooled membership, including atomic install/reuse, removal and teardown.
  *
  * A candidate is moved to CONNECTING before the map publishes it, so a second
  * caller can never mistake a just-installed channel for a stale DISCONNECTED
@@ -36,10 +43,30 @@ internal data class RelayConnectionClaim(
  * creation and the pooled-map update are one lifecycle operation.
  */
 internal class RelayConnectionRegistry(
-    internal val connections: ConcurrentHashMap<String, RelayConnection>,
     private val lifecycleLock: Any,
     private val createConnection: (String) -> RelayConnection,
 ) {
+    private val pooled = ConcurrentHashMap<String, RelayConnection>()
+    val connections: Map<String, RelayConnection> get() = pooled
+    private val membership = MutableStateFlow<List<RelayConnection>>(emptyList())
+
+    /**
+     * Derive status from the current sockets, never from a lifecycle-refreshed cache.
+     * Collection is demand-driven; membership changes cancel the previous observers,
+     * so late callbacks from a removed/replaced socket cannot change its successor.
+     * Ephemeral sockets are not registry members and are deliberately excluded.
+     */
+    @OptIn(ExperimentalCoroutinesApi::class)
+    val connectionStates: Flow<Map<String, RelayState>> = membership.flatMapLatest { snapshot ->
+        if (snapshot.isEmpty()) {
+            flowOf(emptyMap())
+        } else {
+            combine(snapshot.map { it.state }) { states ->
+                snapshot.indices.associate { index -> snapshot[index].url to states[index] }
+            }
+        }
+    }.distinctUntilChanged()
+
     fun acquire(
         url: String,
         transportAllowed: () -> Boolean,
@@ -50,12 +77,12 @@ internal class RelayConnectionRegistry(
 
         // Capacity policy may evict another URL, so evaluate it outside the
         // ConcurrentHashMap mapping function (CHM forbids recursive updates).
-        val observed = connections[url]
+        val observed = pooled[url]
         val mayCreate = observed != null || canCreateNew()
 
         var installed = false
         var replaced: RelayConnection? = null
-        val selected = connections.compute(url) { _, existing ->
+        val selected = pooled.compute(url) { _, existing ->
             if (existing != null &&
                 (existing.state.value == RelayState.CONNECTED ||
                     existing.state.value == RelayState.CONNECTING)
@@ -81,7 +108,29 @@ internal class RelayConnectionRegistry(
 
         // Map-before-close: ConcurrentHashMap.compute has published the winner.
         // Closing afterward makes the old listener observe identity mismatch.
+        if (installed) membership.value = pooled.values.toList()
         replaced?.close()
         RelayConnectionClaim(selected, installed, replaced)
+    }
+
+    /** Detach before the caller closes the socket and clears its bookkeeping. */
+    fun remove(url: String, expected: RelayConnection? = null): RelayConnection? =
+        synchronized(lifecycleLock) {
+            val removed = if (expected == null) {
+                pooled.remove(url)
+            } else {
+                if (!pooled.remove(url, expected)) return@synchronized null
+                expected
+            } ?: return@synchronized null
+            membership.value = pooled.values.toList()
+            removed
+        }
+
+    /** Return detached sockets for map-before-close teardown by the owner. */
+    fun clear(): List<RelayConnection> = synchronized(lifecycleLock) {
+        val removed = pooled.values.toList()
+        pooled.clear()
+        membership.value = emptyList()
+        removed
     }
 }
