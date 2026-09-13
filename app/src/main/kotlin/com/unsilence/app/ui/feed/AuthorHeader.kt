@@ -46,7 +46,7 @@ import com.unsilence.app.ui.theme.TextSecondary
  * Avatar + display name + self-declared Nostr address + timestamp row.
  *
  * Tapping the avatar+name zone navigates to the author's profile.
- * Timestamp is a separate click zone that navigates to the note.
+ * Timestamp is a separate click zone that navigates to the note; null omits it.
  */
 @Composable
 internal fun AuthorHeader(
@@ -54,7 +54,7 @@ internal fun AuthorHeader(
     picture: String?,
     displayName: String?,
     nip05: String?,
-    createdAt: Long,
+    createdAt: Long?,
     onAuthorClick: (String) -> Unit,
     onNoteClick: () -> Unit,
     modifier: Modifier = Modifier,
@@ -154,7 +154,7 @@ internal fun AuthorHeader(
         WotFeedMetaTimestamp(
             lookup = wotLookup?.invoke(pubkey),
             mode = feedWotDisplayMode,
-            timestamp = relativeTime(createdAt),
+            timestamp = createdAt?.let(::relativeTime),
             modifier = Modifier.clickable { onNoteClick() },
         )
     }
@@ -169,7 +169,7 @@ private fun RepostAuthorHeader(
     reposterPubkey: String,
     reposterLabel: String,
     reposterPicture: String?,
-    createdAt: Long,
+    createdAt: Long?,
     onAuthorClick: (String) -> Unit,
     onNoteClick: () -> Unit,
     modifier: Modifier = Modifier,
@@ -235,7 +235,7 @@ private fun RepostAuthorHeader(
         WotFeedMetaTimestamp(
             lookup = wotLookup?.invoke(pubkey),
             mode = feedWotDisplayMode,
-            timestamp = relativeTime(createdAt),
+            timestamp = createdAt?.let(::relativeTime),
             modifier = Modifier.clickable { onNoteClick() },
         )
     }

@@ -4946,7 +4946,7 @@ class MemoryEventStoreInvariantsTest {
         val g = notifs[0] as NotificationRow.Grouped
         assertEquals("reaction", g.notifType)
         assertEquals("my-note", g.targetNoteId)
-        assertEquals("hello world", g.targetNoteContent)
+        assertEquals("hello world", store.getEventEntity(g.targetNoteId!!)?.content)
         assertEquals(1, g.people)
         assertEquals(otherPubkey, g.actors.single().pubkey)
     }
@@ -4965,8 +4965,7 @@ class MemoryEventStoreInvariantsTest {
         val s = notifs[0] as NotificationRow.Single
         assertEquals("reply", s.notifType)
         assertEquals("reply-1", s.targetNoteId)
-        assertEquals("nice post!", s.targetNoteContent)
-        assertEquals("original", s.parentNoteContent)
+        assertEquals("nice post!", store.getEventEntity(s.targetNoteId!!)?.content)
     }
 
     @Test
@@ -4983,7 +4982,7 @@ class MemoryEventStoreInvariantsTest {
         val g = notifs[0] as NotificationRow.Grouped
         assertEquals("repost", g.notifType)
         assertEquals("my-note", g.targetNoteId)
-        assertEquals("great content", g.targetNoteContent)
+        assertEquals("great content", store.getEventEntity(g.targetNoteId!!)?.content)
         assertEquals(otherPubkey, g.actors.single().pubkey)
     }
 
@@ -5012,7 +5011,7 @@ class MemoryEventStoreInvariantsTest {
         val s = notifs[0] as NotificationRow.Single
         assertEquals("mention", s.notifType)
         assertEquals("mention-1", s.targetNoteId)
-        assertEquals("hey @user check this", s.targetNoteContent)
+        assertEquals("hey @user check this", store.getEventEntity(s.targetNoteId!!)?.content)
     }
 
     @Test
@@ -5266,7 +5265,7 @@ class MemoryEventStoreInvariantsTest {
         assertEquals("poll_vote", row.notifType)
         assertEquals("vote-1", row.id)
         assertEquals("my-poll", row.targetNoteId)
-        assertEquals("Tea or coffee?", row.targetNoteContent)
+        assertEquals("Tea or coffee?", store.getEventEntity(row.targetNoteId!!)?.content)
         assertEquals(otherPubkey, row.actorPubkey)
     }
 

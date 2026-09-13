@@ -231,7 +231,7 @@ internal fun QuoteCard(
                     WotFeedMetaTimestamp(
                         lookup = surface.wotLookup?.invoke(displayPubkey),
                         mode = surface.feedWotDisplayMode,
-                        timestamp = relativeTime(displayCreatedAt),
+                        timestamp = if (surface.showTimestamps) relativeTime(displayCreatedAt) else null,
                         timestampColor = TextSecondary,
                     )
                 }

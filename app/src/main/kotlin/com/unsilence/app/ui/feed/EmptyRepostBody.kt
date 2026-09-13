@@ -116,7 +116,7 @@ fun EmptyRepostBody(
                     displayName = targetProfile?.displayName?.takeIf { it.isNotBlank() }
                         ?: targetProfile?.name?.takeIf { it.isNotBlank() && !looksLikeHexPubkey(it) },
                     nip05 = targetProfile?.nip05,
-                    createdAt = resolvedModel.createdAt,
+                    createdAt = resolvedModel.createdAt.takeIf { surface.showTimestamps },
                     onAuthorClick = actions.onAuthorClick,
                     onNoteClick = { actions.onNoteClick(resolvedModel.navigateId) },
                     lookupProfile = lookupProfile,

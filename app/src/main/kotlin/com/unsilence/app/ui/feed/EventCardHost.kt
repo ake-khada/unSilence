@@ -73,6 +73,8 @@ data class EventCardSurface(
     val feedWotDisplayMode: FeedWotDisplayMode,
     val onWotSubjectsVisible: (Collection<String>) -> Unit,
     val pollActions: PollActionCallbacks?,
+    /** Notifications own the activity time; their entire preview subtree omits content times. */
+    val showTimestamps: Boolean = true,
 )
 
 /**
@@ -156,6 +158,7 @@ internal fun NoteActionsViewModel.eventCardHost(
     feedWotDisplayMode: FeedWotDisplayMode,
     onWotSubjectsVisible: (Collection<String>) -> Unit,
     pollActions: PollActionCallbacks?,
+    showTimestamps: Boolean = true,
 ): EventCardHost = EventCardHost(
     actions = actions,
     services = eventCardServices(),
@@ -172,6 +175,7 @@ internal fun NoteActionsViewModel.eventCardHost(
         feedWotDisplayMode = feedWotDisplayMode,
         onWotSubjectsVisible = onWotSubjectsVisible,
         pollActions = pollActions,
+        showTimestamps = showTimestamps,
     ),
 )
 

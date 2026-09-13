@@ -3,17 +3,24 @@ package com.unsilence.app.ui.notifications
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.unsilence.app.data.auth.KeyManager
+import com.unsilence.app.data.memory.EventEntity
 import com.unsilence.app.data.memory.MemoryEventStore
 import com.unsilence.app.data.memory.NotificationRow
+import com.unsilence.app.data.memory.SensitiveContentMode
+import com.unsilence.app.data.memory.UserEntity
 import com.unsilence.app.data.memory.WotLookup
 import com.unsilence.app.data.relay.FeedWotDisplayMode
 import com.unsilence.app.data.relay.RelayPreferencesStore
 import com.unsilence.app.data.relay.WotHydrationCoalescer
 import com.unsilence.app.data.relay.wotLookupSnapshot
 import com.unsilence.app.data.repository.UserRepository
+import com.unsilence.app.ui.feed.EventReferenceTarget
+import com.unsilence.app.ui.shared.TimelineCardData
 import dagger.hilt.android.lifecycle.HiltViewModel
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
@@ -21,6 +28,7 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import javax.inject.Inject
 
 data class NotificationsUiState(
@@ -37,6 +45,7 @@ class NotificationsViewModel @Inject constructor(
     private val relayPreferencesStore: RelayPreferencesStore,
     private val userRepository: UserRepository,
     private val wotHydrationCoalescer: WotHydrationCoalescer,
+    private val timelineCardData: TimelineCardData,
 ) : ViewModel() {
 
     private val _uiState = MutableStateFlow(NotificationsUiState())
@@ -48,14 +57,58 @@ class NotificationsViewModel @Inject constructor(
     private val _hasNew = MutableStateFlow(false)
     val hasNewNotifications: StateFlow<Boolean> = _hasNew.asStateFlow()
     private val _wotSubjects = MutableStateFlow<Set<String>>(emptySet())
+    private val previewWotSubjects = MutableStateFlow<Set<String>>(emptySet())
     val wotLookups: StateFlow<Map<String, WotLookup>> =
-        combine(_wotSubjects, memoryEventStore.wotSignalFlow) { subjects, _ ->
-            wotLookupSnapshot(subjects, memoryEventStore::wotFor)
-        }.stateIn(viewModelScope, kotlinx.coroutines.flow.SharingStarted.WhileSubscribed(5_000), emptyMap())
+        combine(_wotSubjects, previewWotSubjects, memoryEventStore.wotSignalFlow) { subjects, previews, _ ->
+            wotLookupSnapshot(subjects + previews, memoryEventStore::wotFor)
+        }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyMap())
 
     val feedWotDisplayMode: StateFlow<FeedWotDisplayMode> =
         relayPreferencesStore.feedWotDisplayModeFlow()
-            .stateIn(viewModelScope, kotlinx.coroutines.flow.SharingStarted.Eagerly, FeedWotDisplayMode.NUMBERS)
+            .stateIn(viewModelScope, SharingStarted.Eagerly, FeedWotDisplayMode.NUMBERS)
+
+    val sensitiveMode = relayPreferencesStore.sensitiveContentModeFlow()
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), SensitiveContentMode.BLUR)
+
+    private val previewTargets = MutableStateFlow<List<String>>(emptyList())
+    internal val previews = notificationPreviews(
+        targets = previewTargets,
+        eventSignal = memoryEventStore.feedSignalFlow,
+        muteLists = memoryEventStore.ownMuteListFlow(),
+        eventProvider = memoryEventStore::getNostrEvent,
+        modelProvider = memoryEventStore::getOrParseEventModel,
+    ).stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyMap())
+
+    fun profileFlow(pubkey: String): StateFlow<UserEntity?> =
+        timelineCardData.profileFlow(pubkey, viewModelScope)
+
+    fun requestPreviewWotHydration(pubkeys: Collection<String>) {
+        // Embedded references can introduce authors too; retain only a small recent window.
+        previewWotSubjects.update { (it + pubkeys).toList().takeLast(NOTIFICATION_PREVIEW_WINDOW * 4).toSet() }
+        wotHydrationCoalescer.requestHydration(pubkeys)
+    }
+
+    internal fun setPreviewTargets(ids: List<String>) {
+        previewTargets.value = ids.distinct().take(NOTIFICATION_PREVIEW_WINDOW)
+    }
+
+    /** Existing asset warmer accepts FeedRows; take bounded snapshots off Main, never stats flows. */
+    internal suspend fun previewWarmRows(ids: List<String>) = withContext(Dispatchers.Default) {
+        memoryEventStore.feedRowsByIds(ids.take(NOTIFICATION_PREVIEW_WINDOW).toSet())
+    }
+
+    /** Screen-lifetime work only. Existing resolver owns relay selection, caching and misses. */
+    internal suspend fun loadPreviewTargets(
+        ids: List<String>,
+        lookup: suspend (EventReferenceTarget) -> EventEntity?,
+        onFinished: (String) -> Unit,
+    ) = resolveNotificationPreviews(
+        targets = ids,
+        eventProvider = memoryEventStore::getNostrEvent,
+        muteList = { keyManager.getPublicKeyHex()?.let(memoryEventStore::getMuteList) },
+        lookup = lookup,
+        onFinished = onFinished,
+    )
 
     /**
      * In-memory mirror of the DataStore lastSeen timestamp. Seeded once per

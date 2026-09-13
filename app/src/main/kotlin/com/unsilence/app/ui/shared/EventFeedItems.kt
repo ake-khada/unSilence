@@ -216,12 +216,9 @@ internal fun ThreadParentCard(
     videoOwnerId: String,
     modifier: Modifier,
 ) {
-    val actions = host.actions
     val services = host.services
-    val surface = host.surface
-    val lookupProfile: suspend (String) -> UserEntity? = { pubkey -> host.lookupProfile(pubkey) }
-    val sourceModel = remember(event.id) {
-        services.lookupModel(event.id) ?: runCatching {
+    val sourceModel = services.lookupModel(event.id) ?: remember(event) {
+        runCatching {
             ContentParser.parse(
                 id = event.id, pubkey = event.pubkey, kind = event.kind,
                 content = event.content, tagsJson = event.tags,
@@ -232,9 +229,27 @@ internal fun ThreadParentCard(
             )
         }.getOrNull()
     }
-    val model = remember(sourceModel, services.lookupModel) {
-        sourceModel?.resolveDisplayModel(modelProvider = services.lookupModel)
-    }
+    val model = sourceModel?.resolveDisplayModel(modelProvider = services.lookupModel)
+    EmbeddedEventCard(event, model, author, host, videoOwnerId, modifier)
+}
+
+/**
+ * Shared action-bar-free preview for embedded parents and notification targets.
+ * The caller supplies the resolved model; late arrivals are not remembered as null.
+ * Rich text, media and nested references continue through the canonical ContentFlow.
+ */
+@Composable
+internal fun EmbeddedEventCard(
+    event: EventEntity,
+    model: EventModel?,
+    author: UserEntity?,
+    host: EventCardHost,
+    videoOwnerId: String,
+    modifier: Modifier,
+) {
+    val actions = host.actions
+    val surface = host.surface
+    val lookupProfile: suspend (String) -> UserEntity? = { pubkey -> host.lookupProfile(pubkey) }
     val displayPubkey = model?.pubkey ?: event.pubkey
     val displayCreatedAt = model?.createdAt ?: event.createdAt
     val liveAuthor = collectProfileAsState(displayPubkey, surface.profileFlow)
@@ -257,7 +272,10 @@ internal fun ThreadParentCard(
             .padding(12.dp),
     ) {
         // Compact header: avatar + name + timestamp
-        Row(verticalAlignment = Alignment.CenterVertically) {
+        Row(
+            modifier = Modifier.clickable { actions.onAuthorClick(displayPubkey) },
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
             AvatarImage(
                 pubkey = displayPubkey,
                 picture = effectiveAuthor?.picture,
@@ -283,7 +301,7 @@ internal fun ThreadParentCard(
             WotFeedMetaTimestamp(
                 lookup = lookup,
                 mode = surface.feedWotDisplayMode,
-                timestamp = relativeTime(displayCreatedAt),
+                timestamp = if (surface.showTimestamps) relativeTime(displayCreatedAt) else null,
                 timestampColor = Color.White.copy(alpha = 0.4f),
             )
         }
@@ -301,6 +319,9 @@ internal fun ThreadParentCard(
                     role                = CardRole.Embedded,
                     host                = host,
                     videoOwnerId        = videoOwnerId,
+                    onOpenFullscreen    = if (surface.videoScope == null) {
+                        { actions.onNoteClick(model.navigateId) }
+                    } else null,
                     nestDepth           = 1,
                     knownLightningAddress = effectiveAuthor?.lud16,
                 )

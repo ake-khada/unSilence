@@ -154,8 +154,6 @@ class NotificationMuteProjectionTest {
         actorDisplayName = null,
         actorPicture = null,
         targetNoteId = id,
-        targetNoteContent = "reply",
-        parentNoteContent = "parent",
         createdAt = 100,
     )
 
@@ -169,7 +167,6 @@ class NotificationMuteProjectionTest {
     ) = NotificationRow.Grouped(
         notifType = notifType,
         targetNoteId = "target",
-        targetNoteContent = "target note",
         actors = actors,
         people = actors.size + anonymousCount,
         sumSats = actors.sumOf { it.sats } + anonymousSats,

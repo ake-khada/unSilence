@@ -5638,7 +5638,7 @@ class MemoryEventStore @Inject constructor(
                     var g = groups[gkey]
                     if (g == null) {
                         if (slots() >= cap) continue
-                        g = NotifGroupAcc(notifType, targetId, targetId?.let { eventsById[it]?.content } ?: "")
+                        g = NotifGroupAcc(notifType, targetId)
                         groups[gkey] = g
                     }
                     val sats = authenticatedZap?.sats ?: 0L
@@ -5752,8 +5752,6 @@ class MemoryEventStore @Inject constructor(
             actorDisplayName = fields["display_name"],
             actorPicture = fields["picture"],
             targetNoteId = pollId ?: event.id,
-            targetNoteContent = pollId?.let { eventsById[it]?.content } ?: event.content,
-            parentNoteContent = if (notifType == "reply") event.replyToId?.let { eventsById[it]?.content } ?: "" else "",
             createdAt = event.createdAt,
         )
     }
@@ -5767,7 +5765,6 @@ class MemoryEventStore @Inject constructor(
     private class NotifGroupAcc(
         private val notifType: String,
         private val targetNoteId: String?,
-        private val targetNoteContent: String,
     ) {
         private val actorsByPubkey = LinkedHashMap<String, NotificationActor>()
         private val reactionCounts = HashMap<ReactionContent, Int>()
@@ -5810,7 +5807,6 @@ class MemoryEventStore @Inject constructor(
             return NotificationRow.Grouped(
                 notifType = notifType,
                 targetNoteId = targetNoteId,
-                targetNoteContent = targetNoteContent,
                 actors = actors,
                 people = actors.size + anonymousCount,
                 sumSats = sumSats,
