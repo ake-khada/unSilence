@@ -145,6 +145,7 @@ internal fun ContentFlow(
                 // preview). Do NOT `continue` here.
                 if (runForInline.isNotEmpty()) InlineText(
                     segments      = runForInline,
+                    kind          = model.effectiveKind,
                     lookupProfile = lookupProfile,
                     onAuthorClick = actions.onAuthorClick,
                     onHashtagClick = actions.onHashtagClick,
@@ -320,6 +321,7 @@ internal fun ContentFlow(
                     val railColor = TextSecondary.copy(alpha = 0.5f)
                     InlineText(
                         segments      = seg.segments,
+                        kind          = model.effectiveKind,
                         lookupProfile = lookupProfile,
                         onAuthorClick = actions.onAuthorClick,
                         onHashtagClick = actions.onHashtagClick,

@@ -544,6 +544,7 @@ fun UserProfileScreen(
                 if (about != null) {
                     NostrRichText(
                         content       = about,
+                        kind          = 0, // Profile metadata stays plain; note syntax is kind-1/1111 only.
                         lookupProfile = actionsViewModel::lookupProfile,
                         onAuthorClick = interceptedAuthorClick,
                         onHashtagClick = onHashtagClick,

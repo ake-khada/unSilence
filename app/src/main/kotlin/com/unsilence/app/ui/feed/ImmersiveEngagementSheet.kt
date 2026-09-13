@@ -159,6 +159,7 @@ internal fun ImmersiveEngagementSheet(
                     )
                     InlineText(
                         segments = model.segments,
+                        kind = model.effectiveKind,
                         lookupProfile = lookupProfile,
                         onAuthorClick = host.actions.onAuthorClick,
                         onHashtagClick = host.actions.onHashtagClick,

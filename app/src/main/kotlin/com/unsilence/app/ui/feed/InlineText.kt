@@ -15,10 +15,11 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.Placeholder
 import androidx.compose.ui.text.PlaceholderVerticalAlign
-import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.TextLayoutResult
+import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.em
@@ -43,6 +44,8 @@ private const val MAX_INLINE_MENTION_PREFETCH = 8
  * Walks [Segment.Text], [Segment.MentionPubkey], [Segment.Link], and
  * [Segment.Hashtag] in order, building an AnnotatedString. Links render as
  * cyan clickable text. Hashtags render as BrandDeep tappable text.
+ * [kind] is the trusted effective kind; notes/comments receive bounded light
+ * formatting, including inside blockquotes and compact embedded surfaces.
  *
  * Non-text segments (Image, Video, YouTube, QuoteEvent, QuoteAddress)
  * are silently skipped — they render in their own composables.
@@ -50,6 +53,7 @@ private const val MAX_INLINE_MENTION_PREFETCH = 8
 @Composable
 internal fun InlineText(
     segments: List<Segment>,
+    kind: Int,
     lookupProfile: (suspend (String) -> UserEntity?)?,
     onAuthorClick: (String) -> Unit,
     onHashtagClick: (String) -> Unit,
@@ -85,8 +89,8 @@ internal fun InlineText(
 
     // No mentions AND no links AND no hashtags AND no custom emoji — plain Text (fast path)
     if (mentionPubkeys.isEmpty() && !hasLinks && !hasHashtags && customEmojis.isEmpty()) {
-        val plainText = remember(textSegments) {
-            textSegments.joinToString("") { (it as Segment.Text).text }
+        val plainText = remember(textSegments, kind) {
+            formatNoteText(AnnotatedString(textSegments.joinToString("") { (it as Segment.Text).text }), kind)
         }
         Text(
             text      = plainText,
@@ -116,7 +120,7 @@ internal fun InlineText(
         }
     }
 
-    val annotatedText = remember(textSegments, profileMap, onAuthorClick, onHashtagClick, customEmojis) {
+    val annotatedText = remember(textSegments, kind, profileMap, onAuthorClick, onHashtagClick, customEmojis) {
         buildAnnotatedString {
             for (segment in textSegments) {
                 when (segment) {
@@ -147,7 +151,7 @@ internal fun InlineText(
                     else -> { /* skip non-text segments */ }
                 }
             }
-        }
+        }.let { formatNoteText(it, kind) }
     }
 
     val emojiInlineContent = remember(customEmojis) {
