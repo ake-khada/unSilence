@@ -41,11 +41,12 @@ import com.unsilence.app.ui.theme.Text3
 import com.unsilence.app.ui.theme.TextSecondary
 import com.unsilence.app.ui.theme.Zap
 
+/** An optional content time alongside the independent grapevine signal. */
 @Composable
 fun WotFeedMetaTimestamp(
     lookup: WotLookup?,
     mode: FeedWotDisplayMode,
-    timestamp: String,
+    timestamp: String?,
     modifier: Modifier = Modifier,
     timestampColor: Color = TextSecondary,
 ) {
@@ -71,22 +72,26 @@ fun WotFeedMetaTimestamp(
                 maxLines = 1,
                 overflow = TextOverflow.Clip,
             )
+            if (timestamp != null) {
+                Text(
+                    text = " · ",
+                    color = Text3,
+                    fontSize = 10.5.sp,
+                    fontFamily = FontFamily.Monospace,
+                    maxLines = 1,
+                )
+            }
+        }
+        if (timestamp != null) {
             Text(
-                text = " · ",
-                color = Text3,
+                text = timestamp,
+                color = timestampColor,
                 fontSize = 10.5.sp,
                 fontFamily = FontFamily.Monospace,
                 maxLines = 1,
+                overflow = TextOverflow.Clip,
             )
         }
-        Text(
-            text = timestamp,
-            color = timestampColor,
-            fontSize = 10.5.sp,
-            fontFamily = FontFamily.Monospace,
-            maxLines = 1,
-            overflow = TextOverflow.Clip,
-        )
     }
 }
 

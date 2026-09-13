@@ -534,6 +534,9 @@ fun AppNavigation(
                     2    -> NotificationsScreen(
                         onNoteClick      = { eventId -> threadDestination = ThreadDestination(eventId) },
                         onProfileClick   = onAuthorClick,
+                        onHashtagClick   = onHashtagClick,
+                        onQuote          = { quoteNoteId = it },
+                        actionsViewModel = noteActionsVm,
                         staticTopPadding = staticTopPadding,
                         viewModel        = notifViewModel,
                     )

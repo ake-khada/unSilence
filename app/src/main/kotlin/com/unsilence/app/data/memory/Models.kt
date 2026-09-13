@@ -170,7 +170,8 @@ data class RelaySet(
  * A single notification item — in-memory notification representation.
  *
  * Built at scan time from eventsById + profile lookups.
- * Carries enough resolved data for the UI to render without additional lookups.
+ * Carries activity/actor data and stable content targets. Previews resolve their
+ * models from MES, rather than retaining stale, unformatted content snapshots here.
  */
 sealed interface NotificationRow {
     /** Stable key for LazyColumn. */
@@ -189,8 +190,6 @@ sealed interface NotificationRow {
         val actorDisplayName: String?,
         val actorPicture: String?,
         val targetNoteId: String?,
-        val targetNoteContent: String,
-        val parentNoteContent: String,
         val createdAt: Long,
     ) : NotificationRow {
         override val key get() = id
@@ -205,7 +204,6 @@ sealed interface NotificationRow {
     data class Grouped(
         val notifType: String,   // "reaction" | "repost" | "zap"
         val targetNoteId: String?,
-        val targetNoteContent: String,
         val actors: List<NotificationActor>,   // named, deduped by pubkey, recency-sorted
         val people: Int,                        // distinct named actors + anonymous zaps
         val sumSats: Long,                      // zaps

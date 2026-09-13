@@ -325,7 +325,7 @@ fun EventCard(
                 ?: (if (isRepost) null else row.displayName)
                 ?: "${model.pubkey.take(6)}…${model.pubkey.takeLast(4)}",
             nip05       = authorProfile?.nip05 ?: if (isRepost) null else row.authorNip05,
-            createdAt   = model.createdAt,
+            createdAt   = model.createdAt.takeIf { surface.showTimestamps },
             onAuthorClick = actions.onAuthorClick,
             onNoteClick = { actions.onNoteClick(model.navigateId) },
             lookupProfile = lookupProfile,
@@ -334,7 +334,7 @@ fun EventCard(
             feedWotDisplayMode = surface.feedWotDisplayMode,
             repostSourcePubkey = if (isRepost) model.sourcePubkey else null,
             repostSourceProfile = if (isRepost) sourceProfile else null,
-            repostSourceCreatedAt = repostTimestamp,
+            repostSourceCreatedAt = repostTimestamp.takeIf { surface.showTimestamps },
             referenceRepost = model.repost?.payload is RepostPayload.ReferenceOnly,
         )
 
@@ -559,7 +559,7 @@ private fun ArticleLayout(
                 ?: (if (isRepost) null else row.displayName)
                 ?: "${model.pubkey.take(6)}…${model.pubkey.takeLast(4)}",
             nip05       = articleAuthorProfile?.nip05 ?: if (isRepost) null else row.authorNip05,
-            createdAt   = model.createdAt,
+            createdAt   = model.createdAt.takeIf { surface.showTimestamps },
             onAuthorClick = actions.onAuthorClick,
             onNoteClick = { actions.onArticleClick(row) },
             lookupProfile = lookupProfile,
@@ -568,7 +568,7 @@ private fun ArticleLayout(
             feedWotDisplayMode = surface.feedWotDisplayMode,
             repostSourcePubkey = if (isRepost) model.sourcePubkey else null,
             repostSourceProfile = if (isRepost) sourceProfile else null,
-            repostSourceCreatedAt = repostTimestamp,
+            repostSourceCreatedAt = repostTimestamp.takeIf { surface.showTimestamps },
         )
 
         // Card body (grey background with rounded corners)

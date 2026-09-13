@@ -10,6 +10,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -60,8 +61,10 @@ import com.unsilence.app.ui.theme.Zap
  * mentions, likes, boosts, zaps — so the grouped and single layouts read as one
  * system (see notifications_grouped_hybrid_layout.html).
  *
- *   • Single  → 32dp avatar + corner type badge · "Name action · time" / 1-line text
- *   • Grouped → type icon → overlapping actor strip → time · "N verb · sats" / 1-line preview
+ *   • Single  → 32dp avatar + corner type badge · "Name action · time"
+ *   • Grouped → type icon → overlapping actor strip → time · "N verb · sats"
+ * The screen supplies the shared content card below this activity header. Raw
+ * notification snippets are never used as a second, unmoderated content renderer.
  */
 @Composable
 fun NotificationEventRow(
@@ -118,24 +121,6 @@ private fun NotificationPrimaryText(
     )
 }
 
-/** Target/preview text — same metrics, dim, always a single line. */
-@Composable
-private fun NotificationPreviewText(
-    text: String,
-    modifier: Modifier = Modifier,
-) {
-    Text(
-        text = text,
-        modifier = modifier,
-        color = TextSecondary.copy(alpha = 0.7f),
-        fontSize = AppType.bodySmall,
-        lineHeight = NotifLineHeight,
-        maxLines = 1,
-        overflow = TextOverflow.Ellipsis,
-        style = NotifTextStyle,
-    )
-}
-
 /** Right-edge timestamp — caption scale. */
 @Composable
 private fun NotificationTimestamp(
@@ -154,27 +139,6 @@ private fun NotificationTimestamp(
 }
 
 @Composable
-private fun NotificationPreviewWithTimestamp(
-    text: String,
-    createdAt: Long,
-    lookup: WotLookup? = null,
-    mode: FeedWotDisplayMode = FeedWotDisplayMode.OFF,
-    modifier: Modifier = Modifier,
-) {
-    Row(
-        modifier = modifier.fillMaxWidth(),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        NotificationPreviewText(
-            text = text,
-            modifier = Modifier.weight(1f),
-        )
-        Spacer(Modifier.width(Spacing.small))
-        NotificationTimestamp(createdAt, lookup = lookup, mode = mode)
-    }
-}
-
-@Composable
 private fun SingleNotificationRow(
     row: NotificationRow.Single,
     wotLookups: Map<String, WotLookup>,
@@ -182,8 +146,7 @@ private fun SingleNotificationRow(
     onNoteClick: (String) -> Unit,
     onProfileClick: (String) -> Unit,
 ) {
-    // Compact: 32dp avatar with a corner type badge, "Name action · time" on one
-    // line, then the reply/mention text on a single dim line — no grey box.
+    // Actor and action remain distinct from the content card's own author.
     val (badgeIcon, badgeTint, action) = when (row.notifType) {
         "reply" -> Triple(Icons.AutoMirrored.Filled.Chat, Brand, "replied")
         "poll_vote" -> Triple(Icons.Filled.HowToVote, Brand, "voted on your poll")
@@ -199,7 +162,7 @@ private fun SingleNotificationRow(
             .clickable(enabled = row.targetNoteId != null) {
                 row.targetNoteId?.let { onNoteClick(it) }
             }
-            .padding(horizontal = Spacing.medium, vertical = 7.dp),
+            .padding(horizontal = Spacing.medium, vertical = Spacing.small),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         // Avatar with a corner type badge — taps it open the actor's profile
@@ -230,44 +193,26 @@ private fun SingleNotificationRow(
 
         Spacer(Modifier.width(Spacing.small))
 
-        // Natural-height text block, centered against the avatar by the Row's
-        // CenterVertically + tight line heights → two lines land just inside the
-        // avatar height, aligned, without clipping.
-        Column(modifier = Modifier.weight(1f)) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                val lookup = wotLookups[row.actorPubkey]
-                NotificationPrimaryText(
-                    text = actorLabel,
-                    color = Color.White,
-                    fontWeight = FontWeight.SemiBold,
-                    modifier = Modifier.weight(1f, fill = false),
-                )
-                Spacer(Modifier.width(4.dp))
-                NotificationPrimaryText(text = action, color = TextSecondary)
-                if (row.targetNoteContent.isBlank()) {
-                    Spacer(Modifier.width(Spacing.small))
-                    NotificationTimestamp(row.createdAt, lookup = lookup, mode = feedWotDisplayMode)
-                }
-            }
-            if (row.targetNoteContent.isNotBlank()) {
-                NotificationPreviewWithTimestamp(
-                    text = row.targetNoteContent.trim(),
-                    createdAt = row.createdAt,
-                    lookup = wotLookups[row.actorPubkey],
-                    mode = feedWotDisplayMode,
-                )
-            }
+        Row(modifier = Modifier.weight(1f), verticalAlignment = Alignment.CenterVertically) {
+            NotificationPrimaryText(
+                text = actorLabel,
+                color = Color.White,
+                fontWeight = FontWeight.SemiBold,
+                modifier = Modifier.weight(1f, fill = false),
+            )
+            Spacer(Modifier.width(4.dp))
+            NotificationPrimaryText(text = action, color = TextSecondary)
         }
+        Spacer(Modifier.width(Spacing.small))
+        NotificationTimestamp(row.createdAt, lookup = wotLookups[row.actorPubkey], mode = feedWotDisplayMode)
     }
 }
 
 /**
- * Grouped reactions/reposts/zaps. Three-line rhythm matching the mockup:
+ * Grouped reactions/reposts/zaps retain their actor sheet and anonymous totals:
  *   1. type icon → overlapping actor strip → timestamp (right edge)
  *   2. "N liked/boosted/zapped your note" (+ summed sats for zaps)
- *   3. one-line dim target preview
- * Uses the same primary/preview text metrics as single rows. Tap-to-open actor
- * sheet lands in a later phase.
+ * Content is rendered separately, once per group rather than once per actor.
  */
 @Composable
 private fun GroupedNotificationRow(
@@ -287,13 +232,14 @@ private fun GroupedNotificationRow(
         modifier = Modifier
             .fillMaxWidth()
             .clickable(enabled = row.targetNoteId != null) { row.targetNoteId?.let { onNoteClick(it) } }
-            .padding(horizontal = Spacing.medium, vertical = 9.dp),
+            .padding(horizontal = Spacing.medium, vertical = Spacing.small),
     ) {
-        // Content column: the timestamp lives on the note-preview line, so the
-        // date follows the text ellipsis instead of floating on the actor strip.
         Column(modifier = Modifier.weight(1f)) {
             // Strip line: type icon → overlapping avatars.
-            Row(verticalAlignment = Alignment.CenterVertically) {
+            Row(
+                modifier = Modifier.fillMaxWidth().heightIn(min = Sizing.avatar),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
                 Icon(
                     imageVector = icon,
                     contentDescription = null,
@@ -308,6 +254,8 @@ private fun GroupedNotificationRow(
                     people = row.people,
                     onClick = { showActors = true },
                 )
+                Spacer(Modifier.weight(1f))
+                NotificationTimestamp(row.mostRecentAt, lookup = groupedSignalLookup, mode = feedWotDisplayMode)
             }
 
             // Verb line: "N verb (· sats)".
@@ -317,7 +265,10 @@ private fun GroupedNotificationRow(
             ) {
                 NotificationPrimaryText(text = row.people.toString(), fontWeight = FontWeight.SemiBold)
                 Spacer(Modifier.width(4.dp))
-                NotificationPrimaryText(text = verb, color = TextSecondary)
+                NotificationPrimaryText(
+                    text = if (row.notifType == "zap" && row.targetNoteId == null) "zapped you" else verb,
+                    color = TextSecondary,
+                )
                 if (row.notifType == "zap" && row.sumSats > 0) {
                     Spacer(Modifier.width(4.dp))
                     NotificationPrimaryText(
@@ -326,21 +277,6 @@ private fun GroupedNotificationRow(
                         fontWeight = FontWeight.Medium,
                     )
                 }
-                if (row.targetNoteContent.isBlank()) {
-                    Spacer(Modifier.width(Spacing.small))
-                    NotificationTimestamp(row.mostRecentAt, lookup = groupedSignalLookup, mode = feedWotDisplayMode)
-                }
-            }
-
-            // Preview line: one dim line, same metrics as single rows.
-            if (row.targetNoteContent.isNotBlank()) {
-                NotificationPreviewWithTimestamp(
-                    text = row.targetNoteContent.trim(),
-                    createdAt = row.mostRecentAt,
-                    lookup = groupedSignalLookup,
-                    mode = feedWotDisplayMode,
-                    modifier = Modifier.padding(top = 2.dp),
-                )
             }
         }
     }
