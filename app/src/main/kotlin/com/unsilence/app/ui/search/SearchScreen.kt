@@ -267,8 +267,9 @@ fun SearchScreen(
         peopleBelowEntityResult(state.entityTarget, state.peopleResults)
     }
 
+    val engagementRetryRevision by actionsViewModel.engagementRetryRevision.collectAsStateWithLifecycle()
     @OptIn(FlowPreview::class)
-    LaunchedEffect(activeEventResults, peopleBelowEntity, state.entityTarget, selectedTab, cardWidthPx) {
+    LaunchedEffect(activeEventResults, peopleBelowEntity, state.entityTarget, selectedTab, cardWidthPx, engagementRetryRevision) {
         if (activeEventResults.isEmpty()) return@LaunchedEffect
         fun entityOffset(): Int = when {
             selectedTab == 0 && state.entityTarget != null -> 1

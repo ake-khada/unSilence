@@ -65,9 +65,11 @@ internal fun EmbeddedArticleCard(
 
     // A top-level article may resolve after ensureArticle's coordinate effect
     // returns. Hydrate from the resolved row so cached and fetched articles both
-    // load complete engagement. Embedded hosts deliberately skip this fetch.
+    // query engagement, and re-submit on the shared failure-retry signal. The
+    // coordinator skips fresh coverage. Embedded hosts deliberately skip this path.
     if (isTopLevel) {
-        LaunchedEffect(r.id) { host.services.hydrateEngagement(listOf(r)) }
+        val retryRevision by host.services.engagementRetryRevision.collectAsStateWithLifecycle()
+        LaunchedEffect(r.id, retryRevision) { host.services.hydrateEngagement(listOf(r)) }
     }
 
     val articleHost = remember(host, isTopLevel) {

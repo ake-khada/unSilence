@@ -141,6 +141,10 @@ fun FeedScreen(
     val isLoadingMore by viewModel.isLoadingMore.collectAsStateWithLifecycle()
     val isRefreshing by viewModel.isRefreshing.collectAsStateWithLifecycle()
     val feedEvents    by viewModel.feedRows.collectAsStateWithLifecycle()
+    val engagementRetryRevision by actionsViewModel.engagementRetryRevision.collectAsStateWithLifecycle()
+    LaunchedEffect(engagementRetryRevision) {
+        viewModel.retryVisibleEngagement(engagementRetryRevision)
+    }
     val feedShowDot   by viewModel.showDot.collectAsStateWithLifecycle()
     val rawEventCount by viewModel.rawEventCount.collectAsStateWithLifecycle()
     val wotLookups    by viewModel.wotLookups.collectAsStateWithLifecycle()

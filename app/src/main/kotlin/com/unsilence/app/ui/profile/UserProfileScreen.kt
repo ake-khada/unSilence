@@ -313,8 +313,9 @@ fun UserProfileScreen(
         }
     }
 
+    val engagementRetryRevision by actionsViewModel.engagementRetryRevision.collectAsStateWithLifecycle()
     @OptIn(FlowPreview::class)
-    LaunchedEffect(posts, cardWidthPx) {
+    LaunchedEffect(posts, cardWidthPx, engagementRetryRevision) {
         val eventOffset = 3
         fun warmVisibleRange(first: Int, last: Int) {
             val dataFirst = (first - eventOffset).coerceAtLeast(0)

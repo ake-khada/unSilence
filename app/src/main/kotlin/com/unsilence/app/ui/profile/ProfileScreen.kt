@@ -136,6 +136,7 @@ fun ProfileScreen(
 
     val user            by viewModel.userFlow.collectAsStateWithLifecycle(initialValue = null)
     val posts           by viewModel.tabPostsFlow.collectAsStateWithLifecycle(initialValue = emptyList())
+    val engagementRetryRevision by actionsViewModel.engagementRetryRevision.collectAsStateWithLifecycle()
     val sensitiveMode   by viewModel.sensitiveContentMode.collectAsStateWithLifecycle()
     val selectedTab     by viewModel.selectedTab.collectAsStateWithLifecycle()
     val followingCount  by viewModel.followingCount.collectAsStateWithLifecycle()
@@ -564,7 +565,7 @@ fun ProfileScreen(
         }
 
         @OptIn(FlowPreview::class)
-        LaunchedEffect(posts, cardWidthPx) {
+        LaunchedEffect(posts, cardWidthPx, engagementRetryRevision) {
             val eventOffset = 3
             fun warmVisibleRange(first: Int, last: Int) {
                 val dataFirst = (first - eventOffset).coerceAtLeast(0)

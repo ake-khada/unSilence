@@ -401,6 +401,13 @@ fun ArticleReaderScreen(
         }
     }
 
+    val engagementRetryRevision by commentActionsVm.engagementRetryRevision.collectAsStateWithLifecycle()
+    LaunchedEffect(engagementRetryRevision) {
+        if (engagementRetryRevision == 0L) return@LaunchedEffect
+        val visibleIds = listState.layoutInfo.visibleItemsInfo.mapNotNullTo(HashSet()) { it.key as? String }
+        articleReaderVm.hydrateEngagement(commentRows.filter { it.id in visibleIds })
+    }
+
     @OptIn(FlowPreview::class)
     LaunchedEffect(commentRows, cardWidthPx) {
         if (commentRows.isEmpty()) return@LaunchedEffect

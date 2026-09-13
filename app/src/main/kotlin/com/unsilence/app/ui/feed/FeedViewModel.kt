@@ -553,6 +553,10 @@ class FeedViewModel @Inject constructor(
     )
 
     private val _hydrationViewport = MutableStateFlow(HydrationViewport(0, 0, 0))
+    private val engagementRetryRevision = MutableStateFlow(0L)
+
+    /** Called only by the visible screen; retries re-use its latest bounded viewport. */
+    fun retryVisibleEngagement(revision: Long) { engagementRetryRevision.value = revision }
 
     init {
         viewModelScope.launch(Dispatchers.Default) {
@@ -589,7 +593,7 @@ class FeedViewModel @Inject constructor(
 
         @OptIn(FlowPreview::class)
         viewModelScope.launch(Dispatchers.Default) {
-            combine(feedRows, _hydrationViewport) { rows, viewport -> rows to viewport }
+            combine(feedRows, _hydrationViewport, engagementRetryRevision) { rows, viewport, _ -> rows to viewport }
                 .debounce(300L)  // Fling guard: only fires after 300ms of no viewport changes
                 .collectLatest { (rows, viewport) ->
                     if (rows.isEmpty()) return@collectLatest

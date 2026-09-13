@@ -16,7 +16,7 @@ import org.junit.Test
 /**
  * Tests for own-engagement backfill logic:
  * - REQ filter construction (buildOwnEngagementReq)
- * - Dedup sets (checked blocks re-fetch, failed allows retry)
+ * - Fetch lifecycle is exercised by EngagementFetchCoordinatorTest
  * - isOwnEngaged read-only accessor
  */
 class OwnEngagementBackfillTest {
@@ -101,48 +101,6 @@ class OwnEngagementBackfillTest {
         assertEquals(listOf(7), filters[1]["kinds"]!!.jsonArray.map { it.jsonPrimitive.content.toInt() })
         assertEquals(listOf("30023:a:slug"), filters[1]["#a"]!!.jsonArray.map { it.jsonPrimitive.content })
         assertEquals(listOf("30023:a:slug"), filters[2]["#A"]!!.jsonArray.map { it.jsonPrimitive.content })
-    }
-
-    // ── Dedup sets ───────────────────────────────────────────────────────
-
-    @Test
-    fun `checked post is not retried`() {
-        // Simulate: a post ID was successfully checked (EOSE received)
-        val checkedSet: MutableSet<String> = java.util.concurrent.ConcurrentHashMap.newKeySet()
-        checkedSet.add("already-checked")
-
-        // Filter: should exclude already-checked IDs
-        val candidates = listOf("already-checked", "new-post")
-        val novel = candidates.filter { it !in checkedSet }
-        assertEquals(listOf("new-post"), novel)
-    }
-
-    @Test
-    fun `failed post stays retry-eligible`() {
-        // Simulate: a post was in-flight but fetch failed
-        val inFlight: MutableSet<String> = java.util.concurrent.ConcurrentHashMap.newKeySet()
-        val checked: MutableSet<String> = java.util.concurrent.ConcurrentHashMap.newKeySet()
-
-        val batch = listOf("will-fail")
-        // Mark in-flight
-        batch.forEach { inFlight.add(it) }
-
-        // Simulate failure: remove from in-flight, do NOT add to checked
-        batch.forEach { inFlight.remove(it) }
-
-        // On retry: should pass filter (not in checked, not in in-flight)
-        val retryNovel = batch.filter { it !in checked && it !in inFlight }
-        assertEquals(listOf("will-fail"), retryNovel)
-    }
-
-    @Test
-    fun `in-flight post is not double-dispatched`() {
-        val inFlight: MutableSet<String> = java.util.concurrent.ConcurrentHashMap.newKeySet()
-        inFlight.add("in-progress")
-
-        val candidates = listOf("in-progress", "new-post")
-        val novel = candidates.filter { it !in inFlight }
-        assertEquals(listOf("new-post"), novel)
     }
 
     // ── isOwnEngaged ─────────────────────────────────────────────────────

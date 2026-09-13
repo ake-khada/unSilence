@@ -810,9 +810,6 @@ class MemoryEventStore @Inject constructor(
     private val repostEventIdsByActorTarget = ConcurrentHashMap<ActorTargetKey, MutableSet<String>>()
     private val actorAccessedAt = ConcurrentHashMap<String, Long>()
 
-    /** Posts where engagement download hit the limit — cards show "N+" for these. */
-    private val engagementCapped: MutableSet<String> = ConcurrentHashMap.newKeySet()
-
     private data class DeletionTombstone(val pubkey: String, val createdAt: Long)
     // Event targets may be unknown: isolate each deletion signer's claim until
     // the target arrives, so a non-author cannot overwrite the author's tombstone.
@@ -5091,11 +5088,6 @@ class MemoryEventStore @Inject constructor(
     /** Non-Flow snapshot of current engagement counts for a post. */
     fun currentStatsSnapshot(eventId: String): EventStats = currentStats(eventId)
 
-    // ─── Engagement cap ──────────────────────────────────────────────────────
-
-    fun markEngagementCapped(eventId: String) { engagementCapped.add(eventId) }
-    fun isEngagementCapped(eventId: String): Boolean = eventId in engagementCapped
-
     // ─── Outbox routing ─────────────────────────────────────────────────────
 
     /** Relay URLs that have delivered events by [pubkey]. For profile fallback
@@ -7671,7 +7663,6 @@ class MemoryEventStore @Inject constructor(
         deletedAddressableTombstones.clear()
         synchronized(ownDeletionHistory) { ownDeletionHistory.clear() }
         actorAccessedAt.clear()
-        engagementCapped.clear()
         profileAnchoredIds.clear()
         verifiedPrivateZapsById.clear()
         privateZapPendingSignal.value = 0L

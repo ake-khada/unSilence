@@ -16,8 +16,7 @@ import org.junit.Test
  * Tests for the bounded engagement count fetch:
  * - REQ filter construction (buildEngagementReq)
  * - Freshness tier intervals (engagementFreshnessInterval)
- * - Staleness gating (isEngagementStale via CardHydrator)
- * - MES engagementCapped accessors
+ * - Post-age freshness intervals (lifecycle coverage: EngagementFetchCoordinatorTest)
  * - eng- prefix registered in SubscriptionRules
  */
 class EngagementFetchTest {
@@ -153,27 +152,6 @@ class EngagementFetchTest {
         assertTrue(SubscriptionRules.isOneShotSubscription("comment-parents-12345"))
     }
 
-    // ── MES engagementCapped ────────────────────────────────────────────
-
-    @Test
-    fun `engagementCapped starts empty`() {
-        assertFalse(store.isEngagementCapped("any-event"))
-    }
-
-    @Test
-    fun `markEngagementCapped marks event`() {
-        store.markEngagementCapped("event-1")
-        assertTrue(store.isEngagementCapped("event-1"))
-        assertFalse(store.isEngagementCapped("event-2"))
-    }
-
-    @Test
-    fun `engagementCapped cleared on store clear`() {
-        store.markEngagementCapped("event-1")
-        store.clear()
-        assertFalse(store.isEngagementCapped("event-1"))
-    }
-
     // ── MES currentStatsSnapshot ────────────────────────────────────────
 
     @Test
@@ -186,10 +164,4 @@ class EngagementFetchTest {
         assertEquals(0L, stats.zapTotalSats)
     }
 
-    // ── ENGAGEMENT_LIMIT constant ───────────────────────────────────────
-
-    @Test
-    fun `ENGAGEMENT_LIMIT is 100`() {
-        assertEquals(100, ENGAGEMENT_LIMIT)
-    }
 }
