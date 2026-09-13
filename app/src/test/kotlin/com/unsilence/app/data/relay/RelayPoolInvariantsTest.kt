@@ -1,7 +1,11 @@
 package com.unsilence.app.data.relay
 
 import app.cash.turbine.test
+import kotlinx.coroutines.async
+import kotlinx.coroutines.channels.consumeEach
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import okhttp3.Protocol
@@ -27,6 +31,261 @@ import java.util.concurrent.atomic.AtomicReference
 
 @OptIn(ExperimentalCoroutinesApi::class)
 class RelayPoolInvariantsTest {
+    @Test
+    fun `reconnect opening after five seconds still installs listener and replays once`() = runTest {
+        val fixture = RegistryFixture()
+        val connection = fixture.acquire()
+        val received = mutableListOf<String>()
+        val handshake = async {
+            fixture.completeReconnect(connection) { ready ->
+                ready.send("replayed subscription")
+                backgroundScope.launch { ready.messages.consumeEach(received::add) }
+            }
+        }
+        runCurrent()
+
+        advanceTimeBy(7_000)
+        runCurrent()
+        assertFalse(handshake.isCompleted)
+        assertSame(connection, fixture.registry.connections[TEST_RELAY])
+        assertEquals(1, fixture.sockets.created.size)
+
+        fixture.sockets.open(0)
+        runCurrent()
+        assertFalse("Successful handoff must not schedule a retry", handshake.await())
+        val socket = fixture.sockets.created.single()
+        socket.listener.onMessage(socket, "[\"EOSE\",\"replayed\"]")
+        runCurrent()
+
+        assertEquals(listOf(connection), fixture.handedOff)
+        assertEquals(listOf("replayed subscription"), socket.sent)
+        assertEquals(listOf("[\"EOSE\",\"replayed\"]"), received)
+        assertEquals(0, socket.closeCalls.get())
+        assertEquals(0, socket.cancelCalls)
+    }
+
+    @Test
+    fun `reconnect failing after five seconds retires its socket and permits another attempt`() = runTest {
+        val fixture = RegistryFixture()
+        val first = fixture.acquire()
+        val handshake = async { fixture.completeReconnect(first) }
+        runCurrent()
+        advanceTimeBy(10_000)
+        fixture.sockets.fail(0)
+        runCurrent()
+
+        assertTrue(handshake.await())
+        assertTrue(fixture.registry.connections.isEmpty())
+        assertTrue(fixture.handedOff.isEmpty())
+        assertEquals(listOf(TEST_RELAY), fixture.retired)
+        val retry = fixture.acquire()
+        assertNotSame(first, retry)
+        val retriedHandshake = async { fixture.completeReconnect(retry) }
+        fixture.sockets.open(1)
+        runCurrent()
+        assertFalse(retriedHandshake.await())
+        assertEquals(listOf(retry), fixture.handedOff)
+    }
+
+    @Test
+    fun `hung reconnect is detached before its handshake is cancelled at the deadline`() = runTest {
+        val fixture = RegistryFixture()
+        val first = fixture.acquire()
+        val socket = fixture.sockets.created.single()
+        socket.onCancel = { assertNull(fixture.registry.connections[TEST_RELAY]) }
+        val handshake = async { fixture.completeReconnect(first) }
+        runCurrent()
+        advanceTimeBy(RECONNECT_HANDSHAKE_TIMEOUT_MS - 1)
+        runCurrent()
+        assertFalse(handshake.isCompleted)
+        advanceTimeBy(1)
+        runCurrent()
+
+        assertTrue(handshake.await())
+        assertEquals(1, socket.cancelCalls)
+        assertEquals(0, socket.closeCalls.get())
+        assertEquals(listOf(TEST_RELAY), fixture.retired)
+        assertTrue(fixture.handedOff.isEmpty())
+
+        val replacement = fixture.acquire()
+        fixture.sockets.open(0) // Late callback from the cancelled handshake.
+        assertSame(replacement, fixture.registry.connections[TEST_RELAY])
+        assertEquals(RelayState.CONNECTING, replacement.state.value)
+        assertTrue(fixture.handedOff.isEmpty())
+    }
+
+    @Test
+    fun `reconnect failure racing replacement does not retire or hand off the successor`() = runTest {
+        val fixture = RegistryFixture()
+        val first = fixture.acquire()
+        val handshake = async { fixture.completeReconnect(first) }
+        runCurrent()
+        advanceTimeBy(7_000)
+        fixture.sockets.fail(0)
+        val replacement = fixture.acquire()
+        fixture.sockets.open(1)
+        runCurrent()
+
+        assertFalse("The new owner supplies its own recovery", handshake.await())
+        assertSame(replacement, fixture.registry.connections[TEST_RELAY])
+        assertTrue(fixture.handedOff.isEmpty())
+        assertTrue(fixture.retired.isEmpty())
+        assertEquals(0, fixture.sockets.created[1].closeCalls.get())
+        assertEquals(0, fixture.sockets.created[1].cancelCalls)
+    }
+
+    @Test
+    fun `late open on replaced reconnect cannot trigger stale replay`() = runTest {
+        val fixture = RegistryFixture()
+        val first = fixture.acquire()
+        val handshake = async { fixture.completeReconnect(first) }
+        runCurrent()
+        fixture.registry.remove(TEST_RELAY, first)!!.close()
+        val replacement = fixture.acquire()
+        fixture.sockets.open(0)
+        runCurrent()
+
+        assertFalse(handshake.await())
+        assertSame(replacement, fixture.registry.connections[TEST_RELAY])
+        assertTrue(fixture.handedOff.isEmpty())
+        assertTrue(fixture.retired.isEmpty())
+    }
+
+    @Test
+    fun `cancelling reconnect propagates and retires only its owned handshake`() = runTest {
+        val fixture = RegistryFixture()
+        val first = fixture.acquire()
+        val handshake = async { fixture.completeReconnect(first) }
+        runCurrent()
+        advanceTimeBy(7_000)
+        handshake.cancel()
+        runCurrent()
+
+        assertTrue(handshake.isCancelled)
+        assertTrue(fixture.registry.connections.isEmpty())
+        assertEquals(1, fixture.sockets.created.single().cancelCalls)
+        assertEquals(listOf(TEST_RELAY), fixture.retired)
+        assertTrue(fixture.handedOff.isEmpty())
+    }
+
+    @Test
+    fun `old reconnect cancellation cannot close a replacement handshake`() = runTest {
+        val fixture = RegistryFixture()
+        val first = fixture.acquire()
+        val handshake = async { fixture.completeReconnect(first) }
+        runCurrent()
+        fixture.sockets.fail(0)
+        val replacement = fixture.acquire()
+        handshake.cancel()
+        runCurrent()
+
+        assertTrue(handshake.isCancelled)
+        assertSame(replacement, fixture.registry.connections[TEST_RELAY])
+        assertEquals(0, fixture.sockets.created[1].cancelCalls)
+        assertTrue(fixture.retired.isEmpty())
+    }
+
+    @Test
+    fun `background during reconnect preserves a closed entry for foreground recovery`() = runTest {
+        val fixture = RegistryFixture()
+        val first = fixture.acquire()
+        val handshake = async { fixture.completeReconnect(first) }
+        runCurrent()
+        fixture.foreground = false
+        first.close()
+        runCurrent()
+
+        assertTrue(handshake.await())
+        assertSame(first, fixture.registry.connections[TEST_RELAY])
+        assertEquals(RelayState.DISCONNECTED, first.state.value)
+        assertTrue(fixture.handedOff.isEmpty())
+        assertTrue(fixture.retired.isEmpty())
+
+        fixture.foreground = true
+        val replacement = fixture.acquire()
+        val resumed = async { fixture.completeReconnect(replacement) }
+        fixture.sockets.open(1)
+        runCurrent()
+        assertFalse(resumed.await())
+        assertEquals(listOf(replacement), fixture.handedOff)
+    }
+
+    @Test
+    fun `cancelling a backgrounded reconnect keeps foreground recovery discoverable`() = runTest {
+        val fixture = RegistryFixture()
+        val first = fixture.acquire()
+        val handshake = async { fixture.completeReconnect(first) }
+        runCurrent()
+        fixture.foreground = false
+        first.close()
+        handshake.cancel()
+        runCurrent()
+
+        assertTrue(handshake.isCancelled)
+        assertSame(first, fixture.registry.connections[TEST_RELAY])
+        assertTrue(fixture.retired.isEmpty())
+        assertTrue(fixture.handedOff.isEmpty())
+    }
+
+    @Test
+    fun `foreground recovery includes a retired socket still waiting for retry`() = runTest {
+        val fixture = RegistryFixture()
+        val first = fixture.acquire()
+        val handshake = async { fixture.completeReconnect(first) }
+        runCurrent()
+        advanceTimeBy(RECONNECT_HANDSHAKE_TIMEOUT_MS)
+        runCurrent()
+        assertTrue(handshake.await())
+        assertTrue(fixture.registry.connections.isEmpty())
+
+        // The pool keeps the retired URL in pendingReconnect across onStop/onStart.
+        assertEquals(listOf(TEST_RELAY), fixture.registry.reconnectUrls(fixture.retired))
+        fixture.acquire()
+        assertTrue(fixture.registry.reconnectUrls(fixture.retired).isEmpty())
+        fixture.sockets.open(1)
+        assertTrue(fixture.registry.reconnectUrls(fixture.retired).isEmpty())
+        fixture.sockets.fail(1)
+        assertEquals(listOf(TEST_RELAY), fixture.registry.reconnectUrls(fixture.retired))
+    }
+
+    @Test
+    fun `retirement callback failure still cancels the underlying handshake`() = runTest {
+        val fixture = RegistryFixture()
+        val first = fixture.acquire()
+        val handshake = async {
+            runCatching {
+                fixture.registry.completeReconnect(
+                    connection = first,
+                    transportAllowed = { true },
+                    onConnected = { error("must not hand off") },
+                    onRetired = { error("retirement failed") },
+                )
+            }.exceptionOrNull()
+        }
+        runCurrent()
+        advanceTimeBy(RECONNECT_HANDSHAKE_TIMEOUT_MS)
+        runCurrent()
+
+        assertEquals("retirement failed", handshake.await()?.message)
+        assertTrue(fixture.registry.connections.isEmpty())
+        assertEquals(1, fixture.sockets.created.single().cancelCalls)
+    }
+
+    @Test
+    fun `reconnect handoff exception retires the socket rather than orphaning it`() = runTest {
+        val fixture = RegistryFixture()
+        val first = fixture.acquire()
+        fixture.sockets.open(0)
+        val failure = runCatching {
+            fixture.completeReconnect(first) { error("handoff failed") }
+        }.exceptionOrNull()
+
+        assertEquals("handoff failed", failure?.message)
+        assertTrue(fixture.registry.connections.isEmpty())
+        assertEquals(1, fixture.sockets.created.single().closeCalls.get())
+        assertEquals(listOf(TEST_RELAY), fixture.retired)
+    }
+
     @Test
     fun `cold start publishes connecting and connected without a lifecycle refresh`() = runTest {
         val fixture = RegistryFixture()
@@ -440,10 +699,26 @@ class RelayPoolInvariantsTest {
     private class RegistryFixture {
         val sockets = CountingWebSocketFactory()
         val registry = RelayConnectionRegistry(Any()) { url -> RelayConnection(url, sockets) }
+        var foreground = true
+        val handedOff = mutableListOf<RelayConnection>()
+        val retired = mutableListOf<String>()
+
+        suspend fun completeReconnect(
+            connection: RelayConnection,
+            onReady: (RelayConnection) -> Unit = {},
+        ): Boolean = registry.completeReconnect(
+            connection = connection,
+            transportAllowed = { foreground },
+            onConnected = { ready ->
+                onReady(ready)
+                handedOff.add(ready)
+            },
+            onRetired = { retired.add(it) },
+        )
 
         fun acquire(url: String = TEST_RELAY): RelayConnection = registry.acquire(
             url,
-            transportAllowed = { true },
+            transportAllowed = { foreground },
             canCreateNew = { true },
         )!!.connection
     }
@@ -485,16 +760,22 @@ class RelayPoolInvariantsTest {
         val listener: WebSocketListener,
     ) : WebSocket {
         val closeCalls = AtomicInteger(0)
+        var cancelCalls = 0
+        var onCancel: () -> Unit = {}
+        val sent = mutableListOf<String>()
 
         override fun request(): Request = originalRequest
         override fun queueSize(): Long = 0L
-        override fun send(text: String): Boolean = true
+        override fun send(text: String): Boolean = sent.add(text)
         override fun send(bytes: ByteString): Boolean = true
         override fun close(code: Int, reason: String?): Boolean {
             closeCalls.incrementAndGet()
             return true
         }
-        override fun cancel() = Unit
+        override fun cancel() {
+            cancelCalls++
+            onCancel()
+        }
     }
 
     private companion object {

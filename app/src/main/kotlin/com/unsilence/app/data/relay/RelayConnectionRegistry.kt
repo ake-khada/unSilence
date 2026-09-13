@@ -1,16 +1,23 @@
 package com.unsilence.app.data.relay
 
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.flowOf
+import kotlinx.coroutines.withTimeoutOrNull
 import okhttp3.OkHttpClient
 import java.util.concurrent.ConcurrentHashMap
 import javax.inject.Inject
 import javax.inject.Singleton
+
+/** Includes the client's 10-second connect budget and a bounded upgrade window. */
+internal const val RECONNECT_HANDSHAKE_TIMEOUT_MS = 15_000L
 
 /**
  * Creates relay connections through one injectable WebSocket boundary.
@@ -112,6 +119,56 @@ internal class RelayConnectionRegistry(
         replaced?.close()
         RelayConnectionClaim(selected, installed, replaced)
     }
+
+    /**
+     * Finish the handshake we installed, then hand its listener/replay to the pool.
+     * Never leave CONNECTING behind for the next retry to mistake for another owner.
+     * A terminal failure, timeout or cancellation retires only this exact socket.
+     * Background-closed entries stay registered for foreground recovery.
+     *
+     * Returns whether the caller should retry after releasing its per-URL guard.
+     * Callbacks run under the lifecycle lock; they must not suspend.
+     */
+    suspend fun completeReconnect(
+        connection: RelayConnection,
+        transportAllowed: () -> Boolean,
+        onConnected: (RelayConnection) -> Unit,
+        onRetired: (String) -> Unit,
+    ): Boolean {
+        var handedOff = false
+        try {
+            withTimeoutOrNull(RECONNECT_HANDSHAKE_TIMEOUT_MS) {
+                connection.state.first { it != RelayState.CONNECTING }
+            }
+            currentCoroutineContext().ensureActive()
+            return synchronized(lifecycleLock) {
+                if (pooled[connection.url] !== connection) return@synchronized false
+                if (!transportAllowed() || !connection.isConnected) return@synchronized true
+                onConnected(connection)
+                handedOff = true
+                false
+            }
+        } finally {
+            if (!handedOff) synchronized(lifecycleLock) {
+                // onStop already closed this socket. Retain its URL so reconnectAll
+                // sees it; the pool's retry also rechecks foreground eligibility.
+                if (transportAllowed() && remove(connection.url, connection) != null) {
+                    try {
+                        onRetired(connection.url)
+                    } finally {
+                        connection.close()
+                    }
+                }
+            }
+        }
+    }
+
+    /** Include retired attempts waiting in backoff, but never replace another handshake. */
+    fun reconnectUrls(pending: Collection<String>): List<String> =
+        (pooled.keys + pending).filter { url ->
+            val state = pooled[url]?.state?.value
+            state != RelayState.CONNECTED && state != RelayState.CONNECTING
+        }
 
     /** Detach before the caller closes the socket and clears its bookkeeping. */
     fun remove(url: String, expected: RelayConnection? = null): RelayConnection? =

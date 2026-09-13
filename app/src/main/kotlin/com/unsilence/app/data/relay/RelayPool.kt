@@ -464,15 +464,15 @@ class RelayPool @Inject constructor(
     private val connections get() = connectionRegistry.connections
     private val socketTransportSuspended = AtomicBoolean(false)
 
-    /** Relay URLs deferred during network-down/DNS-degraded. Drained with jitter
-     *  when the network recovers (checked in the 60s sweep). */
+    /** Relay URLs deferred while down/backgrounded or waiting after socket retirement.
+     *  Foreground recovery and the existing 60s sweep drain them with staggering/jitter. */
     private val pendingReconnect: MutableSet<String> = ConcurrentHashMap.newKeySet()
 
     /** Coverage-ranked global outbox relay allowlist. Ephemeral connections to relays
      *  NOT in this set (and not in the persistent pool) are skipped to shrink the DNS
      *  failure surface. Populated by [updateOutboxAllowlist] after kind-10002 is fetched. */
     @Volatile private var outboxAllowlist: Set<String> = emptySet()
-    private val reconnecting = ConcurrentHashMap<String, AtomicBoolean>()
+    private val reconnecting = ConcurrentHashMap<String, Any>()
     /** Retained across short-lived successful sockets; cleared only after a healthy window. */
     private val reconnectAttempts = ConcurrentHashMap<String, Int>()
     /** Cached blocked relay URLs, refreshed before each connect(). */
@@ -5295,10 +5295,7 @@ class RelayPool @Inject constructor(
      */
     fun reconnectAll() {
         if (socketTransportSuspended.get()) return
-        val dropped = connections.entries
-            .filter { it.value.state.value == RelayState.DISCONNECTED ||
-                      it.value.state.value == RelayState.FAILED }
-            .map { it.key }
+        val dropped = connectionRegistry.reconnectUrls(pendingReconnect)
             .sortedBy { url -> reconnectPriority(connectionPurposes[url].orEmpty()) }
         for ((index, url) in dropped.withIndex()) {
             scope.launch {
@@ -5314,10 +5311,14 @@ class RelayPool @Inject constructor(
 
     /**
      * Reconnect a single relay with exponential backoff.
-     * Guard: AtomicBoolean per URL prevents concurrent reconnect attempts.
+     * Each in-flight attempt owns a per-URL ticket and its installed handshake.
+     * Late cleanup must not release a newer attempt's ticket or retire its socket.
      */
     private fun reconnectWithBackoff(url: String, attempt: Int = reconnectAttempts[url] ?: 0) {
-        if (socketTransportSuspended.get()) return
+        if (socketTransportSuspended.get()) {
+            pendingReconnect.add(url)
+            return
+        }
         // Only block reconnect for permanent policy rejections (restricted).
         // Transport strikes heal on successful connection — let the 8-attempt
         // backoff handle transient failures without the strike system killing it.
@@ -5334,11 +5335,12 @@ class RelayPool @Inject constructor(
             Log.w(TAG, "reconnectWithBackoff: network down, deferring $url (${pendingReconnect.size} pending)")
             return
         }
-        val guard = reconnecting.getOrPut(url) { AtomicBoolean(false) }
-        if (!guard.compareAndSet(false, true)) return
+        val ticket = Any()
+        if (reconnecting.putIfAbsent(url, ticket) != null) return
         reconnectAttempts[url] = attempt
 
         scope.launch {
+            var retry = false
             try {
                 if (attempt > 0) {
                     val delayMs = minOf(1000L * (1L shl minOf(attempt - 1, 4)), 30_000L)
@@ -5347,14 +5349,13 @@ class RelayPool @Inject constructor(
                 }
 
                 if (socketTransportSuspended.get()) {
-                    guard.set(false)
+                    pendingReconnect.add(url)
                     return@launch
                 }
 
                 // Re-check after delay — network may have gone down during backoff
                 if (relayCapabilitiesStore.isNetworkDown) {
                     pendingReconnect.add(url)
-                    guard.set(false)
                     Log.w(TAG, "reconnectWithBackoff: network down after delay, deferring $url")
                     return@launch
                 }
@@ -5366,73 +5367,79 @@ class RelayPool @Inject constructor(
                 if (current?.state?.value == RelayState.CONNECTED ||
                     current?.state?.value == RelayState.CONNECTING
                 ) {
-                    guard.set(false)
+                    pendingReconnect.remove(url)
                     return@launch
                 }
 
-                val claim = acquirePooledConnection(
-                    url = url,
-                    bypassPoolCap = true,
-                    resetAuth = true,
-                )
+                val claim = synchronized(socketLifecycleLock) {
+                    if (reconnecting[url] !== ticket) return@synchronized null
+                    acquirePooledConnection(url, bypassPoolCap = true, resetAuth = true)
+                }
                 if (claim == null) {
-                    guard.set(false)
                     return@launch
                 }
+                pendingReconnect.remove(url)
                 if (!claim.installed) {
                     // Another foreground path won ownership while this backoff
                     // was sleeping. It owns the listener and replay signal.
-                    guard.set(false)
                     return@launch
                 }
-                val conn = claim.connection
-
-                // Wait briefly for connection to establish
-                var waited = 0
-                while (conn.state.value == RelayState.CONNECTING && waited < 5000) {
-                    delay(100)
-                    waited += 100
-                }
-
-                if (conn.state.value == RelayState.CONNECTED) {
-                    guard.set(false)
-                    // A WebSocket open is not proof of recovery. Preserve/increase the
-                    // backoff if it flaps, and reset only after a healthy connection window.
-                    reconnectAttempts[url] = (attempt + 1).coerceAtMost(8)
-                    _onRelayReconnected.tryEmit(url)
-                    // Resend persistent own-mute-live subscription if this relay carries it
-                    if (url in liveMuteSubRelays) {
-                        liveMuteSubReq?.let { conn.send(it) }
-                    }
-                    // Resend persistent notification subscription if this relay carries it
-                    if (url in liveNotifSubRelays) {
-                        liveNotifSubReq?.let { conn.send(it) }
-                    }
-                    scope.launch { listenForEvents(conn) }
-                    scope.launch {
-                        delay(RECONNECT_HEALTHY_WINDOW_MS)
-                        if (connections[url] === conn && conn.state.value == RelayState.CONNECTED) {
-                            reconnectAttempts.remove(url)
-                            Log.d(TAG, "Reconnect backoff reset after healthy window: $url")
+                retry = connectionRegistry.completeReconnect(
+                    connection = claim.connection,
+                    transportAllowed = { !socketTransportSuspended.get() },
+                    onRetired = { retiredUrl ->
+                        // The socket leaves the registry before retry backoff. Keep
+                        // its URL discoverable if onStop/onStart lands in that gap.
+                        if (attempt < 8) pendingReconnect.add(retiredUrl)
+                        resetConnectionScopedState(retiredUrl)
+                        connectionLastActivity.remove(retiredUrl)
+                    },
+                    onConnected = { conn ->
+                        // A newly started listener can fail immediately and own the
+                        // next retry. Release our ticket before that handoff; finally
+                        // removes by identity and cannot clear the successor's ticket.
+                        reconnecting.remove(url, ticket)
+                        // A WebSocket open is not proof of recovery. Preserve/increase the
+                        // backoff if it flaps, and reset only after a healthy connection window.
+                        reconnectAttempts[url] = (attempt + 1).coerceAtMost(8)
+                        _onRelayReconnected.tryEmit(url)
+                        // Resend persistent own-mute-live subscription if this relay carries it
+                        if (url in liveMuteSubRelays) {
+                            liveMuteSubReq?.let { conn.send(it) }
                         }
-                    }
-                    Log.d(TAG, "Reconnected $url (attempt=$attempt)")
-                } else {
-                    guard.set(false)
-                    if (attempt < 8) {
-                        reconnectWithBackoff(url, attempt + 1)
-                    } else {
-                        Log.w(TAG, "Giving up reconnection to $url after $attempt attempts")
-                    }
-                }
+                        // Resend persistent notification subscription if this relay carries it
+                        if (url in liveNotifSubRelays) {
+                            liveNotifSubReq?.let { conn.send(it) }
+                        }
+                        scope.launch { listenForEvents(conn) }
+                        scope.launch {
+                            delay(RECONNECT_HEALTHY_WINDOW_MS)
+                            if (connections[url] === conn && conn.state.value == RelayState.CONNECTED) {
+                                reconnectAttempts.remove(url)
+                                Log.d(TAG, "Reconnect backoff reset after healthy window: $url")
+                            }
+                        }
+                        Log.d(TAG, "Reconnected $url (attempt=$attempt)")
+                    },
+                )
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
-                currentCoroutineContext().ensureActive()
-                guard.set(false)
                 Log.w(TAG, "Reconnect failed for $url: ${e.message}")
+                retry = true
+            } finally {
+                reconnecting.remove(url, ticket)
+            }
+            if (retry) {
                 if (attempt < 8) {
                     reconnectWithBackoff(url, attempt + 1)
+                } else {
+                    Log.w(TAG, "Giving up reconnection to $url after $attempt attempts")
                 }
             }
+        }.invokeOnCompletion {
+            // Also covers cancellation before the coroutine starts executing.
+            reconnecting.remove(url, ticket)
         }
     }
 
@@ -5675,6 +5682,9 @@ class RelayPool @Inject constructor(
         val (snapshot, ephemeralSnapshot) = synchronized(socketLifecycleLock) {
             val pooled = connectionRegistry.clear()
             val ephemeral = ArrayList(activeEphemeralConnections)
+            pendingReconnect.clear()
+            reconnecting.clear()
+            reconnectAttempts.clear()
             connectionPurposes.clear()
             profileFetchAttempted.clear()
             hintedProfileFetchAttempted.clear()

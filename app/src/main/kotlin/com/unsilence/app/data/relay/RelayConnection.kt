@@ -123,9 +123,12 @@ class RelayConnection(
     fun send(text: String): Boolean = ws?.send(text) == true
 
     fun close() {
+        val wasConnecting = _state.value == RelayState.CONNECTING
         _state.value = RelayState.DISCONNECTED
         connected.set(false)
-        ws?.close(1000, "Client shutdown")
+        // A graceful close only queues a frame while an upgrade is still pending.
+        // Cancel the handshake so a bounded owner cannot leave its socket running.
+        if (wasConnecting) ws?.cancel() else ws?.close(1000, "Client shutdown")
         _messages.close()
         Log.d(TAG, "Closed $url")
     }
