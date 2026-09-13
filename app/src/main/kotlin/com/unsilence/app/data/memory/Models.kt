@@ -96,6 +96,8 @@ data class EventStats(
     val reactionCount: Int,
     val zapCount: Int,
     val zapTotalSats: Long,
+    /** Local conversation traversal hit its bound; independent of fetch completeness. */
+    val replyCountTruncated: Boolean = false,
 ) {
     companion object {
         val EMPTY = EventStats(0, 0, 0, 0, 0L)
