@@ -197,8 +197,9 @@ fun ThreadScreen(
         )
     }
 
+    val engagementRetryRevision by actionsViewModel.engagementRetryRevision.collectAsStateWithLifecycle()
     @OptIn(FlowPreview::class)
-    LaunchedEffect(allThreadRows, state.focusedNote?.id, cardWidthPx) {
+    LaunchedEffect(allThreadRows, state.focusedNote?.id, cardWidthPx, engagementRetryRevision) {
         if (allThreadRows.isEmpty()) return@LaunchedEffect
         val rowIndexById = allThreadRows.withIndex().associate { it.value.id to it.index }
         fun visibleRowsFromLayout(): List<Int> =

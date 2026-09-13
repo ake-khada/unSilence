@@ -641,9 +641,10 @@ class RelayPool @Inject constructor(
     }
 
     private val countCallbacks = ConcurrentHashMap<String, CompletableDeferred<Nip45CountResult?>>()
-    /** Per-subId EOSE completion signal. Callers register before dispatch, await after.
-     *  handleEose completes the deferred when any relay EOSE's the sub. */
+    /** Legacy lifecycle completion, including CLOSED/skipped/failed requests.
+     * Never use completion alone as evidence that engagement was fetched. */
     internal val oneShotEoseCallbacks = ConcurrentHashMap<String, CompletableDeferred<Unit>>()
+    private val oneShotOutcomes = OneShotOutcomes()
     /** Per-subId set of relay URLs the one-shot was sent to. */
     private val oneShotSubTargets = ConcurrentHashMap<String, Set<String>>()
     /** Per-subId set of relay URLs that have EOSE'd or CLOSED. */
@@ -1006,11 +1007,11 @@ class RelayPool @Inject constructor(
             // the current owner while holding the same lock used by install/remove.
             val current = connections[conn.url]
             if (current == null) {
-                extractReqSubId(req)?.let { subId -> recordOneShotRelayCoverage(subId, conn.url) }
+                extractReqSubId(req)?.let { subId -> recordOneShotRelayCoverage(subId, conn.url, OneShotOutcome.SKIPPED) }
                 return@synchronized
             }
             if (relayCapabilitiesStore.shouldSkipRequest(current.url, requestClass, bypassCooldown)) {
-                extractReqSubId(req)?.let { subId -> recordOneShotRelayCoverage(subId, current.url) }
+                extractReqSubId(req)?.let { subId -> recordOneShotRelayCoverage(subId, current.url, OneShotOutcome.SKIPPED) }
                 Log.d(TAG, "One-shot REQ skipped for ${current.url} ($requestClass)")
                 return@synchronized
             }
@@ -1030,6 +1031,7 @@ class RelayPool @Inject constructor(
             if (!current.send(req)) {
                 count.decrementAndGet()
                 if (ownerKey != null) relayOneShotOwners.remove(ownerKey, current)
+                extractReqSubId(req)?.let { subId -> recordOneShotRelayCoverage(subId, current.url, OneShotOutcome.FAILED) }
                 Log.w(TAG, "One-shot send failed for ${current.url}; slot released")
             }
         }
@@ -1055,7 +1057,7 @@ class RelayPool @Inject constructor(
             return
         }
         if (relayCapabilitiesStore.shouldSkipRequest(clean, requestClass)) {
-            recordOneShotRelayCoverage(subId, clean)
+            recordOneShotRelayCoverage(subId, clean, OneShotOutcome.SKIPPED)
             return
         }
         val conn = connections[clean]
@@ -1100,7 +1102,7 @@ class RelayPool @Inject constructor(
                     )
                 ) {
                     extractReqSubId(queued.payload)?.let { subId ->
-                        recordOneShotRelayCoverage(subId, conn.url)
+                        recordOneShotRelayCoverage(subId, conn.url, OneShotOutcome.SKIPPED)
                     }
                     continue
                 }
@@ -1504,6 +1506,7 @@ class RelayPool @Inject constructor(
         capabilityBypassRelays: Set<String> = emptySet(),
         includeActiveFeedRelay: Boolean = false,
         requestClass: RelayRequestClass = RelayRequestClass.GENERAL,
+        onAdmitted: ((String) -> Unit)? = null,
     ): Set<String> {
         if (socketTransportSuspended.get()) {
             subIds.forEach { subId ->
@@ -1576,14 +1579,12 @@ class RelayPool @Inject constructor(
         // Resolve target set BEFORE sending: live reused + ephemeral
         val targetSet = (liveReused + ephemeral).toSet()
 
-        // Register target set for EOSE coverage tracking. Requires the caller
-        // to have registered oneShotEoseCallbacks[subId] beforehand — both
-        // engagement callers (dispatchOwnEngagement, dispatchEngagement) do.
-        // Skipping subIds without a callback avoids leaking map entries for
+        // Register targets for outcome-aware or legacy lifecycle waiters.
+        // Skipping subIds without a waiter avoids leaking map entries for
         // internal callers (fetchProfiles, fetchOlderPosts, etc.).
         if (targetSet.isNotEmpty()) {
             for (subId in subIds) {
-                if (oneShotEoseCallbacks.containsKey(subId)) {
+                if (oneShotEoseCallbacks.containsKey(subId) || oneShotOutcomes.contains(subId)) {
                     oneShotSubTargets[subId] = targetSet
                 }
             }
@@ -1592,6 +1593,7 @@ class RelayPool @Inject constructor(
         // Pool-reused path: wait for mid-handshake connections, then send via existing infra
         for (url in reused) {
             val conn = connections[url] ?: continue
+            onAdmitted?.invoke(url)
             if (!conn.isConnected) {
                 // Mid-handshake — wait up to 1s for ready, skip if it fails
                 val state = withTimeoutOrNull(1_000) {
@@ -1600,7 +1602,8 @@ class RelayPool @Inject constructor(
                     }
                 }
                 if (state != RelayState.CONNECTED) {
-                    subIds.forEach { recordOneShotRelayCoverage(it, url) }
+                    val outcome = if (state == null) OneShotOutcome.TIMEOUT else OneShotOutcome.FAILED
+                    subIds.forEach { recordOneShotRelayCoverage(it, url, outcome) }
                     continue
                 }
             }
@@ -1629,12 +1632,30 @@ class RelayPool @Inject constructor(
                         logInfo = logBypass,
                         requestClass = requestClass,
                         bypassCooldown = url in bypassRelays,
+                        onAdmitted = onAdmitted,
                     )
                 }
             }.awaitAll()
         }
         return targetSet
     }
+
+    /** Bounded request coverage for freshness; EOSE does not imply MES has drained. */
+    internal suspend fun fetchOneShotOutcomes(
+        subId: String,
+        relays: List<String>,
+        req: String,
+        timeoutMs: Long,
+    ): Map<String, OneShotOutcome> = oneShotOutcomes.fetch(
+        subId = subId,
+        relays = relays,
+        timeoutMs = timeoutMs,
+        dispatch = { onAdmitted ->
+            sendOneShotBatch(relays, listOf(req), listOf(subId), timeoutMs, onAdmitted = onAdmitted)
+        },
+        cleanup = { cleanupOneShotSub(subId) },
+        admissionTimeoutMs = ENGAGEMENT_ADMISSION_TIMEOUT_MS,
+    )
 
     /**
      * Open an ephemeral WebSocket, send REQs, collect events until all sub-IDs
@@ -1649,9 +1670,10 @@ class RelayPool @Inject constructor(
         logInfo: Boolean = false,
         requestClass: RelayRequestClass = RelayRequestClass.GENERAL,
         bypassCooldown: Boolean = false,
+        onAdmitted: ((String) -> Unit)? = null,
     ) {
         if (relayCapabilitiesStore.shouldSkipRequest(url, requestClass, bypassCooldown)) {
-            subIds.forEach { recordOneShotRelayCoverage(it, url) }
+            subIds.forEach { recordOneShotRelayCoverage(it, url, OneShotOutcome.SKIPPED) }
             return
         }
         // Rate limit: min 50ms gap per URL
@@ -1660,24 +1682,29 @@ class RelayPool @Inject constructor(
         val prev = lastOpen.get()
         if (now - prev < MIN_EPHEMERAL_GAP_NS) {
             Log.d(TAG, "Ephemeral rate-limited: $url")
-            subIds.forEach { recordOneShotRelayCoverage(it, url) }
+            subIds.forEach { recordOneShotRelayCoverage(it, url, OneShotOutcome.SKIPPED) }
             return
         }
         if (!lastOpen.compareAndSet(prev, now)) {
-            subIds.forEach { recordOneShotRelayCoverage(it, url) }
+            subIds.forEach { recordOneShotRelayCoverage(it, url, OneShotOutcome.SKIPPED) }
             return // CAS race — another caller won
         }
 
         ephemeralSemaphore.acquire()
         try {
+            onAdmitted?.invoke(url)
             if (socketTransportSuspended.get()) {
-                subIds.forEach { recordOneShotRelayCoverage(it, url) }
+                subIds.forEach { recordOneShotRelayCoverage(it, url, OneShotOutcome.SKIPPED) }
                 return
             }
             val conn = relayConnectionFactory.create(url)
             activeEphemeralConnections.add(conn)
+            var unfinishedOutcome = OneShotOutcome.FAILED
             try {
-                if (!connectIfTransportActive(conn)) return
+                if (!connectIfTransportActive(conn)) {
+                    unfinishedOutcome = OneShotOutcome.SKIPPED
+                    return
+                }
                 // Wait for WebSocket ready (max 2s)
                 val state = withTimeoutOrNull(2_000) {
                     conn.state.first {
@@ -1685,17 +1712,22 @@ class RelayPool @Inject constructor(
                     }
                 }
                 if (state != RelayState.CONNECTED) {
+                    if (state == null) unfinishedOutcome = OneShotOutcome.TIMEOUT
                     if (logInfo) Log.i(TAG, "Ephemeral connect failed: $url (state=$state)")
                     else Log.d(TAG, "Ephemeral connect failed: $url (state=$state)")
                     return
                 }
 
                 // Send all REQs
-                reqs.forEach { conn.send(it) }
+                reqs.forEach { req ->
+                    if (!conn.send(req)) {
+                        extractReqSubId(req)?.let { recordOneShotRelayCoverage(it, url, OneShotOutcome.FAILED) }
+                    }
+                }
 
                 // Collect events until all sub-IDs EOSE'd or timeout
                 val pendingSubs = subIds.toMutableSet()
-                withTimeoutOrNull(timeoutMs) {
+                val completed = withTimeoutOrNull(timeoutMs) {
                     conn.messages.consumeEach { raw ->
                         when {
                             raw.startsWith("[\"EVENT\"") -> {
@@ -1710,7 +1742,7 @@ class RelayPool @Inject constructor(
                                 if (eoseSubId != null && eoseSubId in pendingSubs) {
                                     relayCapabilitiesStore.recordRequestSuccess(url)
                                     conn.send("""["CLOSE","$eoseSubId"]""")
-                                    recordOneShotRelayCoverage(eoseSubId, url)
+                                    recordOneShotRelayCoverage(eoseSubId, url, OneShotOutcome.EOSE)
                                     pendingSubs.remove(eoseSubId)
                                     if (pendingSubs.isEmpty()) return@withTimeoutOrNull
                                 }
@@ -1729,7 +1761,7 @@ class RelayPool @Inject constructor(
                                     relayCapabilitiesStore.learnFromClosed(url, reason)
                                 }
                                 if (closedSubId != null && closedSubId in pendingSubs) {
-                                    recordOneShotRelayCoverage(closedSubId, url)
+                                    recordOneShotRelayCoverage(closedSubId, url, OneShotOutcome.CLOSED)
                                     pendingSubs.remove(closedSubId)
                                     if (pendingSubs.isEmpty()) return@withTimeoutOrNull
                                 }
@@ -1747,13 +1779,14 @@ class RelayPool @Inject constructor(
                         }
                     }
                 }
+                if (completed == null) unfinishedOutcome = OneShotOutcome.TIMEOUT
                 val eosed = subIds.size - pendingSubs.size
                 if (logInfo) Log.i(TAG, "Ephemeral complete: $url ($eosed/${subIds.size} subs EOSE'd)")
                 else Log.d(TAG, "Ephemeral complete: $url ($eosed/${subIds.size} subs EOSE'd)")
             } finally {
-                // A failed connection or a relay that omits EOSE is still complete from
-                // the caller's perspective. Coverage is idempotent for real EOSEs.
-                subIds.forEach { recordOneShotRelayCoverage(it, url) }
+                // Release lifecycle waiters, but retain the actual outcome for freshness.
+                val outcome = if (currentCoroutineContext().isActive) unfinishedOutcome else OneShotOutcome.CANCELLED
+                subIds.forEach { recordOneShotRelayCoverage(it, url, outcome) }
                 activeEphemeralConnections.remove(conn)
                 conn.close()
             }
@@ -1933,7 +1966,7 @@ class RelayPool @Inject constructor(
                         // count it as done for coverage so it doesn't force a full timeout.
                         if (isOneShot) {
                             releaseOneShotForRelay(closedSubId, conn.url, conn)
-                            recordOneShotRelayCoverage(closedSubId, conn.url)
+                            recordOneShotRelayCoverage(closedSubId, conn.url, OneShotOutcome.CLOSED)
                         }
                     } catch (e: Exception) {
                         Log.w(TAG, "Failed to parse CLOSED message: ${e.message}")
@@ -2073,7 +2106,7 @@ class RelayPool @Inject constructor(
             // Single release path — idempotent, sends CLOSE + decrements slot + flushes queue
             releaseOneShotForRelay(subId, conn.url, conn)
             // Record this relay as done; complete deferred when all targets covered
-            recordOneShotRelayCoverage(subId, conn.url)
+            recordOneShotRelayCoverage(subId, conn.url, OneShotOutcome.EOSE)
             Log.d(TAG, "CLOSE sent for one-shot sub '$subId' on ${conn.url}")
         }
     }
@@ -2090,7 +2123,10 @@ class RelayPool @Inject constructor(
         // relays that already EOSE'd (and were released in handleEose) are skipped
         // via the oneShotReleased guard. Only un-released relays get CLOSE + decrement.
         for (url in targets) {
-            releaseOneShotForRelay(subId, url)
+            synchronized(socketLifecycleLock) {
+                relayReqQueue[url]?.removeIf { extractReqSubId(it.payload) == subId }
+                releaseOneShotForRelay(subId, url)
+            }
         }
 
         // Final cleanup of the released tracking set
@@ -2099,30 +2135,31 @@ class RelayPool @Inject constructor(
 
     /**
      * Record a relay as done for a one-shot sub. Completes
-     * [oneShotEoseCallbacks] when ALL target relays have responded (EOSE or CLOSED).
-     * Falls back to first-EOSE if no target set was registered.
+     * [oneShotEoseCallbacks] when ALL target relays terminate, even unsuccessfully.
+     * Freshness consumers separately receive the actual terminal outcome.
      */
-    private fun recordOneShotRelayCoverage(subId: String, relayUrl: String) {
+    private fun recordOneShotRelayCoverage(subId: String, relayUrl: String, outcome: OneShotOutcome) {
         val targets = oneShotSubTargets[subId]
         if (targets == null) {
             // No target set registered — fall back to old behavior (complete on first)
             oneShotEoseCallbacks.remove(subId)?.complete(Unit)
-            return
-        }
-        val eosed = oneShotSubEosed.computeIfAbsent(subId) { ConcurrentHashMap.newKeySet() }
-        eosed.add(relayUrl)
-        val covered = eosed.size
-        val total = targets.size
-        Log.d(TAG, "one-shot '$subId' coverage $covered/$total")
+        } else {
+            val eosed = oneShotSubEosed.computeIfAbsent(subId) { ConcurrentHashMap.newKeySet() }
+            eosed.add(relayUrl)
+            val covered = eosed.size
+            val total = targets.size
+            Log.d(TAG, "one-shot '$subId' coverage $covered/$total")
 
-        // Full coverage: complete the main deferred and clean up tracking maps.
-        // oneShotReleased is NOT removed here — late duplicate EOSEs from flaky relays
-        // would recreate the set and double-decrement. cleanupOneShotSub does the bulk wipe.
-        if (covered >= total) {
-            oneShotEoseCallbacks.remove(subId)?.complete(Unit)
-            oneShotSubTargets.remove(subId)
-            oneShotSubEosed.remove(subId)
+            // Retain release guards until the caller's bulk cleanup.
+            if (covered >= total) {
+                oneShotEoseCallbacks.remove(subId)?.complete(Unit)
+                oneShotSubTargets.remove(subId)
+                oneShotSubEosed.remove(subId)
+            }
         }
+        // Notify LAST: resuming the waiter can immediately run cleanup on another
+        // thread. The awaiting boundary distinguishes deadline from cancellation.
+        if (outcome != OneShotOutcome.CANCELLED) oneShotOutcomes.record(subId, relayUrl, outcome)
     }
 
     /** Handle a NIP-45 COUNT response, retaining its integrity-significant limited flag. */

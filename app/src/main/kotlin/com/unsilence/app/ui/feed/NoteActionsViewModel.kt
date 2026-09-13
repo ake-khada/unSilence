@@ -171,11 +171,13 @@ class NoteActionsViewModel @Inject constructor(
         }
     }
 
-    /** Hydrate a resolved top-level embedded article's engagement once. */
+    /** Hydrate a resolved top-level article, subject to shared freshness/backoff. */
     fun hydrateEngagement(rows: List<FeedRow>) {
         if (rows.isEmpty()) return
         cardHydrator.hydrateEngagement(rows, 0, rows.lastIndex)
     }
+
+    val engagementRetryRevision = cardHydrator.engagementRetryRevision
 
     /** Read at action-sheet open so relay observations that arrived after card creation are included. */
     fun relayProvenance(eventId: String) = relayProvenanceItems(
@@ -288,42 +290,54 @@ class NoteActionsViewModel @Inject constructor(
             cardWidthPx = cardWidthPx,
             hydrateEngagement = hydrateEngagement,
         )
-        if (key == lastCardWindowWarmKey) return
+        val sameWindow = key == lastCardWindowWarmKey
+        val retryRevision = engagementRetryRevision.value
+        val previousHydration = lastCardWindowHydration
+        val needsEngagement = hydrateEngagement && (
+            previousHydration?.window != key || previousHydration.revision != retryRevision ||
+                previousHydration.job.isCancelled
+            )
+        if (sameWindow && !needsEngagement) return
         lastCardWindowWarmKey = key
 
-        val visibleEnd = (safeLast + 1).coerceAtMost(warmEnd)
-        val warmRows = buildList {
-            addAll(rows.subList(safeFirst, visibleEnd))
-            if (warmStart < safeFirst) addAll(rows.subList(warmStart, safeFirst))
-            if (visibleEnd < warmEnd) addAll(rows.subList(visibleEnd, warmEnd))
-        }
-        wotHydrationCoalescer.requestHydration(
-            wotSubjectsForFeedRows(warmRows, modelProvider = memoryEventStore::getEventModel)
-        )
-        viewModelScope.launch(Dispatchers.Default) {
-            cardHydrator.warmUpcomingAssets(
-                events = warmRows,
-                cardWidthPx = cardWidthPx,
-                maxRows = maxRows,
-                maxImagePrefetches = CARD_WINDOW_IMAGE_CAP,
-                maxOgFetches = CARD_WINDOW_OG_CAP,
-                maxVideoThumbnails = CARD_WINDOW_VIDEO_THUMB_CAP,
-                maxProfileFetches = CARD_WINDOW_PROFILE_CAP,
-                maxReferenceFetches = CARD_WINDOW_REFERENCE_CAP,
-                maxArticleFetches = CARD_WINDOW_ARTICLE_CAP,
+        if (!sameWindow) {
+            val visibleEnd = (safeLast + 1).coerceAtMost(warmEnd)
+            val warmRows = buildList {
+                addAll(rows.subList(safeFirst, visibleEnd))
+                if (warmStart < safeFirst) addAll(rows.subList(warmStart, safeFirst))
+                if (visibleEnd < warmEnd) addAll(rows.subList(visibleEnd, warmEnd))
+            }
+            wotHydrationCoalescer.requestHydration(
+                wotSubjectsForFeedRows(warmRows, modelProvider = memoryEventStore::getEventModel)
             )
+            viewModelScope.launch(Dispatchers.Default) {
+                cardHydrator.warmUpcomingAssets(
+                    events = warmRows,
+                    cardWidthPx = cardWidthPx,
+                    maxRows = maxRows,
+                    maxImagePrefetches = CARD_WINDOW_IMAGE_CAP,
+                    maxOgFetches = CARD_WINDOW_OG_CAP,
+                    maxVideoThumbnails = CARD_WINDOW_VIDEO_THUMB_CAP,
+                    maxProfileFetches = CARD_WINDOW_PROFILE_CAP,
+                    maxReferenceFetches = CARD_WINDOW_REFERENCE_CAP,
+                    maxArticleFetches = CARD_WINDOW_ARTICLE_CAP,
+                )
+            }
         }
 
-        if (!hydrateEngagement) return
+        if (!needsEngagement) return
         val engagementEnd = (safeLast + 1 + CARD_WINDOW_ENGAGEMENT_LOOKAHEAD).coerceAtMost(rows.size)
         if (safeFirst >= engagementEnd) return
         val engagementRows = rows.subList(safeFirst, engagementEnd).toList()
         val viewportIds = engagementRows.map { it.id }.toSet()
-        cardWindowHydrationJob?.cancel()
-        cardWindowHydrationJob = viewModelScope.launch(Dispatchers.Default) {
+        previousHydration?.job?.cancel()
+        val job = viewModelScope.launch(Dispatchers.Default) {
             delay(CARD_WINDOW_ENGAGEMENT_DEBOUNCE_MS)
             cardHydrator.hydrateVisibleCards(engagementRows, viewportIds = viewportIds)
         }
+        // Only actual engagement work owns this revision. Asset-only calls cannot
+        // consume it, and a cancelled debounce never counts as completed hydration.
+        lastCardWindowHydration = CardWindowHydration(key, retryRevision, job)
     }
 
     private data class CardWindowWarmKey(
@@ -337,7 +351,8 @@ class NoteActionsViewModel @Inject constructor(
     )
 
     private var lastCardWindowWarmKey: CardWindowWarmKey? = null
-    private var cardWindowHydrationJob: Job? = null
+    private data class CardWindowHydration(val window: CardWindowWarmKey, val revision: Long, val job: Job)
+    private var lastCardWindowHydration: CardWindowHydration? = null
 
     // ── Custom emoji picker data ─────────────────────────────────────────────
 

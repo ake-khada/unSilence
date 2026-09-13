@@ -53,6 +53,7 @@ data class EventCardServices(
     val articleRowFlow: (String) -> Flow<FeedRow?>,
     val ensureArticle: (coord: String, author: String, dTag: String, hints: List<String>) -> Unit,
     val hydrateEngagement: (List<FeedRow>) -> Unit,
+    val engagementRetryRevision: StateFlow<Long>,
     val imageDimensionCache: ImageDimensionCache?,
     val thumbnailCache: VideoThumbnailCache?,
 )
@@ -136,6 +137,7 @@ internal fun NoteActionsViewModel.eventCardServices(): EventCardServices = Event
     articleRowFlow = ::articleRowFlow,
     ensureArticle = ::ensureArticle,
     hydrateEngagement = ::hydrateEngagement,
+    engagementRetryRevision = engagementRetryRevision,
     imageDimensionCache = imageDimensionCache,
     thumbnailCache = videoThumbnailCache,
 )

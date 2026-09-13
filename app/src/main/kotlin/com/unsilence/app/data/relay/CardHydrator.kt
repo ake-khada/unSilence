@@ -19,9 +19,9 @@ import dagger.hilt.android.qualifiers.ApplicationContext
 import com.vitorpamplona.quartz.nip19Bech32.Nip19Parser
 import com.vitorpamplona.quartz.nip19Bech32.entities.NEvent
 import com.vitorpamplona.quartz.nip19Bech32.entities.NNote
-import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
@@ -32,6 +32,11 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.emptyFlow
+import kotlinx.coroutines.flow.flatMapLatest
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.SharingStarted
+import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
@@ -44,6 +49,7 @@ import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ConcurrentLinkedQueue
+import java.util.concurrent.atomic.AtomicLong
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -148,6 +154,11 @@ class CardHydrator @Inject constructor(
     private val relayCapabilitiesStore: RelayCapabilitiesStore,
 ) {
     private val imageLoader by lazy { SingletonImageLoader.get(context) }
+    private val hydrationScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+    // Reset cancels work, not the shared observer used by the next app session.
+    private val backfillScope = CoroutineScope(
+        hydrationScope.coroutineContext + SupervisorJob(hydrationScope.coroutineContext[Job]) + Dispatchers.IO,
+    )
 
     // ── Per-phase hydrated-id memo ───────────────────────────────────────
     // hydrateVisibleCards re-fires on every viewport change (debounce 300ms).
@@ -201,35 +212,28 @@ class CardHydrator @Inject constructor(
         ogWarmOrder.clear()
         backfillScope.coroutineContext.cancelChildren()
         pendingBackfillTargets.clear()
-        ownEngagementInFlight.clear()
-        ownEngagementChecked.clear()
-        engagementTracker.clear()
-        engagementInFlight.clear()
+        engagementFetches.clear()
         pendingEngagementTargets.clear()
     }
 
     // ── Engagement count fetch ─────────────────────────────────────────
-    // Per-post bounded download: kinds [1,6,16,7,9735] with #e:[postId],
-    // limit 100. Targets the user's NIP-65 read relays (same as fetchThread).
+    // Bounded batched queries, routed by the engagement outbox policy.
     // Events flow through EventProcessor → MES aggregates → statsFlow → card display.
     //
     // Freshness tiers gate re-fetch based on post age:
     //   <1h→2min, <6h→10min, <24h→1h, <7d→6h, ≥7d→fetch once.
 
-    /** Per-post engagement fetch state: when we last fetched, capped flag, and
-     *  whether the article coordinate (#a/#A) was fetched — so an old id-only
-     *  fetch can't mark an article "fresh" and suppress the coordinate fetch. */
-    internal data class EngagementFetchState(
-        val lastFetchedAt: Long = 0L,
-        val capped: Boolean = false,
-        val coordFetched: Boolean = false,
-    )
+    private val engagementFetches = EngagementFetchCoordinator(relayPool::fetchOneShotOutcomes)
+    private val retryRevision = AtomicLong()
 
-    /** Tracks per-post engagement fetch state. Cleared on logout/reset. */
-    internal val engagementTracker = ConcurrentHashMap<String, EngagementFetchState>()
-
-    /** Posts whose engagement REQ is currently in flight. */
-    private val engagementInFlight: MutableSet<String> = ConcurrentHashMap.newKeySet()
+    /** One deadline signal shared by lifecycle-aware screen collectors; never a per-card fetch. */
+    @OptIn(ExperimentalCoroutinesApi::class)
+    val engagementRetryRevision = networkMonitor.state
+        .flatMapLatest { state ->
+            if (state == NetworkState.OFFLINE) emptyFlow() else engagementFetches.retrySignals()
+        }
+        .map { retryRevision.incrementAndGet() }
+        .stateIn(hydrationScope, SharingStarted.WhileSubscribed(), 0L)
 
     /** Pending engagement targets (id → target) awaiting debounced dispatch. */
     private val pendingEngagementTargets = ConcurrentHashMap<String, EngagementTarget>()
@@ -246,16 +250,8 @@ class CardHydrator @Inject constructor(
     //
     // Non-blocking: hydrateVisibleCards accumulates novel IDs into a
     // pending buffer. A debounced coroutine (250ms) coalesces and dispatches
-    // in the background. The checked transition is gated on real EOSE via
-    // RelayPool.oneShotEoseCallbacks.
-
-    private val backfillScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-
-    /** Posts whose backfill REQ reached EOSE — never re-checked this session. */
-    internal val ownEngagementChecked: MutableSet<String> = ConcurrentHashMap.newKeySet()
-
-    /** Posts whose backfill REQ is in flight — prevents duplicate dispatch. */
-    private val ownEngagementInFlight: MutableSet<String> = ConcurrentHashMap.newKeySet()
+    // in the background. Both paths share attempt-owned, per-relay/filter
+    // freshness; only real EOSE records a successful bounded query.
 
     /** Pending own-engagement targets (id → target) awaiting debounced dispatch. */
     private val pendingBackfillTargets = ConcurrentHashMap<String, EngagementTarget>()
@@ -994,13 +990,14 @@ class CardHydrator @Inject constructor(
             // EventModel. Overlapping viewport passes mostly hit this path.
             val quickId = engagementIdFor(row)
             if (memoryEventStore.isOwnEngaged(quickId)) continue
-            if (quickId in ownEngagementChecked || quickId in ownEngagementInFlight ||
-                pendingBackfillTargets.containsKey(quickId)) continue
+            if (pendingBackfillTargets.containsKey(quickId)) continue
+            if (row.kind == 1 &&
+                !engagementFetches.needsFetch(quickId, row.createdAt, hasCoordinate = false, ownPubkey = ownPk)
+            ) continue
 
             val t = engagementTargetFor(row)
             if (memoryEventStore.isOwnEngaged(t.id)) continue
-            if (t.id in ownEngagementChecked || t.id in ownEngagementInFlight ||
-                pendingBackfillTargets.containsKey(t.id)) continue
+            if (pendingBackfillTargets.containsKey(t.id) || !engagementFetches.needsFetch(t, ownPk)) continue
             pendingBackfillTargets[t.id] = t
             added = true
         }
@@ -1019,63 +1016,18 @@ class CardHydrator @Inject constructor(
 
     /**
      * Dispatch the accumulated pending IDs as a single batched REQ to write relays.
-     * EOSE-gated: moves IDs from in-flight → checked only when real EOSE arrives.
+     * Each relay/filter is checked only after real EOSE; failures remain retryable.
      */
     private suspend fun dispatchOwnEngagement(ownPk: String) {
         // Drain pending buffer
         val targets = pendingBackfillTargets.values.toList()
-        pendingBackfillTargets.clear()
+        targets.forEach { pendingBackfillTargets.remove(it.id, it) }
         if (targets.isEmpty()) return
         val batch = targets.map { it.id }
 
-        batch.forEach { ownEngagementInFlight.add(it) }
-
-        val subId = "own-eng-${System.nanoTime()}"
-        // Article rows: also fetch own coordinate-targeted reactions (#a/#A) —
-        // coord carried from the row, so embedded/boosted longform works too.
-        val coords = targets.mapNotNull { it.coord }
-        val req = buildOwnEngagementReq(subId, ownPk, batch, coords)
-
         val writeRelays = memoryEventStore.writeRelaysFor(ownPk)
         val targetUrls = writeRelays.ifEmpty { relayPool.connectedRelayUrls() }
-        if (targetUrls.isEmpty()) {
-            batch.forEach { ownEngagementInFlight.remove(it) }
-            return
-        }
-
-        // Register EOSE callback BEFORE dispatch so we don't miss a fast EOSE
-        val eoseDeferred = CompletableDeferred<Unit>()
-        relayPool.oneShotEoseCallbacks[subId] = eoseDeferred
-
-        try {
-            relayPool.sendOneShotBatch(targetUrls, listOf(req), listOf(subId))
-
-            // Wait for real EOSE (or timeout). sendOneShotBatch returns immediately
-            // for pool-reused relays (fire-and-forget), so the deferred is our
-            // only signal that EOSE actually arrived.
-            val eoseReceived = withTimeoutOrNull(10_000) { eoseDeferred.await() } != null
-
-            if (eoseReceived) {
-                batch.forEach {
-                    ownEngagementInFlight.remove(it)
-                    ownEngagementChecked.add(it)
-                }
-                Log.d(TAG, "Own-engagement backfill: ${batch.size} posts checked (EOSE) → ${targetUrls.size} relay(s)")
-            } else {
-                // Timeout without EOSE — remove from in-flight, stays retry-eligible
-                batch.forEach { ownEngagementInFlight.remove(it) }
-                relayPool.cleanupOneShotSub(subId)
-                Log.w(TAG, "Own-engagement backfill: ${batch.size} posts timed out (no EOSE)")
-            }
-        } catch (e: kotlin.coroutines.cancellation.CancellationException) {
-            batch.forEach { ownEngagementInFlight.remove(it) }
-            relayPool.cleanupOneShotSub(subId)
-            throw e
-        } catch (_: Exception) {
-            batch.forEach { ownEngagementInFlight.remove(it) }
-            relayPool.cleanupOneShotSub(subId)
-            Log.w(TAG, "Own-engagement backfill failed for ${batch.size} posts")
-        }
+        engagementFetches.fetch(targets, targetUrls.map { it to batch }, ownPk)
     }
 
     // ── Engagement count fetch ─────────────────────────────────────────
@@ -1086,9 +1038,6 @@ class CardHydrator @Inject constructor(
      */
     internal fun accumulateEngagement(events: List<FeedRow>) {
         if (events.isEmpty()) return
-        val nowMs = System.currentTimeMillis()
-        val nowSec = nowMs / 1000L
-
         var added = false
         for (row in events) {
             // Most feed rows are ordinary kind-1 notes, whose engagement target
@@ -1096,14 +1045,13 @@ class CardHydrator @Inject constructor(
             // more expensive EventModel + relay-hint derivation. Reposts and
             // articles still take the full path because they may need #a/#A.
             val quickId = engagementIdFor(row)
-            if (quickId in engagementInFlight || pendingEngagementTargets.containsKey(quickId)) continue
-            if (row.kind != 6 && row.kind != 16 && row.kind != 30023 &&
-                !isEngagementStale(quickId, row.createdAt, hasCoord = false, nowMs, nowSec)
+            if (pendingEngagementTargets.containsKey(quickId)) continue
+            if (row.kind == 1 &&
+                !engagementFetches.needsFetch(quickId, row.createdAt, hasCoordinate = false)
             ) continue
 
             val t = engagementTargetFor(row)
-            if (t.id in engagementInFlight || pendingEngagementTargets.containsKey(t.id)) continue
-            if (!isEngagementStale(t.id, t.createdAt, t.coord != null, nowMs, nowSec)) continue
+            if (pendingEngagementTargets.containsKey(t.id) || !engagementFetches.needsFetch(t)) continue
             pendingEngagementTargets[t.id] = t
             added = true
         }
@@ -1117,63 +1065,28 @@ class CardHydrator @Inject constructor(
     }
 
     /**
-     * Returns true if this post's engagement counts are stale per freshness tiers.
-     * Posts aged ≥7d that have been fetched once are never re-fetched.
-     */
-    internal fun isEngagementStale(
-        eventId: String,
-        postCreatedAt: Long,
-        hasCoord: Boolean = false,
-        nowMs: Long = System.currentTimeMillis(),
-        nowSec: Long = nowMs / 1000L,
-    ): Boolean {
-        val state = engagementTracker[eventId]
-        if (state == null) return true // never fetched
-
-        // Article whose coordinate was never fetched (e.g. an old id-only fetch) —
-        // force one re-fetch so #a/#A likes/zaps land.
-        if (hasCoord && !state.coordFetched) return true
-
-        val ageSec = nowSec - postCreatedAt
-        val staleSec = engagementFreshnessInterval(ageSec)
-        if (staleSec == Long.MAX_VALUE) return false // ≥7d, fetched once — done
-
-        val elapsedMs = nowMs - state.lastFetchedAt
-        return elapsedMs >= staleSec * 1000L
-    }
-
-    /**
      * Dispatch per-post engagement REQs via outbox-routed relay resolution.
      *
-     * Each post gets ONE combined REQ (kinds [1,6,16,7,9735]) with its own #e and
-     * limit=ENGAGEMENT_LIMIT. Per-post dispatch is a spec invariant: the per-post
-     * limit cap ensures bounded download per post.
+     * Query budgets remain batched; a relay's limit is not per-post completeness.
      *
      * Relay targeting: post author's NIP-65 write relays (top 4 by trust+RTT) +
      * user's read relays (top 2) as secondary catch-net. Reactors fan their
      * kind-7/9735 broadcasts to the post author's write relays — that's where
      * engagement propagates. GLOBAL fallback when neither kind-10002 is known.
-     * EOSE-gated completion via oneShotEoseCallbacks.
+     * The coordinator records real EOSE per relay and requested filter scope.
      */
     private suspend fun dispatchEngagement() {
         val targets = pendingEngagementTargets.values.toList()
-        pendingEngagementTargets.clear()
+        targets.forEach { pendingEngagementTargets.remove(it.id, it) }
         if (targets.isEmpty()) return
         val batch = targets.map { it.id }
         val targetById = targets.associateBy { it.id }
-        // IDs whose coordinate was fetched this pass (drives coordFetched state).
-        val coordIds = targets.filter { it.coord != null }.map { it.id }.toSet()
-
-        batch.forEach { engagementInFlight.add(it) }
-
         // Resolve own read relays + blocked relays once per batch.
         val ownPk = memoryEventStore.ownPubkey
         val ownReadRelays = ownPk?.let(memoryEventStore::readRelaysFor).orEmpty()
         val blockedRelays = ownPk
             ?.let { memoryEventStore.getBlockedRelayUrls(it).toSet() }
             ?: emptySet()
-
-        val nowMs = System.currentTimeMillis()
 
         // 1. Resolve each post's outbox relays from the carried author pubkey
         //    (NOT getEventEntity — a boosted/embedded article's target may be absent
@@ -1197,65 +1110,12 @@ class CardHydrator @Inject constructor(
 
         // 2. Invert → one chunked REQ per relay (coverage-ranked, capped).
         val relayBatches = coalesceByRelay(idToRelays, MAX_ENGAGEMENT_RELAYS, ENGAGEMENT_BATCH_CHUNK)
-        if (relayBatches.isEmpty()) {
-            batch.forEach { engagementInFlight.remove(it) }
-            return
-        }
-
-        // 3. Fire one sub per (relay, chunk).
-        for ((relay, ids) in relayBatches) {
-            val subId = "eng-${System.nanoTime()}"
-            // Article rows: also fetch coordinate-targeted reactions/zaps (#a/#A) —
-            // coord carried from the row, so embedded/boosted longform works too.
-            val coords = ids.mapNotNull { targetById[it]?.coord }
-            val req = buildBatchedEngagementReq(subId, ids, coords)
-
-            val eoseDeferred = CompletableDeferred<Unit>()
-            relayPool.oneShotEoseCallbacks[subId] = eoseDeferred
-
-            backfillScope.launch {
-                try {
-                    relayPool.sendOneShotBatch(listOf(relay), listOf(req), listOf(subId))
-                    val eosed = withTimeoutOrNull(ENGAGEMENT_BATCH_TIMEOUT_MS) { eoseDeferred.await() } != null
-                    markEngagementFetched(ids, nowMs, coordIds)
-                    if (!eosed) relayPool.cleanupOneShotSub(subId)
-                } finally {
-                    backfillScope.launch {
-                        delay(30_000)
-                        relayPool.cleanupOneShotSub(subId)
-                    }
-                }
-            }
-        }
-
-        // 4. Backstop: flush any post not marked by a covering sub within the window.
-        backfillScope.launch {
-            delay(ENGAGEMENT_BATCH_TIMEOUT_MS + 500)
-            markEngagementFetched(batch.filter { it in engagementInFlight }, nowMs, coordIds)
-        }
+        engagementFetches.fetch(targets, relayBatches)
 
         Log.d(TAG, "Engagement: ${batch.size} posts → ${relayBatches.size} REQ(s) across " +
             "${relayBatches.map { it.first }.distinct().size} relay(s)")
     }
 
-    /** Per-post completion: snapshot stats, set capped, update freshness tracker, clear
-     *  in-flight. [coordIds] are the ids whose article coordinate was fetched this pass —
-     *  recorded so an id-only fetch can't later be mistaken for a coordinate fetch. Idempotent. */
-    private fun markEngagementFetched(ids: List<String>, nowMs: Long, coordIds: Set<String>) {
-        for (id in ids) {
-            if (id !in engagementInFlight) continue
-            val stats = memoryEventStore.currentStatsSnapshot(id)
-            val total = stats.replyCount + stats.repostCount + stats.reactionCount + stats.zapCount
-            val capped = total >= ENGAGEMENT_LIMIT
-            if (capped) memoryEventStore.markEngagementCapped(id)
-            engagementTracker[id] = EngagementFetchState(
-                lastFetchedAt = nowMs,
-                capped = capped,
-                coordFetched = id in coordIds,
-            )
-            engagementInFlight.remove(id)
-        }
-    }
 }
 
 /**
@@ -1298,9 +1158,6 @@ internal fun buildOwnEngagementReq(
         }
     }.toString()
 
-/** Per-post engagement REQ limit. Posts reaching this show "N+" in the UI. */
-internal const val ENGAGEMENT_LIMIT = 100
-
 /** Number of posts BEYOND the viewport to prefetch engagement for.
  *  Covers roughly one screenful of scroll — by the time a post becomes visible,
  *  its reaction/zap counts are already in MES.  Bounded by the debounce
@@ -1338,7 +1195,6 @@ private const val MAX_ENGAGEMENT_RELAYS = 12
 // engagement chunk size, so the two paths can't drift apart.
 internal const val ENGAGEMENT_BATCH_CHUNK = 5
 private const val ENGAGEMENT_BATCH_LIMIT = 500
-private const val ENGAGEMENT_BATCH_TIMEOUT_MS = 10_000L
 
 /**
  * Invert a per-item → relays map into a minimal set of per-relay REQ batches.
