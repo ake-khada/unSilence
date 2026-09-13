@@ -162,8 +162,6 @@ private val CONTENT_KINDS = setOf(
 )
 private val OWN_PROFILE_CONTENT_KINDS = PROFILE_NOTE_REPLY_EVENT_KIND_SET + 30023
 
-/** Max comments surfaced per article (bounds the rendered list + scan). */
-private const val ARTICLE_COMMENT_CAP = 200
 private val NOTIFICATION_KINDS = setOf(1, 6, 7, 1018, 9735, 16, 1111)
 // Kind-5 keeps only tombstones plus a separate, bounded owner history for snapshots.
 private val DERIVED_ONLY_KINDS = setOf(5, 30166, 30382)
@@ -1244,7 +1242,7 @@ class MemoryEventStore @Inject constructor(
                 eventsById.remove(event.id, event)
                 dirty.admissionRejected++
                 recordAdmissionRejected(event.kind)
-                publishEvictionInvalidations(invalidatedTargets, removedIds)
+                publishEvictionInvalidations(invalidatedTargets, removedIds, dirty)
                 return false
             }
             val removed = removeContentEventForEviction(
@@ -1256,7 +1254,7 @@ class MemoryEventStore @Inject constructor(
             recordAdmissionReplacement(victim.tier, removed.kind)
         }
 
-        publishEvictionInvalidations(invalidatedTargets, removedIds)
+        publishEvictionInvalidations(invalidatedTargets, removedIds, dirty)
         return true
     }
 
@@ -1496,8 +1494,7 @@ class MemoryEventStore @Inject constructor(
         // 3. Update derived aggregates based on kind
         when (event.kind) {
             0 -> handleProfile(event)
-            1 -> handleNote(event, dirty)
-            1111 -> handleNip22Comment(event, dirty)
+            1, 1111 -> invalidateConversationMembership(event, dirty)
             3 -> handleFollows(event, dirty)
             6, 16 -> handleRepost(event, dirty)
             7 -> handleReaction(event, dirty)
@@ -1644,30 +1641,6 @@ class MemoryEventStore @Inject constructor(
             // on every subsequent kind-0 insert.
             profileTrimBackoffUntilMs = System.currentTimeMillis() + PROFILE_TRIM_NOOP_BACKOFF_MS
         }
-    }
-
-    private fun handleNote(event: NostrEvent, dirty: InsertDirty) {
-        invalidateReplyTarget(event.replyToId, dirty)
-        if (event.rootId != null && event.rootId != event.replyToId) {
-            invalidateReplyTarget(event.rootId, dirty)
-        }
-    }
-
-    private fun handleNip22Comment(event: NostrEvent, dirty: InsertDirty) {
-        // Addressable-root counts come from articleCommentIds(coord). Event-addressed
-        // video roots (21/22) and kind-1111 parents use the ordinary live reply index.
-        val parentKind = event.tags
-            .firstOrNull { it.size >= 2 && it[0] == "k" }
-            ?.getOrNull(1)
-            ?.toIntOrNull()
-        if (parentKind !in COUNTED_NIP22_PARENT_KINDS) return
-
-        val parentId = event.replyToId
-            ?: event.tags.firstOrNull { it.size >= 2 && it[0] == "e" }?.getOrNull(1)
-            ?: return
-        if (parentId == event.id) return
-
-        invalidateReplyTarget(parentId, dirty)
     }
 
     private fun handleFollows(event: NostrEvent, dirty: InsertDirty? = null) {
@@ -2022,22 +1995,9 @@ class MemoryEventStore @Inject constructor(
 
     private fun deindexDerivedForDeletion(event: NostrEvent, dirty: InsertDirty) {
         when (event.kind) {
-            1 -> {
-                invalidateRemovedReplyTarget(event.replyToId, dirty)
-                if (event.rootId != null && event.rootId != event.replyToId) {
-                    invalidateRemovedReplyTarget(event.rootId, dirty)
-                }
-            }
-            1111 -> {
-                val parentKind = event.tags
-                    .firstOrNull { it.size >= 2 && it[0] == "k" }
-                    ?.getOrNull(1)
-                    ?.toIntOrNull()
-                if (parentKind in COUNTED_NIP22_PARENT_KINDS) {
-                    val parentId = event.replyToId
-                        ?: event.tags.firstOrNull { it.size >= 2 && it[0] == "e" }?.getOrNull(1)
-                    if (parentId != event.id) invalidateRemovedReplyTarget(parentId, dirty)
-                }
+            1, 1111 -> {
+                invalidateConversationMembership(event, dirty)
+                dirty.stats = true
             }
             6, 16 -> {
                 val targetId = repostTargetId(event) ?: return
@@ -2074,15 +2034,41 @@ class MemoryEventStore @Inject constructor(
         }
     }
 
-    private fun invalidateReplyTarget(targetId: String?, dirty: InsertDirty) {
-        if (targetId == null) return
-        statsUpdatedAt[targetId] = System.currentTimeMillis()
-        dirty.invalidatedStatsIds.add(targetId)
+    /**
+     * Capture BEFORE removing any event/index links. Follow both parent and explicit
+     * root edges, plus existing coordinate-root membership, so legacy descendants
+     * notify article cards too. No new uppercase-E interpretation belongs here.
+     * Cycles are harmless; work is bounded by the membership limit plus its root.
+     */
+    private fun conversationInvalidationTargets(event: NostrEvent): Set<String> {
+        if (event.kind != 1 && event.kind != 1111) return emptySet()
+        val visited = HashSet<String>()
+        val targets = LinkedHashSet<String>()
+        val queue = ArrayDeque<String>()
+        queue.add(event.id)
+        while (queue.isNotEmpty() && visited.size <= CONVERSATION_MEMBER_LIMIT) {
+            val id = queue.removeFirst()
+            if (!visited.add(id)) continue
+            targets.add(id)
+            articleCoordById[id]?.let(targets::add)
+            val current = if (id == event.id) event else eventsById[id] ?: continue
+            if (!isConversationReply(current)) continue
+            forEachReplyIndexTarget(current) { queue.add(it) }
+            articleCommentCoordinate(current)?.let { coord ->
+                targets.add(coord)
+                articleIdByCoord[coord]?.let(queue::add)
+            }
+        }
+        return targets
     }
 
-    private fun invalidateRemovedReplyTarget(targetId: String?, dirty: InsertDirty) {
-        invalidateReplyTarget(targetId, dirty)
-        dirty.stats = true
+    private fun invalidateConversationMembership(event: NostrEvent, dirty: InsertDirty) {
+        val now = System.currentTimeMillis()
+        for (id in conversationInvalidationTargets(event)) {
+            // Storing a root is not evidence that its engagement was refreshed.
+            if (id != event.id) statsUpdatedAt[id] = now
+            dirty.invalidatedStatsIds.add(id)
+        }
     }
 
     private fun decrementCounter(index: ConcurrentHashMap<String, Int>, key: String) {
@@ -3242,7 +3228,10 @@ class MemoryEventStore @Inject constructor(
         eventId: String,
         invalidatedReplyTargets: MutableSet<String>,
     ): NostrEvent? {
-        val event = eventsById.remove(eventId) ?: return null
+        val event = eventsById[eventId] ?: return null
+        val conversationTargets = conversationInvalidationTargets(event)
+        if (!eventsById.remove(eventId, event)) return null
+        invalidatedReplyTargets += conversationTargets
         if (event.kind == 9735) {
             val zapDirty = InsertDirty()
             removeAuthenticatedZapReceipt(event, zapDirty)
@@ -3300,12 +3289,17 @@ class MemoryEventStore @Inject constructor(
     private fun publishEvictionInvalidations(
         invalidatedReplyTargets: MutableSet<String>,
         removedIds: Set<String>,
+        dirty: InsertDirty? = null,
     ) {
         invalidatedReplyTargets.removeAll(removedIds)
         if (invalidatedReplyTargets.isEmpty()) return
         val updatedAt = System.currentTimeMillis()
         invalidatedReplyTargets.forEach { statsUpdatedAt[it] = updatedAt }
-        _statsInvalidations.tryEmit(StatsInvalidation.Targeted(invalidatedReplyTargets))
+        if (dirty != null) {
+            dirty.invalidatedStatsIds += invalidatedReplyTargets
+        } else {
+            _statsInvalidations.tryEmit(StatsInvalidation.Targeted(invalidatedReplyTargets))
+        }
     }
 
     /** Rebuild access order after snapshot records arrive in persistence order. */
@@ -4072,19 +4066,20 @@ class MemoryEventStore @Inject constructor(
         idsByPubkey.getOrPut(event.pubkey) { ConcurrentHashMap.newKeySet() }.add(event.id)
     }
 
-    // ─── O(1) stat reads ────────────────────────────────────────────────────
+    // ─── Live stat reads ────────────────────────────────────────────────────
 
-    fun replyCount(eventId: String): Int {
-        val coord = articleCoordForEvent(eventId)
-        // Count the EXACT same unique, live reply rows the corresponding thread can
-        // render. The persisted scalar is only a legacy invalidation aid: payload
-        // eviction + later refetch can increment it repeatedly for the same event ID.
-        return if (coord != null) {
-            articleCommentIds(coord).size
-        } else {
-            replyEventIdsForTarget(eventId).count()
-        }
-    }
+    /** Known conversation total before display pagination and reversible moderation. */
+    fun replyCount(eventId: String): Int = conversationMembership(eventId).ids.size
+
+    internal fun conversationMembership(eventId: String): ConversationMembership =
+        articleCoordForEvent(eventId)?.let(::articleCommentMembership)
+            ?: expandConversationDescendants(
+                seeds = replyEventIdsForTarget(eventId),
+                targetId = eventId,
+                cap = CONVERSATION_MEMBER_LIMIT,
+                eventProvider = eventsById::get,
+                childrenOf = { idsByReplyTarget[it].orEmpty() },
+            )
 
     /**
      * Unique live replies whose insertion semantics contribute to [replyCount].
@@ -4208,22 +4203,24 @@ class MemoryEventStore @Inject constructor(
         // flow through the normal reply index (idsByReplyTarget),
         // keyed by the article EVENT id, which inherently counts only genuine replies
         // and excludes quote/mention posts (they reply elsewhere). Indexing legacy
-        // kind-1 here too would double-count it (handleNote + this index).
-        if (event.kind != 1111) return
-        val coord = event.tags.firstOrNull {
+        // kind-1 here too would misattribute unrelated coordinate mentions.
+        val coord = articleCommentCoordinate(event) ?: return
+        commentIdsByCoord.getOrPut(coord) { ConcurrentHashMap.newKeySet() }.add(event.id)
+        dirty?.let { invalidateStatsForTarget(coord, it) }
+    }
+
+    private fun articleCommentCoordinate(event: NostrEvent): String? =
+        if (event.kind != 1111) null else event.tags.firstOrNull {
             it.size >= 2 && it[0] == "A" && (
                 it[1].startsWith("30023:") ||
                     it[1].startsWith("34235:") ||
                     it[1].startsWith("34236:")
                 )
-        }?.get(1) ?: return
-        commentIdsByCoord.getOrPut(coord) { ConcurrentHashMap.newKeySet() }.add(event.id)
-        dirty?.let { invalidateStatsForTarget(coord, it) }
-    }
+        }?.get(1)
 
     /** Comments (FeedRow) for an article coordinate, oldest-first (chronological
      *  comment-section ordering, NOT the newest-first main feed), id tie-break.
-     *  Bounded by [ARTICLE_COMMENT_CAP]. */
+     *  Bounded by [ARTICLE_COMMENT_PAGE_SIZE], independently of the known total. */
     fun articleCommentsFlow(coord: String): Flow<List<FeedRow>> =
         _feedSignal
             .map { articleComments(coord) }
@@ -4269,39 +4266,26 @@ class MemoryEventStore @Inject constructor(
      * coord-index entries can't leak) + genuine kind-1 replies to the article event
      * (idsByReplyTarget, excluding quote-posts).
      */
-    private fun articleCommentIds(coord: String): Set<String> {
-        val ids = LinkedHashSet<String>()
-        val queue = ArrayDeque<String>()
-        // Seed with DIRECT article comments (the false-attribution guard lives here —
-        // never an arbitrary #a mention).
-        commentIdsByCoord[coord]?.forEach { id ->                 // NIP-22 kind-1111 (uppercase A)
-            if (eventsById[id]?.kind == 1111 && ids.add(id)) queue.add(id)
-        }
-        articleIdByCoord[coord]?.let { articleId ->               // legacy kind-1 replies to the article event
-            idsByReplyTarget[articleId]?.forEach { id ->
-                val e = eventsById[id]
-                if (e?.kind == 1 && e.tags.none { it.size >= 2 && it[0] == "q" } && ids.add(id)) queue.add(id)
-            }
-        }
-        // BFS-expand descendants (replies to comments) through idsByReplyTarget — a
-        // reply to an accepted comment is an article-comment descendant even if it
-        // carries no #a/#A tag. Bounded by ARTICLE_COMMENT_CAP.
-        while (queue.isNotEmpty() && ids.size < ARTICLE_COMMENT_CAP) {
-            val parent = queue.removeFirst()
-            idsByReplyTarget[parent]?.forEach { childId ->
-                val c = eventsById[childId] ?: return@forEach
-                val ok = c.kind == 1111 || (c.kind == 1 && c.tags.none { it.size >= 2 && it[0] == "q" })
-                if (ok && ids.add(childId)) queue.add(childId)
-            }
-        }
-        return ids
+    private fun articleCommentMembership(coord: String): ConversationMembership {
+        val articleId = articleIdByCoord[coord]
+        val nip22 = commentIdsByCoord[coord].orEmpty().asSequence()
+            .filter { eventsById[it]?.kind == 1111 }
+        val legacy = articleId?.let(idsByReplyTarget::get).orEmpty().asSequence()
+            .filter { eventsById[it]?.kind == 1 }
+        return expandConversationDescendants(
+            seeds = nip22 + legacy,
+            targetId = articleId,
+            cap = CONVERSATION_MEMBER_LIMIT,
+            eventProvider = eventsById::get,
+            childrenOf = { idsByReplyTarget[it].orEmpty() },
+        )
     }
 
     private fun articleComments(coord: String): List<FeedRow> =
-        articleCommentIds(coord)
+        articleCommentMembership(coord).ids
             .mapNotNull { eventsById[it] }
             .sortedWith(compareBy<NostrEvent> { it.createdAt }.thenBy { it.id })
-            .take(ARTICLE_COMMENT_CAP)
+            .take(ARTICLE_COMMENT_PAGE_SIZE)
             .map { toFeedRow(it) }
     fun zapStats(eventId: String): ZapAggregate {
         // Source of truth = authenticated, receipt-backed rows. Legacy scalar
@@ -4315,15 +4299,9 @@ class MemoryEventStore @Inject constructor(
 
     // ─── Engagement contributor queries (drawer) ────────────────────────────
 
-    /** Deduplicated pubkeys of users who replied to [eventId]. For articles, uses
-     *  the same comment-id source as the list/count. */
+    /** Deduplicated authors from the same membership as the conversation count. */
     fun replyPubkeysForEvent(eventId: String): List<String> {
-        val coord = articleCoordForEvent(eventId)
-        val ids = if (coord != null) {
-            articleCommentIds(coord).asSequence()
-        } else {
-            replyEventIdsForTarget(eventId)
-        }
+        val ids = conversationMembership(eventId).ids
         val seen = HashSet<String>()
         for (id in ids) eventsById[id]?.pubkey?.let { seen.add(it) }
         return seen.toList()
@@ -4937,45 +4915,9 @@ class MemoryEventStore @Inject constructor(
             .flowOn(Dispatchers.Default)
 
     private fun collectThread(rootId: String): List<NostrEvent> {
-        val results = mutableListOf<NostrEvent>()
-        val included = mutableSetOf<String>()
-        // BFS frontier — every admitted id gets its repliers expanded.
-        val queue = ArrayDeque<String>()
-
-        fun admit(id: String, event: NostrEvent) {
-            if (!included.add(id)) return
-            results.add(event)
-            queue.add(id)
-        }
-
-        eventsById[rootId]?.let { admit(rootId, it) }
-
-        // Events that explicitly mark rootId as their thread root.
-        // idsByReplyTarget[rootId] indexes BOTH rootId and replyToId references
-        // (insertCore/insertFromSnapshot); the rootId filter here keeps the
-        // direct-mark predicate exact — replyToId-only references are admitted
-        // by the BFS below, which requires their parent to be in the thread.
-        idsByReplyTarget[rootId]?.forEach { id ->
-            if (id !in included) {
-                val event = eventsById[id] ?: return@forEach
-                if (event.rootId == rootId) admit(id, event)
-            }
-        }
-
-        // BFS over the reply index: admit events whose replyToId points to
-        // anything already in the thread, expanding replies-of-replies until
-        // the frontier drains (replaces the O(N)-per-iteration fixpoint scan).
-        while (queue.isNotEmpty()) {
-            val parentId = queue.removeFirst()
-            idsByReplyTarget[parentId]?.forEach { id ->
-                if (id !in included) {
-                    val event = eventsById[id] ?: return@forEach
-                    if (event.replyToId == parentId) admit(id, event)
-                }
-            }
-        }
-
-        return results.sortedBy { it.createdAt }
+        val replies = conversationMembership(rootId).ids.mapNotNull(eventsById::get)
+        return (listOfNotNull(eventsById[rootId]) + replies)
+            .sortedWith(compareBy<NostrEvent> { it.createdAt }.thenBy { it.id })
     }
 
     // ─── Event/User entity getters ──
@@ -5135,12 +5077,14 @@ class MemoryEventStore @Inject constructor(
 
     private fun currentStats(eventId: String): EventStats {
         val zap = zapStats(eventId)
+        val replies = conversationMembership(eventId)
         return EventStats(
-            replyCount = replyCount(eventId),
+            replyCount = replies.ids.size,
             repostCount = repostCount(eventId),
             reactionCount = reactionCount(eventId),
             zapCount = zap.count,
             zapTotalSats = zap.totalSats,
+            replyCountTruncated = replies.truncated,
         )
     }
 
