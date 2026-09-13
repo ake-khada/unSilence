@@ -6,6 +6,9 @@ package com.unsilence.app.data.model
  * markdown per-block/total-block) stay with their renderer.
  */
 internal object ParseLimits {
+    /** Shared note-tokenization/text-styling bound; never parse an unbounded fallback body. */
+    const val MAX_NOTE_PARSE_CHARS = 20_000
+
     /** Input character cap for long-form (kind-30023) before the O(content) parse pass. */
     const val MAX_ARTICLE_PARSE_CHARS = 200_000
 

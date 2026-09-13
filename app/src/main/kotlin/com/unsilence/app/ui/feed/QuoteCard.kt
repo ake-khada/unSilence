@@ -278,6 +278,7 @@ internal fun QuoteCard(
                     if (textSegments.isNotEmpty()) {
                         InlineText(
                             segments      = textSegments,
+                            kind          = eventModel.effectiveKind,
                             lookupProfile = lookupProfile,
                             onAuthorClick = actions.onAuthorClick,
                             onHashtagClick = actions.onHashtagClick,
@@ -299,6 +300,7 @@ internal fun QuoteCard(
                     if (loadedEvent.content.isNotBlank()) {
                         NostrRichText(
                             content       = loadedEvent.content,
+                            kind          = loadedEvent.kind,
                             lookupProfile = lookupProfile,
                             onAuthorClick = actions.onAuthorClick,
                             onHashtagClick = actions.onHashtagClick,

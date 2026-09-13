@@ -55,6 +55,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
@@ -318,6 +319,7 @@ private fun nostrRichTextReferences(content: String): List<NostrRichTextReferenc
 @Composable
 internal fun NostrRichText(
     content: String,
+    kind: Int,
     lookupProfile: (suspend (String) -> UserEntity?)?,
     onAuthorClick: (String) -> Unit,
     onHashtagClick: (String) -> Unit,
@@ -331,8 +333,9 @@ internal fun NostrRichText(
 
     // Plain text remains the fast path when there are no interactive spans.
     if (references.isEmpty()) {
+        val text = remember(content, kind) { formatNoteText(AnnotatedString(content), kind) }
         Text(
-            text       = content,
+            text       = text,
             color      = MaterialTheme.colorScheme.onSurface,
             fontSize   = AppType.bodyLarge,
             lineHeight = 22.sp,
@@ -365,6 +368,7 @@ internal fun NostrRichText(
 
     val annotatedText = remember(
         content,
+        kind,
         references,
         profileMap,
         onAuthorClick,
@@ -400,7 +404,7 @@ internal fun NostrRichText(
             if (lastIndex < content.length) {
                 append(content.substring(lastIndex))
             }
-        }
+        }.let { formatNoteText(it, kind) }
     }
 
     Text(

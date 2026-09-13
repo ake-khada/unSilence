@@ -26,9 +26,8 @@ private const val TAG = "ContentParser"
 // Values: observed legit p100 < 60 segments / 4k chars → 150 / 20k is 2.5–5× headroom
 // over legit, orders of magnitude below pathology. The bound IS the feature — no
 // tap-to-expand (that would re-create the freeze we prevent).
-private const val MAX_PARSE_CHARS = 20_000
-// Long-form (kind-30023) input cap + the tail marker now live in shared ParseLimits
-// (reused by the native markdown parser). The SEGMENT cap still applies to every kind.
+// Input caps and the tail marker live in shared ParseLimits (also used by note
+// styling and native article Markdown). The SEGMENT cap still applies to every kind.
 private const val MAX_SEGMENTS = 150
 private const val MAX_TAG_ONLY_HASHTAGS = 5
 private const val MAX_TAG_ONLY_HASHTAG_CHARS = 80
@@ -181,7 +180,7 @@ object ContentParser {
         // ── Step 3: Bounded single-pass tokenization (spam-post DoS bound) ─
         // Cap 1: truncate INPUT before the O(content) regex pass. Long-form gets a
         // far larger cap (legit long prose); the segment cap below still bounds all kinds.
-        val maxChars = if (effectiveKind == 30023) ParseLimits.MAX_ARTICLE_PARSE_CHARS else MAX_PARSE_CHARS
+        val maxChars = if (effectiveKind == 30023) ParseLimits.MAX_ARTICLE_PARSE_CHARS else ParseLimits.MAX_NOTE_PARSE_CHARS
         val rawLen = effectiveContent.length
         val inputTruncated = rawLen > maxChars
         val parseInput = if (inputTruncated) effectiveContent.take(maxChars) else effectiveContent
