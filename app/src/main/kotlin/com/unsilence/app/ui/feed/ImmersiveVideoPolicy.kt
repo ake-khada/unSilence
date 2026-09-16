@@ -1,6 +1,7 @@
 package com.unsilence.app.ui.feed
 
 import androidx.media3.common.Player
+import com.unsilence.app.data.memory.EventEntity
 import com.unsilence.app.data.memory.FeedRow
 import com.unsilence.app.data.model.VideoRenderModel
 import com.unsilence.app.domain.model.FeedFilter
@@ -59,6 +60,7 @@ internal fun mergeImmersiveItems(
 internal fun selectImmersiveVideoItems(
     rows: List<FeedRow>,
     videoModelsFor: (String) -> List<VideoRenderModel>,
+    repostTargetFor: (String) -> EventEntity? = { null },
     authorPubkeyFor: (String) -> String? = { null },
 ): List<ImmersiveVideoItem> {
     val seenContentIds = HashSet<String>()
@@ -71,18 +73,23 @@ internal fun selectImmersiveVideoItems(
         // Feed order is newest-first; the first playable occurrence becomes the
         // canonical page and later wrappers of the same target do no extra work.
         if (contentId in seenContentIds) return@mapNotNull null
-        val authorPubkey = if (row.kind in REPOST_KINDS) {
-            authorPubkeyFor(contentId) ?: return@mapNotNull null
-        } else {
-            row.pubkey
-        }
+        val target = if (row.kind in REPOST_KINDS) {
+            repostTargetFor(contentId) ?: return@mapNotNull null
+        } else null
         videoModelsFor(contentId).firstOrNull()?.let {
             seenContentIds.add(contentId)
             ImmersiveVideoItem(
-                row = row,
+                // A reference-only wrapper may be unflagged while its verified
+                // fetched target is sensitive. The target's flag must win too.
+                row = if (target?.hasContentWarning == true) row.copy(
+                    hasContentWarning = true,
+                    contentWarningReason = row.contentWarningReason ?: target.contentWarningReason,
+                ) else row,
                 video = it,
                 contentId = contentId,
-                authorPubkey = authorPubkey,
+                authorPubkey = if (target != null) {
+                    authorPubkeyFor(contentId) ?: target.pubkey
+                } else row.pubkey,
             )
         }
     }

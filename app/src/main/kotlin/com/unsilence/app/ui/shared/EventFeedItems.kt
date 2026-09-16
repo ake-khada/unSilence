@@ -309,10 +309,12 @@ internal fun EmbeddedEventCard(
         if (model != null) {
             Spacer(Modifier.height(4.dp))
             // NIP-36: gate on the parent's own content-warning.
-            EmbeddedSensitiveGate(
+            SensitiveContentGate(
+                contentKey = event.id,
                 mode = surface.sensitiveMode,
                 sensitive = event.hasContentWarning || model.warnings.hasContentWarning,
                 reason = event.contentWarningReason ?: model.warnings.reason,
+                compact = true,
             ) {
                 ContentFlow(
                     model               = model,

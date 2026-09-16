@@ -428,7 +428,7 @@ fun AppNavigation(
     val immersiveVideoMode = selectedTab == 0 && currentFilter.isImmersiveVideoMode()
     val topBarShown    = splashDone && barsVisible && selectedTab != 1 && selectedTab != 3 && !immersiveVideoMode
     val bottomBarShown = splashDone && barsVisible && !immersiveVideoMode
-    val activeTopBarHeight = if (selectedTab == 0) 68.dp else Sizing.topBarHeight
+    val activeTopBarHeight = if (selectedTab == 0) Sizing.feedTopBarHeight else Sizing.topBarHeight
 
     val topBarOffset by animateDpAsState(
         targetValue   = if (topBarShown) 0.dp else -(activeTopBarHeight + statusBarHeight + 8.dp),
@@ -953,7 +953,7 @@ private fun UnifiedFeedHeader(
     Box(
         modifier = Modifier
             .fillMaxWidth()
-            .height(68.dp),
+            .height(Sizing.feedTopBarHeight),
         contentAlignment = Alignment.Center,
     ) {
         FeedHeaderHairline(

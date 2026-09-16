@@ -37,7 +37,6 @@ import androidx.compose.foundation.pager.PagerSnapDistance
 import androidx.compose.foundation.pager.VerticalPager
 import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.VolumeOff
 import androidx.compose.material.icons.automirrored.filled.VolumeUp
@@ -54,11 +53,11 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
-import androidx.compose.ui.draw.blur
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
@@ -81,11 +80,14 @@ import androidx.media3.common.Player
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.ui.AspectRatioFrameLayout
 import androidx.media3.ui.PlayerView
-import com.unsilence.app.data.memory.SensitiveContentMode
 import com.unsilence.app.data.memory.WotLookup
 import com.unsilence.app.data.memory.toEventModel
 import com.unsilence.app.data.model.EventModel
 import com.unsilence.app.ui.shared.EngagementSnapshot
+import com.unsilence.app.ui.shared.SensitiveContentHiddenCard
+import com.unsilence.app.ui.shared.SensitiveContentRevealCard
+import com.unsilence.app.ui.shared.SensitiveContentVisibility
+import com.unsilence.app.ui.shared.sensitiveContentVisibility
 import com.unsilence.app.ui.shared.WotInlineLabel
 import com.unsilence.app.ui.common.rememberPowerSaveMode
 import com.unsilence.app.ui.theme.AppType
@@ -173,12 +175,15 @@ internal fun ImmersiveVideoFeed(
     var startupReadyEventId by remember { mutableStateOf<String?>(null) }
     var sheetEventId by remember { mutableStateOf<String?>(null) }
     var anchoredContentId by remember { mutableStateOf(sessionItems.first().contentId) }
-    var revealedSensitiveIds by remember { mutableStateOf(emptySet<String>()) }
+    var revealedSensitiveIds by remember(sensitiveMode) { mutableStateOf(emptySet<String>()) }
     val isPowerSaveMode = rememberPowerSaveMode()
 
     BackHandler(enabled = sheetEventId == null, onBack = onExit)
 
     DisposableEffect(holder, player) {
+        // Ownership can arrive with the feed's previous media still playing.
+        // Stay silent until the settled page passes its gate and is ready.
+        player.playWhenReady = false
         holder.claim(IMMERSIVE_OWNER_ID)
         player.repeatMode = Player.REPEAT_MODE_ONE
         player.volume = 1f
@@ -205,12 +210,26 @@ internal fun ImmersiveVideoFeed(
         onDispose { player.removeListener(listener) }
     }
 
+    val settledItem = sessionItems.getOrNull(pagerState.settledPage)
+    val settledItemBlocked = settledItem?.let { item ->
+        sensitiveContentVisibility(
+            mode = sensitiveMode,
+            sensitive = item.row.hasContentWarning,
+            revealed = item.contentId in revealedSensitiveIds,
+        ) != SensitiveContentVisibility.VISIBLE
+    } == true
+    val canResumePlayback by rememberUpdatedState(
+        settledItem != null && !paused && !settledItemBlocked &&
+            startupReadyEventId == settledItem.contentId,
+    )
     val lifecycleOwner = LocalLifecycleOwner.current
     DisposableEffect(lifecycleOwner, player) {
         val observer = LifecycleEventObserver { _, event ->
             when (event) {
                 Lifecycle.Event.ON_PAUSE -> player.playWhenReady = false
-                Lifecycle.Event.ON_RESUME -> if (!paused) player.playWhenReady = true
+                Lifecycle.Event.ON_RESUME -> if (holder.isOwner(IMMERSIVE_OWNER_ID) && canResumePlayback) {
+                    player.playWhenReady = true
+                }
                 else -> Unit
             }
         }
@@ -222,11 +241,6 @@ internal fun ImmersiveVideoFeed(
         player.volume = if (muted) 0f else 1f
     }
 
-    val settledItem = sessionItems.getOrNull(pagerState.settledPage)
-    val settledItemBlocked = settledItem?.let { item ->
-        sensitiveMode == SensitiveContentMode.BLUR &&
-            item.row.hasContentWarning && item.contentId !in revealedSensitiveIds
-    } == true
     LaunchedEffect(
         settledItem?.contentId,
         settledItem?.video?.videoUrl,
@@ -334,23 +348,30 @@ internal fun ImmersiveVideoFeed(
         ) { page ->
             val item = sessionItems[page]
             val active = page == pagerState.settledPage
-            val blocked = sensitiveMode == SensitiveContentMode.BLUR &&
-                item.row.hasContentWarning && item.contentId !in revealedSensitiveIds
+            val visibility = sensitiveContentVisibility(
+                mode = sensitiveMode,
+                sensitive = item.row.hasContentWarning,
+                revealed = item.contentId in revealedSensitiveIds,
+            )
+            val blocked = visibility != SensitiveContentVisibility.VISIBLE
             ImmersiveVideoPage(
                 item = item,
                 player = player,
                 active = active,
                 paused = paused && active && !blocked,
                 frameReady = renderedVideoUrl == item.video.videoUrl,
-                sensitiveBlocked = blocked,
+                sensitiveVisibility = visibility,
                 thumbnailCache = thumbnailCache,
                 onTogglePlayback = {
                     if (active) {
-                        if (blocked) {
-                            revealedSensitiveIds = revealedSensitiveIds + item.contentId
-                        } else {
-                            paused = !paused
-                            player.playWhenReady = !paused
+                        when (visibility) {
+                            SensitiveContentVisibility.REVEALABLE ->
+                                revealedSensitiveIds = revealedSensitiveIds + item.contentId
+                            SensitiveContentVisibility.HIDDEN -> Unit
+                            SensitiveContentVisibility.VISIBLE -> {
+                                paused = !paused
+                                player.playWhenReady = !paused
+                            }
                         }
                     }
                 },
@@ -384,7 +405,8 @@ internal fun ImmersiveVideoFeed(
             }
         }
 
-        settledItem?.let { item ->
+        // The author bar includes the post's caption: it is protected content too.
+        settledItem?.takeUnless { settledItemBlocked }?.let { item ->
             ImmersiveAuthorBar(
                 item = item,
                 host = host,
@@ -448,11 +470,31 @@ private fun ImmersiveVideoPage(
     active: Boolean,
     paused: Boolean,
     frameReady: Boolean,
-    sensitiveBlocked: Boolean,
+    sensitiveVisibility: SensitiveContentVisibility,
     thumbnailCache: VideoThumbnailCache,
     onTogglePlayback: () -> Unit,
     onLongPress: () -> Unit,
 ) {
+    if (sensitiveVisibility != SensitiveContentVisibility.VISIBLE) {
+        // No poster request, player surface or caption behind the placeholder.
+        Box(modifier = Modifier.fillMaxSize().background(Black), contentAlignment = Alignment.Center) {
+            val placeholderModifier = Modifier.padding(Spacing.medium)
+            when (sensitiveVisibility) {
+                SensitiveContentVisibility.HIDDEN -> SensitiveContentHiddenCard(
+                    reason = item.row.contentWarningReason,
+                    modifier = placeholderModifier,
+                )
+                SensitiveContentVisibility.REVEALABLE -> SensitiveContentRevealCard(
+                    reason = item.row.contentWarningReason,
+                    onReveal = onTogglePlayback,
+                    modifier = Modifier.fillMaxSize().padding(Spacing.medium),
+                )
+                SensitiveContentVisibility.VISIBLE -> Unit
+            }
+        }
+        return
+    }
+
     var renderedAspect by remember(item.video.videoUrl) {
         mutableFloatStateOf(
             thumbnailCache.resolvedAspectRatios[item.video.videoUrl] ?: item.video.aspectRatio,
@@ -481,11 +523,9 @@ private fun ImmersiveVideoPage(
             model = item.video,
             thumbnailCache = thumbnailCache,
             contentScale = ContentScale.Fit,
-            modifier = Modifier
-                .fillMaxSize()
-                .then(if (sensitiveBlocked) Modifier.blur(24.dp) else Modifier),
+            modifier = Modifier.fillMaxSize(),
         )
-        if (active && !sensitiveBlocked) {
+        if (active) {
             AndroidView(
                 factory = { context ->
                     PlayerView(context).apply {
@@ -543,21 +583,6 @@ private fun ImmersiveVideoPage(
                     contentDescription = "Paused",
                     tint = White,
                     modifier = Modifier.size(42.dp),
-                )
-            }
-        }
-        if (sensitiveBlocked) {
-            Box(
-                modifier = Modifier
-                    .background(Color.Black.copy(alpha = 0.72f), RoundedCornerShape(6.dp))
-                    .padding(horizontal = 16.dp, vertical = 10.dp),
-                contentAlignment = Alignment.Center,
-            ) {
-                Text(
-                    text = item.row.contentWarningReason?.takeIf { it.isNotBlank() }
-                        ?: "Sensitive content · tap to reveal",
-                    color = White,
-                    fontSize = AppType.bodySmall,
                 )
             }
         }

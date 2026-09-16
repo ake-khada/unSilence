@@ -29,6 +29,8 @@ import com.unsilence.app.data.model.ContentParser
 import com.unsilence.app.data.model.EventModel
 import com.unsilence.app.data.model.resolveDisplayModel
 import com.unsilence.app.ui.shared.CardRole
+import com.unsilence.app.ui.shared.sensitiveContentPlaceholderPadding
+import com.unsilence.app.ui.shared.usesCompactSensitivePlaceholder
 import com.unsilence.app.ui.theme.AppType
 import com.unsilence.app.ui.theme.Spacing
 import com.unsilence.app.ui.theme.SurfaceVariant
@@ -49,6 +51,7 @@ fun EmptyRepostBody(
     targetAuthorPubkey: String?,
     proxyUrl: String?,
     host: EventCardHost,
+    role: CardRole,
     videoOwnerId: String,
 ) {
     val uriHandler = LocalUriHandler.current
@@ -124,10 +127,15 @@ fun EmptyRepostBody(
                     wotLookup = surface.wotLookup,
                     feedWotDisplayMode = surface.feedWotDisplayMode,
                 )
-                com.unsilence.app.ui.shared.EmbeddedSensitiveGate(
+                // A repost in the feed is a full-size card, not a quote. Use
+                // the same host role and gutters as EventCard's own gate.
+                com.unsilence.app.ui.shared.SensitiveContentGate(
+                    contentKey = resolvedModel.navigateId,
                     mode = surface.sensitiveMode,
                     sensitive = resolvedModel.warnings.hasContentWarning,
                     reason = resolvedModel.warnings.reason,
+                    modifier = Modifier.sensitiveContentPlaceholderPadding(role),
+                    compact = role.usesCompactSensitivePlaceholder,
                 ) {
                     ContentFlow(
                         model               = resolvedModel,

@@ -377,7 +377,7 @@ private fun SegmentedToggle(
             val selected = mode == current
             val label = when (mode) {
                 SensitiveContentMode.HIDE -> "Hide"
-                SensitiveContentMode.BLUR -> "Blur"
+                SensitiveContentMode.BLUR -> "Tap to reveal"
                 SensitiveContentMode.SHOW -> "Show"
             }
             Box(
