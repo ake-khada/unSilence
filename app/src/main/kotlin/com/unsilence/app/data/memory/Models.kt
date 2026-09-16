@@ -110,7 +110,7 @@ data class RelayList(val read: List<String>, val write: List<String>)
 enum class SensitiveContentMode {
     /** Hide sensitive posts entirely (filtered out of feed). */
     HIDE,
-    /** Show blurred preview with tap-to-reveal. Default. */
+    /** Hide behind tap-to-reveal. Default; BLUR is retained for stored preferences. */
     BLUR,
     /** Show sensitive posts without any overlay. */
     SHOW,

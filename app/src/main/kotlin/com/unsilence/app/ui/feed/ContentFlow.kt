@@ -8,7 +8,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -73,8 +73,11 @@ internal fun ContentFlow(
     val isEmbedded = role == CardRole.Embedded
     val videoModels = remember(model.media.videos) { model.media.videos.map { it.model } }
 
-    LaunchedEffect(model.id, videoOwnerId, videoModels) {
-        if (videoModels.isNotEmpty()) videoScope?.registerVideoModels(videoOwnerId, videoModels)
+    if (showVideo && videoScope != null && videoModels.isNotEmpty()) {
+        DisposableEffect(videoScope, model.id, videoOwnerId, videoModels) {
+            val unregister = videoScope.registerVideoModels(videoOwnerId, videoModels)
+            onDispose { unregister() }
+        }
     }
 
     // Collapsed long-note budget: keep the whole card close to 80% of the

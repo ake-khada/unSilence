@@ -193,6 +193,7 @@ fun FeedScreen(
                     actionsViewModel.getVideoRenderModels(id).takeIf { it.isNotEmpty() }
                         ?: rowsById[id]?.let(::buildVideoRenderModels).orEmpty()
                 },
+                repostTargetFor = actionsViewModel::getCachedEvent,
                 authorPubkeyFor = { id -> actionsViewModel.getCachedEventModel(id)?.pubkey },
             )
         }

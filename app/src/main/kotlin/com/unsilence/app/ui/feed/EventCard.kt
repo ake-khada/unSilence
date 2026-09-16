@@ -9,14 +9,11 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
-import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -28,9 +25,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
-import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.blur
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.graphics.Color
@@ -48,7 +43,6 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import coil3.compose.AsyncImage
 import com.unsilence.app.data.memory.CustomEmoji
 import com.unsilence.app.data.memory.FeedRow
-import com.unsilence.app.data.memory.SensitiveContentMode
 import com.unsilence.app.data.memory.UserEntity
 import com.unsilence.app.data.model.EventModel
 import com.unsilence.app.data.model.RepostPayload
@@ -56,8 +50,10 @@ import com.unsilence.app.data.wallet.ZapRequest
 import com.unsilence.app.ui.common.rememberWidthImageRequest
 import com.unsilence.app.ui.shared.CardRole
 import com.unsilence.app.ui.shared.EventEngagementSnapshot
-import com.unsilence.app.ui.shared.SensitiveContentHiddenCard
+import com.unsilence.app.ui.shared.SensitiveContentGate
 import com.unsilence.app.ui.shared.ThreadParentCard
+import com.unsilence.app.ui.shared.sensitiveContentPlaceholderPadding
+import com.unsilence.app.ui.shared.usesCompactSensitivePlaceholder
 import com.unsilence.app.ui.theme.AppType
 import com.unsilence.app.ui.theme.Sizing
 import com.unsilence.app.ui.theme.Spacing
@@ -145,13 +141,6 @@ fun EventCard(
         }
     }
 
-    // NIP-36 blur/hide state — tap to reveal, per-card
-    var revealed by remember { mutableStateOf(false) }
-    val showBlur = surface.sensitiveMode == SensitiveContentMode.BLUR &&
-        row.hasContentWarning && !revealed
-    val hideWhole = surface.sensitiveMode == SensitiveContentMode.HIDE &&
-        row.hasContentWarning
-
     // Resolve source profile for repost header (kind-6 wrapper author).
     val liveSourceProfile = if (model.repost != null) {
         collectProfileAsState(model.sourcePubkey, surface.profileFlow)
@@ -217,36 +206,28 @@ fun EventCard(
 
     // Article layout
     if (role == CardRole.Article || role == CardRole.EmbeddedArticle || model.article != null) {
-        if (hideWhole) {
-            SensitiveContentHiddenCard(
-                reason = row.contentWarningReason,
-                modifier = modifier.padding(horizontal = Spacing.medium, vertical = Spacing.small),
+        SensitiveContentGate(
+            contentKey = row.id,
+            mode = surface.sensitiveMode,
+            sensitive = row.hasContentWarning,
+            reason = row.contentWarningReason,
+            modifier = modifier.sensitiveContentPlaceholderPadding(role),
+            compact = role.usesCompactSensitivePlaceholder,
+        ) {
+            ArticleLayout(
+                model = model,
+                row = row,
+                engagement = engagement,
+                replyCount = liveReplyCount,
+                repostCount = liveRepostCount,
+                reactionCount = liveReactionCount,
+                zapTotalSats = liveZapTotalSats,
+                sourceProfile = sourceProfile,
+                role = role,
+                host = host,
+                boundActions = boundActions,
+                modifier = modifier,
             )
-        } else {
-            Box {
-                Box(modifier = if (showBlur) Modifier.blur(24.dp) else Modifier) {
-                    ArticleLayout(
-                        model = model,
-                        row = row,
-                        engagement = engagement,
-                        replyCount = liveReplyCount,
-                        repostCount = liveRepostCount,
-                        reactionCount = liveReactionCount,
-                        zapTotalSats = liveZapTotalSats,
-                        sourceProfile = sourceProfile,
-                        role = role,
-                        host = host,
-                        boundActions = boundActions,
-                        modifier = modifier,
-                    )
-                }
-                SensitiveContentRevealOverlay(
-                    visible = showBlur,
-                    reason = row.contentWarningReason,
-                    onReveal = { revealed = true },
-                    modifier = Modifier.align(Alignment.Center),
-                )
-            }
         }
         return
     }
@@ -349,17 +330,17 @@ fun EventCard(
             )
         }
 
-        // NIP-36 content warning blur/hide overlay. HIDE shows a compact
-        // placeholder (feed already drops these via its filter; this covers
-        // non-feed surfaces — profile/thread — and preserves thread structure).
-        if (hideWhole) {
-            SensitiveContentHiddenCard(
-                reason = row.contentWarningReason,
-                modifier = Modifier.padding(horizontal = Spacing.medium, vertical = Spacing.small),
-            )
-        } else
-        Box {
-            Column(modifier = if (showBlur) Modifier.blur(24.dp) else Modifier) {
+        // Keep protected bodies (including inline video surfaces) out of
+        // composition until revealed. HIDE preserves non-feed thread structure.
+        SensitiveContentGate(
+            contentKey = row.id,
+            mode = surface.sensitiveMode,
+            sensitive = row.hasContentWarning,
+            reason = row.contentWarningReason,
+            modifier = Modifier.sensitiveContentPlaceholderPadding(role),
+            compact = role.usesCompactSensitivePlaceholder,
+        ) {
+            Column {
                 // Content flow — walks segments and renders primitives
                 ContentFlow(
                     model               = model,
@@ -404,17 +385,11 @@ fun EventCard(
                         targetAuthorPubkey = model.repost.targetAuthorHint,
                         proxyUrl = model.repost.proxyUrl,
                         host = host,
+                        role = role,
                         videoOwnerId = row.id,
                     )
                 }
             }
-
-            SensitiveContentRevealOverlay(
-                visible = showBlur,
-                reason = row.contentWarningReason,
-                onReveal = { revealed = true },
-                modifier = Modifier.align(Alignment.Center),
-            )
         }
         } // end content-area Column (card-level long-press scope)
 
@@ -471,36 +446,6 @@ fun EventCard(
                 onProfileTap          = actions.onAuthorClick,
             )
         }
-    }
-}
-
-@Composable
-private fun SensitiveContentRevealOverlay(
-    visible: Boolean,
-    reason: String?,
-    onReveal: () -> Unit,
-    modifier: Modifier = Modifier,
-) {
-    if (!visible) return
-    Column(
-        modifier = modifier
-            .fillMaxWidth()
-            .clickable(onClick = onReveal)
-            .padding(vertical = Spacing.xl),
-        horizontalAlignment = Alignment.CenterHorizontally,
-    ) {
-        Text(
-            text = reason?.takeIf { it.isNotBlank() } ?: "Sensitive content",
-            fontSize = AppType.bodySmall,
-            fontWeight = FontWeight.Medium,
-            color = TextSecondary,
-        )
-        Spacer(Modifier.height(Spacing.small))
-        Text(
-            text = "Tap to reveal",
-            fontSize = AppType.caption,
-            color = TextSecondary.copy(alpha = 0.6f),
-        )
     }
 }
 

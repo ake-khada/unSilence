@@ -193,6 +193,9 @@ class NoteActionsViewModel @Inject constructor(
      */
     fun getCachedEventModel(eventId: String) = memoryEventStore.getEventModel(eventId)
 
+    /** Cache-only trusted event metadata, including the upstream content-warning flag. */
+    fun getCachedEvent(eventId: String) = memoryEventStore.getEventEntity(eventId)
+
     fun pollResponsesFlow(pollId: String): Flow<List<NostrEvent>> =
         memoryEventStore.pollResponsesFlow(pollId)
 

@@ -237,8 +237,10 @@ internal fun QuoteCard(
                 }
                 Spacer(Modifier.height(4.dp))
 
-                com.unsilence.app.ui.shared.EmbeddedSensitiveGate(
+                com.unsilence.app.ui.shared.SensitiveContentGate(
+                    contentKey = loadedEvent.id,
                     mode = surface.sensitiveMode, sensitive = targetSensitive, reason = targetReason,
+                    compact = true,
                 ) {
                 if (eventModel != null && renderMode == QuoteRenderMode.FULL) {
                     // Full source-order rendering via ContentFlow (same pipeline as top-level cards)

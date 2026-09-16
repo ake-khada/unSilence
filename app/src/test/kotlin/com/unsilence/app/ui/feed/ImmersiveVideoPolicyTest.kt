@@ -1,6 +1,7 @@
 package com.unsilence.app.ui.feed
 
 import androidx.media3.common.Player
+import com.unsilence.app.data.memory.EventEntity
 import com.unsilence.app.data.memory.FeedRow
 import com.unsilence.app.data.model.VideoRenderModel
 import com.unsilence.app.domain.model.FeedFilter
@@ -82,7 +83,7 @@ class ImmersiveVideoPolicyTest {
                 requestedIds += id
                 if (id == targetId) listOf(video) else emptyList()
             },
-            authorPubkeyFor = { id -> originalAuthor.takeIf { id == targetId } },
+            repostTargetFor = { id -> targetEvent(id, originalAuthor).takeIf { id == targetId } },
         )
 
         assertEquals(listOf(targetId), requestedIds)
@@ -90,6 +91,55 @@ class ImmersiveVideoPolicyTest {
         assertEquals("newest-repost", selected.single().row.id)
         assertEquals(targetId, selected.single().contentId)
         assertEquals(originalAuthor, selected.single().authorPubkey)
+    }
+
+    @Test
+    fun `target warning lookup preserves effective author attribution`() {
+        val selected = selectImmersiveVideoItems(
+            rows = listOf(row("wrapper", 16, rootId = "target")),
+            videoModelsFor = { listOf(video) },
+            repostTargetFor = { targetEvent(it, pubkey = "intermediate-reposter") },
+            authorPubkeyFor = { "verified-original-author" },
+        ).single()
+        assertEquals("verified-original-author", selected.authorPubkey)
+    }
+
+    @Test
+    fun `both repost kinds inherit the verified targets warning`() {
+        listOf(6, 16).forEach { kind ->
+            val selected = selectImmersiveVideoItems(
+                rows = listOf(row("wrapper", kind, rootId = "sensitive-target")),
+                videoModelsFor = { listOf(video) },
+                repostTargetFor = { id -> targetEvent(id).copy(
+                    hasContentWarning = true,
+                    contentWarningReason = "Test warning",
+                ) },
+            ).single()
+            assertTrue("kind=$kind", selected.row.hasContentWarning)
+            assertEquals("Test warning", selected.row.contentWarningReason)
+        }
+    }
+
+    @Test
+    fun `target without a warning cannot clear the wrappers warning`() {
+        val selected = selectImmersiveVideoItems(
+            rows = listOf(row("wrapper", 16, rootId = "target").copy(
+                hasContentWarning = true, contentWarningReason = "Wrapper warning",
+            )),
+            videoModelsFor = { listOf(video) },
+            repostTargetFor = { targetEvent(it) },
+        ).single()
+        assertTrue(selected.row.hasContentWarning)
+        assertEquals("Wrapper warning", selected.row.contentWarningReason)
+    }
+
+    @Test
+    fun `cached repost media without a verified target is not eligible`() {
+        assertTrue(selectImmersiveVideoItems(
+            rows = listOf(row("wrapper", 16, rootId = "target")),
+            videoModelsFor = { listOf(video) },
+            repostTargetFor = { null },
+        ).isEmpty())
     }
 
     @Test
@@ -227,6 +277,10 @@ class ImmersiveVideoPolicyTest {
         replyCount = 0,
         repostCount = 0,
         zapCount = 0,
+    )
+
+    private fun targetEvent(id: String, pubkey: String = "b".repeat(64)) = EventEntity(
+        id = id, pubkey = pubkey, kind = 22, content = "", createdAt = 1L, tags = "[]",
     )
 
     private fun item(

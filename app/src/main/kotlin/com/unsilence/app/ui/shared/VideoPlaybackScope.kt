@@ -7,6 +7,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.Stable
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -70,6 +71,15 @@ class VideoPlaybackScope(
     var videoRenderModels by mutableStateOf<Map<String, List<VideoRenderModel>>>(emptyMap())
         internal set
     private var selectedVideoUrls by mutableStateOf<Map<String, String>>(emptyMap())
+    private var playbackRegistrations by mutableStateOf<Map<Any, VideoPlaybackRegistration>>(emptyMap())
+    internal var playbackPermissionRevision by mutableStateOf(0L)
+        private set
+
+    // Only composed, allowed ContentFlows register. Cache hydration must never
+    // start a hidden video's audio, including a target under an ordinary wrapper.
+    internal val playableVideoModels by derivedStateOf {
+        permittedVideoModels(videoRenderModels, playbackRegistrations.values)
+    }
 
     // Detector state — written only from the detection coroutine (main thread)
     internal var lastActiveTransitionAt: Long = 0L
@@ -98,17 +108,31 @@ class VideoPlaybackScope(
 
     fun toggleMute() { isMuted = !isMuted }
 
-    fun registerVideoModels(noteId: String, models: List<VideoRenderModel>) {
-        if (models.isEmpty()) return
-        if (videoRenderModels[noteId] == models) return
-        videoRenderModels = videoRenderModels + (noteId to models)
+    /** Returns a disposer; each rendered occurrence owns its own permission. */
+    fun registerVideoModels(noteId: String, models: List<VideoRenderModel>): () -> Unit {
+        val token = Any()
+        playbackRegistrations = playbackRegistrations + (
+            token to VideoPlaybackRegistration(noteId, models)
+        )
+        return {
+            playbackRegistrations = playbackRegistrations - token
+            // Re-hide/disposal revokes consent immediately, not after the scroll
+            // detector's cooldown. Preserve codec retention and other scopes' ownership.
+            if (activeVideoNoteId == noteId && holder.currentUrl != activeVideoUrl) {
+                holder.releaseOwnership(ownerId)
+                // Disposal and a new grant can occur in one Compose apply pass.
+                // Restart the effect even if the final allowed URL is unchanged.
+                playbackPermissionRevision += 1
+                if (showFullscreenVideo) dismissFullscreen()
+            }
+        }
     }
 
     fun selectedVideoUrl(noteId: String): String? =
-        resolveSelectedVideoUrl(videoRenderModels[noteId].orEmpty(), selectedVideoUrls[noteId])
+        resolveSelectedVideoUrl(playableVideoModels[noteId].orEmpty(), selectedVideoUrls[noteId])
 
     fun selectVideo(noteId: String, videoUrl: String) {
-        val registeredUrl = videoRenderModels[noteId]
+        val registeredUrl = playableVideoModels[noteId]
             ?.firstOrNull { it.videoUrl == videoUrl }
             ?.videoUrl
             ?: return
@@ -128,7 +152,7 @@ class VideoPlaybackScope(
         // tapping it would open an empty (black) fullscreen with no media. The
         // tap is a no-op until the target warms (map recompute on next `events`).
         val targetUrl = resolvePlaybackVideoUrl(
-            models = videoRenderModels[noteId].orEmpty(),
+            models = playableVideoModels[noteId].orEmpty(),
             requestedUrl = requestedVideoUrl,
         ) ?: return
         selectVideo(noteId, targetUrl)
@@ -281,7 +305,7 @@ fun rememberVideoPlaybackScope(
     // watchdog's blind spot for a screen that disappears before its first 5s tick.
     DisposableEffect(ownerId) {
         onDispose {
-            val currentModels = scope.videoRenderModels
+            val currentModels = scope.playableVideoModels
             if (scope.activeVideoNoteId == null && currentModels.isNotEmpty()) {
                 val layoutInfo = listState.layoutInfo
                 val viewportStart = layoutInfo.viewportStartOffset
@@ -325,7 +349,10 @@ fun rememberVideoPlaybackScope(
         val observer = LifecycleEventObserver { _, event ->
             when (event) {
                 Lifecycle.Event.ON_PAUSE -> exoPlayer.playWhenReady = false
-                Lifecycle.Event.ON_RESUME -> if (scope.activeVideoNoteId != null) exoPlayer.playWhenReady = true
+                Lifecycle.Event.ON_RESUME -> if (
+                    holder.isOwner(ownerId) && scope.activeVideoUrl != null &&
+                    holder.currentUrl == scope.activeVideoUrl
+                ) exoPlayer.playWhenReady = true
                 else -> {}
             }
         }
@@ -344,9 +371,8 @@ fun rememberVideoPlaybackScope(
     // (keyed by parent row.id). Discovery is cache-only: videoSourceCandidateIds
     // reads the empty-repost target from FeedRow.rootId and quote ids from an
     // already-parsed model via cachedModelProvider (no parse); videoModelProvider
-    // is the MES sidecar lookup. Such a row becomes eligible once the target's
-    // video sidecar exists; the map recomputes on the next `events` change
-    // (frequent on a live feed) — see openFullscreen's guard for the cold case.
+    // is the MES sidecar lookup. This cache establishes source priority, not
+    // playback permission: only a composed ContentFlow can make media eligible.
     val visibleEventIds = remember(events) { events.mapTo(HashSet()) { it.id } }
     val renderModelsMap = remember(events, additionalVideoSourceCandidateIds) {
         events
@@ -381,8 +407,6 @@ fun rememberVideoPlaybackScope(
             Log.w("VideoScope", "models resolved: ${combined.size} rows for $ownerId")
         }
     }
-
-    val noteIdsWithVideo = remember(scope.videoRenderModels) { scope.videoRenderModels.keys }
 
     // Playback transitions: swap media source on active note change.
     // B2 contract:
@@ -435,7 +459,7 @@ fun rememberVideoPlaybackScope(
         onDispose { exoPlayer.removeListener(listener) }
     }
 
-    LaunchedEffect(activeVideoUrl) {
+    LaunchedEffect(activeVideoUrl, scope.playbackPermissionRevision) {
         if (activeVideoUrl != null) {
             val retainedUrl = holder.currentUrl
             val wasRetained = holder.isRetained
@@ -496,7 +520,7 @@ fun rememberVideoPlaybackScope(
         // changes. Returning layoutInfo alone means a late-resolved nested video
         // can be observed but suppressed until the user scrolls and layoutInfo
         // changes. That is exactly the "video appears after sliding" failure.
-        snapshotFlow { scope.videoRenderModels.keys to listState.layoutInfo }
+        snapshotFlow { scope.playableVideoModels.keys to listState.layoutInfo }
             .map { (currentIds, layoutInfo) ->
                 scope.mapPasses += 1
 
@@ -601,6 +625,8 @@ fun rememberVideoPlaybackScope(
             }
             .distinctUntilChanged()
             .collect { newActiveId ->
+                // Consent may have been revoked during the confirmation delay.
+                if (newActiveId != null && newActiveId !in scope.playableVideoModels) return@collect
                 if (scope.activeVideoNoteId != newActiveId) {
                     val now = System.currentTimeMillis()
 
@@ -637,7 +663,7 @@ fun rememberVideoPlaybackScope(
                         scope.confirmationFires = 0
                         scope.starvationWatchdogLoggedTicks = 0
                     }
-                    if (newActiveId == null) {
+                    if (newActiveId == null && holder.isOwner(ownerId)) {
                         exoPlayer.playWhenReady = false
                     }
                 }
@@ -648,7 +674,7 @@ fun rememberVideoPlaybackScope(
         while (true) {
             delay(5_000)
 
-            val currentModels = scope.videoRenderModels
+            val currentModels = scope.playableVideoModels
             val isScrolling = listState.isScrollInProgress
             val nowElapsedMs = SystemClock.elapsedRealtime()
             val millisSinceLastScroll = scope.lastScrollObservedAtElapsedMs

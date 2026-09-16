@@ -64,6 +64,7 @@ object Sizing {
     val actionIcon        = 20.dp
     val navIcon           = 20.dp   // φ⁶ — top bar action icons
     val topBarHeight      = 52.dp
+    val feedTopBarHeight  = 68.dp
     val bottomNavHeight   = 52.dp
     val mediaCornerRadius = 8.dp
 }
