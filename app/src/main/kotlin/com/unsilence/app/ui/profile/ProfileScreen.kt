@@ -7,6 +7,7 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -56,6 +57,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.sp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -111,6 +113,7 @@ private val PROFILE_AVATAR_SIZE = 85.dp
 @Composable
 fun ProfileScreen(
     scrollToTopTrigger: Int = 0,
+    staticBottomPadding: Dp = 0.dp,
     onLogout: () -> Unit = {},
     onBack: () -> Unit = {},
     onNoteClick: (String) -> Unit = {},
@@ -288,6 +291,7 @@ fun ProfileScreen(
         // ── Scrollable content ────────────────────────────────────────────────
         LazyColumn(
             state               = listState,
+            contentPadding      = PaddingValues(bottom = staticBottomPadding),
             modifier            = Modifier
                 .fillMaxSize()
                 .tabSwipe(

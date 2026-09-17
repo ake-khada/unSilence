@@ -8,6 +8,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -66,6 +67,7 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.sp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -121,6 +123,7 @@ private const val SEARCH_TAB_SWIPE_THRESHOLD_PX = 120f
 
 @Composable
 fun SearchScreen(
+    staticBottomPadding: Dp = 0.dp,
     onNoteClick: (String) -> Unit = {},
     onComment: (String) -> Unit = {},
     onAuthorClick: (pubkey: String) -> Unit = {},
@@ -476,6 +479,7 @@ fun SearchScreen(
                         ShimmerTrendingDiscovery()
                     } else {
                         TrendingDiscovery(
+                            staticBottomPadding = staticBottomPadding,
                             hashtags = trendingHashtags,
                             users = trendingUsers,
                             wotLookups = trendingWotLookups,
@@ -514,7 +518,11 @@ fun SearchScreen(
                         }
                     } else {
                         // Notes/Tags/All tab loading
-                        LazyColumn(state = noteListState, modifier = Modifier.fillMaxSize()) {
+                        LazyColumn(
+                            state = noteListState,
+                            modifier = Modifier.fillMaxSize(),
+                            contentPadding = PaddingValues(bottom = staticBottomPadding),
+                        ) {
                             items(3) { ShimmerNoteCard(showMedia = it == 0) }
                         }
                     }
@@ -534,7 +542,11 @@ fun SearchScreen(
                             reactedIds, repostedIds, zappedIds, isNwcConfigured,
                             zapLoadingIds, optimisticSats, zapFlash,
                         )
-                        LazyColumn(state = noteListState, modifier = Modifier.fillMaxSize()) {
+                        LazyColumn(
+                            state = noteListState,
+                            modifier = Modifier.fillMaxSize(),
+                            contentPadding = PaddingValues(bottom = staticBottomPadding),
+                        ) {
                             state.entityTarget?.let { target ->
                                 item(key = "entity:${entityResultKey(target)}") {
                                     SearchEntityResultRow(
@@ -578,7 +590,10 @@ fun SearchScreen(
                             message = "No results for \u201c${state.query}\u201d",
                         )
                     } else {
-                        LazyColumn(modifier = Modifier.fillMaxSize()) {
+                        LazyColumn(
+                            modifier = Modifier.fillMaxSize(),
+                            contentPadding = PaddingValues(bottom = staticBottomPadding),
+                        ) {
                             profileTarget?.let { target ->
                                 item(key = "entity:${entityResultKey(target)}") {
                                     SearchEntityResultRow(
@@ -619,7 +634,11 @@ fun SearchScreen(
                             reactedIds, repostedIds, zappedIds, isNwcConfigured,
                             zapLoadingIds, optimisticSats, zapFlash,
                         )
-                        LazyColumn(state = noteListState, modifier = Modifier.fillMaxSize()) {
+                        LazyColumn(
+                            state = noteListState,
+                            modifier = Modifier.fillMaxSize(),
+                            contentPadding = PaddingValues(bottom = staticBottomPadding),
+                        ) {
                             noteTarget?.let { target ->
                                 item(key = "entity:${entityResultKey(target)}") {
                                     SearchEntityResultRow(
@@ -913,6 +932,7 @@ private fun rememberEngagement(
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun TrendingDiscovery(
+    staticBottomPadding: Dp,
     hashtags: List<Pair<String, Int>>,
     users: List<UserEntity>,
     wotLookups: Map<String, WotLookup>,
@@ -921,7 +941,7 @@ private fun TrendingDiscovery(
 ) {
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
-        contentPadding = androidx.compose.foundation.layout.PaddingValues(bottom = Spacing.xl),
+        contentPadding = PaddingValues(bottom = Spacing.xl + staticBottomPadding),
     ) {
         if (hashtags.isNotEmpty()) {
             item {
