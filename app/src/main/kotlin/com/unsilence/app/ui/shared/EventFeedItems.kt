@@ -296,7 +296,7 @@ internal fun EmbeddedEventCard(
                 overflow = TextOverflow.Ellipsis,
                 modifier = Modifier.weight(1f),
             )
-            val lookup = surface.wotLookup?.invoke(displayPubkey)
+            val lookup = rememberCardWot(displayPubkey, surface.wotLookup)
             Spacer(Modifier.width(6.dp))
             WotFeedMetaTimestamp(
                 lookup = lookup,

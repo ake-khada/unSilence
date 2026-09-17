@@ -141,9 +141,7 @@ class SearchViewModel @Inject constructor(
 
     /** NIP-36 sensitive-content display mode (shared with feed). */
     val sensitiveContentMode: StateFlow<com.unsilence.app.data.memory.SensitiveContentMode> =
-        relayPreferencesStore.sensitiveContentModeFlow()
-            .stateIn(viewModelScope, SharingStarted.Eagerly,
-                com.unsilence.app.data.memory.SensitiveContentMode.BLUR)
+        relayPreferencesStore.sensitiveContentMode
 
     /** Visible trending hashtags after account-level mute filtering. */
     private val _trendingHashtags = MutableStateFlow<List<Pair<String, Int>>>(emptyList())

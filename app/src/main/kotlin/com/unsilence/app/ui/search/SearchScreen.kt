@@ -38,6 +38,8 @@ import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
+import com.unsilence.app.ui.shared.rememberCardWotLookup
+import com.unsilence.app.ui.shared.rememberArticleSelection
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -143,7 +145,9 @@ fun SearchScreen(
     val trendingHashtags by viewModel.trendingHashtags.collectAsStateWithLifecycle()
     val trendingUsers   by viewModel.trendingUsers.collectAsStateWithLifecycle()
     val trendingWotLookups by viewModel.trendingWotLookups.collectAsStateWithLifecycle()
-    val wotLookups      by viewModel.wotLookups.collectAsStateWithLifecycle()
+    val wotLookupState = viewModel.wotLookups.collectAsStateWithLifecycle()
+    val wotLookups by wotLookupState
+    val wotLookup = rememberCardWotLookup(wotLookupState)
     val feedWotDisplayMode by viewModel.feedWotDisplayMode.collectAsStateWithLifecycle()
     val reactedIds      by actionsViewModel.reactedEventIds.collectAsStateWithLifecycle()
     val repostedIds     by actionsViewModel.repostedEventIds.collectAsStateWithLifecycle()
@@ -155,7 +159,7 @@ fun SearchScreen(
 
     val showSnackbar = LocalShowSnackbar.current
     var selectedTab by remember { mutableIntStateOf(0) }
-    var articleRow by remember { mutableStateOf<FeedRow?>(null) }
+    var articleRow by rememberArticleSelection(actionsViewModel)
     var actionsRow by remember { mutableStateOf<FeedRow?>(null) }
     val noteListState = rememberLazyListState()
     val cardWidthPx = LocalWindowInfo.current.containerSize.width
@@ -229,7 +233,7 @@ fun SearchScreen(
         onCardReactLongPress,
         pinnedEmojis,
         viewModel,
-        wotLookups,
+        wotLookup,
         feedWotDisplayMode,
         onCardLongPress,
         sensitiveMode,
@@ -253,7 +257,7 @@ fun SearchScreen(
             pinnedEmojis = pinnedEmojis,
             videoScope = null,
             sensitiveMode = sensitiveMode,
-            wotLookup = { pubkey -> wotLookups[pubkey] },
+            wotLookup = wotLookup,
             feedWotDisplayMode = feedWotDisplayMode,
             onWotSubjectsVisible = viewModel::requestWotHydration,
             pollActions = actionsViewModel.pollActionCallbacks(),

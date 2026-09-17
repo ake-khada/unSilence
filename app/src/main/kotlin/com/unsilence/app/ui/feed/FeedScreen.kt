@@ -19,13 +19,18 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.rememberLazyListState
+import com.unsilence.app.ui.shared.rememberFeedScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Forum
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
+import com.unsilence.app.ui.shared.ResumedEffect
+import androidx.lifecycle.compose.LifecycleResumeEffect
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.Composable
+import com.unsilence.app.ui.shared.rememberCardWotLookup
+import com.unsilence.app.ui.shared.rememberArticleSelection
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -124,6 +129,10 @@ fun FeedScreen(
         key = "immersive-thread-${LocalAppSessionKey.current}",
     ),
 ) {
+    LifecycleResumeEffect(viewModel) {
+        viewModel.setScreenActive(true)
+        onPauseOrDispose { viewModel.setScreenActive(false) }
+    }
     val contentFilter by viewModel.contentFilter.collectAsStateWithLifecycle()
     val currentFilter by viewModel.filterFlow.collectAsStateWithLifecycle()
     val currentFeedType by viewModel.feedType.collectAsStateWithLifecycle()
@@ -148,16 +157,16 @@ fun FeedScreen(
     }
     val feedShowDot   by viewModel.showDot.collectAsStateWithLifecycle()
     val rawEventCount by viewModel.rawEventCount.collectAsStateWithLifecycle()
-    val wotLookups    by viewModel.wotLookups.collectAsStateWithLifecycle()
+    val wotLookup = rememberCardWotLookup(viewModel.wotLookups)
     val feedWotDisplayMode by viewModel.feedWotDisplayMode.collectAsStateWithLifecycle()
 
     val coldStartState by viewModel.coldStartState.collectAsStateWithLifecycle()
     val trustedHydrationFailed by viewModel.trustedHydrationFailed.collectAsStateWithLifecycle()
     val sensitiveMode  by viewModel.sensitiveContentMode.collectAsStateWithLifecycle()
-    val listState = rememberLazyListState()
+    val listState = rememberFeedScrollState(feedEvents)
     val cardWidthPx = LocalWindowInfo.current.containerSize.width
 
-    var articleRow by remember { mutableStateOf<FeedRow?>(null) }
+    var articleRow by rememberArticleSelection(actionsViewModel)
 
     // ── Long-press bottom sheet state ────────────────────────────────────────
     var actionsRow by remember { mutableStateOf<FeedRow?>(null) }
@@ -171,7 +180,7 @@ fun FeedScreen(
     val pinnedEmojis by actionsViewModel.pinnedEmojis.collectAsStateWithLifecycle()
 
     // ── Action failure snackbar ──────────────────────────────────────────────
-    LaunchedEffect(Unit) {
+    ResumedEffect(Unit) {
         actionsViewModel.actionError.collect { showSnackbar(it) }
     }
 
@@ -229,7 +238,7 @@ fun FeedScreen(
         viewModel,
         actionsViewModel,
         pinnedEmojis,
-        wotLookups,
+        wotLookup,
         feedWotDisplayMode,
         videoScope,
         sensitiveMode,
@@ -261,15 +270,19 @@ fun FeedScreen(
             pinnedEmojis = pinnedEmojis,
             videoScope = videoScope,
             sensitiveMode = sensitiveMode,
-            wotLookup = { pubkey -> wotLookups[pubkey] },
+            wotLookup = wotLookup,
             feedWotDisplayMode = feedWotDisplayMode,
             onWotSubjectsVisible = viewModel::requestWotHydration,
             pollActions = actionsViewModel.pollActionCallbacks(),
         )
     }
 
+    var handledTopTrigger by rememberSaveable { mutableStateOf(scrollToTopTrigger) }
     LaunchedEffect(scrollToTopTrigger) {
-        if (scrollToTopTrigger > 0) listState.animateScrollToItem(0)
+        if (scrollToTopTrigger != handledTopTrigger) {
+            handledTopTrigger = scrollToTopTrigger
+            listState.animateScrollToItem(0)
+        }
     }
 
     // Intent-based at-top: only user-driven scrolling changes _isAtTop.
@@ -487,7 +500,7 @@ fun FeedScreen(
                 // Viewport tracking — warm-zone hydration + auto-paging.
                 // _isAtTop is driven by the gesture-based snapshotFlow above,
                 // NOT from this sampled index (which drifts on prepends).
-                LaunchedEffect(events, cardWidthPx, contentFilter) {
+                ResumedEffect(events, cardWidthPx, contentFilter) {
                     if (events.isNotEmpty() && cardWidthPx > 0) {
                         val info = listState.layoutInfo
                         val first = info.visibleItemsInfo.firstOrNull()?.index
@@ -503,7 +516,7 @@ fun FeedScreen(
                 }
 
                 @OptIn(kotlinx.coroutines.FlowPreview::class)
-                LaunchedEffect(Unit) {
+                ResumedEffect(Unit) {
                     snapshotFlow {
                         val info = listState.layoutInfo
                         val first = info.visibleItemsInfo.firstOrNull()?.index ?: 0

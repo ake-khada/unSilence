@@ -24,6 +24,8 @@ import com.unsilence.app.data.relay.relayResolutionTargets
 import com.unsilence.app.data.relay.wotLookupSnapshot
 import com.unsilence.app.data.relay.wotSubjectsForFeedRows
 import com.unsilence.app.ui.shared.TimelineCardData
+import com.unsilence.app.ui.shared.collectLatestWhileActive
+import kotlinx.coroutines.flow.emptyFlow
 import com.unsilence.app.ui.shared.ModeratedReplyRow
 import com.unsilence.app.ui.shared.markLikelyCoordinatedSpam
 import com.unsilence.app.ui.shared.mutedTimelineRowIds
@@ -31,6 +33,7 @@ import com.unsilence.app.ui.shared.pruneFullyMutedSubtrees
 import java.util.concurrent.ConcurrentHashMap
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -152,13 +155,11 @@ class ThreadViewModel @Inject constructor(
 
     /** NIP-36 sensitive-content display mode (shared with feed). */
     val sensitiveContentMode: StateFlow<com.unsilence.app.data.memory.SensitiveContentMode> =
-        relayPreferencesStore.sensitiveContentModeFlow()
-            .stateIn(viewModelScope, SharingStarted.Eagerly,
-                com.unsilence.app.data.memory.SensitiveContentMode.BLUR)
+        relayPreferencesStore.sensitiveContentMode
 
     val feedWotDisplayMode: StateFlow<FeedWotDisplayMode> =
         relayPreferencesStore.feedWotDisplayModeFlow()
-            .stateIn(viewModelScope, SharingStarted.Eagerly, FeedWotDisplayMode.NUMBERS)
+            .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), FeedWotDisplayMode.NUMBERS)
 
     private val _uiState = MutableStateFlow(ThreadUiState())
     val uiState: StateFlow<ThreadUiState> = _uiState.asStateFlow()
@@ -170,11 +171,17 @@ class ThreadViewModel @Inject constructor(
         }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyMap())
 
     private val eventIdFlow = MutableStateFlow<String?>(null)
+    // Non-navigation clients (e.g. the immersive engagement sheet) remain active
+    // until clearThread; navigation explicitly supplies its resumed lifecycle.
+    private val screenActive = MutableStateFlow(false)
+
+    fun setScreenActive(active: Boolean) { screenActive.value = active }
     @Volatile private var articleCommentRelays: List<String> = emptyList()
     private val fetchedArticleCoords = ConcurrentHashMap.newKeySet<String>()
     private val fetchedReplyDescendants = ConcurrentHashMap.newKeySet<String>()
     private val fetchedMissingParents = ConcurrentHashMap.newKeySet<String>()
     @Volatile private var tappedId: String? = null
+    private var loadJob: Job? = null
 
     val pubkeyHex: String? = keyManager.getPublicKeyHex()
 
@@ -186,8 +193,9 @@ class ThreadViewModel @Inject constructor(
 
     init {
         viewModelScope.launch {
-            eventIdFlow.filterNotNull()
+            eventIdFlow
                 .flatMapLatest { id ->
+                    if (id == null) return@flatMapLatest emptyFlow()
                     // A repost target can arrive after the drawer opens. Re-evaluate
                     // its coordinate on every feed insert so the thread promotes from
                     // #e lookup to #A lookup without requiring a page-away/page-back.
@@ -214,7 +222,7 @@ class ThreadViewModel @Inject constructor(
                 .combine(memoryEventStore.ownMuteListFlow()) { source, muteList ->
                     source to muteList
                 }
-                .collect { (source, muteList) ->
+                .collectLatestWhileActive(screenActive) { (source, muteList) ->
                     val (focusedId, articleMode, rows) = source
                     // Article mode: the focused article isn't in the comment list, and
                     // replies include NIP-22 kind-1111 (not just kind-1).
@@ -310,7 +318,7 @@ class ThreadViewModel @Inject constructor(
                 }
                 .distinctUntilChanged()
                 .flowOn(Dispatchers.Default)
-                .collect { _uiState.value = it }
+                .collectLatestWhileActive(screenActive) { _uiState.value = it }
         }
     }
 
@@ -333,6 +341,9 @@ class ThreadViewModel @Inject constructor(
 
     /** Wipe stale state so next open doesn't flash old content. */
     fun clearThread() {
+        screenActive.value = false
+        loadJob?.cancel()
+        loadJob = null
         eventIdFlow.value = null
         articleCommentRelays = emptyList()
         fetchedArticleCoords.clear()
@@ -372,8 +383,13 @@ class ThreadViewModel @Inject constructor(
     }
 
     fun loadThread(eventId: String, relayHints: List<String> = emptyList()) {
+        screenActive.value = true
+        // A saved navigation entry is resumed, not loaded as a new visit. Preserve
+        // its refined root and reply focus, and avoid another ancestor walk.
+        if (tappedId == eventId && (eventIdFlow.value != null || loadJob?.isActive == true)) return
+        loadJob?.cancel()
         tappedId = eventId
-        viewModelScope.launch {
+        loadJob = viewModelScope.launch {
             val ownPubkey = pubkeyHex ?: ""
             val ownReadRelays = memoryEventStore.readRelaysFor(ownPubkey)
             val blockedRelays = memoryEventStore.getBlockedRelayUrls(ownPubkey).toSet()

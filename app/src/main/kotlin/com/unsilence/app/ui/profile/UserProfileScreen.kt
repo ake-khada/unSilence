@@ -1,6 +1,7 @@
 package com.unsilence.app.ui.profile
 
-import androidx.activity.compose.BackHandler
+import androidx.lifecycle.compose.LifecycleResumeEffect
+import com.unsilence.app.ui.shared.ResumedEffect
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -37,6 +38,8 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import com.unsilence.app.ui.shared.rememberCardWotLookup
+import com.unsilence.app.ui.shared.rememberArticleSelection
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
@@ -124,6 +127,7 @@ private val PROFILE_IMPERSONATION_INLINE_SLOT_WIDTH = 116.dp
 @Composable
 fun UserProfileScreen(
     pubkey: String,
+    entryId: String,
     onDismiss: () -> Unit,
     onNoteClick: (String) -> Unit = {},
     onComment: (String) -> Unit = {},
@@ -139,8 +143,11 @@ fun UserProfileScreen(
         key = "note-actions-${LocalAppSessionKey.current}",
     ),
 ) {
-    BackHandler(onBack = onDismiss)
-    LaunchedEffect(pubkey) { viewModel.loadProfile(pubkey) }
+    LifecycleResumeEffect(viewModel, pubkey) {
+        viewModel.loadProfile(pubkey)
+        viewModel.setScreenActive(true)
+        onPauseOrDispose { viewModel.setScreenActive(false) }
+    }
 
     val pubkeyHex       by viewModel.pubkeyHex.collectAsStateWithLifecycle()
     val nip05Verifier = LocalNip05VerificationController.current
@@ -168,7 +175,7 @@ fun UserProfileScreen(
     val relayCount     by viewModel.relayCount.collectAsStateWithLifecycle()
     val isMuted        by viewModel.isMuted.collectAsStateWithLifecycle()
     val isOwnProfile   by viewModel.isOwnProfile.collectAsStateWithLifecycle()
-    val wotLookups     by viewModel.wotLookups.collectAsStateWithLifecycle()
+    val wotLookup = rememberCardWotLookup(viewModel.wotLookups)
     val profileWotLookup by viewModel.profileWotLookup.collectAsStateWithLifecycle()
     val impersonationRisk by viewModel.impersonationRisk.collectAsStateWithLifecycle()
     val wotProvenance  by viewModel.wotProvenance.collectAsStateWithLifecycle()
@@ -176,7 +183,7 @@ fun UserProfileScreen(
 
     val listState = rememberLazyListState()
     val cardWidthPx = LocalWindowInfo.current.containerSize.width
-    var articleRow by remember { mutableStateOf<FeedRow?>(null) }
+    var articleRow by rememberArticleSelection(actionsViewModel)
     var actionsRow by remember { mutableStateOf<FeedRow?>(null) }
     var showProfileActions by remember { mutableStateOf(false) }
     var showReportSheet by remember { mutableStateOf(false) }
@@ -190,10 +197,10 @@ fun UserProfileScreen(
     val pinnedShortcodes by actionsViewModel.pinnedEmojiShortcodes.collectAsStateWithLifecycle()
 
     // ── Action failure snackbar ──────────────────────────────────────────────
-    LaunchedEffect(Unit) {
+    ResumedEffect(Unit) {
         actionsViewModel.actionError.collect { showSnackbar(it) }
     }
-    LaunchedEffect(Unit) {
+    ResumedEffect(Unit) {
         viewModel.followFeedback.collect { showSnackbar(it) }
     }
 
@@ -211,7 +218,7 @@ fun UserProfileScreen(
 
     // ── Shared video playback — replaces ~80 lines of duplicated state ────────
     val videoScope = rememberVideoPlaybackScope(
-        ownerId = "userprofile-$pubkey",
+        ownerId = "userprofile-$entryId",
         holder = actionsViewModel.sharedPlayerHolder,
         events = posts,
         listState = listState,
@@ -240,7 +247,7 @@ fun UserProfileScreen(
         actionsViewModel,
         pubkey,
         pinnedEmojis,
-        wotLookups,
+        wotLookup,
         feedWotDisplayMode,
         videoScope,
         sensitiveMode,
@@ -272,7 +279,7 @@ fun UserProfileScreen(
             pinnedEmojis = pinnedEmojis,
             videoScope = videoScope,
             sensitiveMode = sensitiveMode,
-            wotLookup = { key -> wotLookups[key] },
+            wotLookup = wotLookup,
             feedWotDisplayMode = feedWotDisplayMode,
             pollActions = actionsViewModel.pollActionCallbacks(),
             onWotSubjectsVisible = viewModel::requestWotHydration,
@@ -288,7 +295,7 @@ fun UserProfileScreen(
         }
     }
 
-    LaunchedEffect(Unit) {
+    ResumedEffect(Unit) {
         snapshotFlow {
             if (shouldLoadMore.value) posts.lastOrNull()?.createdAt else null
         }
@@ -302,7 +309,7 @@ fun UserProfileScreen(
 
     // Viewport tracking for zone-aware hydration
     @OptIn(FlowPreview::class)
-    LaunchedEffect(Unit) {
+    ResumedEffect(Unit) {
         snapshotFlow {
             val info = listState.layoutInfo
             val first = info.visibleItemsInfo.firstOrNull()?.index ?: 0
@@ -315,7 +322,7 @@ fun UserProfileScreen(
 
     val engagementRetryRevision by actionsViewModel.engagementRetryRevision.collectAsStateWithLifecycle()
     @OptIn(FlowPreview::class)
-    LaunchedEffect(posts, cardWidthPx, engagementRetryRevision) {
+    ResumedEffect(posts, cardWidthPx, engagementRetryRevision) {
         val eventOffset = 3
         fun warmVisibleRange(first: Int, last: Int) {
             val dataFirst = (first - eventOffset).coerceAtLeast(0)

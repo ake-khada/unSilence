@@ -53,7 +53,6 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -72,8 +71,6 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
-import androidx.lifecycle.Lifecycle
-import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.media3.common.MediaItem
 import androidx.media3.common.Player
@@ -84,6 +81,8 @@ import com.unsilence.app.data.memory.WotLookup
 import com.unsilence.app.data.memory.toEventModel
 import com.unsilence.app.data.model.EventModel
 import com.unsilence.app.ui.shared.EngagementSnapshot
+import com.unsilence.app.ui.shared.NavigationPlaybackGate
+import com.unsilence.app.ui.shared.ResumedEffect
 import com.unsilence.app.ui.shared.SensitiveContentHiddenCard
 import com.unsilence.app.ui.shared.SensitiveContentRevealCard
 import com.unsilence.app.ui.shared.SensitiveContentVisibility
@@ -178,23 +177,23 @@ internal fun ImmersiveVideoFeed(
     var revealedSensitiveIds by remember(sensitiveMode) { mutableStateOf(emptySet<String>()) }
     val isPowerSaveMode = rememberPowerSaveMode()
 
-    BackHandler(enabled = sheetEventId == null, onBack = onExit)
-
-    DisposableEffect(holder, player) {
-        // Ownership can arrive with the feed's previous media still playing.
-        // Stay silent until the settled page passes its gate and is ready.
-        player.playWhenReady = false
-        holder.claim(IMMERSIVE_OWNER_ID)
-        player.repeatMode = Player.REPEAT_MODE_ONE
-        player.volume = 1f
-        onDispose {
-            player.playWhenReady = false
-            player.volume = 0f
-            player.repeatMode = Player.REPEAT_MODE_ALL
-            holder.clearImmersivePreloads()
-            holder.releaseOwnership(IMMERSIVE_OWNER_ID)
+    val lifecycle = LocalLifecycleOwner.current.lifecycle
+    val navigationGate = remember(holder, lifecycle) {
+        NavigationPlaybackGate(lifecycle) { resumed ->
+            if (!resumed && holder.isOwner(IMMERSIVE_OWNER_ID)) {
+                holder.releaseOwnership(IMMERSIVE_OWNER_ID)
+                holder.clearImmersivePreloads()
+                player.volume = 0f
+                player.repeatMode = Player.REPEAT_MODE_ALL
+            }
         }
     }
+    DisposableEffect(navigationGate) {
+        navigationGate.attach()
+        onDispose { navigationGate.dispose() }
+    }
+
+    BackHandler(enabled = sheetEventId == null && navigationGate.canPlay, onBack = onExit)
 
     DisposableEffect(player) {
         val listener = object : Player.Listener {
@@ -218,45 +217,33 @@ internal fun ImmersiveVideoFeed(
             revealed = item.contentId in revealedSensitiveIds,
         ) != SensitiveContentVisibility.VISIBLE
     } == true
-    val canResumePlayback by rememberUpdatedState(
-        settledItem != null && !paused && !settledItemBlocked &&
-            startupReadyEventId == settledItem.contentId,
-    )
-    val lifecycleOwner = LocalLifecycleOwner.current
-    DisposableEffect(lifecycleOwner, player) {
-        val observer = LifecycleEventObserver { _, event ->
-            when (event) {
-                Lifecycle.Event.ON_PAUSE -> player.playWhenReady = false
-                Lifecycle.Event.ON_RESUME -> if (holder.isOwner(IMMERSIVE_OWNER_ID) && canResumePlayback) {
-                    player.playWhenReady = true
-                }
-                else -> Unit
-            }
+    LaunchedEffect(navigationGate.canPlay, muted, player) {
+        if (navigationGate.canPlay && holder.isOwner(IMMERSIVE_OWNER_ID)) {
+            player.volume = if (muted) 0f else 1f
         }
-        lifecycleOwner.lifecycle.addObserver(observer)
-        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
-    }
-
-    LaunchedEffect(muted, player) {
-        player.volume = if (muted) 0f else 1f
     }
 
     LaunchedEffect(
+        navigationGate.canPlay,
         settledItem?.contentId,
         settledItem?.video?.videoUrl,
         settledItemBlocked,
     ) {
+        if (!navigationGate.canPlay) return@LaunchedEffect
         val item = settledItem ?: return@LaunchedEffect
+        if (anchoredContentId != item.contentId) paused = false
         anchoredContentId = item.contentId
         onPageSettled(item.row)
         host.surface.onWotSubjectsVisible(setOf(item.authorPubkey))
         if (settledItemBlocked) {
-            player.playWhenReady = false
+            holder.releaseOwnership(IMMERSIVE_OWNER_ID)
             paused = true
             startupReadyEventId = null
             return@LaunchedEffect
         }
         holder.claim(IMMERSIVE_OWNER_ID)
+        player.repeatMode = Player.REPEAT_MODE_ONE
+        player.volume = if (muted) 0f else 1f
         val currentUrl = player.currentMediaItem?.localConfiguration?.uri?.toString()
         val currentEventId = player.currentMediaItem?.mediaId
         if (
@@ -270,6 +257,10 @@ internal fun ImmersiveVideoFeed(
             player.stop()
             player.clearMediaItems()
             holder.setImmersiveMediaItem(item.contentId, item.video)
+        }
+        if (startupReadyEventId != item.contentId) {
+            // Returning after an interrupted buffer wait still owes that wait,
+            // even when the retained player is already bound to the same URL.
             val stillCurrent = awaitStartupBuffer(
                 player = player,
                 expectedEventId = item.contentId,
@@ -277,9 +268,10 @@ internal fun ImmersiveVideoFeed(
             )
             if (!stillCurrent) return@LaunchedEffect
         }
-        paused = false
+        // Awaiting the startup buffer may span a navigation/lifecycle change.
+        if (!navigationGate.canPlay || !holder.isOwner(IMMERSIVE_OWNER_ID)) return@LaunchedEffect
         startupReadyEventId = item.contentId
-        player.playWhenReady = true
+        player.playWhenReady = !paused
     }
 
     // Preserve the viewed event when live inserts prepend rows to the filtered feed.
@@ -297,15 +289,16 @@ internal fun ImmersiveVideoFeed(
         isPowerSaveMode = isPowerSaveMode,
     )
     val preloadItem = preloadIndex?.let(sessionItems::getOrNull)
-    LaunchedEffect(
+    ResumedEffect(
+        navigationGate.canPlay,
         settledItem?.contentId,
         startupReadyEventId,
         preloadIndex,
         preloadItem?.contentId,
         isPowerSaveMode,
     ) {
-        val current = settledItem ?: return@LaunchedEffect
-        if (startupReadyEventId != current.contentId) return@LaunchedEffect
+        val current = settledItem ?: return@ResumedEffect
+        if (startupReadyEventId != current.contentId) return@ResumedEffect
         if (
             !isPowerSaveMode &&
             preloadItem != null &&
@@ -319,8 +312,9 @@ internal fun ImmersiveVideoFeed(
                 if (durationMs > 0L && player.bufferedPosition >= durationMs - PROGRESS_POLL_MS) break
                 delay(PROGRESS_POLL_MS)
             }
-            if (player.currentMediaItem?.mediaId != current.contentId) return@LaunchedEffect
+            if (player.currentMediaItem?.mediaId != current.contentId) return@ResumedEffect
         }
+        if (!navigationGate.canPlay || !holder.isOwner(IMMERSIVE_OWNER_ID)) return@ResumedEffect
         holder.updateImmersivePreload(
             currentIndex = pagerState.settledPage,
             currentEventId = current.contentId,
@@ -332,7 +326,7 @@ internal fun ImmersiveVideoFeed(
         )
     }
 
-    LaunchedEffect(pagerState.settledPage, sessionItems.size, isLoadingMore) {
+    ResumedEffect(pagerState.settledPage, sessionItems.size, isLoadingMore) {
         if (!isLoadingMore && pagerState.settledPage >= sessionItems.size - 1 - LOAD_MORE_DISTANCE) {
             onLoadMore()
         }
@@ -347,7 +341,7 @@ internal fun ImmersiveVideoFeed(
             modifier = Modifier.fillMaxSize(),
         ) { page ->
             val item = sessionItems[page]
-            val active = page == pagerState.settledPage
+            val active = page == pagerState.settledPage && navigationGate.canPlay
             val visibility = sensitiveContentVisibility(
                 mode = sensitiveMode,
                 sensitive = item.row.hasContentWarning,
@@ -363,12 +357,15 @@ internal fun ImmersiveVideoFeed(
                 sensitiveVisibility = visibility,
                 thumbnailCache = thumbnailCache,
                 onTogglePlayback = {
-                    if (active) {
+                    if (active && navigationGate.canPlay) {
                         when (visibility) {
-                            SensitiveContentVisibility.REVEALABLE ->
+                            SensitiveContentVisibility.REVEALABLE -> {
+                                paused = false
                                 revealedSensitiveIds = revealedSensitiveIds + item.contentId
+                            }
                             SensitiveContentVisibility.HIDDEN -> Unit
                             SensitiveContentVisibility.VISIBLE -> {
+                                if (!holder.isOwner(IMMERSIVE_OWNER_ID)) return@ImmersiveVideoPage
                                 paused = !paused
                                 player.playWhenReady = !paused
                             }

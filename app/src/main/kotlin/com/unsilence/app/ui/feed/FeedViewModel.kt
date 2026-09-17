@@ -43,6 +43,7 @@ import com.unsilence.app.domain.model.FeedFilter
 import com.unsilence.app.domain.model.GlobalFeedLens
 import com.unsilence.app.domain.model.ShowType
 import com.unsilence.app.ui.shared.TimelineCardData
+import com.unsilence.app.ui.shared.collectLatestWhileActive
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.FlowPreview
@@ -279,8 +280,7 @@ class FeedViewModel @Inject constructor(
     private val feedRowCache = androidx.collection.LruCache<String, FeedRow>(FEED_ROW_CACHE_SIZE)
 
     val sensitiveContentMode: StateFlow<SensitiveContentMode> =
-        relayPreferencesStore.sensitiveContentModeFlow()
-            .stateIn(viewModelScope, SharingStarted.Eagerly, SensitiveContentMode.BLUR)
+        relayPreferencesStore.sensitiveContentMode
 
     private data class FeedProjectionInput(
         val events: List<NostrEvent>,
@@ -552,6 +552,13 @@ class FeedViewModel @Inject constructor(
         val cardWidthPx: Int,
     )
 
+    private val screenActive = MutableStateFlow(false)
+
+    fun setScreenActive(active: Boolean) {
+        screenActive.value = active
+        if (active) wotHydrationCoalescer.requestHydration(_wotSubjects.value)
+    }
+
     private val _hydrationViewport = MutableStateFlow(HydrationViewport(0, 0, 0))
     private val engagementRetryRevision = MutableStateFlow(0L)
 
@@ -562,8 +569,8 @@ class FeedViewModel @Inject constructor(
         viewModelScope.launch(Dispatchers.Default) {
             combine(feedRows, _hydrationViewport) { rows, viewport -> rows to viewport }
                 .conflate()
-                .collect { (rows, viewport) ->
-                    if (rows.isEmpty() || viewport.cardWidthPx <= 0) return@collect
+                .collectLatestWhileActive(screenActive) { (rows, viewport) ->
+                    if (rows.isEmpty() || viewport.cardWidthPx <= 0) return@collectLatestWhileActive
                     val first = viewport.first.coerceIn(0, rows.lastIndex)
                     val last = viewport.last.coerceAtLeast(first).coerceAtMost(rows.lastIndex)
                     val lookahead = if (_feedType.value is FeedType.Following) {
@@ -573,7 +580,7 @@ class FeedViewModel @Inject constructor(
                     }
                     val start = (first - ASSET_WARM_ABOVE).coerceAtLeast(0)
                     val end = (last + 1 + lookahead).coerceAtMost(rows.size)
-                    if (start >= end) return@collect
+                    if (start >= end) return@collectLatestWhileActive
 
                     val visibleEnd = (last + 1).coerceAtMost(end)
                     val warmRows = buildList {
@@ -595,14 +602,14 @@ class FeedViewModel @Inject constructor(
         viewModelScope.launch(Dispatchers.Default) {
             combine(feedRows, _hydrationViewport, engagementRetryRevision) { rows, viewport, _ -> rows to viewport }
                 .debounce(300L)  // Fling guard: only fires after 300ms of no viewport changes
-                .collectLatest { (rows, viewport) ->
-                    if (rows.isEmpty()) return@collectLatest
+                .collectLatestWhileActive(screenActive) { (rows, viewport) ->
+                    if (rows.isEmpty()) return@collectLatestWhileActive
                     val first = viewport.first.coerceIn(0, rows.lastIndex)
                     val last = viewport.last.coerceAtLeast(first).coerceAtMost(rows.lastIndex)
                     val warmBelow = if (_feedType.value is FeedType.Following) WARM_ZONE_BELOW else WARM_ZONE_BELOW_CHURNY
                     val zoneStart = (first - WARM_ZONE_ABOVE).coerceAtLeast(0)
                     val zoneEnd = (first + warmBelow).coerceAtMost(rows.size)
-                    if (zoneStart >= zoneEnd) return@collectLatest
+                    if (zoneStart >= zoneEnd) return@collectLatestWhileActive
                     val warmRows = rows.subList(zoneStart, zoneEnd)
                     val vpStart = (first - zoneStart).coerceAtLeast(0)
                     val actualVpEnd = (last - zoneStart + 1).coerceAtLeast(vpStart + VIEWPORT_SIZE)
@@ -627,7 +634,7 @@ class FeedViewModel @Inject constructor(
     fun requestWotHydration(pubkeys: Collection<String>) {
         if (pubkeys.isEmpty()) return
         _wotSubjects.update { current -> current + pubkeys }
-        wotHydrationCoalescer.requestHydration(pubkeys)
+        if (screenActive.value) wotHydrationCoalescer.requestHydration(pubkeys)
     }
 
     // ── Subscription lifecycle (mirrors Jumble NoteList useEffect) ────────────

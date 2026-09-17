@@ -35,6 +35,7 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import com.unsilence.app.ui.shared.rememberCardWotLookup
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -190,7 +191,7 @@ fun ArticleReaderScreen(
     val commentsState by commentsFlow.collectAsStateWithLifecycle(ArticleCommentsState())
     val comments = commentsState.rows
     val depthComments = commentsState.depthRows
-    val wotLookups by articleReaderVm.wotLookups.collectAsStateWithLifecycle()
+    val wotLookup = rememberCardWotLookup(articleReaderVm.wotLookups)
     val feedWotDisplayMode by articleReaderVm.feedWotDisplayMode.collectAsStateWithLifecycle()
     var revealedSpamClusters by remember(articleCoord) { mutableStateOf(emptySet<String>()) }
     val commentItems = remember(depthComments, revealedSpamClusters) {
@@ -339,7 +340,7 @@ fun ArticleReaderScreen(
         pinnedEmojis,
         commentVideoScope,
         sensitiveMode,
-        wotLookups,
+        wotLookup,
         feedWotDisplayMode,
         onNoteTap,
         onAuthorTap,
@@ -384,7 +385,7 @@ fun ArticleReaderScreen(
             pinnedEmojis = pinnedEmojis,
             videoScope = commentVideoScope,
             sensitiveMode = sensitiveMode,
-            wotLookup = { key -> wotLookups[key] },
+            wotLookup = wotLookup,
             feedWotDisplayMode = feedWotDisplayMode,
             onWotSubjectsVisible = articleReaderVm::requestWotHydration,
             pollActions = pollActions,
@@ -512,7 +513,7 @@ fun ArticleReaderScreen(
                                 onNoteClick   = {},
                                 lookupProfile = lookupProfile,
                                 profileFlow   = profileFlow,
-                                wotLookup     = { key -> wotLookups[key] },
+                                wotLookup = wotLookup,
                                 feedWotDisplayMode = feedWotDisplayMode,
                                 repostSourcePubkey = if (isRepost) model.sourcePubkey else null,
                                 repostSourceProfile = sourceProfile,

@@ -94,7 +94,6 @@ import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
-import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.remember
@@ -187,33 +186,6 @@ private val NavUnselected = Text3
 
 private data class NavTab(val icon: ImageVector, val contentDescription: String)
 
-private data class ThreadDestination(
-    val eventId: String,
-    val relayHints: List<String> = emptyList(),
-    val openArticleOnLoad: Boolean = false,
-)
-
-private val ThreadDestinationSaver = Saver<ThreadDestination?, Bundle>(
-    save = { destination ->
-        Bundle().apply {
-            destination?.let {
-                putString("eventId", it.eventId)
-                putStringArrayList("relayHints", ArrayList(it.relayHints))
-                putBoolean("openArticleOnLoad", it.openArticleOnLoad)
-            }
-        }
-    },
-    restore = { saved ->
-        saved.getString("eventId")?.let { eventId ->
-            ThreadDestination(
-                eventId = eventId,
-                relayHints = saved.getStringArrayList("relayHints").orEmpty(),
-                openArticleOnLoad = saved.getBoolean("openArticleOnLoad"),
-            )
-        }
-    },
-)
-
 private val ConnectionsDestinationSaver = Saver<Pair<String, ConnectionsTab>?, Bundle>(
     save = { destination ->
         Bundle().apply {
@@ -282,18 +254,15 @@ fun AppNavigation(
     var showRelaySettings    by rememberSaveable { mutableStateOf(false) }
     var relayDetailUrl       by rememberSaveable { mutableStateOf<String?>(null) }
     var showDiscovery        by rememberSaveable { mutableStateOf(false) }
-    var threadDestination    by rememberSaveable(stateSaver = ThreadDestinationSaver) {
-        mutableStateOf<ThreadDestination?>(null)
-    }
+    val navigator = rememberAppNavigator(sessionKey)
     var replyToEventId       by rememberSaveable { mutableStateOf<String?>(null) }
     var quoteNoteId          by rememberSaveable { mutableStateOf<String?>(null) }
-    var userProfilePubkey    by rememberSaveable { mutableStateOf<String?>(null) }
     var connectionsTarget    by rememberSaveable(stateSaver = ConnectionsDestinationSaver) {
         mutableStateOf<Pair<String, ConnectionsTab>?>(null)
     }
     var profileRelaysPubkey  by rememberSaveable { mutableStateOf<String?>(null) }
-    var scrollToTopTrigger   by remember { mutableIntStateOf(0) }
-    var profileScrollToTopTrigger by remember { mutableIntStateOf(0) }
+    var scrollToTopTrigger   by rememberSaveable { mutableIntStateOf(0) }
+    var profileScrollToTopTrigger by rememberSaveable { mutableIntStateOf(0) }
     var showEmojiSettings    by rememberSaveable { mutableStateOf(false) }
     var showZapSettings      by rememberSaveable { mutableStateOf(false) }
     var hashtagSearchQuery   by rememberSaveable { mutableStateOf<String?>(null) }
@@ -305,13 +274,17 @@ fun AppNavigation(
 
     BackHandler(enabled = selectedTab != 0) { selectedTab = 0 }
 
-    val onAuthorClick: (String) -> Unit = { pubkey -> userProfilePubkey = pubkey }
+    val onAuthorClick: (String) -> Unit = remember(navigator) {
+        { pubkey -> navigator.push(AppDestination.Profile(pubkey)) }
+    }
+    val onNoteClick: (String) -> Unit = remember(navigator) {
+        { eventId -> navigator.push(AppDestination.Thread(eventId)) }
+    }
     val onHashtagClick: (String) -> Unit = { tag ->
         // Clear any open overlays (thread / user profile) so the search tab isn't
         // hidden behind them when a hashtag is tapped from inside one (incl. the
         // article reader hosted there).
-        threadDestination = null
-        userProfilePubkey = null
+        navigator.popToTabs()
         hashtagSearchQuery = "#$tag"
         selectedTab = 1
     }
@@ -330,8 +303,7 @@ fun AppNavigation(
         showDiscovery = false
         profileRelaysPubkey = null
         connectionsTarget = null
-        threadDestination = null
-        userProfilePubkey = null
+        navigator.popToTabs()
         selectedTab = 0
     }
     val notifViewModel: NotificationsViewModel = hiltViewModel(key = "notif-$sessionKey")
@@ -400,27 +372,24 @@ fun AppNavigation(
         when (target) {
             is DeepLinkTarget.Profile -> {
                 deepLinkVm.prefetchProfile(target)
-                threadDestination = null
-                userProfilePubkey = target.pubkey
+                navigator.replaceAboveTabs(AppDestination.Profile(target.pubkey))
             }
             is DeepLinkTarget.Note -> {
-                userProfilePubkey = null
-                threadDestination = ThreadDestination(
+                navigator.replaceAboveTabs(AppDestination.Thread(
                     eventId = target.eventId,
                     relayHints = target.relayHints,
-                )
+                ))
             }
             is DeepLinkTarget.Address -> {
                 val eventId = deepLinkVm.resolveAddress(target)
                 if (eventId == null) {
                     showSnackbar("Couldn't open link")
                 } else {
-                    userProfilePubkey = null
-                    threadDestination = ThreadDestination(
+                    navigator.replaceAboveTabs(AppDestination.Thread(
                         eventId = eventId,
                         relayHints = target.relayHints,
                         openArticleOnLoad = target.kind == 30023,
-                    )
+                    ))
                 }
             }
         }
@@ -489,252 +458,285 @@ fun AppNavigation(
     Box(
         modifier = Modifier
             .fillMaxSize()
-            .background(Black)
-            .nestedScroll(nestedScrollConnection),
+            .background(Black),
     ) {
 
-            // ── Content ───────────────────────────────────────────────────────
-            // Full-height viewports let content pass behind the sliding bars.
-            // Each tab reserves bottom clearance in its own scrollable content.
-            Box(
-                modifier = Modifier
-                    .fillMaxSize(),
-            ) {
-                when (selectedTab) {
-                    0    -> FeedScreen(
-                        scrollToTopTrigger = scrollToTopTrigger,
-                        topBarShown        = topBarShown,
-                        staticTopPadding   = staticTopPadding,
-                        staticBottomPadding = staticBottomPadding,
-                        onNoteClick        = { eventId -> threadDestination = ThreadDestination(eventId) },
-                        onComment          = { eventId -> replyToEventId = eventId },
-                        onAuthorClick      = onAuthorClick,
-                        onHashtagClick     = onHashtagClick,
-                        onQuote            = { noteId  -> quoteNoteId   = noteId  },
-                        onPullRefreshProgress = updatePullRefreshFraction,
-                        showFindPeopleEmptyState = showEmptyFollowingEntry,
-                        onFindPeople = {
-                            startGraphVm.open()
-                            showStartGraph = true
-                        },
-                        viewModel          = feedViewModel,
-                        actionsViewModel   = noteActionsVm,
-                    )
-                    1    -> Box(Modifier.padding(top = statusBarHeight)) {
-                        SearchScreen(
-                            staticBottomPadding = staticBottomPadding,
-                            onNoteClick   = { eventId -> threadDestination = ThreadDestination(eventId) },
-                            onComment     = { eventId -> replyToEventId = eventId },
-                            onAuthorClick = onAuthorClick,
-                            onHashtagClick = onHashtagClick,
-                            onQuote       = { noteId  -> quoteNoteId   = noteId  },
-                            initialQuery  = hashtagSearchQuery,
-                            onInitialQueryConsumed = { hashtagSearchQuery = null },
-                            actionsViewModel = noteActionsVm,
-                        )
-                    }
-                    2    -> NotificationsScreen(
-                        onNoteClick      = { eventId -> threadDestination = ThreadDestination(eventId) },
-                        onProfileClick   = onAuthorClick,
-                        onHashtagClick   = onHashtagClick,
-                        onQuote          = { quoteNoteId = it },
-                        actionsViewModel = noteActionsVm,
-                        staticTopPadding = staticTopPadding,
-                        staticBottomPadding = staticBottomPadding,
-                        viewModel        = notifViewModel,
-                    )
-                    3    -> ProfileScreen(
-                        staticBottomPadding = staticBottomPadding,
-                        scrollToTopTrigger = profileScrollToTopTrigger,
-                        onLogout = onLogout,
-                        onBack = { selectedTab = 0 },
-                        onNoteClick = { eventId -> threadDestination = ThreadDestination(eventId) },
-                        onComment = { eventId -> replyToEventId = eventId },
-                        onAuthorClick = onAuthorClick,
-                        onQuote = { noteId -> quoteNoteId = noteId },
-                        onConnectionsClick = { tab -> connectionsTarget = ownPubkey to tab },
-                        onRelaysClick = { profileRelaysPubkey = ownPubkey },
-                        onHashtagClick = onHashtagClick,
-                        onBrowseRelay = onBrowseRelayFeed,
-                        viewModel = hiltViewModel(key = "profile-$sessionKey"),
-                        actionsViewModel = noteActionsVm,
-                    )
-                    else -> PlaceholderScreen()
-                }
-            }
-
-            // ── Top bar overlay ───────────────────────────────────────────────
-            Box(
-                modifier = Modifier
-                    .align(Alignment.TopStart)
-                    .offset { IntOffset(0, topBarOffset.roundToPx()) }
-                    .fillMaxWidth()
-                    .background(Black)
-                    .statusBarsPadding()
-                    .height(activeTopBarHeight),
-                contentAlignment = Alignment.Center,
-            ) {
-                if (selectedTab == 2) {
-                    // Notification header keeps its established 52dp geometry.
-                    Box(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(horizontal = Spacing.medium),
-                    ) {
-                        LogoMark(
-                            sizeDp = Spacing.xxl,
-                            static = false,
-                            modifier = Modifier
-                                .align(Alignment.CenterStart)
-                                .offset(x = (-8).dp),
-                        )
-                        // Center: notification filter carousel
-                        NotifFilterCarousel(
-                            current = notifFilter,
-                            onChanged = { notifViewModel.setFilter(it) },
-                            modifier = Modifier.align(Alignment.Center),
-                        )
-                    }
-                } else {
-                    UnifiedFeedHeader(
-                        feedType = feedType,
-                        lens = globalFeedLens,
-                        filter = currentFilter,
-                        pullFraction = pullRefreshFraction.floatValue,
-                        isRefreshing = isFeedRefreshing,
-                        motionEnabled = headerMotionEnabled,
-                        onLogoClick = { scrollToTopTrigger++ },
-                        onSourceClick = { showFeedSheet = true },
-                        onLensToggle = feedViewModel::setGlobalFeedLens,
-                        onFilterClick = { showFilter = true },
-                    )
-                }
-            }
-
-            // ── Floating compose FAB (feed tab only) ──────────────────────────
-            if (selectedTab == 0) {
-                val fabVisible = splashDone && barsVisible && !immersiveVideoMode
-                AnimatedVisibility(
-                    visible = fabVisible,
-                    enter   = scaleIn(animationSpec = tween(200)) + fadeIn(animationSpec = tween(200)),
-                    exit    = scaleOut(animationSpec = tween(150)) + fadeOut(animationSpec = tween(150)),
-                    modifier = Modifier
-                        .align(Alignment.BottomEnd)
-                        .padding(
-                            end    = Spacing.medium,
-                            bottom = Sizing.bottomNavHeight + navBarHeight + Spacing.medium + 14.dp,
-                        ),
+        AppNavDisplay(navigator) { entry ->
+            when (val destination = entry.destination) {
+                AppDestination.Tabs -> Box(
+                    Modifier.fillMaxSize().nestedScroll(nestedScrollConnection),
                 ) {
+                    // ── Content ───────────────────────────────────────────────────────
+                    // Full-height viewports let content pass behind the sliding bars.
+                    // Each tab reserves bottom clearance in its own scrollable content.
                     Box(
                         modifier = Modifier
-                            .size(56.dp)
-                            .background(BrandDeep, CircleShape)
-                            .clip(CircleShape)
-                            .clickable { showCompose = true },
+                            .fillMaxSize(),
+                    ) {
+                        when (selectedTab) {
+                            0    -> FeedScreen(
+                                scrollToTopTrigger = scrollToTopTrigger,
+                                topBarShown        = topBarShown,
+                                staticTopPadding   = staticTopPadding,
+                                staticBottomPadding = staticBottomPadding,
+                                onNoteClick        = onNoteClick,
+                                onComment          = { eventId -> replyToEventId = eventId },
+                                onAuthorClick      = onAuthorClick,
+                                onHashtagClick     = onHashtagClick,
+                                onQuote            = { noteId  -> quoteNoteId   = noteId  },
+                                onPullRefreshProgress = updatePullRefreshFraction,
+                                showFindPeopleEmptyState = showEmptyFollowingEntry,
+                                onFindPeople = {
+                                    startGraphVm.open()
+                                    showStartGraph = true
+                                },
+                                viewModel          = feedViewModel,
+                                actionsViewModel   = noteActionsVm,
+                            )
+                            1    -> Box(Modifier.padding(top = statusBarHeight)) {
+                                SearchScreen(
+                                    staticBottomPadding = staticBottomPadding,
+                                    onNoteClick   = onNoteClick,
+                                    onComment     = { eventId -> replyToEventId = eventId },
+                                    onAuthorClick = onAuthorClick,
+                                    onHashtagClick = onHashtagClick,
+                                    onQuote       = { noteId  -> quoteNoteId   = noteId  },
+                                    initialQuery  = hashtagSearchQuery,
+                                    onInitialQueryConsumed = { hashtagSearchQuery = null },
+                                    actionsViewModel = noteActionsVm,
+                                )
+                            }
+                            2    -> NotificationsScreen(
+                                onNoteClick      = onNoteClick,
+                                onProfileClick   = onAuthorClick,
+                                onHashtagClick   = onHashtagClick,
+                                onQuote          = { quoteNoteId = it },
+                                actionsViewModel = noteActionsVm,
+                                staticTopPadding = staticTopPadding,
+                                staticBottomPadding = staticBottomPadding,
+                                viewModel        = notifViewModel,
+                            )
+                            3    -> ProfileScreen(
+                                staticBottomPadding = staticBottomPadding,
+                                scrollToTopTrigger = profileScrollToTopTrigger,
+                                onLogout = onLogout,
+                                onBack = { selectedTab = 0 },
+                                onNoteClick = onNoteClick,
+                                onComment = { eventId -> replyToEventId = eventId },
+                                onAuthorClick = onAuthorClick,
+                                onQuote = { noteId -> quoteNoteId = noteId },
+                                onConnectionsClick = { tab -> connectionsTarget = ownPubkey to tab },
+                                onRelaysClick = { profileRelaysPubkey = ownPubkey },
+                                onHashtagClick = onHashtagClick,
+                                onBrowseRelay = onBrowseRelayFeed,
+                                viewModel = hiltViewModel(key = "profile-$sessionKey"),
+                                actionsViewModel = noteActionsVm,
+                            )
+                            else -> PlaceholderScreen()
+                        }
+                    }
+
+                    // ── Top bar overlay ───────────────────────────────────────────────
+                    Box(
+                        modifier = Modifier
+                            .align(Alignment.TopStart)
+                            .offset { IntOffset(0, topBarOffset.roundToPx()) }
+                            .fillMaxWidth()
+                            .background(Black)
+                            .statusBarsPadding()
+                            .height(activeTopBarHeight),
                         contentAlignment = Alignment.Center,
                     ) {
-                        Icon(
-                            imageVector        = Icons.Outlined.EditNote,
-                            contentDescription = "New note",
-                            tint               = Color.Black,
-                            modifier           = Modifier.size(28.dp),
-                        )
+                        if (selectedTab == 2) {
+                            // Notification header keeps its established 52dp geometry.
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = Spacing.medium),
+                            ) {
+                                LogoMark(
+                                    sizeDp = Spacing.xxl,
+                                    static = false,
+                                    modifier = Modifier
+                                        .align(Alignment.CenterStart)
+                                        .offset(x = (-8).dp),
+                                )
+                                // Center: notification filter carousel
+                                NotifFilterCarousel(
+                                    current = notifFilter,
+                                    onChanged = { notifViewModel.setFilter(it) },
+                                    modifier = Modifier.align(Alignment.Center),
+                                )
+                            }
+                        } else {
+                            UnifiedFeedHeader(
+                                feedType = feedType,
+                                lens = globalFeedLens,
+                                filter = currentFilter,
+                                pullFraction = pullRefreshFraction.floatValue,
+                                isRefreshing = isFeedRefreshing,
+                                motionEnabled = headerMotionEnabled,
+                                onLogoClick = { scrollToTopTrigger++ },
+                                onSourceClick = { showFeedSheet = true },
+                                onLensToggle = feedViewModel::setGlobalFeedLens,
+                                onFilterClick = { showFilter = true },
+                            )
+                        }
                     }
-                }
-            }
 
-            // ── Bottom nav overlay ────────────────────────────────────────────
-            // Surface blocks touches in the bar's padding from reaching the feed.
-            // Keep this barrier on the moving overlay, not on the content below.
-            Surface(
-                modifier = Modifier
-                    .align(Alignment.BottomStart)
-                    .offset { IntOffset(0, bottomBarOffset.roundToPx()) }
-                    .fillMaxWidth(),
-                color = Black,
-            ) {
-                Row(
-                    modifier = Modifier
-                        .navigationBarsPadding()
-                        .height(Sizing.bottomNavHeight)
-                        .padding(horizontal = Spacing.medium)
-                        .selectableGroup(),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    TABS.forEachIndexed { index, tab ->
-                        val isSelected = index == selectedTab
-                        val iconSize = 24.dp  // constant — selection via tint only
-
-                        // The entire tab slot is a target, not just the icon's circle.
-                        Box(
+                    // ── Floating compose FAB (feed tab only) ──────────────────────────
+                    if (selectedTab == 0) {
+                        val fabVisible = splashDone && barsVisible && !immersiveVideoMode
+                        AnimatedVisibility(
+                            visible = fabVisible,
+                            enter   = scaleIn(animationSpec = tween(200)) + fadeIn(animationSpec = tween(200)),
+                            exit    = scaleOut(animationSpec = tween(150)) + fadeOut(animationSpec = tween(150)),
                             modifier = Modifier
-                                .weight(1f)
-                                .fillMaxHeight()
-                                .selectable(
-                                    selected = isSelected,
-                                    role = Role.Tab,
-                                    onClick = {
-                                        when (tabReselectAction(index, selectedTab)) {
-                                            TabReselectAction.FEED_TOP -> {
-                                                scrollToTopTrigger++
-                                                feedViewModel.clearNewTopPost()
-                                            }
-                                            TabReselectAction.PROFILE_TOP -> profileScrollToTopTrigger++
-                                            TabReselectAction.NONE -> Unit
-                                        }
-                                        if (index == 2) notifViewModel.markSeen()
-                                        selectedTab = index
-                                    },
+                                .align(Alignment.BottomEnd)
+                                .padding(
+                                    end    = Spacing.medium,
+                                    bottom = Sizing.bottomNavHeight + navBarHeight + Spacing.medium + 14.dp,
                                 ),
-                            contentAlignment = Alignment.Center,
                         ) {
-                            Box(contentAlignment = Alignment.Center) {
-                                if (index == 3 && userAvatarUrl != null) {
-                                    Box(
-                                        modifier = Modifier
-                                            .size(iconSize)
-                                            .then(
-                                                if (isSelected) Modifier.border(1.5.dp, Color.White, CircleShape)
-                                                else Modifier
+                            Box(
+                                modifier = Modifier
+                                    .size(56.dp)
+                                    .background(BrandDeep, CircleShape)
+                                    .clip(CircleShape)
+                                    .clickable { showCompose = true },
+                                contentAlignment = Alignment.Center,
+                            ) {
+                                Icon(
+                                    imageVector        = Icons.Outlined.EditNote,
+                                    contentDescription = "New note",
+                                    tint               = Color.Black,
+                                    modifier           = Modifier.size(28.dp),
+                                )
+                            }
+                        }
+                    }
+
+                    // ── Bottom nav overlay ────────────────────────────────────────────
+                    // Surface blocks touches in the bar's padding from reaching the feed.
+                    // Keep this barrier on the moving overlay, not on the content below.
+                    Surface(
+                        modifier = Modifier
+                            .align(Alignment.BottomStart)
+                            .offset { IntOffset(0, bottomBarOffset.roundToPx()) }
+                            .fillMaxWidth(),
+                        color = Black,
+                    ) {
+                        Row(
+                            modifier = Modifier
+                                .navigationBarsPadding()
+                                .height(Sizing.bottomNavHeight)
+                                .padding(horizontal = Spacing.medium)
+                                .selectableGroup(),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            TABS.forEachIndexed { index, tab ->
+                                val isSelected = index == selectedTab
+                                val iconSize = 24.dp  // constant — selection via tint only
+
+                                // The entire tab slot is a target, not just the icon's circle.
+                                Box(
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .fillMaxHeight()
+                                        .selectable(
+                                            selected = isSelected,
+                                            role = Role.Tab,
+                                            onClick = {
+                                                when (tabReselectAction(index, selectedTab)) {
+                                                    TabReselectAction.FEED_TOP -> {
+                                                        scrollToTopTrigger++
+                                                        feedViewModel.clearNewTopPost()
+                                                    }
+                                                    TabReselectAction.PROFILE_TOP -> profileScrollToTopTrigger++
+                                                    TabReselectAction.NONE -> Unit
+                                                }
+                                                if (index == 2) notifViewModel.markSeen()
+                                                selectedTab = index
+                                            },
+                                        ),
+                                    contentAlignment = Alignment.Center,
+                                ) {
+                                    Box(contentAlignment = Alignment.Center) {
+                                        if (index == 3 && userAvatarUrl != null) {
+                                            Box(
+                                                modifier = Modifier
+                                                    .size(iconSize)
+                                                    .then(
+                                                        if (isSelected) Modifier.border(1.5.dp, Color.White, CircleShape)
+                                                        else Modifier
+                                                    )
+                                                    .clip(CircleShape),
+                                            ) {
+                                                AsyncImage(
+                                                    model = rememberAvatarImageRequest(userAvatarUrl, iconSize),
+                                                    contentDescription = "Profile",
+                                                    contentScale = ContentScale.Crop,
+                                                    modifier = Modifier.fillMaxSize(),
+                                                )
+                                            }
+                                        } else {
+                                            Icon(
+                                                imageVector        = tab.icon,
+                                                contentDescription = tab.contentDescription,
+                                                tint               = if (isSelected) Color.White else NavUnselected,
+                                                modifier           = Modifier.size(iconSize),
                                             )
-                                            .clip(CircleShape),
-                                    ) {
-                                        AsyncImage(
-                                            model = rememberAvatarImageRequest(userAvatarUrl, iconSize),
-                                            contentDescription = "Profile",
-                                            contentScale = ContentScale.Crop,
-                                            modifier = Modifier.fillMaxSize(),
-                                        )
+                                        }
+                                        if (index == 0 && hasNewTopPost) {
+                                            Box(
+                                                modifier = Modifier
+                                                    .size(6.dp)
+                                                    .align(Alignment.TopEnd)
+                                                    .background(Brand, CircleShape),
+                                            )
+                                        }
+                                        if (index == 2 && hasNewNotifications) {
+                                            Box(
+                                                modifier = Modifier
+                                                    .size(6.dp)
+                                                    .align(Alignment.TopEnd)
+                                                    .background(Brand, CircleShape),
+                                            )
+                                        }
                                     }
-                                } else {
-                                    Icon(
-                                        imageVector        = tab.icon,
-                                        contentDescription = tab.contentDescription,
-                                        tint               = if (isSelected) Color.White else NavUnselected,
-                                        modifier           = Modifier.size(iconSize),
-                                    )
-                                }
-                                if (index == 0 && hasNewTopPost) {
-                                    Box(
-                                        modifier = Modifier
-                                            .size(6.dp)
-                                            .align(Alignment.TopEnd)
-                                            .background(Brand, CircleShape),
-                                    )
-                                }
-                                if (index == 2 && hasNewNotifications) {
-                                    Box(
-                                        modifier = Modifier
-                                            .size(6.dp)
-                                            .align(Alignment.TopEnd)
-                                            .background(Brand, CircleShape),
-                                    )
                                 }
                             }
                         }
                     }
+
                 }
+                is AppDestination.Thread -> ThreadScreen(
+                    entryId = entry.id,
+                    eventId = destination.eventId,
+                    relayHints = destination.relayHints,
+                    openArticleOnLoad = destination.openArticleOnLoad,
+                    onDismiss = navigator::pop,
+                    onQuote = { quoteNoteId = it },
+                    onComment = { replyToEventId = it },
+                    onAuthorClick = onAuthorClick,
+                    onHashtagClick = onHashtagClick,
+                    actionsViewModel = noteActionsVm,
+                )
+                is AppDestination.Profile -> UserProfileScreen(
+                    entryId = entry.id,
+                    pubkey = destination.pubkey,
+                    onDismiss = navigator::pop,
+                    onNoteClick = onNoteClick,
+                    onComment = { replyToEventId = it },
+                    onAuthorClick = onAuthorClick,
+                    onQuote = { quoteNoteId = it },
+                    onConnectionsClick = { connectionsTarget = destination.pubkey to it },
+                    onRelaysClick = { profileRelaysPubkey = destination.pubkey },
+                    onHashtagClick = onHashtagClick,
+                    actionsViewModel = noteActionsVm,
+                )
             }
+        }
 
             // ── Feed selector bottom sheet ───────────────────────────────────
             if (showFeedSheet) {
@@ -801,22 +803,6 @@ fun AppNavigation(
                 ComposeScreen(onDismiss = { showCompose = false })
             }
 
-            // ── User profile overlay ──────────────────────────────────────────
-            userProfilePubkey?.let { pubkey ->
-                UserProfileScreen(
-                    pubkey        = pubkey,
-                    onDismiss     = { userProfilePubkey = null },
-                    onNoteClick   = { eventId -> threadDestination = ThreadDestination(eventId) },
-                    onComment     = { eventId -> replyToEventId = eventId },
-                    onAuthorClick = onAuthorClick,
-                    onQuote       = { noteId -> quoteNoteId = noteId },
-                    onConnectionsClick = { tab -> connectionsTarget = pubkey to tab },
-                    onRelaysClick = { profileRelaysPubkey = pubkey },
-                    onHashtagClick = onHashtagClick,
-                    actionsViewModel = noteActionsVm,
-                )
-            }
-
             connectionsTarget?.let { (pubkey, initialTab) ->
                 ConnectionsScreen(
                     pubkey = pubkey,
@@ -824,7 +810,7 @@ fun AppNavigation(
                     onDismiss = { connectionsTarget = null },
                     onProfileClick = { targetPubkey ->
                         connectionsTarget = null
-                        userProfilePubkey = targetPubkey
+                        navigator.push(AppDestination.Profile(targetPubkey))
                     },
                 )
             }
@@ -835,27 +821,6 @@ fun AppNavigation(
                     onDismiss = { profileRelaysPubkey = null },
                     onOpenRelay = { url -> relayDetailUrl = url },
                 )
-            }
-
-            // ── Thread overlay ────────────────────────────────────────────────
-            // Must come AFTER user profile so it renders on top when both are visible
-            threadDestination?.let { destination ->
-                key(destination.eventId) {
-                    ThreadScreen(
-                        eventId       = destination.eventId,
-                        relayHints    = destination.relayHints,
-                        openArticleOnLoad = destination.openArticleOnLoad,
-                        onDismiss     = { threadDestination = null },
-                        onQuote       = { noteId -> quoteNoteId = noteId },
-                        onComment     = { replyEventId -> replyToEventId = replyEventId },
-                        onAuthorClick = { pubkey ->
-                            threadDestination = null  // dismiss thread so profile is visible
-                            userProfilePubkey = pubkey
-                        },
-                        onHashtagClick = onHashtagClick,
-                        actionsViewModel = noteActionsVm,
-                    )
-                }
             }
 
             // ── Reply-compose overlay ─────────────────────────────────────────
@@ -913,8 +878,7 @@ fun AppNavigation(
                         relayDetailUrl = null
                         profileRelaysPubkey = null
                         connectionsTarget = null
-                        threadDestination = null
-                        userProfilePubkey = pubkey
+                        navigator.push(AppDestination.Profile(pubkey))
                     },
                     onBrowse = onBrowseRelayFeed,
                     viewModel = relayManagementVm,
