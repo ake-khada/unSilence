@@ -29,7 +29,10 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Text
+import com.unsilence.app.ui.shared.ResumedEffect
 import androidx.compose.runtime.Composable
+import com.unsilence.app.ui.shared.rememberCardWotLookup
+import com.unsilence.app.ui.shared.rememberArticleSelection
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
@@ -145,7 +148,7 @@ fun ProfileScreen(
     val followingCount  by viewModel.followingCount.collectAsStateWithLifecycle()
     val followerCount   by viewModel.followerCount.collectAsStateWithLifecycle()
     val relayCount      by viewModel.relayCount.collectAsStateWithLifecycle()
-    val wotLookups      by viewModel.wotLookups.collectAsStateWithLifecycle()
+    val wotLookup = rememberCardWotLookup(viewModel.wotLookups)
     val profileWotLookup by viewModel.profileWotLookup.collectAsStateWithLifecycle()
     val wotProvenance   by viewModel.wotProvenance.collectAsStateWithLifecycle()
     val feedWotDisplayMode by viewModel.feedWotDisplayMode.collectAsStateWithLifecycle()
@@ -162,7 +165,7 @@ fun ProfileScreen(
 
     var showEditProfile by rememberSaveable { mutableStateOf(false) }
     var showSettings    by rememberSaveable { mutableStateOf(false) }
-    var articleRow      by remember { mutableStateOf<FeedRow?>(null) }
+    var articleRow by rememberArticleSelection(actionsViewModel)
     var actionsRow      by remember { mutableStateOf<FeedRow?>(null) }
     var showWotBreakdown by remember { mutableStateOf(false) }
 
@@ -173,15 +176,19 @@ fun ProfileScreen(
     val pinnedShortcodes by actionsViewModel.pinnedEmojiShortcodes.collectAsStateWithLifecycle()
 
     // ── Action failure snackbar ──────────────────────────────────────────────
-    LaunchedEffect(Unit) {
+    ResumedEffect(Unit) {
         actionsViewModel.actionError.collect { showSnackbar(it) }
     }
     val listState = rememberLazyListState()
     val cardWidthPx = LocalWindowInfo.current.containerSize.width
     val scope = rememberCoroutineScope()
 
+    var handledTopTrigger by rememberSaveable { mutableStateOf(scrollToTopTrigger) }
     LaunchedEffect(scrollToTopTrigger) {
-        if (scrollToTopTrigger > 0) listState.animateScrollToItem(0)
+        if (scrollToTopTrigger != handledTopTrigger) {
+            handledTopTrigger = scrollToTopTrigger
+            listState.animateScrollToItem(0)
+        }
     }
 
     // Intercept avatar tap: own pubkey → scroll to top, other → navigate
@@ -231,7 +238,7 @@ fun ProfileScreen(
         viewModel,
         actionsViewModel,
         pinnedEmojis,
-        wotLookups,
+        wotLookup,
         feedWotDisplayMode,
         videoScope,
         sensitiveMode,
@@ -263,7 +270,7 @@ fun ProfileScreen(
             pinnedEmojis = pinnedEmojis,
             videoScope = videoScope,
             sensitiveMode = sensitiveMode,
-            wotLookup = { key -> wotLookups[key] },
+            wotLookup = wotLookup,
             feedWotDisplayMode = feedWotDisplayMode,
             onWotSubjectsVisible = viewModel::requestWotHydration,
             pollActions = actionsViewModel.pollActionCallbacks(),
@@ -544,7 +551,7 @@ fun ProfileScreen(
                 totalItems > 0 && lastVisible >= totalItems / 2
             }
         }
-        LaunchedEffect(Unit) {
+        ResumedEffect(Unit) {
             snapshotFlow {
                 if (shouldLoadMore.value) posts.lastOrNull()?.createdAt else null
             }
@@ -558,7 +565,7 @@ fun ProfileScreen(
 
         // Viewport tracking for zone-aware hydration
         @OptIn(FlowPreview::class)
-        LaunchedEffect(Unit) {
+        ResumedEffect(Unit) {
             snapshotFlow {
                 val info = listState.layoutInfo
                 val first = info.visibleItemsInfo.firstOrNull()?.index ?: 0
@@ -570,7 +577,7 @@ fun ProfileScreen(
         }
 
         @OptIn(FlowPreview::class)
-        LaunchedEffect(posts, cardWidthPx, engagementRetryRevision) {
+        ResumedEffect(posts, cardWidthPx, engagementRetryRevision) {
             val eventOffset = 3
             fun warmVisibleRange(first: Int, last: Int) {
                 val dataFirst = (first - eventOffset).coerceAtLeast(0)

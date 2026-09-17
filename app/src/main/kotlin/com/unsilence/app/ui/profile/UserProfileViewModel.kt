@@ -1,6 +1,7 @@
 package com.unsilence.app.ui.profile
 
 import androidx.lifecycle.ViewModel
+import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.viewModelScope
 import com.unsilence.app.data.auth.KeyManager
 import com.unsilence.app.data.memory.EventStats
@@ -39,6 +40,10 @@ import com.unsilence.app.data.repository.MuteResult
 import com.unsilence.app.data.repository.ReportRepository
 import com.unsilence.app.ui.feed.FeedContentFilter
 import com.unsilence.app.ui.shared.TimelineCardData
+import com.unsilence.app.ui.shared.collectLatestWhileActive
+import kotlinx.coroutines.awaitCancellation
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import com.vitorpamplona.quartz.nip01Core.core.hexToByteArray
 import com.vitorpamplona.quartz.nip19Bech32.toNpub
 import dagger.hilt.android.lifecycle.HiltViewModel
@@ -51,7 +56,6 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.filterNotNull
@@ -73,6 +77,7 @@ data class ProfileWotProvenance(
 
 @HiltViewModel
 class UserProfileViewModel @Inject constructor(
+    private val savedStateHandle: SavedStateHandle,
     private val userRepository: UserRepository,
     private val memoryEventStore: MemoryEventStore,
     private val relayPool: RelayPool,
@@ -108,6 +113,24 @@ class UserProfileViewModel @Inject constructor(
     private val _isAtTop = MutableStateFlow(true)
     private val _contentFilter = MutableStateFlow(FeedContentFilter.NOTES_ONLY)
     private var currentHandle: TimelineService.TimelineHandle? = null
+    private val screenActive = MutableStateFlow(false)
+    @Volatile private var subscriptionGeneration = 0L
+
+    fun setScreenActive(active: Boolean) {
+        if (screenActive.value == active) return
+        screenActive.value = active
+        if (active) {
+            memoryEventStore.viewedPubkey = _pubkeyHex.value
+            wotHydrationCoalescer.requestHydration(_wotSubjects.value)
+        } else {
+            subscriptionGeneration++
+            currentHandle?.close()
+            currentHandle = null
+            if (memoryEventStore.viewedPubkey == _pubkeyHex.value) {
+                memoryEventStore.viewedPubkey = null
+            }
+        }
+    }
     private val _wotSubjects = MutableStateFlow<Set<String>>(emptySet())
 
     val isLoadingPosts: StateFlow<Boolean> = _isLoading.asStateFlow()
@@ -148,9 +171,7 @@ class UserProfileViewModel @Inject constructor(
 
     /** NIP-36 sensitive-content display mode (shared with feed). */
     val sensitiveContentMode: StateFlow<com.unsilence.app.data.memory.SensitiveContentMode> =
-        relayPreferencesStore.sensitiveContentModeFlow()
-            .stateIn(viewModelScope, SharingStarted.Eagerly,
-                com.unsilence.app.data.memory.SensitiveContentMode.BLUR)
+        relayPreferencesStore.sensitiveContentMode
 
     val wotLookups: StateFlow<Map<String, WotLookup>> =
         combine(_wotSubjects, memoryEventStore.wotSignalFlow) { subjects, _ ->
@@ -201,7 +222,7 @@ class UserProfileViewModel @Inject constructor(
 
     val feedWotDisplayMode: StateFlow<FeedWotDisplayMode> =
         relayPreferencesStore.feedWotDisplayModeFlow()
-            .stateIn(viewModelScope, SharingStarted.Eagerly, FeedWotDisplayMode.NUMBERS)
+            .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), FeedWotDisplayMode.NUMBERS)
 
     @OptIn(ExperimentalCoroutinesApi::class)
     val relayCount: StateFlow<Int?> = _pubkeyHex
@@ -211,7 +232,7 @@ class UserProfileViewModel @Inject constructor(
 
     // ── Profile tabs ─────────────────────────────────────────────────────
 
-    val selectedTab = MutableStateFlow(ProfileTab.NOTES)
+    val selectedTab = MutableStateFlow(savedStateHandle.get<ProfileTab>("profileTab") ?: ProfileTab.NOTES)
 
     // Track last subscription group to optimize Notes↔Replies (filter-only swap)
     private var lastSubGroup: SubGroup? = null
@@ -262,14 +283,14 @@ class UserProfileViewModel @Inject constructor(
 
     val isOwnProfile: StateFlow<Boolean> = _pubkeyHex
         .map { target -> target != null && target == myPubkey }
-        .stateIn(viewModelScope, SharingStarted.Eagerly, false)
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), false)
 
     val isMuted: StateFlow<Boolean> = combine(
         _pubkeyHex,
         memoryEventStore.ownMuteListFlow(),
     ) { target, muteList ->
         target != null && muteList.mutesPubkey(target)
-    }.stateIn(viewModelScope, SharingStarted.Eagerly, false)
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), false)
 
     /** Whether the logged-in user follows the viewed pubkey. */
     @OptIn(ExperimentalCoroutinesApi::class)
@@ -288,12 +309,23 @@ class UserProfileViewModel @Inject constructor(
     val followFeedback = followFeedbackChannel.receiveAsFlow()
 
     init {
-        // Combine pubkey + tab → resubscribe. Drives timeline lifecycle.
         viewModelScope.launch {
-            @OptIn(ExperimentalCoroutinesApi::class)
-            combine(_pubkeyHex.filterNotNull(), selectedTab) { pk, tab -> pk to tab }
-                .collectLatest { (pk, tab) ->
-                    resubscribeForTab(pk, tab)
+            selectedTab.collect { tab ->
+                savedStateHandle["profileTab"] = tab
+                _contentFilter.value = if (tab == ProfileTab.REPLIES) {
+                    FeedContentFilter.REPLIES_ONLY
+                } else FeedContentFilter.NOTES_ONLY
+            }
+        }
+        // Notes/Replies share a subscription. Covering stops it; returning retains
+        // loaded pages and subscribes anew. The handle cannot outlive this collector.
+        viewModelScope.launch {
+            combine(
+                _pubkeyHex.filterNotNull(),
+                selectedTab.map(::subGroupFor).distinctUntilChanged(),
+            ) { pk, group -> pk to group }
+                .collectLatestWhileActive(screenActive) { (pk, group) ->
+                    collectProfileSubscription(pk, group)
                 }
         }
     }
@@ -308,9 +340,14 @@ class UserProfileViewModel @Inject constructor(
         indexedFollowerCount.value = null
         _pubkeyHex.value = pubkey
         memoryEventStore.viewedPubkey = pubkey
-        selectedTab.value = ProfileTab.NOTES
+        if (savedStateHandle.get<String>("profilePubkey") != pubkey) {
+            selectedTab.value = ProfileTab.NOTES
+        }
+        savedStateHandle["profilePubkey"] = pubkey
         _events.value = emptyList()
-        _contentFilter.value = FeedContentFilter.NOTES_ONLY
+        _contentFilter.value = if (selectedTab.value == ProfileTab.REPLIES) {
+            FeedContentFilter.REPLIES_ONLY
+        } else FeedContentFilter.NOTES_ONLY
         _wotSubjects.value = setOf(pubkey)
         wotHydrationCoalescer.requestProfileHydration(pubkey)
 
@@ -398,7 +435,7 @@ class UserProfileViewModel @Inject constructor(
     fun requestWotHydration(pubkeys: Collection<String>) {
         if (pubkeys.isEmpty()) return
         _wotSubjects.update { current -> current + pubkeys }
-        wotHydrationCoalescer.requestHydration(pubkeys)
+        if (screenActive.value) wotHydrationCoalescer.requestHydration(pubkeys)
     }
 
     private fun buildProtectedProfiles(): List<ProtectedProfile> {
@@ -429,34 +466,27 @@ class UserProfileViewModel @Inject constructor(
 
     // ── Tab → subscription logic ─────────────────────────────────────────
 
-    private fun resubscribeForTab(pubkey: String, tab: ProfileTab) {
-        // Set content filter at render boundary
-        val contentFilter = when (tab) {
-            ProfileTab.NOTES, ProfileTab.LONGFORM -> FeedContentFilter.NOTES_ONLY
-            ProfileTab.REPLIES -> FeedContentFilter.REPLIES_ONLY
-        }
-        _contentFilter.value = contentFilter
-
-        // Notes↔Replies share the same kinds — skip resubscribe, just filter
-        val group = subGroupFor(tab)
-        if (lastSubPubkey == pubkey && lastSubGroup == group) return
-        lastSubPubkey = pubkey
-        lastSubGroup = group
-
-        // Close previous handle
-        currentHandle?.close()
-        currentHandle = null
+    private suspend fun collectProfileSubscription(pubkey: String, group: SubGroup) {
+        val sameTimeline = lastSubPubkey == pubkey && lastSubGroup == group
+        val tab = if (group == SubGroup.LONGFORM) ProfileTab.LONGFORM else ProfileTab.NOTES
+        val generation = ++subscriptionGeneration
+        fun acceptsEvents() = screenActive.value && subscriptionGeneration == generation
 
         val kinds = profileKindsForTab(tab)
-        val cached = memoryEventStore.userEvents(pubkey, kinds.toSet(), 300)
         val writeRelays = memoryEventStore.writeRelaysFor(pubkey)
             .ifEmpty { GLOBAL_RELAY_URLS }
         val limit = if (tab == ProfileTab.LONGFORM) 100 else 300
 
         // Pre-seed with MES-cached events for instant tab switching;
         // relay subscription merges on top as batches arrive.
-        _events.value = cached
-        _isLoading.value = cached.isEmpty()
+        if (!sameTimeline) {
+            _events.value = kotlinx.coroutines.withContext(Dispatchers.Default) {
+                memoryEventStore.userEvents(pubkey, kinds.toSet(), 300)
+            }
+        }
+        _isLoading.value = _events.value.isEmpty()
+        lastSubPubkey = pubkey
+        lastSubGroup = group
 
         val subRequests = listOf(SubRequest(
             urls = writeRelays,
@@ -467,10 +497,10 @@ class UserProfileViewModel @Inject constructor(
             ),
         ))
 
-        viewModelScope.launch {
-            val handle = timelineService.subscribeTimeline(
+        val handle = timelineService.subscribeTimeline(
                 subRequests = subRequests,
                 onEvents = { batch, eosed ->
+                    if (!acceptsEvents()) return@subscribeTimeline
                     if (batch.isNotEmpty()) {
                         // Always route through merge — handles dedup, sort, and
                         // cap uniformly whether _events is empty or populated.
@@ -480,10 +510,18 @@ class UserProfileViewModel @Inject constructor(
                     if (eosed) _isLoading.value = false
                 },
                 onNew = { event ->
+                    if (!acceptsEvents()) return@subscribeTimeline
                     _events.update { current -> TimelineMerge.merge(current, listOf(event)) }
                 },
             )
+        try {
+            currentCoroutineContext().ensureActive()
             currentHandle = handle
+            awaitCancellation()
+        } finally {
+            if (subscriptionGeneration == generation) subscriptionGeneration++
+            handle.close()
+            if (currentHandle === handle) currentHandle = null
         }
     }
 
@@ -511,9 +549,9 @@ class UserProfileViewModel @Inject constructor(
         this != null && (pubkey in pubkeys || pubkey in privatePubkeys)
 
     override fun onCleared() {
+        setScreenActive(false)
         currentHandle?.close()
         currentHandle = null
-        memoryEventStore.viewedPubkey = null
         super.onCleared()
     }
 

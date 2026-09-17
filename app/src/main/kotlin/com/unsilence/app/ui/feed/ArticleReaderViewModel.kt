@@ -61,9 +61,7 @@ class ArticleReaderViewModel @Inject constructor(
 
     /** NIP-36 sensitive-content display mode (shared with feed). */
     val sensitiveContentMode: StateFlow<com.unsilence.app.data.memory.SensitiveContentMode> =
-        relayPreferencesStore.sensitiveContentModeFlow()
-            .stateIn(viewModelScope, SharingStarted.Eagerly,
-                com.unsilence.app.data.memory.SensitiveContentMode.BLUR)
+        relayPreferencesStore.sensitiveContentMode
 
     private val _wotSubjects = MutableStateFlow<Set<String>>(emptySet())
     val wotLookups: StateFlow<Map<String, WotLookup>> =

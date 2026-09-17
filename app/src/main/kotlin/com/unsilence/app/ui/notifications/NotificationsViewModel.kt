@@ -67,8 +67,7 @@ class NotificationsViewModel @Inject constructor(
         relayPreferencesStore.feedWotDisplayModeFlow()
             .stateIn(viewModelScope, SharingStarted.Eagerly, FeedWotDisplayMode.NUMBERS)
 
-    val sensitiveMode = relayPreferencesStore.sensitiveContentModeFlow()
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), SensitiveContentMode.BLUR)
+    val sensitiveMode = relayPreferencesStore.sensitiveContentMode
 
     private val previewTargets = MutableStateFlow<List<String>>(emptyList())
     internal val previews = notificationPreviews(

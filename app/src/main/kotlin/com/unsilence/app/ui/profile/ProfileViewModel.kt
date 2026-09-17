@@ -87,9 +87,7 @@ class ProfileViewModel @Inject constructor(
 
     /** NIP-36 sensitive-content display mode (shared with feed). */
     val sensitiveContentMode: StateFlow<com.unsilence.app.data.memory.SensitiveContentMode> =
-        relayPreferencesStore.sensitiveContentModeFlow()
-            .stateIn(viewModelScope, SharingStarted.Eagerly,
-                com.unsilence.app.data.memory.SensitiveContentMode.BLUR)
+        relayPreferencesStore.sensitiveContentMode
 
     private val _uploadingAvatar = MutableStateFlow(false)
     val uploadingAvatar: StateFlow<Boolean> = _uploadingAvatar.asStateFlow()

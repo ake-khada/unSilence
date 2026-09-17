@@ -62,6 +62,8 @@ import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.mapNotNull
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.merge
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
@@ -147,6 +149,11 @@ class NoteActionsViewModel @Inject constructor(
 
     /** Live row for a quoted long-form coordinate. */
     fun articleRowFlow(coord: String): Flow<FeedRow?> = memoryEventStore.articleRowByCoordFlow(coord)
+
+    /** Exact cached event identity, including repost envelopes; no navigation-time network fetch. */
+    fun eventRowFlow(eventId: String): Flow<FeedRow?> = memoryEventStore.eventEntityFlow(eventId)
+        .map { memoryEventStore.feedRowsByIds(setOf(eventId)).firstOrNull() }
+        .flowOn(Dispatchers.Default)
 
     /**
      * Resolve a quoted long-form through its author relays and configured indexers.

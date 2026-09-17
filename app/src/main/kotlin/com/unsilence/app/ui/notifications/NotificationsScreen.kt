@@ -15,6 +15,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Notifications
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Text
+import com.unsilence.app.ui.shared.rememberCardWotLookup
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -68,7 +69,9 @@ fun NotificationsScreen(
     ),
 ) {
     val state by viewModel.uiState.collectAsStateWithLifecycle()
-    val wotLookups by viewModel.wotLookups.collectAsStateWithLifecycle()
+    val wotLookupState = viewModel.wotLookups.collectAsStateWithLifecycle()
+    val wotLookups by wotLookupState
+    val wotLookup = rememberCardWotLookup(wotLookupState)
     val feedWotDisplayMode by viewModel.feedWotDisplayMode.collectAsStateWithLifecycle()
     val sensitiveMode by viewModel.sensitiveMode.collectAsStateWithLifecycle()
     val previews by viewModel.previews.collectAsStateWithLifecycle()
@@ -117,7 +120,7 @@ fun NotificationsScreen(
     }
     val host = remember(
         actionsViewModel, viewModel, onNoteClick, onProfileClick, onHashtagClick, onQuote,
-        sensitiveMode, wotLookups, feedWotDisplayMode,
+        sensitiveMode, wotLookup, feedWotDisplayMode,
     ) {
         actionsViewModel.eventCardHost(
             actions = EventCardActions(
@@ -138,7 +141,7 @@ fun NotificationsScreen(
             pinnedEmojis = emptyList(),
             videoScope = null,
             sensitiveMode = sensitiveMode,
-            wotLookup = { wotLookups[it] },
+            wotLookup = wotLookup,
             feedWotDisplayMode = feedWotDisplayMode,
             onWotSubjectsVisible = viewModel::requestPreviewWotHydration,
             pollActions = null,

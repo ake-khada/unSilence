@@ -35,8 +35,7 @@ class FiltersViewModel @Inject constructor(
             .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
 
     val sensitiveContentMode: StateFlow<SensitiveContentMode> =
-        relayPreferencesStore.sensitiveContentModeFlow()
-            .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), SensitiveContentMode.BLUR)
+        relayPreferencesStore.sensitiveContentMode
 
     val hashtagCap: StateFlow<Int?> =
         relayPreferencesStore.hashtagCapFlow()

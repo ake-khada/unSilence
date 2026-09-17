@@ -14,8 +14,6 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
-import androidx.lifecycle.Lifecycle
-import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.media3.common.MediaItem
 import androidx.media3.common.PlaybackException
@@ -41,10 +39,11 @@ import kotlinx.coroutines.flow.map
  * FeedScreen, ProfileScreen, and UserProfileScreen.
  */
 @Stable
-class VideoPlaybackScope(
+class VideoPlaybackScope internal constructor(
     val exoPlayer: ExoPlayer,
     private val holder: SharedPlayerHolder,
     private val ownerId: String,
+    private val navigationGate: NavigationPlaybackGate,
 ) {
     companion object {
         /** A candidate must hold ≥60% visibility for this long before activation.
@@ -95,7 +94,10 @@ class VideoPlaybackScope(
     internal var modelsResolvedAtElapsedMs: Long = 0L
     internal var playbackRequestedAtElapsedMs: Long = 0L
 
-    fun isActiveVideo(noteId: String): Boolean = noteId == activeVideoNoteId
+    internal val canPlay: Boolean get() = navigationGate.canPlay
+
+    // A preview uses the ordinary thumbnail, never another entry's shared surface.
+    fun isActiveVideo(noteId: String): Boolean = canPlay && noteId == activeVideoNoteId
 
     /**
      * URL currently bound to the shared player. Multi-video rows use their
@@ -146,6 +148,7 @@ class VideoPlaybackScope(
     }
 
     fun openFullscreen(noteId: String, requestedVideoUrl: String) {
+        if (!canPlay) return
         // Only claim fullscreen when the row resolves to a bound video URL.
         // A cold empty-repost target may render its preview before the model map
         // recomputes to include row.id → targetModels; without this guard,
@@ -161,6 +164,7 @@ class VideoPlaybackScope(
             FullscreenPlaybackDecision.Ignore -> return
             FullscreenPlaybackDecision.Resume -> {
                 holder.claim(ownerId)
+                exoPlayer.repeatMode = Player.REPEAT_MODE_ALL
                 exoPlayer.playWhenReady = true
             }
             FullscreenPlaybackDecision.Rebind -> {
@@ -169,6 +173,7 @@ class VideoPlaybackScope(
                 // activeVideoNoteId may be unchanged, so LaunchedEffect(activeVideoUrl)
                 // will not necessarily run to repair this.
                 holder.claim(ownerId)
+                exoPlayer.repeatMode = Player.REPEAT_MODE_ALL
                 exoPlayer.stop()
                 exoPlayer.clearMediaItems()
                 exoPlayer.setMediaItem(MediaItem.fromUri(targetUrl))
@@ -176,6 +181,7 @@ class VideoPlaybackScope(
                 exoPlayer.playWhenReady = true
             }
         }
+        exoPlayer.volume = 1f
         activeVideoNoteId = noteId
         preFullscreenMuted = isMuted
         isMuted = false
@@ -299,14 +305,30 @@ fun rememberVideoPlaybackScope(
     additionalVideoSourceCandidateIds: ((FeedRow, EventModel?) -> List<String>)? = null,
 ): VideoPlaybackScope {
     val exoPlayer = holder.player
-    val scope = remember(ownerId) { VideoPlaybackScope(exoPlayer, holder, ownerId) }
+    val lifecycle = LocalLifecycleOwner.current.lifecycle
+    val navigationGate = remember(ownerId, holder, lifecycle) {
+        NavigationPlaybackGate(lifecycle) { resumed ->
+            // releaseOwnership is owner-checked: a late outgoing callback must
+            // not pause the incoming entry's player. Retain the codec as before.
+            if (!resumed) holder.releaseOwnership(ownerId)
+            Log.w("VideoScope", "navigation playback: owner=$ownerId resumed=$resumed")
+        }
+    }
+    val scope = remember(ownerId, holder, navigationGate) {
+        VideoPlaybackScope(exoPlayer, holder, ownerId, navigationGate)
+    }
+
+    DisposableEffect(navigationGate) {
+        navigationGate.attach()
+        onDispose { navigationGate.dispose() }
+    }
 
     // Release ownership on disposal. A qualifying one-shot summary closes the
     // watchdog's blind spot for a screen that disappears before its first 5s tick.
-    DisposableEffect(ownerId) {
+    DisposableEffect(scope) {
         onDispose {
             val currentModels = scope.playableVideoModels
-            if (scope.activeVideoNoteId == null && currentModels.isNotEmpty()) {
+            if (scope.canPlay && scope.activeVideoNoteId == null && currentModels.isNotEmpty()) {
                 val layoutInfo = listState.layoutInfo
                 val viewportStart = layoutInfo.viewportStartOffset
                 val viewportEnd = layoutInfo.viewportEndOffset
@@ -343,26 +365,11 @@ fun rememberVideoPlaybackScope(
         }
     }
 
-    // Lifecycle pause/resume
-    val lifecycleOwner = LocalLifecycleOwner.current
-    DisposableEffect(lifecycleOwner) {
-        val observer = LifecycleEventObserver { _, event ->
-            when (event) {
-                Lifecycle.Event.ON_PAUSE -> exoPlayer.playWhenReady = false
-                Lifecycle.Event.ON_RESUME -> if (
-                    holder.isOwner(ownerId) && scope.activeVideoUrl != null &&
-                    holder.currentUrl == scope.activeVideoUrl
-                ) exoPlayer.playWhenReady = true
-                else -> {}
-            }
+    // Covered/previews cannot change the current owner's audio either.
+    LaunchedEffect(scope, scope.canPlay, scope.isMuted) {
+        if (scope.canPlay && holder.isOwner(ownerId)) {
+            exoPlayer.volume = if (scope.isMuted) 0f else 1f
         }
-        lifecycleOwner.lifecycle.addObserver(observer)
-        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
-    }
-
-    // Mute sync
-    LaunchedEffect(scope.isMuted) {
-        exoPlayer.volume = if (scope.isMuted) 0f else 1f
     }
 
     // Read pre-computed VideoRenderModels from MES sidecar cache (populated at insert time).
@@ -459,14 +466,17 @@ fun rememberVideoPlaybackScope(
         onDispose { exoPlayer.removeListener(listener) }
     }
 
-    LaunchedEffect(activeVideoUrl, scope.playbackPermissionRevision) {
-        if (activeVideoUrl != null) {
+    LaunchedEffect(scope, scope.canPlay, activeVideoUrl, scope.playbackPermissionRevision) {
+        if (!scope.canPlay) return@LaunchedEffect
+        // Read current live consent here, not a URL captured before a re-hide.
+        val permittedUrl = scope.activeVideoUrl
+        if (permittedUrl != null) {
             val retainedUrl = holder.currentUrl
             val wasRetained = holder.isRetained
             val activeId = scope.activeVideoNoteId
             scope.playbackRequestedAtElapsedMs = SystemClock.elapsedRealtime()
             val requestMode = when {
-                retainedUrl != activeVideoUrl -> "rebind"
+                retainedUrl != permittedUrl -> "rebind"
                 wasRetained -> "resume-retained"
                 else -> "resume-owned"
             }
@@ -476,24 +486,21 @@ fun rememberVideoPlaybackScope(
                     "owner=$ownerId mode=$requestMode",
             )
             holder.claim(ownerId)
-            if (retainedUrl == activeVideoUrl && holder.isRetained.not()) {
-                // Same URL, player was already claimed (not retained) — just ensure playing
-                exoPlayer.playWhenReady = true
-            } else if (retainedUrl == activeVideoUrl) {
-                // Same URL, player was retained (codec alive) — resume without re-prepare
-                exoPlayer.playWhenReady = true
-            } else {
+            exoPlayer.repeatMode = Player.REPEAT_MODE_ALL
+            exoPlayer.volume = if (scope.isMuted) 0f else 1f
+            if (retainedUrl != permittedUrl || exoPlayer.mediaItemCount == 0) {
                 // Different URL — full media swap (the one path where codec realloc is correct)
                 exoPlayer.stop()
                 exoPlayer.clearMediaItems()
-                exoPlayer.setMediaItem(MediaItem.fromUri(activeVideoUrl))
+                exoPlayer.setMediaItem(MediaItem.fromUri(permittedUrl))
                 exoPlayer.prepare()
-                exoPlayer.playWhenReady = true
             }
+            // Same URL resumes without prepare or codec reallocation.
+            exoPlayer.playWhenReady = true
         } else {
             if (holder.isOwner(ownerId)) {
                 // B2: retain codec — just release ownership (sets playWhenReady=false,
-                // starts 15s retention timer)
+                // retains the codec for the foreground session)
                 holder.releaseOwnership(ownerId)
             }
         }
@@ -514,7 +521,7 @@ fun rememberVideoPlaybackScope(
     //      normal sequential transitions A→B→C.
     val showFullscreenRef = rememberUpdatedState(scope.showFullscreenVideo)
     val activeRef = rememberUpdatedState(scope.activeVideoNoteId)
-    LaunchedEffect(Unit) {
+    ResumedEffect(scope) {
         // Include the video row ids in the emitted value. snapshotFlow observes
         // every state read, but it only emits when the block's returned value
         // changes. Returning layoutInfo alone means a late-resolved nested video
@@ -625,6 +632,7 @@ fun rememberVideoPlaybackScope(
             }
             .distinctUntilChanged()
             .collect { newActiveId ->
+                if (!scope.canPlay) return@collect
                 // Consent may have been revoked during the confirmation delay.
                 if (newActiveId != null && newActiveId !in scope.playableVideoModels) return@collect
                 if (scope.activeVideoNoteId != newActiveId) {
@@ -670,7 +678,7 @@ fun rememberVideoPlaybackScope(
             }
     }
 
-    LaunchedEffect(Unit) {
+    ResumedEffect(scope) {
         while (true) {
             delay(5_000)
 

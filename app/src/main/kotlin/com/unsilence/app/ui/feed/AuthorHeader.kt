@@ -17,6 +17,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import com.unsilence.app.ui.shared.rememberCardWot
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -152,7 +153,7 @@ internal fun AuthorHeader(
         }
         Spacer(Modifier.width(Spacing.micro))
         WotFeedMetaTimestamp(
-            lookup = wotLookup?.invoke(pubkey),
+            lookup = rememberCardWot(pubkey, wotLookup),
             mode = feedWotDisplayMode,
             timestamp = createdAt?.let(::relativeTime),
             modifier = Modifier.clickable { onNoteClick() },
@@ -233,7 +234,7 @@ private fun RepostAuthorHeader(
         }
         Spacer(Modifier.width(Spacing.micro))
         WotFeedMetaTimestamp(
-            lookup = wotLookup?.invoke(pubkey),
+            lookup = rememberCardWot(pubkey, wotLookup),
             mode = feedWotDisplayMode,
             timestamp = createdAt?.let(::relativeTime),
             modifier = Modifier.clickable { onNoteClick() },

@@ -1,6 +1,8 @@
 package com.unsilence.app.ui.thread
 
-import androidx.activity.compose.BackHandler
+import androidx.lifecycle.compose.LifecycleResumeEffect
+import androidx.compose.runtime.saveable.rememberSaveable
+import com.unsilence.app.ui.shared.ResumedEffect
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -22,7 +24,8 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.DisposableEffect
+import com.unsilence.app.ui.shared.rememberCardWotLookup
+import com.unsilence.app.ui.shared.rememberArticleSelection
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -76,6 +79,7 @@ fun ThreadScreen(
     eventId: String,
     relayHints: List<String> = emptyList(),
     openArticleOnLoad: Boolean = false,
+    entryId: String,
     onDismiss: () -> Unit,
     onQuote: (String) -> Unit = {},
     onComment: (String) -> Unit = {},
@@ -88,12 +92,15 @@ fun ThreadScreen(
         key = "note-actions-${LocalAppSessionKey.current}",
     ),
 ) {
-    BackHandler(onBack = onDismiss)
-    DisposableEffect(Unit) { onDispose { viewModel.clearThread() } }
-    LaunchedEffect(eventId, relayHints) { viewModel.loadThread(eventId, relayHints) }
+    // NavDisplay owns back and the ViewModel store. Covering is not destruction.
+    LifecycleResumeEffect(viewModel, eventId, relayHints) {
+        viewModel.setScreenActive(true)
+        viewModel.loadThread(eventId, relayHints)
+        onPauseOrDispose { viewModel.setScreenActive(false) }
+    }
     val state           by viewModel.uiState.collectAsStateWithLifecycle()
     val sensitiveMode   by viewModel.sensitiveContentMode.collectAsStateWithLifecycle()
-    val wotLookups      by viewModel.wotLookups.collectAsStateWithLifecycle()
+    val wotLookup = rememberCardWotLookup(viewModel.wotLookups)
     val feedWotDisplayMode by viewModel.feedWotDisplayMode.collectAsStateWithLifecycle()
     val reactedIds      by actionsViewModel.reactedEventIds.collectAsStateWithLifecycle()
     val repostedIds     by actionsViewModel.repostedEventIds.collectAsStateWithLifecycle()
@@ -103,7 +110,7 @@ fun ThreadScreen(
     val zapFlash        by actionsViewModel.zapFlashState.collectAsStateWithLifecycle()
     val isNwcConfigured = actionsViewModel.isNwcConfigured
     val showSnackbar = LocalShowSnackbar.current
-    var articleRow by remember { mutableStateOf<FeedRow?>(null) }
+    var articleRow by rememberArticleSelection(actionsViewModel)
     var actionsRow by remember { mutableStateOf<FeedRow?>(null) }
 
     // ── Emoji reaction picker state ─────────────────────────────────────────
@@ -115,15 +122,19 @@ fun ThreadScreen(
     val pollActions = remember(actionsViewModel) { actionsViewModel.pollActionCallbacks() }
     val listState = rememberLazyListState()
     val cardWidthPx = LocalWindowInfo.current.containerSize.width
-    var didScrollToFocus by remember { mutableStateOf(false) }
-    var revealedSpamClusters by remember(eventId) { mutableStateOf(emptySet<String>()) }
+    var didScrollToFocus by rememberSaveable(eventId) { mutableStateOf(false) }
+    var revealedSpamClusters by rememberSaveable(eventId) { mutableStateOf(emptySet<String>()) }
     val threadItems = remember(state.replies, revealedSpamClusters) {
         replyListItems(state.replies, revealedSpamClusters)
     }
 
+    var autoArticleHandled by rememberSaveable(eventId) { mutableStateOf(false) }
     LaunchedEffect(openArticleOnLoad, state.focusedNote?.id) {
         val focused = state.focusedNote
-        if (openArticleOnLoad && focused?.kind == 30023) articleRow = focused
+        if (openArticleOnLoad && !autoArticleHandled && focused?.kind == 30023) {
+            autoArticleHandled = true
+            articleRow = focused
+        }
     }
 
     // Single engagement snapshot for ALL cards in the thread — same remember
@@ -147,7 +158,7 @@ fun ThreadScreen(
             .map { it.row }
     }
     val videoScope = rememberVideoPlaybackScope(
-        ownerId            = "thread-$eventId",
+        ownerId            = "thread-$entryId",
         holder             = actionsViewModel.sharedPlayerHolder,
         events             = allThreadRows,
         listState          = listState,
@@ -160,7 +171,7 @@ fun ThreadScreen(
         pinnedEmojis,
         videoScope,
         sensitiveMode,
-        wotLookups,
+        wotLookup,
         feedWotDisplayMode,
         onComment,
         onAuthorClick,
@@ -189,7 +200,7 @@ fun ThreadScreen(
             pinnedEmojis = pinnedEmojis,
             videoScope = videoScope,
             sensitiveMode = sensitiveMode,
-            wotLookup = { key -> wotLookups[key] },
+            wotLookup = wotLookup,
             feedWotDisplayMode = feedWotDisplayMode,
             // The ThreadViewModel hydrates the complete visible row set as one batch.
             onWotSubjectsVisible = {},
@@ -199,8 +210,8 @@ fun ThreadScreen(
 
     val engagementRetryRevision by actionsViewModel.engagementRetryRevision.collectAsStateWithLifecycle()
     @OptIn(FlowPreview::class)
-    LaunchedEffect(allThreadRows, state.focusedNote?.id, cardWidthPx, engagementRetryRevision) {
-        if (allThreadRows.isEmpty()) return@LaunchedEffect
+    ResumedEffect(allThreadRows, state.focusedNote?.id, cardWidthPx, engagementRetryRevision) {
+        if (allThreadRows.isEmpty()) return@ResumedEffect
         val rowIndexById = allThreadRows.withIndex().associate { it.value.id to it.index }
         fun visibleRowsFromLayout(): List<Int> =
             listState.layoutInfo.visibleItemsInfo.mapNotNull { item ->

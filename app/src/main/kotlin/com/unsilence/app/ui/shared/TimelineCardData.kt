@@ -8,6 +8,7 @@ import com.unsilence.app.data.memory.UserEntity
 import com.unsilence.app.data.memory.ZapDetail
 import com.unsilence.app.data.repository.UserRepository
 import javax.inject.Inject
+import dagger.hilt.android.scopes.ViewModelScoped
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -17,13 +18,17 @@ private const val CARD_FLOW_CACHE_SIZE = 500
 private const val CARD_FLOW_STOP_TIMEOUT_MS = 5_000L
 
 /**
- * Shared reactive data source for timeline cards.
+ * Shared implementation, with one cache owner per ViewModel (not a global instance).
  *
  * Feed, profile, thread, and article-reader screens all render the same card
  * primitives. Keeping their profile/stat caches here prevents each screen from
  * drifting into slightly different cache sizing, source selection, and stop
  * timeout behavior.
+ *
+ * Cached flows use their owning ViewModel's scope. Never promote this to Singleton:
+ * a later screen would inherit flows whose original scope has already been cancelled.
  */
+@ViewModelScoped
 class TimelineCardData @Inject constructor(
     private val userRepository: UserRepository,
     private val memoryEventStore: MemoryEventStore,

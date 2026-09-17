@@ -279,6 +279,12 @@ class RelayPreferencesStore internal constructor(
 
     // ─── Sensitive Content Mode ────────────────────────────────────────────
 
+    // A device-wide safety preference needs one always-current owner, not a
+    // stopped per-screen cache that could replay SHOW after the user chose HIDE.
+    // Fail closed only until DataStore supplies the persisted preference.
+    val sensitiveContentMode: StateFlow<SensitiveContentMode> = sensitiveContentModeFlow()
+        .stateIn(scope, SharingStarted.Eagerly, SensitiveContentMode.HIDE)
+
     fun sensitiveContentModeFlow(): Flow<SensitiveContentMode> =
         dataStore.data
             .map { prefs ->
