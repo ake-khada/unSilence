@@ -105,6 +105,7 @@ fun FeedScreen(
     scrollToTopTrigger: Int = 0,
     topBarShown: Boolean = true,
     staticTopPadding: Dp = 0.dp,
+    staticBottomPadding: Dp = 0.dp,
     onNoteClick: (String) -> Unit = {},
     onComment: (String) -> Unit = {},
     onAuthorClick: (pubkey: String) -> Unit = {},
@@ -416,7 +417,7 @@ fun FeedScreen(
                 LazyColumn(
                     state    = listState,
                     modifier = Modifier.fillMaxWidth(),
-                    contentPadding = PaddingValues(top = totalTopPadding),
+                    contentPadding = PaddingValues(top = totalTopPadding, bottom = staticBottomPadding),
                 ) {
                     eventFeedItems(
                         events = events,

@@ -62,6 +62,7 @@ fun NotificationsScreen(
     onQuote: (String) -> Unit,
     actionsViewModel: NoteActionsViewModel,
     staticTopPadding: Dp = 0.dp,
+    staticBottomPadding: Dp = 0.dp,
     viewModel: NotificationsViewModel = hiltViewModel(
         key = "notif-${LocalAppSessionKey.current}",
     ),
@@ -170,7 +171,7 @@ fun NotificationsScreen(
                 LazyColumn(
                     state = listState,
                     modifier = Modifier.fillMaxWidth(),
-                    contentPadding = PaddingValues(top = staticTopPadding),
+                    contentPadding = PaddingValues(top = staticTopPadding, bottom = staticBottomPadding),
                 ) {
                     items(state.items, key = { it.key }) { row ->
                         Column {

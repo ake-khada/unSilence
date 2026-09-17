@@ -440,14 +440,10 @@ fun AppNavigation(
         animationSpec = animSpec,
         label         = "bottomBarOffset",
     )
-    // Constant: top spacing moved to LazyColumn contentPadding (no animation = no jerk).
+    // Both insets belong inside the scrolling content, not around its viewport.
+    // Keep them independent of bar visibility so only the overlays move.
     val staticTopPadding = activeTopBarHeight + statusBarHeight
-    val animatedContentBottomPadding by animateDpAsState(
-        targetValue   = if (bottomBarShown) Sizing.bottomNavHeight + navBarHeight else 0.dp,
-        animationSpec = animSpec,
-        label         = "contentBottomPadding",
-    )
-    val contentBottomPadding = if (immersiveVideoMode) 0.dp else animatedContentBottomPadding
+    val staticBottomPadding = if (immersiveVideoMode) 0.dp else Sizing.bottomNavHeight + navBarHeight
 
     // Accumulated scroll distance — requires committed drag before toggling bars.
     // Prevents jittery show/hide on micro-scrolls and the "back jerk" when
@@ -493,18 +489,18 @@ fun AppNavigation(
     ) {
 
             // ── Content ───────────────────────────────────────────────────────
-            // No top padding — FeedScreen uses LazyColumn contentPadding instead
-            // (prevents jerk when bar hides). Other screens get constant padding.
+            // Full-height viewports let content pass behind the sliding bars.
+            // Each tab reserves bottom clearance in its own scrollable content.
             Box(
                 modifier = Modifier
-                    .fillMaxSize()
-                    .padding(bottom = contentBottomPadding),
+                    .fillMaxSize(),
             ) {
                 when (selectedTab) {
                     0    -> FeedScreen(
                         scrollToTopTrigger = scrollToTopTrigger,
                         topBarShown        = topBarShown,
                         staticTopPadding   = staticTopPadding,
+                        staticBottomPadding = staticBottomPadding,
                         onNoteClick        = { eventId -> threadDestination = ThreadDestination(eventId) },
                         onComment          = { eventId -> replyToEventId = eventId },
                         onAuthorClick      = onAuthorClick,
@@ -521,6 +517,7 @@ fun AppNavigation(
                     )
                     1    -> Box(Modifier.padding(top = statusBarHeight)) {
                         SearchScreen(
+                            staticBottomPadding = staticBottomPadding,
                             onNoteClick   = { eventId -> threadDestination = ThreadDestination(eventId) },
                             onComment     = { eventId -> replyToEventId = eventId },
                             onAuthorClick = onAuthorClick,
@@ -538,9 +535,11 @@ fun AppNavigation(
                         onQuote          = { quoteNoteId = it },
                         actionsViewModel = noteActionsVm,
                         staticTopPadding = staticTopPadding,
+                        staticBottomPadding = staticBottomPadding,
                         viewModel        = notifViewModel,
                     )
                     3    -> ProfileScreen(
+                        staticBottomPadding = staticBottomPadding,
                         scrollToTopTrigger = profileScrollToTopTrigger,
                         onLogout = onLogout,
                         onBack = { selectedTab = 0 },
