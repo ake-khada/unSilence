@@ -37,6 +37,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.navigationBars
@@ -53,6 +54,8 @@ import androidx.compose.foundation.pager.VerticalPager
 import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.selection.selectable
+import androidx.compose.foundation.selection.selectableGroup
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Article
 import androidx.compose.material.icons.automirrored.filled.FormatAlignLeft
@@ -80,6 +83,7 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberModalBottomSheetState
@@ -114,6 +118,7 @@ import androidx.compose.ui.input.pointer.positionChange
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -639,75 +644,92 @@ fun AppNavigation(
             }
 
             // ── Bottom nav overlay ────────────────────────────────────────────
-            Row(
+            // Surface blocks touches in the bar's padding from reaching the feed.
+            // Keep this barrier on the moving overlay, not on the content below.
+            Surface(
                 modifier = Modifier
                     .align(Alignment.BottomStart)
                     .offset { IntOffset(0, bottomBarOffset.roundToPx()) }
-                    .fillMaxWidth()
-                    .background(Black)
-                    .navigationBarsPadding()
-                    .height(Sizing.bottomNavHeight)
-                    .padding(horizontal = Spacing.medium),
-                horizontalArrangement = Arrangement.SpaceEvenly,
-                verticalAlignment     = Alignment.CenterVertically,
+                    .fillMaxWidth(),
+                color = Black,
             ) {
-                TABS.forEachIndexed { index, tab ->
-                    val isSelected = index == selectedTab
-                    val iconSize   = 24.dp  // constant — selection via tint only
+                Row(
+                    modifier = Modifier
+                        .navigationBarsPadding()
+                        .height(Sizing.bottomNavHeight)
+                        .padding(horizontal = Spacing.medium)
+                        .selectableGroup(),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    TABS.forEachIndexed { index, tab ->
+                        val isSelected = index == selectedTab
+                        val iconSize = 24.dp  // constant — selection via tint only
 
-                    IconButton(onClick = {
-                        when (tabReselectAction(index, selectedTab)) {
-                            TabReselectAction.FEED_TOP -> {
-                                scrollToTopTrigger++
-                                feedViewModel.clearNewTopPost()
-                            }
-                            TabReselectAction.PROFILE_TOP -> profileScrollToTopTrigger++
-                            TabReselectAction.NONE -> Unit
-                        }
-                        if (index == 2) notifViewModel.markSeen()
-                        selectedTab = index
-                    }) {
-                        Box(contentAlignment = Alignment.Center) {
-                            if (index == 3 && userAvatarUrl != null) {
-                                Box(
-                                    modifier = Modifier
-                                        .size(iconSize)
-                                        .then(
-                                            if (isSelected) Modifier.border(1.5.dp, Color.White, CircleShape)
-                                            else Modifier
+                        // The entire tab slot is a target, not just the icon's circle.
+                        Box(
+                            modifier = Modifier
+                                .weight(1f)
+                                .fillMaxHeight()
+                                .selectable(
+                                    selected = isSelected,
+                                    role = Role.Tab,
+                                    onClick = {
+                                        when (tabReselectAction(index, selectedTab)) {
+                                            TabReselectAction.FEED_TOP -> {
+                                                scrollToTopTrigger++
+                                                feedViewModel.clearNewTopPost()
+                                            }
+                                            TabReselectAction.PROFILE_TOP -> profileScrollToTopTrigger++
+                                            TabReselectAction.NONE -> Unit
+                                        }
+                                        if (index == 2) notifViewModel.markSeen()
+                                        selectedTab = index
+                                    },
+                                ),
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            Box(contentAlignment = Alignment.Center) {
+                                if (index == 3 && userAvatarUrl != null) {
+                                    Box(
+                                        modifier = Modifier
+                                            .size(iconSize)
+                                            .then(
+                                                if (isSelected) Modifier.border(1.5.dp, Color.White, CircleShape)
+                                                else Modifier
+                                            )
+                                            .clip(CircleShape),
+                                    ) {
+                                        AsyncImage(
+                                            model = rememberAvatarImageRequest(userAvatarUrl, iconSize),
+                                            contentDescription = "Profile",
+                                            contentScale = ContentScale.Crop,
+                                            modifier = Modifier.fillMaxSize(),
                                         )
-                                        .clip(CircleShape),
-                                ) {
-                                    AsyncImage(
-                                        model = rememberAvatarImageRequest(userAvatarUrl, iconSize),
-                                        contentDescription = "Profile",
-                                        contentScale = ContentScale.Crop,
-                                        modifier = Modifier.fillMaxSize(),
+                                    }
+                                } else {
+                                    Icon(
+                                        imageVector        = tab.icon,
+                                        contentDescription = tab.contentDescription,
+                                        tint               = if (isSelected) Color.White else NavUnselected,
+                                        modifier           = Modifier.size(iconSize),
                                     )
                                 }
-                            } else {
-                                Icon(
-                                    imageVector        = tab.icon,
-                                    contentDescription = tab.contentDescription,
-                                    tint               = if (isSelected) Color.White else NavUnselected,
-                                    modifier           = Modifier.size(iconSize),
-                                )
-                            }
-                            if (index == 0 && hasNewTopPost) {
-                                Box(
-                                    modifier = Modifier
-                                        .size(6.dp)
-                                        .align(Alignment.TopEnd)
-                                        .background(Brand, CircleShape),
-                                )
-                            }
-                            if (index == 2 && hasNewNotifications) {
-                                Box(
-                                    modifier = Modifier
-                                        .size(6.dp)
-                                        .align(Alignment.TopEnd)
-                                        .background(Brand, CircleShape),
-                                )
+                                if (index == 0 && hasNewTopPost) {
+                                    Box(
+                                        modifier = Modifier
+                                            .size(6.dp)
+                                            .align(Alignment.TopEnd)
+                                            .background(Brand, CircleShape),
+                                    )
+                                }
+                                if (index == 2 && hasNewNotifications) {
+                                    Box(
+                                        modifier = Modifier
+                                            .size(6.dp)
+                                            .align(Alignment.TopEnd)
+                                            .background(Brand, CircleShape),
+                                    )
+                                }
                             }
                         }
                     }
