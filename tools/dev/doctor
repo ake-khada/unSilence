@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+mise --version
+java -version
+"$JAVA21_HOME/bin/java" -version
+python3 --version
+adb version
+sdkmanager --version
+apksigner version
+./gradlew --version
+printf '\nSDK: %s\nGradle cache: %s\nAndroid user files: %s\n' \
+    "$ANDROID_HOME" "$GRADLE_USER_HOME" "$ANDROID_USER_HOME"
+if [[ -f "$ANDROID_USER_HOME/debug.keystore" ]]; then
+    keytool -list -keystore "$ANDROID_USER_HOME/debug.keystore" \
+        -storepass android -alias androiddebugkey
+else
+    printf '%s\n' 'The first APK build will generate a local debug signing key.'
+fi

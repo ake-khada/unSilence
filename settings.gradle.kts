@@ -28,3 +28,4 @@ dependencyResolutionManagement {
 
 rootProject.name = "unsilence"
 include(":app")
+include(":macrobenchmark")

@@ -1,0 +1,71 @@
+# Tool binaries stay in this checkout. Provision their pinned releases with ./dev setup.
+# Path tools also work with normal mise shell activation.
+min_version = "2026.9.0"
+
+[tools]
+java = { path = "./.toolchains/jdk17" }
+python = { path = "./.toolchains/python" }
+
+[vars]
+java17 = "temurin-17.0.20+8"
+java21 = "temurin-21.0.12+8.0.LTS"
+python = "3.14.7"
+android_cli = "19.0"
+perfetto = "v58.2"
+
+[env]
+JAVA21_HOME = "{{config_root}}/.toolchains/jdk21"
+ANDROID_HOME = "{{config_root}}/.toolchains/android-sdk"
+ANDROID_SDK_ROOT = "{{config_root}}/.toolchains/android-sdk"
+ANDROID_USER_HOME = "{{config_root}}/.toolchains/android-user"
+ANDROID_AVD_HOME = "{{config_root}}/.toolchains/android-user/avd"
+GRADLE_USER_HOME = "{{config_root}}/.toolchains/gradle-home"
+_.path = ["{{config_root}}/.toolchains/android-sdk/platform-tools", "{{config_root}}/.toolchains/android-sdk/cmdline-tools/{{vars.android_cli}}/bin", "{{config_root}}/.toolchains/android-sdk/build-tools/35.0.0", "{{config_root}}/.toolchains/perfetto"]
+
+[tasks.doctor]
+description = "Check local Java, Android SDK, Gradle and signing configuration"
+run = "bash tools/dev/doctor"
+
+[tasks.build]
+description = "Build the minified release APK"
+run = "./gradlew assembleRelease"
+
+[tasks.debug]
+description = "Build the separate com.unsilence.app.dev APK"
+run = "./gradlew assembleDebug"
+
+[tasks.test]
+description = "Run JVM tests with Java 21 and the performance analyzer tests"
+run = ["./gradlew testDebugUnitTest", "python3 -m unittest discover -s tools/perf/tests -v"]
+
+[tasks.lint]
+description = "Run Android lint"
+run = "./gradlew lintDebug"
+
+[tasks.check]
+description = "Run the full local build gate without a phone"
+run = ["./gradlew testDebugUnitTest lintDebug assembleRelease :macrobenchmark:assembleBenchmark --continue", "python3 -m unittest discover -s tools/perf/tests -v"]
+
+[tasks.devices]
+description = "List connected Android devices (USB debugging required)"
+run = "adb devices -l"
+
+[tasks.install]
+description = "Build and update the release app in place; never automatically uninstall"
+run = ["./gradlew assembleRelease", "adb -d install -r app/build/outputs/apk/release/app-release.apk"]
+
+[tasks."install:debug"]
+description = "Build and install the separate development app"
+run = ["./gradlew assembleDebug", "adb -d install -r app/build/outputs/apk/debug/app-debug.apk"]
+
+[tasks.logs]
+description = "Stream the release app's logcat"
+run = "bash tools/dev/logs"
+
+[tasks."profile:emulator:setup"]
+description = "Provision an isolated API 35 emulator for ART profile generation"
+run = "bash tools/dev/profile-emulator setup"
+
+[tasks."profile:emulator"]
+description = "Run the isolated profile emulator headlessly (requires host KVM)"
+run = "bash tools/dev/profile-emulator start"

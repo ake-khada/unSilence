@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+set -euo pipefail
+if ! app_pid="$(adb -d shell pidof -s com.unsilence.app)" || [[ -z "$app_pid" ]]; then
+    printf '%s\n' 'Open unSilence on the phone first.' >&2
+    exit 1
+fi
+exec adb -d logcat --pid="$app_pid" -v threadtime

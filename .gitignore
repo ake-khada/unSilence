@@ -18,8 +18,12 @@ keystore.properties
 node_modules/
 /build
 /app/build
+/macrobenchmark/build
 .kotlin/
 .toolchains/
+mise.local.toml
+__pycache__/
+*.py[cod]
 
 # Internal working files
 .claude/
@@ -31,7 +35,6 @@ docs/
 validation_logs/
 CLAUDE.md
 VALIDATION_PROTOCOL.md
-unsilence-backlog.md
 unsilence-sprint*.md
 unsilence-stabilization-sprint.md
 unsilence-session-*.md

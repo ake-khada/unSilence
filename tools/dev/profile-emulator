@@ -1,0 +1,41 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+project_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd -P)"
+cd "$project_dir"
+profile_sdk="$project_dir/.toolchains/android-sdk"
+profile_avd_dir="$project_dir/.toolchains/android-user/avd"
+profile_name="unsilence-profile-api35"
+profile_image="system-images;android-35;default;x86_64"
+
+# The mise wrapper supplies the SDK/user paths. Keep this optional emulator out
+# of global Android state and never overwrite an existing virtual device.
+export ANDROID_AVD_HOME="$profile_avd_dir"
+case "${1:-start}" in
+    setup)
+        sdkmanager --install emulator "$profile_image"
+        mkdir -p "$profile_avd_dir"
+        if [[ ! -f "$profile_avd_dir/$profile_name.ini" ]]; then
+            printf 'no\n' | avdmanager create avd --name "$profile_name" \
+                --package "$profile_image" --device pixel_6 \
+                --path "$profile_avd_dir/$profile_name.avd"
+        fi
+        ;;
+    start)
+        if [[ ! -r /dev/kvm || ! -w /dev/kvm ]]; then
+            printf '%s\n' 'Host KVM access is required. Run outside the command sandbox with approval.' >&2
+            exit 1
+        fi
+        if [[ ! -f "$profile_avd_dir/$profile_name.ini" ]]; then
+            printf '%s\n' 'Run ./dev profile:emulator:setup first.' >&2
+            exit 1
+        fi
+        exec "$profile_sdk/emulator/emulator" -avd "$profile_name" \
+            -no-window -no-audio -no-boot-anim -no-snapshot -gpu swiftshader \
+            -accel on -memory 3072 -cores 4
+        ;;
+    *)
+        printf '%s\n' 'Usage: ./dev profile:emulator:setup | ./dev profile:emulator' >&2
+        exit 2
+        ;;
+esac
