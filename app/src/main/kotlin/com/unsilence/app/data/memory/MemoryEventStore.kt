@@ -14,6 +14,7 @@ import com.unsilence.app.data.network.isValidAt
 import com.unsilence.app.data.network.nip05VerificationCacheKey
 import com.unsilence.app.data.relay.NostrJson
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
@@ -41,7 +42,9 @@ import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
 import java.io.DataInputStream
 import java.io.DataOutputStream
+import java.io.FileOutputStream
 import java.io.IOException
+import java.nio.ByteBuffer
 import com.unsilence.app.data.auth.MuteKeyProvider
 import com.unsilence.app.data.relay.NostrFilter
 import com.unsilence.app.data.relay.PROFILE_NOTE_REPLY_EVENT_KIND_SET
@@ -5703,12 +5706,18 @@ class MemoryEventStore @Inject constructor(
         recipientPubkey: String,
         followedOnly: Boolean = false,
         limit: Int? = null,
-    ): Flow<List<NotificationRow>> =
-        combine(notificationSignalFor(recipientPubkey), _profileSignal) { _, _ ->
-            getNotifications(recipientPubkey, followedOnly, limit)
-        }
+        includeProfileChanges: Boolean = true,
+    ): Flow<List<NotificationRow>> {
+        // Badge consumers need activity/mute changes, not every hydrated avatar.
+        val changes = if (includeProfileChanges) {
+            combine(notificationSignalFor(recipientPubkey), _profileSignal) { activity, profile ->
+                activity to profile
+            }
+        } else notificationSignalFor(recipientPubkey)
+        return changes.map { getNotifications(recipientPubkey, followedOnly, limit) }
             .distinctUntilChanged()
             .flowOn(Dispatchers.Default)
+    }
 
     /** Defensive bound on raw events scanned per notification query (see getNotifications). */
     private val NOTIF_RAW_SCAN_CAP = 1500
@@ -6254,16 +6263,16 @@ class MemoryEventStore @Inject constructor(
     // 4 bytes and dispatches: "USNS" → binary, anything else → V2 reader.
 
     internal suspend fun saveSnapshotBinary(
-        out: DataOutputStream,
+        stream: FileOutputStream,
         snapshotVersion: Int = SNAPSHOT_BINARY_VERSION,
     ): SnapshotSectionSizes {
         require(snapshotVersion in 16..SNAPSHOT_BINARY_VERSION) {
             "Binary writer supports V16..V$SNAPSHOT_BINARY_VERSION, got V$snapshotVersion"
         }
-        // Serialize each section once, compute offsets from the live buffer sizes,
-        // then stream those buffers directly. This keeps peak memory near the
-        // snapshot size instead of duplicating 15-20MB into contiguous arrays.
-        val writeStart = out.size()
+        // Serialize once directly to the temporary file. Only the header is
+        // patched afterwards; no section-sized byte arrays or second encoding pass.
+        val writer = SnapshotOutput(stream, currentCoroutineContext())
+        val out = writer.data
 
         // Capture pending intent BEFORE event selection. commitAcceptedMutePublish
         // stores its event before clearing the journal, so a concurrent writer sees
@@ -6273,9 +6282,13 @@ class MemoryEventStore @Inject constructor(
             owner?.let(pendingMutePublishesByPubkey::get)?.let(::listOf).orEmpty()
         }
 
+        out.write(ByteArray(SNAPSHOT_HEADER_SIZE))
+        // V14 owner prefix is deliberately excluded from the historical offsets.
+        out.writeStr(ownPubkey ?: "")
+        val headerBytes = out.size()
+
         val followsSelection = snapshotFollowsSelection()
-        val followsBuf = ByteArrayOutputStream(8 * 1024)
-        DataOutputStream(followsBuf).use { d ->
+        val followsBytes = writer.section { d ->
             d.writeInt(followsSelection.entries.size)
             for (entry in followsSelection.entries) {
                 d.writeStr(entry.pubkey)
@@ -6314,15 +6327,13 @@ class MemoryEventStore @Inject constructor(
         val selectedContentEventIds = eventSelection.contentEvents
             .mapTo(HashSet(eventSelection.contentEvents.size)) { it.id }
 
-        val eventsBuf = ByteArrayOutputStream(2 * 1024 * 1024)
-        DataOutputStream(eventsBuf).use { d ->
+        val eventsBytes = writer.section { d ->
             d.writeInt(totalEvents)
             for (event in eventSelection.nonContentEvents) d.writeEventBinary(event)
             for (event in eventSelection.contentEvents) d.writeEventBinary(event)
         }
 
-        val aggregatesBuf = ByteArrayOutputStream(64 * 1024)
-        DataOutputStream(aggregatesBuf).use { d ->
+        val aggregatesBytes = writer.section { d ->
             // Snapshot each ConcurrentHashMap to an immutable copy BEFORE
             // writing the pre-count and iterating. CHM's iteration is
             // weakly-consistent with respect to .size: under concurrent
@@ -6428,8 +6439,7 @@ class MemoryEventStore @Inject constructor(
             }
         }
 
-        val relayHealthBuf = ByteArrayOutputStream(64 * 1024)
-        DataOutputStream(relayHealthBuf).use { d ->
+        val relayHealthBytes = writer.section { d ->
             // Same concurrent-modification hazard as aggregates above.
             // Snapshot before count + iterate.
             val trustScores = trustScoresByUrl.toMap()
@@ -6462,8 +6472,7 @@ class MemoryEventStore @Inject constructor(
         }
 
         // ── Timelines (V12+) ────────────────────────────────────────────
-        val timelinesBuf = ByteArrayOutputStream(64 * 1024)
-        DataOutputStream(timelinesBuf).use { d ->
+        val timelinesBytes = writer.section { d ->
             val timelineEntries = timelineServiceProvider.get().snapshotData(selectedContentEventIds)
             d.writeInt(timelineEntries.size)
             for ((key, timeline) in timelineEntries) {
@@ -6480,33 +6489,10 @@ class MemoryEventStore @Inject constructor(
         }
 
         val followsOffset = SNAPSHOT_HEADER_SIZE
-        val eventsOffset = followsOffset + followsBuf.size()
-        val aggregatesOffset = eventsOffset + eventsBuf.size()
-        val relayHealthOffset = aggregatesOffset + aggregatesBuf.size()
-        val timelinesOffset = relayHealthOffset + relayHealthBuf.size()
-
-        // Header
-        out.write(SNAPSHOT_BINARY_MAGIC)
-        out.writeInt(snapshotVersion)
-        out.writeInt(followsOffset)
-        out.writeInt(eventsOffset)
-        out.writeInt(aggregatesOffset)
-        out.writeInt(relayHealthOffset)
-        out.writeInt(totalEvents)
-        out.writeInt(timelinesOffset) // was reserved; V12+ carries timelines offset
-
-        // V14 owner stamp — length-prefixed pubkey directly after the header.
-        // The section offsets above intentionally do NOT include this prefix
-        // (informational only; see header-layout comment TODO).
-        out.writeStr(ownPubkey ?: "")
-        val headerBytes = out.size() - writeStart
-
-        // Sections in offset order.
-        followsBuf.writeTo(out)
-        eventsBuf.writeTo(out)
-        aggregatesBuf.writeTo(out)
-        relayHealthBuf.writeTo(out)
-        timelinesBuf.writeTo(out)
+        val eventsOffset = followsOffset + followsBytes
+        val aggregatesOffset = eventsOffset + eventsBytes
+        val relayHealthOffset = aggregatesOffset + aggregatesBytes
+        val timelinesOffset = relayHealthOffset + relayHealthBytes
 
         // V15 (appended after timelines; not in the informational offset table) —
         // own outgoing private-zap anon pubkeys, for cross-session self-recognition.
@@ -6544,20 +6530,27 @@ class MemoryEventStore @Inject constructor(
                 out.write(record)
             }
         }
-        val totalBytes = out.size() - writeStart
+        val totalBytes = out.size()
+        val header = ByteBuffer.allocate(SNAPSHOT_HEADER_SIZE)
+            .put(SNAPSHOT_BINARY_MAGIC)
+            .putInt(snapshotVersion)
+            .putInt(followsOffset)
+            .putInt(eventsOffset)
+            .putInt(aggregatesOffset)
+            .putInt(relayHealthOffset)
+            .putInt(totalEvents)
+            .putInt(timelinesOffset)
+        header.flip()
+        writer.finish(header)
         val knownSectionBytes = headerBytes +
-            followsBuf.size() +
-            eventsBuf.size() +
-            aggregatesBuf.size() +
-            relayHealthBuf.size() +
-            timelinesBuf.size()
+            followsBytes + eventsBytes + aggregatesBytes + relayHealthBytes + timelinesBytes
         return SnapshotSectionSizes(
             headerBytes = headerBytes,
-            followsBytes = followsBuf.size(),
-            eventsBytes = eventsBuf.size(),
-            aggregatesBytes = aggregatesBuf.size(),
-            relayHealthBytes = relayHealthBuf.size(),
-            timelinesBytes = timelinesBuf.size(),
+            followsBytes = followsBytes,
+            eventsBytes = eventsBytes,
+            aggregatesBytes = aggregatesBytes,
+            relayHealthBytes = relayHealthBytes,
+            timelinesBytes = timelinesBytes,
             tailBytes = totalBytes - knownSectionBytes,
             totalBytes = totalBytes,
             eventCount = totalEvents,

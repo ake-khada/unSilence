@@ -52,7 +52,7 @@ class PendingMutePublishTest {
         source.recordPendingMuteMutation(MuteMutation(MuteMutationKind.Hashtag, "NEW-TAG", true))
 
         val bytes = ByteArrayOutputStream()
-        DataOutputStream(bytes).use { source.saveSnapshotBinary(it) }
+        DataOutputStream(bytes).use { source.copySnapshotForTest(it) }
         val restored = store().apply { ownPubkey = OWN }
         DataInputStream(ByteArrayInputStream(bytes.toByteArray())).use {
             restored.restoreSnapshotBinary(it)
@@ -77,7 +77,7 @@ class PendingMutePublishTest {
         source.recordPendingMuteMutation(MuteMutation(MuteMutationKind.User, "local", true))
 
         val bytes = ByteArrayOutputStream()
-        DataOutputStream(bytes).use { source.saveSnapshotBinary(it, snapshotVersion = 17) }
+        DataOutputStream(bytes).use { source.copySnapshotForTest(it, snapshotVersion = 17) }
         val restored = store().apply { ownPubkey = OWN }
         DataInputStream(ByteArrayInputStream(bytes.toByteArray())).use {
             restored.restoreSnapshotBinary(it)

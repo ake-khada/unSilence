@@ -190,7 +190,7 @@ class MemoryEventStoreInvariantsTest {
         )
 
         val bytes = ByteArrayOutputStream()
-        DataOutputStream(bytes).use { store.saveSnapshotBinary(it) }
+        DataOutputStream(bytes).use { store.copySnapshotForTest(it) }
         val restored = MemoryEventStore(
             object : MuteKeyProvider {},
             com.unsilence.app.data.relay.stubTimelineServiceProvider(),
@@ -701,7 +701,7 @@ class MemoryEventStoreInvariantsTest {
         )
 
         val snapshot = ByteArrayOutputStream()
-        val sizes = DataOutputStream(snapshot).use { source.saveSnapshotBinary(it) }
+        val sizes = DataOutputStream(snapshot).use { source.copySnapshotForTest(it) }
         val bytes = snapshot.toByteArray()
         val aggregatesOffset = sizes.headerBytes + sizes.followsBytes + sizes.eventsBytes
         DataInputStream(
@@ -1890,7 +1890,7 @@ class MemoryEventStoreInvariantsTest {
         )
 
         val bytes = ByteArrayOutputStream()
-        DataOutputStream(bytes).use { source.saveSnapshotBinary(it) }
+        DataOutputStream(bytes).use { source.copySnapshotForTest(it) }
 
         val restoredTimelineService = timelineService()
         val restored = MemoryEventStore(
@@ -2734,7 +2734,7 @@ class MemoryEventStoreInvariantsTest {
         store.updateFollows(original)
 
         val bytes = ByteArrayOutputStream()
-        DataOutputStream(bytes).use { store.saveSnapshotBinary(it) }
+        DataOutputStream(bytes).use { store.copySnapshotForTest(it) }
         val restored = MemoryEventStore(
             object : MuteKeyProvider {},
             com.unsilence.app.data.relay.stubTimelineServiceProvider(),
@@ -2766,7 +2766,7 @@ class MemoryEventStoreInvariantsTest {
         )
 
         val bytes = ByteArrayOutputStream()
-        DataOutputStream(bytes).use { store.saveSnapshotBinary(it, snapshotVersion = 16) }
+        DataOutputStream(bytes).use { store.copySnapshotForTest(it, snapshotVersion = 16) }
         val restored = MemoryEventStore(
             object : MuteKeyProvider {},
             com.unsilence.app.data.relay.stubTimelineServiceProvider(),

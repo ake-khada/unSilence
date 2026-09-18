@@ -38,7 +38,7 @@ class Nip05VerificationSnapshotTest {
         )
 
         val bytes = ByteArrayOutputStream()
-        DataOutputStream(bytes).use { source.saveSnapshotBinary(it) }
+        DataOutputStream(bytes).use { source.copySnapshotForTest(it) }
 
         val restored = store()
         DataInputStream(ByteArrayInputStream(bytes.toByteArray())).use {
@@ -106,7 +106,7 @@ class Nip05VerificationSnapshotTest {
     @Test
     fun `legacy snapshot without verification cache restores cleanly`() = runTest {
         val bytes = ByteArrayOutputStream()
-        DataOutputStream(bytes).use { store().saveSnapshotBinary(it, snapshotVersion = 18) }
+        DataOutputStream(bytes).use { store().copySnapshotForTest(it, snapshotVersion = 18) }
 
         val restored = store()
         DataInputStream(ByteArrayInputStream(bytes.toByteArray())).use {

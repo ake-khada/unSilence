@@ -60,7 +60,7 @@ class NostrEventTagStorageTest {
 
     private suspend fun save(store: MemoryEventStore): ByteArray {
         val bytes = ByteArrayOutputStream()
-        DataOutputStream(bytes).use { store.saveSnapshotBinary(it) }
+        DataOutputStream(bytes).use { store.copySnapshotForTest(it) }
         return bytes.toByteArray()
     }
 

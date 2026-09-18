@@ -198,7 +198,7 @@ class DeletionRetentionTest {
 
     private suspend fun roundTrip(source: MemoryEventStore): MemoryEventStore {
         val bytes = ByteArrayOutputStream()
-        DataOutputStream(bytes).use { source.saveSnapshotBinary(it) }
+        DataOutputStream(bytes).use { source.copySnapshotForTest(it) }
         return newStore().also { restored ->
             DataInputStream(ByteArrayInputStream(bytes.toByteArray())).use { restored.restoreSnapshotBinary(it) }
         }

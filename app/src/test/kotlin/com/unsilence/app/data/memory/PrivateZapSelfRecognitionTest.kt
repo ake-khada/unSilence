@@ -97,7 +97,7 @@ class PrivateZapSelfRecognitionTest {
         store.addOptimisticZapDetail(crypto.defaultTarget, crypto.sender.pubkey, 1_000, "gm")
         store.registerPendingPrivateZap(crypto.defaultTarget, prepared.requestSignerPubkey)
         val bytes = ByteArrayOutputStream()
-        DataOutputStream(bytes).use { store.saveSnapshotBinary(it) }
+        DataOutputStream(bytes).use { store.copySnapshotForTest(it) }
 
         val restored = newStore()
         restored.ownPubkey = crypto.sender.pubkey

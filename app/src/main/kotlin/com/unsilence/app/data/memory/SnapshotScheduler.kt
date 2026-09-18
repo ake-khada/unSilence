@@ -17,9 +17,7 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import java.io.BufferedInputStream
-import java.io.BufferedOutputStream
 import java.io.DataInputStream
-import java.io.DataOutputStream
 import java.io.File
 import java.io.InputStreamReader
 import java.util.concurrent.atomic.AtomicLong
@@ -29,6 +27,8 @@ import javax.inject.Singleton
 private const val TAG = "SnapshotScheduler"
 private const val PERIODIC_INTERVAL_MS = 5 * 60 * 1000L // 5 minutes
 private const val DEFERRED_SAVE_DELAY_MS = 30_000L
+
+internal enum class SnapshotStopOutcome { COMPLETED, NOT_COMMITTED, TIMED_OUT, COMMITTED_AFTER_DEADLINE }
 
 /**
  * Tracks which save requests are covered by a completed snapshot.
@@ -50,6 +50,8 @@ internal class SnapshotSaveCoordinator {
     fun complete(coveredThrough: Long) {
         completedThrough.updateAndGet { completed -> maxOf(completed, coveredThrough) }
     }
+
+    fun covers(request: Long): Boolean = request <= completedThrough.get()
 
     fun reset() {
         completedThrough.set(requested.get())
@@ -123,13 +125,27 @@ class SnapshotScheduler internal constructor(
     override fun onStop(owner: LifecycleOwner) {
         periodicJob?.cancel()
         periodicJob = null
+        scope.launch { saveBeforeStopDeadline() }
+    }
+
+    /** Testable stop path; serialization is cancellable, the final atomic rename is not. */
+    internal suspend fun saveBeforeStopDeadline(timeoutMs: Long = 3000L): SnapshotStopOutcome {
         val request = saveCoordinator.request()
-        scope.launch {
-            val saved = withTimeoutOrNull(3000L) { save(request) }
-            if (saved == null) {
-                Log.w(TAG, "onStop save timed out after 3s (mutex held by periodic save)")
-            }
+        val started = System.nanoTime()
+        val saved = withTimeoutOrNull(timeoutMs) { save(request) }
+        val exceeded = saved == null || System.nanoTime() - started >= timeoutMs * 1_000_000L
+        val committed = saveCoordinator.covers(request)
+        val outcome = when {
+            exceeded && committed -> SnapshotStopOutcome.COMMITTED_AFTER_DEADLINE
+            exceeded -> SnapshotStopOutcome.TIMED_OUT
+            committed -> SnapshotStopOutcome.COMPLETED
+            else -> SnapshotStopOutcome.NOT_COMMITTED
         }
+        if (exceeded) {
+            val detail = if (committed) "snapshot committed" else "previous snapshot preserved"
+            Log.w(TAG, "onStop ${timeoutMs}ms save deadline elapsed; $detail")
+        }
+        return outcome
     }
 
     /** Age of the snapshot file in seconds, or [Long.MAX_VALUE] if no snapshot exists or file is empty. */
@@ -316,15 +332,15 @@ class SnapshotScheduler internal constructor(
         doSave(request, requireRestored = true)
     }
 
-    private suspend fun doSave(request: Long, requireRestored: Boolean) {
+    private suspend fun doSave(request: Long, requireRestored: Boolean): Unit = withContext(snapshotDispatcher) {
         mutex.withLock {
             // Check under the same lock as deleteSnapshot(): a save that passed an
             // outside guard before logout could otherwise recreate the deleted file.
             if (requireRestored && !restored) {
                 Log.d(TAG, "save() skipped — restore not yet complete")
-                return
+                return@withContext
             }
-            val coveredThrough = saveCoordinator.coverageForSave(request) ?: return
+            val coveredThrough = saveCoordinator.coverageForSave(request) ?: return@withContext
             try {
                 val stream = snapshotFile.startWrite()
                 try {
@@ -332,9 +348,7 @@ class SnapshotScheduler internal constructor(
                     // in MES for restore-side migration but is no longer called.
                     // AtomicFile owns the FileOutputStream: flush the wrapper,
                     // then let finishWrite fsync and close the still-open stream.
-                    val out = DataOutputStream(BufferedOutputStream(stream))
-                    val sections = memoryEventStore.saveSnapshotBinary(out)
-                    out.flush()
+                    val sections = memoryEventStore.saveSnapshotBinary(stream)
                     snapshotFile.finishWrite(stream)
                     saveCoordinator.complete(coveredThrough)
                     Log.w(

@@ -291,6 +291,7 @@ class AppBootstrapper @Inject constructor(
             snapshotScheduler.restoreIfPresent()
             if (sessionGen.get() == myGen && keyManager.getPublicKeyHex() == pubkeyHex) {
                 muteListRepository.markSnapshotReady()
+                initGate.signalSnapshotReady(initSession)
                 Log.d(TAG, "Phase1.5: snapshot restore complete (background)")
             } else {
                 Log.w(TAG, "SESSION-FENCE: stale snapshot completion ignored (gen=$myGen)")
