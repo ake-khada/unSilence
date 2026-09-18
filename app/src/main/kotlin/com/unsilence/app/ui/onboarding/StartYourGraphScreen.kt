@@ -1,5 +1,6 @@
 package com.unsilence.app.ui.onboarding
 
+import com.unsilence.app.ui.theme.AppTextStyles
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -90,12 +91,12 @@ internal fun StartYourGraphScreen(
                 Text(
                     text = "Start your graph",
                     color = Color.White,
-                    fontSize = AppType.subheading,
+                    style = AppTextStyles.subheading,
                     fontWeight = FontWeight.SemiBold,
                     modifier = Modifier.weight(1f),
                 )
                 TextButton(onClick = onDone, enabled = !state.publishing) {
-                    Text("Skip", color = TextSecondary, fontSize = AppType.body)
+                    Text("Skip", color = TextSecondary, style = AppTextStyles.body)
                 }
             }
 
@@ -120,7 +121,7 @@ internal fun StartYourGraphScreen(
                                 .align(Alignment.Center),
                             horizontalAlignment = Alignment.CenterHorizontally,
                         ) {
-                            Text(state.error, color = TextSecondary, fontSize = AppType.body)
+                            Text(state.error, color = TextSecondary, style = AppTextStyles.body)
                             TextButton(onClick = onRetry) { Text("Retry", color = Brand) }
                         }
                     }
@@ -137,7 +138,7 @@ internal fun StartYourGraphScreen(
                 Text(
                     text = it,
                     color = TextSecondary,
-                    fontSize = AppType.caption,
+                    style = AppTextStyles.caption,
                     modifier = Modifier
                         .fillMaxWidth()
                         .padding(horizontal = Spacing.large, vertical = Spacing.micro),
@@ -149,7 +150,7 @@ internal fun StartYourGraphScreen(
                 shape = RoundedCornerShape(8.dp),
                 colors = ButtonDefaults.buttonColors(
                     containerColor = Brand,
-                    contentColor = Color(0xFF001012),
+                    contentColor = com.unsilence.app.ui.theme.Black,
                     disabledContainerColor = Brand.copy(alpha = 0.45f),
                     disabledContentColor = Color.Black.copy(alpha = 0.65f),
                 ),
@@ -160,7 +161,7 @@ internal fun StartYourGraphScreen(
             ) {
                 Text(
                     text = "Done  ·  ${state.selectedFollowCount.coerceAtMost(5)} of 5",
-                    fontSize = AppType.bodyLarge,
+                    style = AppTextStyles.bodyLarge,
                     fontWeight = FontWeight.SemiBold,
                 )
             }
@@ -181,7 +182,7 @@ private fun StartGraphPublishingOverlay() {
             .background(Black.copy(alpha = 0.96f))
             .clickable(
                 interactionSource = remember { MutableInteractionSource() },
-                indication = null,
+                indication = androidx.compose.foundation.LocalIndication.current,
                 onClick = {},
             ),
         contentAlignment = Alignment.Center,
@@ -211,7 +212,7 @@ private fun StartGraphProgress(
         Text(
             text = message,
             color = TextSecondary,
-            fontSize = AppType.bodyLarge,
+            style = AppTextStyles.bodyLarge,
         )
     }
 }
@@ -231,7 +232,7 @@ private fun GraphChoices(
             Text(
                 text = "Follow a few people to bring your Following feed to life.",
                 color = TextSecondary,
-                fontSize = AppType.bodyLarge,
+                style = AppTextStyles.bodyLarge,
                 lineHeight = 21.sp,
                 modifier = Modifier.padding(
                     start = Spacing.large,
@@ -286,7 +287,7 @@ private fun GraphSectionLabel(text: String) {
     Text(
         text = text,
         color = Text3,
-        fontSize = AppType.footnote,
+        style = AppTextStyles.footnote,
         fontWeight = FontWeight.SemiBold,
         letterSpacing = 1.sp,
         modifier = Modifier.padding(
@@ -319,7 +320,7 @@ private fun FollowPackCard(
         Text(
             text = pack.title,
             color = Color.White,
-            fontSize = AppType.bodyLarge,
+            style = AppTextStyles.bodyLarge,
             fontWeight = FontWeight.SemiBold,
             maxLines = 2,
             overflow = TextOverflow.Ellipsis,
@@ -329,7 +330,7 @@ private fun FollowPackCard(
         Text(
             text = "${pack.memberCount} people",
             color = TextSecondary,
-            fontSize = AppType.caption,
+            style = AppTextStyles.caption,
         )
         Spacer(Modifier.weight(1f))
         Row(
@@ -341,7 +342,7 @@ private fun FollowPackCard(
             Text(
                 text = "Follow all",
                 color = if (selected) Brand else TextSecondary,
-                fontSize = AppType.caption,
+                style = AppTextStyles.caption,
             )
             Spacer(Modifier.width(Spacing.micro))
             GraphSwitch(checked = selected, onCheckedChange = { onToggle() })
@@ -382,7 +383,7 @@ private fun NotablePersonRow(
                 Text(
                     text = displayName(person),
                     color = Color.White,
-                    fontSize = AppType.body,
+                    style = AppTextStyles.body,
                     fontWeight = FontWeight.SemiBold,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
@@ -397,7 +398,7 @@ private fun NotablePersonRow(
                 Text(
                     text = "${formatFollowerCount(count)} followers",
                     color = Text3,
-                    fontSize = AppType.caption,
+                    style = AppTextStyles.caption,
                 )
             }
         }

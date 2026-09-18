@@ -1,5 +1,6 @@
 package com.unsilence.app.ui.shared
 
+import com.unsilence.app.ui.theme.AppTextStyles
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Column
@@ -41,7 +42,6 @@ import com.unsilence.app.ui.feed.EventCardParent
 import com.unsilence.app.ui.feed.EventCardPresentation
 import com.unsilence.app.ui.feed.collectProfileAsState
 import com.unsilence.app.ui.feed.looksLikeHexPubkey
-import com.unsilence.app.ui.feed.relativeTime
 import com.unsilence.app.ui.feed.buildReplyParentReference
 import com.unsilence.app.ui.theme.AppType
 import com.unsilence.app.ui.theme.Spacing
@@ -263,7 +263,7 @@ internal fun EmbeddedEventCard(
             .fillMaxWidth()
             .padding(horizontal = 12.dp)
             .border(
-                width = 0.5.dp,
+                width = 1.dp,
                 color = Color.White.copy(alpha = 0.08f),
                 shape = RoundedCornerShape(12.dp),
             )
@@ -282,7 +282,6 @@ internal fun EmbeddedEventCard(
                 modifier = Modifier.size(24.dp),
                 sizeDp = 24.dp,
                 lookupProfile = lookupProfile,
-                profileFlow = surface.profileFlow,
             )
             Spacer(Modifier.width(6.dp))
             Text(
@@ -291,7 +290,7 @@ internal fun EmbeddedEventCard(
                     ?: "${displayPubkey.take(6)}…${displayPubkey.takeLast(4)}",
                 color = Color.White.copy(alpha = 0.7f),
                 fontWeight = FontWeight.SemiBold,
-                fontSize = AppType.bodySmall,
+                style = AppTextStyles.bodySmall,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
                 modifier = Modifier.weight(1f),
@@ -301,7 +300,7 @@ internal fun EmbeddedEventCard(
             WotFeedMetaTimestamp(
                 lookup = lookup,
                 mode = surface.feedWotDisplayMode,
-                timestamp = if (surface.showTimestamps) relativeTime(displayCreatedAt) else null,
+                createdAt = displayCreatedAt.takeIf { surface.showTimestamps },
                 timestampColor = Color.White.copy(alpha = 0.4f),
             )
         }
@@ -333,7 +332,7 @@ internal fun EmbeddedEventCard(
             Text(
                 text = "Reposted post unavailable",
                 color = com.unsilence.app.ui.theme.TextSecondary,
-                fontSize = AppType.footnote,
+                style = AppTextStyles.footnote,
             )
         }
     }

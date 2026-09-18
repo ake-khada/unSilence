@@ -1,6 +1,10 @@
 package com.unsilence.app.ui.relays
 
+import com.unsilence.app.ui.theme.AppTextStyles
 import androidx.activity.compose.BackHandler
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.saveable.listSaver
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
@@ -68,24 +72,43 @@ private val RELAY_SET_IMAGE_SIZE = 72.dp
 @Composable
 fun RelaySetEditorScreen(
     onDismiss: () -> Unit,
+    navigationOwnsBack: Boolean = false,
     relaySet: RelaySet? = null,
     viewModel: RelayManagementViewModel = hiltViewModel(
         key = "relay-management-${LocalAppSessionKey.current}",
     ),
 ) {
-    BackHandler(onBack = onDismiss)
+    val saveState by viewModel.relaySetSave.collectAsStateWithLifecycle()
+    val saving = saveState == RelaySetSaveState.Saving
+    BackHandler(enabled = !navigationOwnsBack || saving) { if (!saving) onDismiss() }
     val initialDraft = remember(relaySet) { relaySetEditorDraft(relaySet) }
-    var name by remember(initialDraft) { mutableStateOf(initialDraft.title) }
-    var description by remember(initialDraft) { mutableStateOf(initialDraft.description) }
-    var image by remember(initialDraft) { mutableStateOf(initialDraft.image) }
-    val relayUrls = remember(initialDraft) {
+    var name by rememberSaveable(initialDraft) { mutableStateOf(initialDraft.title) }
+    var description by rememberSaveable(initialDraft) { mutableStateOf(initialDraft.description) }
+    var image by rememberSaveable(initialDraft) { mutableStateOf(initialDraft.image) }
+    val relayUrls = rememberSaveable(initialDraft, saver = listSaver(
+        save = { it.toList() },
+        restore = { mutableStateListOf<String>().apply { addAll(it) } },
+    )) {
         mutableStateListOf<String>().apply { addAll(initialDraft.members) }
     }
-    var newRelayUrl by remember { mutableStateOf("") }
+    var newRelayUrl by rememberSaveable { mutableStateOf("") }
     val uploadingImage by viewModel.uploadingRelaySetImage.collectAsStateWithLifecycle()
     val showSnackbar = LocalShowSnackbar.current
+    LaunchedEffect(saveState) {
+        when (val result = saveState) {
+            RelaySetSaveState.Saved -> {
+                viewModel.consumeRelaySetSaveResult()
+                onDismiss()
+            }
+            is RelaySetSaveState.Failed -> {
+                viewModel.consumeRelaySetSaveResult()
+                showSnackbar(result.message)
+            }
+            else -> Unit
+        }
+    }
     val isEdit = relaySet != null
-    val canSave = name.isNotBlank() && relayUrls.isNotEmpty() && !uploadingImage
+    val canSave = name.isNotBlank() && relayUrls.isNotEmpty() && !uploadingImage && !saving
 
     val imagePicker = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.PickVisualMedia(),
@@ -113,13 +136,13 @@ fun RelaySetEditorScreen(
                     .padding(horizontal = 4.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                IconButton(onClick = onDismiss) {
+                IconButton(onClick = onDismiss, enabled = !saving) {
                     Icon(Icons.Filled.Close, contentDescription = "Cancel", tint = Color.White)
                 }
                 Text(
                     text = if (isEdit) "Edit Relay Set" else "New Relay Set",
                     color = Color.White,
-                    fontSize = 16.sp,
+                    style = AppTextStyles.subheading,
                     fontWeight = FontWeight.SemiBold,
                     modifier = Modifier.weight(1f),
                 )
@@ -133,7 +156,6 @@ fun RelaySetEditorScreen(
                                 members = relayUrls.toList(),
                             ),
                         )
-                        onDismiss()
                     },
                     enabled = canSave,
                 ) {
@@ -170,7 +192,7 @@ fun RelaySetEditorScreen(
                             singleLine = false,
                         )
                         Spacer(Modifier.height(Spacing.medium))
-                        Text(text = "Image", color = TextSecondary, fontSize = 12.sp)
+                        Text(text = "Image", color = TextSecondary, style = AppTextStyles.footnote)
                         Spacer(Modifier.height(6.dp))
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             Box(
@@ -226,7 +248,7 @@ fun RelaySetEditorScreen(
                                     decorationBox = { inner ->
                                         Box {
                                             if (image.isEmpty()) {
-                                                Text("Paste image URL", color = TextSecondary, fontSize = 13.sp)
+                                                Text("Paste image URL", color = TextSecondary, style = AppTextStyles.bodySmall)
                                             }
                                             inner()
                                         }
@@ -238,7 +260,7 @@ fun RelaySetEditorScreen(
                                 Text(
                                     text = "Tap the preview to upload",
                                     color = TextSecondary,
-                                    fontSize = 11.sp,
+                                    style = AppTextStyles.caption,
                                     modifier = Modifier.padding(top = 6.dp),
                                 )
                             }
@@ -264,7 +286,7 @@ fun RelaySetEditorScreen(
                     Text(
                         text = "RELAYS",
                         color = TextSecondary,
-                        fontSize = 11.sp,
+                        style = AppTextStyles.caption,
                         modifier = Modifier.padding(
                             start = Spacing.medium,
                             end = Spacing.medium,
@@ -286,7 +308,7 @@ fun RelaySetEditorScreen(
                             decorationBox = { inner ->
                                 Box {
                                     if (newRelayUrl.isEmpty()) {
-                                        Text("wss://relay.example.com", color = TextSecondary, fontSize = 14.sp)
+                                        Text("wss://relay.example.com", color = TextSecondary, style = AppTextStyles.body)
                                     }
                                     inner()
                                 }
@@ -326,7 +348,7 @@ fun RelaySetEditorScreen(
                         Text(
                             text = url,
                             color = Color.White,
-                            fontSize = 13.sp,
+                            style = AppTextStyles.bodySmall,
                             modifier = Modifier.weight(1f),
                         )
                         IconButton(
@@ -342,8 +364,8 @@ fun RelaySetEditorScreen(
                         }
                     }
                     HorizontalDivider(
-                        color = MaterialTheme.colorScheme.surfaceVariant,
-                        thickness = 0.5.dp,
+                        color = com.unsilence.app.ui.theme.DividerColor,
+                        thickness = 1.dp,
                     )
                 }
                 item(key = "bottom-space") { Spacer(Modifier.height(Spacing.xl)) }
@@ -360,7 +382,7 @@ private fun RelaySetTextField(
     onValueChange: (String) -> Unit,
     singleLine: Boolean,
 ) {
-    Text(text = label, color = TextSecondary, fontSize = 12.sp)
+    Text(text = label, color = TextSecondary, style = AppTextStyles.footnote)
     Spacer(Modifier.height(6.dp))
     BasicTextField(
         value = value,
@@ -373,7 +395,7 @@ private fun RelaySetTextField(
         decorationBox = { inner ->
             Box(modifier = Modifier.fillMaxWidth()) {
                 if (value.isEmpty()) {
-                    Text(placeholder, color = TextSecondary, fontSize = 15.sp)
+                    Text(placeholder, color = TextSecondary, style = AppTextStyles.bodyLarge)
                 }
                 inner()
             }

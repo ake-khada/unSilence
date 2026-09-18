@@ -1,5 +1,6 @@
 package com.unsilence.app.ui.profile
 
+import com.unsilence.app.ui.theme.AppTextStyles
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
@@ -123,7 +124,7 @@ fun SocialGraphScreen(
                 Text(
                     text = "Social graph",
                     color = Color.White,
-                    fontSize = AppType.subheading,
+                    style = AppTextStyles.subheading,
                     fontWeight = FontWeight.SemiBold,
                     modifier = Modifier.weight(1f),
                 )
@@ -191,7 +192,7 @@ fun SocialGraphScreen(
                     Text(
                         text = "This publishes exactly this provider in your public kind 10040 list.",
                         color = TextSecondary,
-                        fontSize = AppType.bodySmall,
+                        style = AppTextStyles.bodySmall,
                     )
                     MetricRow("Provider", shortNpub(state.activeProvider.providerPubkey))
                     MetricRow("Relay", state.activeProvider.relayHint)
@@ -236,13 +237,13 @@ private fun PublishProviderListCard(
                 Text(
                     text = "Publish provider list",
                     color = Color.White,
-                    fontSize = AppType.body,
+                    style = AppTextStyles.body,
                     fontWeight = FontWeight.Medium,
                 )
                 Text(
                     text = "${shortNpub(state.activeProvider.providerPubkey)} · ${state.activeProvider.relayHint}",
                     color = Text3,
-                    fontSize = AppType.caption,
+                    style = AppTextStyles.caption,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                 )
@@ -276,7 +277,7 @@ private fun FeedScoreModeCard(
             Text(
                 text = "Feed scores",
                 color = Color.White,
-                fontSize = AppType.body,
+                style = AppTextStyles.body,
                 fontWeight = FontWeight.Medium,
             )
             Row(
@@ -329,7 +330,7 @@ private fun FeedScoreModeSegment(
         Text(
             text = label,
             color = if (selected) Brand else TextSecondary,
-            fontSize = AppType.caption,
+            style = AppTextStyles.caption,
             fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Medium,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
@@ -410,7 +411,7 @@ private fun ProviderIdentityRow(
             Text(
                 text = name,
                 color = Color.White,
-                fontSize = AppType.body,
+                style = AppTextStyles.body,
                 fontWeight = FontWeight.SemiBold,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
@@ -418,7 +419,7 @@ private fun ProviderIdentityRow(
             Text(
                 text = profile?.nip05?.takeIf { it.isNotBlank() } ?: provider.relayHint,
                 color = Text3,
-                fontSize = AppType.caption,
+                style = AppTextStyles.caption,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
             )
@@ -456,14 +457,14 @@ private fun ProviderOptionRow(
             Text(
                 text = providerOptionTitle(option.source),
                 color = Color.White,
-                fontSize = AppType.body,
+                style = AppTextStyles.body,
                 fontWeight = FontWeight.Medium,
                 maxLines = 1,
             )
             Text(
                 text = option.subtitle,
                 color = Text3,
-                fontSize = AppType.caption,
+                style = AppTextStyles.caption,
                 maxLines = 2,
                 overflow = TextOverflow.Ellipsis,
             )
@@ -504,14 +505,14 @@ private fun CustomProviderFields(
             label = "Relay URL",
         )
         if (error != null) {
-            Text(error, color = Like, fontSize = AppType.caption)
+            Text(error, color = Like, style = AppTextStyles.caption)
         }
         Button(
             onClick = onApply,
             colors = ButtonDefaults.buttonColors(containerColor = Brand, contentColor = Black),
             modifier = Modifier.align(Alignment.End),
         ) {
-            Text("Use custom provider", fontSize = AppType.bodySmall, fontWeight = FontWeight.SemiBold)
+            Text("Use custom provider", style = AppTextStyles.bodySmall, fontWeight = FontWeight.SemiBold)
         }
     }
 }
@@ -567,7 +568,7 @@ private fun ProvenanceBanner(state: SocialGraphUiState) {
         Text(
             text = text,
             color = Color.White,
-            fontSize = AppType.bodySmall,
+            style = AppTextStyles.bodySmall,
             lineHeight = 17.sp,
             modifier = Modifier.weight(1f),
         )
@@ -639,7 +640,7 @@ private fun NeutralStanding(text: String) {
         Text(
             text = text,
             color = TextSecondary,
-            fontSize = AppType.body,
+            style = AppTextStyles.body,
             fontWeight = FontWeight.Medium,
         )
     }
@@ -703,7 +704,7 @@ private fun CoverageCard(
         Text(
             text = "${state.coverage.scored} of ${state.coverage.total} follows scored",
             color = Color.White,
-            fontSize = AppType.body,
+            style = AppTextStyles.body,
             fontWeight = FontWeight.SemiBold,
         )
         Spacer(Modifier.height(Spacing.small))
@@ -720,13 +721,13 @@ private fun CoverageCard(
         Text(
             text = "${formatSyncedAgo(state.lastWotFetchAt, now)} · ${state.activeProvider.relayHint}",
             color = Text3,
-            fontSize = AppType.caption,
+            style = AppTextStyles.caption,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
         )
         state.statusMessage?.let {
             Spacer(Modifier.height(Spacing.micro))
-            Text(it, color = TextSecondary, fontSize = AppType.caption, maxLines = 2)
+            Text(it, color = TextSecondary, style = AppTextStyles.caption, maxLines = 2)
         }
     }
 }
@@ -743,7 +744,7 @@ private fun HowScoresWorkCard() {
         Text(
             text = "brainstorm.world",
             color = Brand,
-            fontSize = AppType.bodySmall,
+            style = AppTextStyles.bodySmall,
             fontWeight = FontWeight.SemiBold,
             modifier = Modifier.clickable { uriHandler.openUri("https://brainstorm.world") },
         )
@@ -769,7 +770,7 @@ private fun SectionLabel(text: String, modifier: Modifier = Modifier) {
     Text(
         text = text,
         color = TextSecondary,
-        fontSize = 11.sp,
+        style = AppTextStyles.caption,
         fontWeight = FontWeight.SemiBold,
         modifier = modifier.padding(bottom = Spacing.small),
     )
@@ -783,8 +784,8 @@ private fun MetricRow(label: String, value: String, color: Color = TextSecondary
             .padding(vertical = 2.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Text(label, color = Text3, fontSize = AppType.caption, modifier = Modifier.weight(1f))
-        Text(value, color = color, fontSize = AppType.caption, fontFamily = FontFamily.Monospace, maxLines = 1)
+        Text(label, color = Text3, style = AppTextStyles.caption, modifier = Modifier.weight(1f))
+        Text(value, color = color, style = AppTextStyles.caption, fontFamily = FontFamily.Monospace, maxLines = 1)
     }
 }
 
@@ -793,8 +794,7 @@ private fun ExplainerLine(text: String) {
     Text(
         text = text,
         color = TextSecondary,
-        fontSize = AppType.bodySmall,
-        lineHeight = 18.sp,
+        style = AppTextStyles.bodySmall,
         modifier = Modifier.padding(vertical = 2.dp),
     )
 }

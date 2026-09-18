@@ -1,5 +1,10 @@
 package com.unsilence.app.ui.notifications
 
+import com.unsilence.app.ui.theme.AppTextStyles
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.compose.LocalLifecycleOwner
+import androidx.lifecycle.repeatOnLifecycle
+
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
@@ -69,6 +74,12 @@ fun NotificationsScreen(
     ),
 ) {
     val state by viewModel.uiState.collectAsStateWithLifecycle()
+    val lifecycleOwner = LocalLifecycleOwner.current
+    LaunchedEffect(viewModel, lifecycleOwner) {
+        lifecycleOwner.lifecycle.repeatOnLifecycle(Lifecycle.State.RESUMED) {
+            viewModel.uiState.collect { viewModel.markSeen() }
+        }
+    }
     val wotLookupState = viewModel.wotLookups.collectAsStateWithLifecycle()
     val wotLookups by wotLookupState
     val wotLookup = rememberCardWotLookup(wotLookupState)
@@ -239,7 +250,7 @@ private fun NotificationContentPreview(
         else -> Text(
             text = if (loading) "Loading post…" else "Post unavailable · tap to open",
             color = TextSecondary,
-            fontSize = AppType.footnote,
+            style = AppTextStyles.footnote,
             modifier = modifier
                 .fillMaxWidth()
                 .clickable { host.actions.onNoteClick(targetId) }

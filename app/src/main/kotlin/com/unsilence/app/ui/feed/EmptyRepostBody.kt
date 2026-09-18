@@ -1,5 +1,6 @@
 package com.unsilence.app.ui.feed
 
+import com.unsilence.app.ui.theme.AppTextStyles
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
@@ -123,7 +124,6 @@ fun EmptyRepostBody(
                     onAuthorClick = actions.onAuthorClick,
                     onNoteClick = { actions.onNoteClick(resolvedModel.navigateId) },
                     lookupProfile = lookupProfile,
-                    profileFlow = surface.profileFlow,
                     wotLookup = surface.wotLookup,
                     feedWotDisplayMode = surface.feedWotDisplayMode,
                 )
@@ -167,7 +167,7 @@ fun EmptyRepostBody(
                 Text(
                     text = if (proxyUrl != null) "Open original post" else "Reposted note unavailable",
                     color = TextSecondary,
-                    fontSize = AppType.footnote,
+                    style = AppTextStyles.footnote,
                     fontWeight = FontWeight.Medium,
                     modifier = Modifier.weight(1f),
                 )

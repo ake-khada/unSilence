@@ -18,6 +18,22 @@ internal sealed interface AppDestination {
         val openArticleOnLoad: Boolean = false,
     ) : AppDestination
     @Serializable data class Profile(val pubkey: String) : AppDestination
+    @Serializable data class Compose(
+        val replyToEventId: String? = null,
+        val quoteEventId: String? = null,
+    ) : AppDestination
+    @Serializable data class Connections(
+        val pubkey: String,
+        val tab: com.unsilence.app.ui.profile.ConnectionsTab,
+    ) : AppDestination
+    @Serializable data class ProfileRelays(val pubkey: String) : AppDestination
+    @Serializable data class RelayDetail(val url: String) : AppDestination
+    @Serializable data object RelaySettings : AppDestination
+    @Serializable data object RelayDiscovery : AppDestination
+    @Serializable data object CreateRelaySet : AppDestination
+    @Serializable data object EmojiSettings : AppDestination
+    @Serializable data object ZapSettings : AppDestination
+    @Serializable data object StartGraph : AppDestination
 }
 
 /** Identity belongs to the visit, not the event: repeated visits must not share stores. */
@@ -28,6 +44,9 @@ internal class AppNavigator(
     val backStack: MutableList<NavKey>,
     private val newId: () -> String = { UUID.randomUUID().toString() },
 ) {
+    // Stable across Activity recreation; the navigator object itself is not.
+    val stateKey: String = (backStack.first() as AppEntry).id
+
     fun push(destination: AppDestination) {
         // Ignore a double tap on the current destination, but allow revisiting it later.
         if ((backStack.lastOrNull() as? AppEntry)?.destination == destination) return

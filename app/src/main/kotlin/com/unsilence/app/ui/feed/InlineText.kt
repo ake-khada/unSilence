@@ -18,16 +18,15 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.Placeholder
 import androidx.compose.ui.text.PlaceholderVerticalAlign
-import androidx.compose.ui.text.TextLayoutResult
+import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.em
-import androidx.compose.ui.unit.sp
+import androidx.compose.ui.unit.Constraints
 import coil3.compose.AsyncImage
 import com.unsilence.app.data.memory.UserEntity
 import com.unsilence.app.data.model.Segment
-import com.unsilence.app.ui.theme.AppType
 import com.vitorpamplona.quartz.nip19Bech32.entities.NPub
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
@@ -63,16 +62,16 @@ internal fun InlineText(
     maxLines: Int = Int.MAX_VALUE,
     overflow: TextOverflow = TextOverflow.Clip,
     textAlign: TextAlign? = null,
-    onTextLayoutResult: ((TextLayoutResult) -> Unit)? = null,
+    overflowWidthPx: Int? = null,
     textColor: Color? = null, // null = default onSurface; blockquotes pass TextSecondary
-) {
+): Boolean {
     // Extract text-renderable segments only
     val textSegments = remember(segments) {
         segments.filter { it is Segment.Text || it is Segment.MentionPubkey || it is Segment.Link || it is Segment.Hashtag }
     }
 
     // No text content at all — skip rendering
-    if (textSegments.isEmpty()) return
+    if (textSegments.isEmpty()) return false
 
     // Extract unique mention pubkeys for batch resolution
     val mentionPubkeys = remember(textSegments) {
@@ -92,18 +91,15 @@ internal fun InlineText(
         val plainText = remember(textSegments, kind) {
             formatNoteText(AnnotatedString(textSegments.joinToString("") { (it as Segment.Text).text }), kind)
         }
-        Text(
+        return MeasuredInlineText(
             text      = plainText,
             color     = textColor ?: MaterialTheme.colorScheme.onSurface,
-            fontSize  = AppType.bodyLarge,
-            lineHeight = 22.sp,
             maxLines  = maxLines,
             overflow  = overflow,
             textAlign = textAlign,
-            onTextLayout = onTextLayoutResult ?: {},
+            overflowWidthPx = overflowWidthPx,
             modifier  = modifier.clickable { onTextClick() },
         )
-        return
     }
 
     // Resolve display names reactively
@@ -174,19 +170,70 @@ internal fun InlineText(
         }
     }
 
-    Text(
+    return MeasuredInlineText(
         text         = annotatedText,
         inlineContent = emojiInlineContent,
         color        = textColor ?: MaterialTheme.colorScheme.onSurface,
-        fontSize     = AppType.bodyLarge,
-        lineHeight   = 22.sp,
         maxLines     = maxLines,
         overflow     = overflow,
         textAlign    = textAlign,
-        onTextLayout = onTextLayoutResult ?: {},
+        overflowWidthPx = overflowWidthPx,
         modifier     = modifier.clickable { onTextClick() },
     )
 }
+
+/** One rich-text build feeds both preflight and rendering, including emoji dimensions. */
+@Composable
+private fun MeasuredInlineText(
+    text: AnnotatedString,
+    color: Color,
+    maxLines: Int,
+    overflow: TextOverflow,
+    textAlign: TextAlign?,
+    overflowWidthPx: Int?,
+    modifier: Modifier,
+    inlineContent: Map<String, InlineTextContent> = emptyMap(),
+): Boolean {
+    val baseStyle = MaterialTheme.typography.bodyLarge
+    val style = remember(baseStyle, textAlign) {
+        baseStyle.copy(textAlign = textAlign ?: TextAlign.Unspecified)
+    }
+    val hasOverflow = if (overflowWidthPx != null && maxLines != Int.MAX_VALUE) {
+        val measurer = rememberTextMeasurer(cacheSize = 1)
+        val placeholders = remember(text, inlineContent) {
+            inlineEmojiPlaceholders(text, inlineContent.mapValues { it.value.placeholder })
+        }
+        measurer.measure(
+            text = text,
+            style = style,
+            maxLines = maxLines,
+            overflow = overflow,
+            placeholders = placeholders,
+            constraints = Constraints(maxWidth = overflowWidthPx.coerceAtLeast(0)),
+        ).hasVisualOverflow
+    } else false
+    Text(
+        text = text,
+        inlineContent = inlineContent,
+        style = style,
+        color = color,
+        maxLines = maxLines,
+        overflow = overflow,
+        modifier = modifier,
+    )
+    return hasOverflow
+}
+
+private const val INLINE_EMOJI_MEASURE_TAG = "unsilence.inlineEmoji"
+
+internal fun inlineEmojiPlaceholders(
+    text: AnnotatedString,
+    placeholders: Map<String, Placeholder>,
+): List<AnnotatedString.Range<Placeholder>> = text
+    .getStringAnnotations(INLINE_EMOJI_MEASURE_TAG, 0, text.length)
+    .mapNotNull { range ->
+        placeholders[range.item]?.let { AnnotatedString.Range(it, range.start, range.end) }
+    }
 
 /**
  * Appends [text] to the receiver, substituting `:shortcode:` substrings with
@@ -195,7 +242,7 @@ internal fun InlineText(
  * no regex charset restrictions, handles spaces/hyphens/dots in shortcodes.
  * Unmatched colon patterns pass through as plain text.
  */
-private fun androidx.compose.ui.text.AnnotatedString.Builder.appendTextWithEmoji(
+internal fun androidx.compose.ui.text.AnnotatedString.Builder.appendTextWithEmoji(
     text: String,
     emojis: Map<String, String>,
 ) {
@@ -208,7 +255,10 @@ private fun androidx.compose.ui.text.AnnotatedString.Builder.appendTextWithEmoji
         val shortcode = text.substring(openColon + 1, closeColon)
         if (shortcode.isNotEmpty() && shortcode in emojis) {
             if (openColon > cursor) append(text.substring(cursor, openColon))
+            // Own measurement annotation avoids depending on Foundation's internal tag.
+            pushStringAnnotation(INLINE_EMOJI_MEASURE_TAG, shortcode)
             appendInlineContent(shortcode, ":$shortcode:")
+            pop()
             cursor = closeColon + 1
         } else {
             // Not a known emoji — emit up to and including the opening colon, keep scanning

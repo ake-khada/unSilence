@@ -1,4 +1,4 @@
-package com.unsilence.app.ui.notifications
+package com.unsilence.app.data.repository
 
 import com.unsilence.app.data.memory.MuteList
 import com.unsilence.app.data.memory.NostrEvent

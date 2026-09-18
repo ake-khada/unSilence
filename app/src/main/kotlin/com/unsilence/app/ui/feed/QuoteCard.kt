@@ -1,5 +1,6 @@
 package com.unsilence.app.ui.feed
 
+import com.unsilence.app.ui.theme.AppTextStyles
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -177,7 +178,7 @@ internal fun QuoteCard(
     Box(
         modifier = modifier
             .fillMaxWidth()
-            .border(0.5.dp, Color.White.copy(alpha = 0.08f), RoundedCornerShape(quoteCornerRadius))
+            .border(1.dp, Color.White.copy(alpha = 0.08f), RoundedCornerShape(quoteCornerRadius))
             .clip(RoundedCornerShape(quoteCornerRadius))
             .pointerInput(quoteNavigationId) {
                 awaitEachGesture {
@@ -213,7 +214,6 @@ internal fun QuoteCard(
                         modifier      = Modifier.size(avatarSize),
                         sizeDp        = avatarSize,
                         lookupProfile = lookupProfile,
-                        profileFlow   = surface.profileFlow,
                     )
                     Spacer(Modifier.width(6.dp))
                     Text(
@@ -222,7 +222,7 @@ internal fun QuoteCard(
                             ?: "${displayPubkey.take(6)}…${displayPubkey.takeLast(4)}",
                         color    = Color.White.copy(alpha = 0.7f),
                         fontWeight = FontWeight.SemiBold,
-                        fontSize = AppType.bodySmall,
+                        style = AppTextStyles.bodySmall,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
                         modifier = Modifier.weight(1f),
@@ -231,7 +231,7 @@ internal fun QuoteCard(
                     WotFeedMetaTimestamp(
                         lookup = surface.wotLookup?.invoke(displayPubkey),
                         mode = surface.feedWotDisplayMode,
-                        timestamp = if (surface.showTimestamps) relativeTime(displayCreatedAt) else null,
+                        createdAt = displayCreatedAt.takeIf { surface.showTimestamps },
                         timestampColor = TextSecondary,
                     )
                 }
@@ -315,7 +315,7 @@ internal fun QuoteCard(
                     Text(
                         text = "Reposted post unavailable",
                         color = TextSecondary,
-                        fontSize = AppType.footnote,
+                        style = AppTextStyles.footnote,
                     )
                 }
                 }
@@ -332,7 +332,7 @@ internal fun QuoteCard(
                 Text(
                     text = "Quoted note unavailable",
                     color = TextSecondary,
-                    fontSize = AppType.footnote,
+                    style = AppTextStyles.footnote,
                     fontWeight = FontWeight.Medium,
                     modifier = Modifier.weight(1f),
                 )
@@ -377,7 +377,7 @@ private fun QuoteChainContinuationChip(
         Text(
             text = "Quote chain continues",
             color = TextSecondary,
-            fontSize = AppType.footnote,
+            style = AppTextStyles.footnote,
             fontWeight = FontWeight.Medium,
             modifier = Modifier.weight(1f),
         )

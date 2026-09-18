@@ -1,5 +1,10 @@
 package com.unsilence.app.ui.feed
 
+import com.unsilence.app.ui.theme.AppTextStyles
+import com.unsilence.app.ui.shared.collectCardDataAsState
+
+import com.unsilence.app.ui.shared.CardDataFlow
+
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -48,7 +53,6 @@ import com.unsilence.app.ui.theme.Sizing
 import com.unsilence.app.ui.theme.Spacing
 import com.unsilence.app.ui.theme.TextSecondary
 import com.unsilence.app.ui.theme.Zap
-import kotlinx.coroutines.flow.StateFlow
 
 enum class EngagementSection { REPLIES, REPOSTS, REACTIONS, ZAPS }
 
@@ -87,17 +91,18 @@ private data class DrawerData(
 @Composable
 internal fun EngagementDrawer(
     eventId: String,
-    statsFlow: ((String) -> StateFlow<com.unsilence.app.data.memory.EventStats>)?,
+    statsFlow: ((String) -> CardDataFlow<com.unsilence.app.data.memory.EventStats>)?,
     zapDetailsForEvent: ((String) -> List<ZapDetail>)?,
     repostPubkeysForEvent: ((String) -> List<String>)?,
     reactionsForEvent: ((String) -> List<ReactionInfo>)?,
-    profileFlow: ((String) -> StateFlow<UserEntity?>)?,
+    profileFlow: ((String) -> CardDataFlow<UserEntity?>)?,
     lookupProfile: (suspend (String) -> UserEntity?)?,
     onProfileTap: (String) -> Unit,
 ) {
     val stats = if (statsFlow != null) {
         key(eventId) {
-            statsFlow(eventId).collectAsStateWithLifecycle().value
+            val flow = statsFlow(eventId)
+            flow.collectCardDataAsState().value
         }
     } else null
 
@@ -156,7 +161,7 @@ internal fun EngagementDrawer(
                             Text(
                                 text = comment,
                                 color = TextSecondary,
-                                fontSize = AppType.footnote,
+                                style = AppTextStyles.footnote,
                                 maxLines = 2,
                                 overflow = TextOverflow.Ellipsis,
                                 modifier = Modifier.weight(1f, fill = false),
@@ -325,7 +330,7 @@ private fun EngagementRow(
             } else if (emojiText != null) {
                 Text(
                     text = emojiText,
-                    fontSize = AppType.body,
+                    style = AppTextStyles.body,
                     modifier = Modifier.size(Sizing.actionIcon),
                 )
             }
@@ -337,16 +342,15 @@ private fun EngagementRow(
 @Composable
 private fun AvatarChip(
     pubkey: String,
-    profileFlow: ((String) -> StateFlow<UserEntity?>)?,
+    profileFlow: ((String) -> CardDataFlow<UserEntity?>)?,
     lookupProfile: (suspend (String) -> UserEntity?)?,
     onTap: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     AvatarImage(
         pubkey = pubkey,
-        picture = null,
+        picture = collectProfileAsState(pubkey, profileFlow)?.picture,
         sizeDp = Sizing.avatar,
-        profileFlow = profileFlow,
         lookupProfile = lookupProfile,
         modifier = modifier
             .size(Sizing.avatar)
@@ -361,7 +365,7 @@ private fun AvatarChip(
 @Composable
 private fun ZapChip(
     zap: IdentifiedZap,
-    profileFlow: ((String) -> StateFlow<UserEntity?>)?,
+    profileFlow: ((String) -> CardDataFlow<UserEntity?>)?,
     lookupProfile: (suspend (String) -> UserEntity?)?,
     onTap: () -> Unit,
     modifier: Modifier = Modifier,
@@ -375,9 +379,8 @@ private fun ZapChip(
     ) {
         AvatarImage(
             pubkey = sender,
-            picture = null,
+            picture = collectProfileAsState(sender, profileFlow)?.picture,
             sizeDp = Sizing.avatar,
-            profileFlow = profileFlow,
             lookupProfile = lookupProfile,
             modifier = Modifier.size(Sizing.avatar),
         )
@@ -392,7 +395,7 @@ private fun ZapChip(
         Text(
             text = zap.sats.toCompactSats(),
             color = Zap,
-            fontSize = AppType.caption,
+            style = AppTextStyles.caption,
             fontWeight = FontWeight.Bold,
             maxLines = 1,
             modifier = Modifier
@@ -413,7 +416,7 @@ private fun AnonymousZapChip(sats: Long, modifier: Modifier = Modifier) {
         Box(
             modifier = Modifier
                 .size(Sizing.avatar)
-                .background(Color(0xFF1A1A1A), CircleShape),
+                .background(com.unsilence.app.ui.theme.Surface2, CircleShape),
             contentAlignment = Alignment.Center,
         ) {
             Icon(
@@ -433,7 +436,7 @@ private fun AnonymousZapChip(sats: Long, modifier: Modifier = Modifier) {
         Text(
             text = sats.toCompactSats(),
             color = Zap,
-            fontSize = AppType.caption,
+            style = AppTextStyles.caption,
             fontWeight = FontWeight.Bold,
             maxLines = 1,
             modifier = Modifier

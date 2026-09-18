@@ -31,9 +31,17 @@ import kotlinx.coroutines.flow.emptyFlow
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import javax.inject.Inject
+
+sealed interface RelaySetSaveState {
+    data object Idle : RelaySetSaveState
+    data object Saving : RelaySetSaveState
+    data object Saved : RelaySetSaveState
+    data class Failed(val message: String) : RelaySetSaveState
+}
 
 @HiltViewModel
 class RelayManagementViewModel @Inject constructor(
@@ -109,6 +117,9 @@ class RelayManagementViewModel @Inject constructor(
     private val _uploadingRelaySetImage = MutableStateFlow(false)
     val uploadingRelaySetImage: StateFlow<Boolean> = _uploadingRelaySetImage.asStateFlow()
     private val publishMutex = Mutex()
+    private val _relaySetSave = MutableStateFlow<RelaySetSaveState>(RelaySetSaveState.Idle)
+    val relaySetSave = _relaySetSave.asStateFlow()
+    fun consumeRelaySetSaveResult() { _relaySetSave.value = RelaySetSaveState.Idle }
 
     // ── Kind 10002: Read/Write relays ─────────────────────────────────────────
 
@@ -251,7 +262,10 @@ class RelayManagementViewModel @Inject constructor(
 
     fun saveRelaySet(draft: RelaySetEditorDraft) {
         val pk = ownerPubkey ?: return
+        if (_relaySetSave.value == RelaySetSaveState.Saving) return
+        _relaySetSave.value = RelaySetSaveState.Saving
         viewModelScope.launch(Dispatchers.IO) {
+            try {
             val dTag = draft.dTag ?: uniqueRelaySetDTag(draft.title, pk)
             val payload = buildRelaySetPublishPayload(dTag, draft)
             val optimistic = RelaySet(
@@ -267,7 +281,14 @@ class RelayManagementViewModel @Inject constructor(
                 },
             )
             memoryEventStore.upsertRelaySet(optimistic)
-            publishRelaySetPayload(payload)
+            _relaySetSave.value = if (publishRelaySetPayload(payload)) RelaySetSaveState.Saved else
+                RelaySetSaveState.Failed("Relay set was not signed. Try again.")
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Exception) {
+                Log.w("RelayMgmt", "Relay-set save failed", error)
+                _relaySetSave.value = RelaySetSaveState.Failed("Couldn't save relay set. Try again.")
+            }
         }
     }
 
@@ -406,8 +427,8 @@ class RelayManagementViewModel @Inject constructor(
 
     private suspend fun publishRelaySetPayload(
         payload: RelaySetPublishPayload,
-    ): Unit = publishMutex.withLock {
-        val pk = ownerPubkey ?: return
+    ): Boolean = publishMutex.withLock {
+        val pk = ownerPubkey ?: return@withLock false
         publishing.value = true
         try {
             val now = nowSeconds()
@@ -419,7 +440,7 @@ class RelayManagementViewModel @Inject constructor(
                 tags      = tags,
                 content   = "",
             )
-            val signed = signingManager.sign(template) ?: return
+            val signed = signingManager.sign(template) ?: return@withLock false
             // Self-insert the just-signed event into MES so it lands in eventsById and survives
             // cold-start via the ---EVENTS--- snapshot (insertFromSnapshot re-materializes the
             // derived maps on restore; the end-of-restore signal bump surfaces them in the UI).
@@ -433,6 +454,7 @@ class RelayManagementViewModel @Inject constructor(
             relayPool.publishToRelays(eventJson, (writeUrls + indexerUrls).distinct())
             Log.w("RelayMgmt", "RELAY-LIST published kind=30002 set=${payload.dTag} id=${signed.id.take(8)}… tags: " +
                 payload.tags.joinToString(", ") { it.joinToString(":") })
+            true
         } finally {
             publishing.value = false
         }

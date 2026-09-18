@@ -1,5 +1,6 @@
 package com.unsilence.app.ui.feed
 
+import com.unsilence.app.ui.theme.AppTextStyles
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
@@ -77,7 +78,7 @@ internal fun EmojiPickerSheet(
                 Text(
                     text = "Custom Emoji",
                     color = Color.White,
-                    fontSize = AppType.subheading,
+                    style = AppTextStyles.subheading,
                     fontWeight = FontWeight.SemiBold,
                     modifier = Modifier.weight(1f),
                 )
@@ -104,7 +105,7 @@ internal fun EmojiPickerSheet(
                     Text(
                         text = "No custom emoji yet",
                         color = TextSecondary,
-                        fontSize = AppType.body,
+                        style = AppTextStyles.body,
                     )
                     Spacer(Modifier.height(Spacing.small))
                     Box(
@@ -120,7 +121,7 @@ internal fun EmojiPickerSheet(
                         Text(
                             text = "Manage in Settings",
                             color = BrandDeep,
-                            fontSize = AppType.bodySmall,
+                            style = AppTextStyles.bodySmall,
                             fontWeight = FontWeight.Medium,
                         )
                     }
@@ -233,7 +234,7 @@ private fun CategoryHeader(title: String) {
     Text(
         text = title,
         color = Text3,
-        fontSize = AppType.caption,
+        style = AppTextStyles.caption,
         fontWeight = FontWeight.Medium,
         modifier = Modifier.padding(top = Spacing.small, bottom = 2.dp),
     )
@@ -267,7 +268,7 @@ private fun EmojiGridCell(
         Text(
             text = if (isPinned) "\u2605 ${emoji.shortcode}" else emoji.shortcode,
             color = if (isPinned) BrandDeep else TextSecondary,
-            fontSize = AppType.caption,
+            style = AppTextStyles.caption,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
             textAlign = TextAlign.Center,

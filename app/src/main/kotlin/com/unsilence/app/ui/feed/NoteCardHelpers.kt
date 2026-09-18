@@ -1,5 +1,10 @@
 package com.unsilence.app.ui.feed
 
+import com.unsilence.app.ui.theme.AppTextStyles
+import com.unsilence.app.ui.shared.collectCardDataAsState
+
+import com.unsilence.app.ui.shared.CardDataFlow
+
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.spring
@@ -49,7 +54,6 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import kotlinx.coroutines.flow.StateFlow
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
@@ -160,8 +164,8 @@ private fun monthDayFormat(): DateTimeFormatter {
     }
 }
 
-internal fun relativeTime(createdAtSeconds: Long): String {
-    val diffMs = System.currentTimeMillis() - createdAtSeconds * 1000L
+internal fun relativeTime(createdAtSeconds: Long, nowMillis: Long = System.currentTimeMillis()): String {
+    val diffMs = nowMillis - createdAtSeconds * 1000L
     return when {
         diffMs < TimeUnit.MINUTES.toMillis(1) -> "now"
         diffMs < TimeUnit.HOURS.toMillis(1)   -> "${TimeUnit.MILLISECONDS.toMinutes(diffMs)}m"
@@ -219,11 +223,12 @@ private fun decodeNostrRef(uri: String): NostrRef? {
 @Composable
 internal fun collectProfileAsState(
     pubkey: String,
-    profileFlow: ((String) -> StateFlow<UserEntity?>)?,
+    profileFlow: ((String) -> CardDataFlow<UserEntity?>)?,
 ): UserEntity? {
     if (profileFlow == null) return null
     return key(pubkey) {
-        profileFlow(pubkey).collectAsStateWithLifecycle().value
+        val flow = profileFlow(pubkey)
+        flow.collectCardDataAsState().value
     }
 }
 
@@ -234,16 +239,11 @@ internal fun AvatarImage(
     modifier: Modifier = Modifier,
     sizeDp: Dp = Sizing.avatar,
     lookupProfile: (suspend (String) -> UserEntity?)? = null,
-    profileFlow: ((String) -> StateFlow<UserEntity?>)? = null,
 ) {
     var lookedUpProfile by remember(pubkey) { mutableStateOf<UserEntity?>(null) }
 
-    // Observe the profile reactively — when MES receives the kind-0,
-    // _profileSignal bumps and this re-emits the updated UserEntity.
-    val liveProfile = collectProfileAsState(pubkey, profileFlow)
-
-    val effectivePicture = liveProfile?.picture?.takeIf { it.isNotBlank() }
-        ?: picture?.takeIf { it.isNotBlank() }
+    // The parent resolves the profile once for its name, address and avatar.
+    val effectivePicture = picture?.takeIf { it.isNotBlank() }
         ?: lookedUpProfile?.picture?.takeIf { it.isNotBlank() }
     var imageFailed by remember(pubkey, effectivePicture) { mutableStateOf(false) }
 
@@ -337,8 +337,7 @@ internal fun NostrRichText(
         Text(
             text       = text,
             color      = MaterialTheme.colorScheme.onSurface,
-            fontSize   = AppType.bodyLarge,
-            lineHeight = 22.sp,
+            style = AppTextStyles.bodyLarge,
             maxLines   = maxLines,
             overflow   = overflow,
             textAlign  = textAlign,
@@ -410,8 +409,7 @@ internal fun NostrRichText(
     Text(
         text       = annotatedText,
         color      = MaterialTheme.colorScheme.onSurface,
-        fontSize   = AppType.bodyLarge,
-        lineHeight = 22.sp,
+        style = AppTextStyles.bodyLarge,
         maxLines   = maxLines,
         overflow   = overflow,
         textAlign  = textAlign,
@@ -453,7 +451,7 @@ internal fun ActionButton(
             Text(
                 text     = formatCount(count),
                 color    = tint,
-                fontSize = AppType.footnote,
+                style = AppTextStyles.footnote,
             )
         }
     }
@@ -534,7 +532,7 @@ internal fun ZapButton(
                 Text(
                     text     = sats.toCompactSats(),
                     color    = tint,
-                    fontSize = AppType.footnote,
+                    style = AppTextStyles.footnote,
                 )
             }
         }

@@ -1,5 +1,7 @@
 package com.unsilence.app.ui.feed
 
+import com.unsilence.app.ui.shared.CardDataFlow
+
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.unsilence.app.data.auth.KeyManager
@@ -173,11 +175,11 @@ class ArticleReaderViewModel @Inject constructor(
 
     // ── Display providers for comment EventCards (MES-backed, cached) ──────────
 
-    fun profileFlow(pubkey: String): StateFlow<UserEntity?> =
-        timelineCardData.profileFlow(pubkey, viewModelScope)
+    fun profileFlow(pubkey: String): CardDataFlow<UserEntity?> =
+        timelineCardData.profileFlow(pubkey)
 
-    fun statsFlow(eventId: String): StateFlow<EventStats> =
-        timelineCardData.statsFlow(eventId, viewModelScope)
+    fun statsFlow(eventId: String): CardDataFlow<EventStats> =
+        timelineCardData.statsFlow(eventId)
 
     fun zapDetailsForEvent(eventId: String): List<ZapDetail> = timelineCardData.zapDetailsForEvent(eventId)
     fun repostPubkeysForEvent(eventId: String): List<String> = timelineCardData.repostPubkeysForEvent(eventId)

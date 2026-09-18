@@ -1,5 +1,6 @@
 package com.unsilence.app.ui.shared
 
+import com.unsilence.app.ui.theme.AppTextStyles
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -195,21 +196,21 @@ fun LikelySpamClusterCard(
             Text(
                 text = "Likely coordinated spam",
                 color = TextSecondary,
-                fontSize = AppType.footnote,
+                style = AppTextStyles.footnote,
                 fontWeight = FontWeight.Medium,
             )
             Text(
                 text = "$replyCount ${if (replyCount == 1) "reply" else "replies"} " +
                     if (revealed) "shown" else "hidden",
                 color = TextSecondary.copy(alpha = 0.7f),
-                fontSize = AppType.caption,
+                style = AppTextStyles.caption,
             )
         }
         Spacer(Modifier.width(Spacing.small))
         Text(
             text = if (revealed) "Hide" else "Show",
             color = Brand,
-            fontSize = AppType.footnote,
+            style = AppTextStyles.footnote,
             fontWeight = FontWeight.Medium,
         )
     }
@@ -235,7 +236,7 @@ private fun ContentHiddenCard(text: String, modifier: Modifier) {
         Text(
             text = text,
             color = TextSecondary,
-            fontSize = AppType.footnote,
+            style = AppTextStyles.footnote,
             fontWeight = FontWeight.Medium,
         )
     }

@@ -1,5 +1,6 @@
 package com.unsilence.app.ui.common
 
+import com.unsilence.app.ui.theme.AppTextStyles
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Spacer
@@ -41,16 +42,15 @@ fun EmptyState(
         Text(
             text = message,
             color = TextSecondary,
-            fontSize = AppType.bodyLarge,
+            style = AppTextStyles.bodyLarge,
             textAlign = TextAlign.Center,
-            lineHeight = 22.sp,
         )
         if (hint != null) {
             Spacer(Modifier.height(Spacing.small))
             Text(
                 text = hint,
                 color = TextSecondary.copy(alpha = 0.6f),
-                fontSize = AppType.bodySmall,
+                style = AppTextStyles.bodySmall,
                 textAlign = TextAlign.Center,
             )
         }

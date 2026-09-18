@@ -1,5 +1,6 @@
 package com.unsilence.app.ui.feed
 
+import com.unsilence.app.ui.theme.AppTextStyles
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
@@ -72,7 +73,7 @@ internal fun YouTubeCard(
         contentAlignment = Alignment.Center,
     ) {
         AsyncImage(
-            model              = rememberFullWidthImageRequest(thumbnailUrls[thumbnailIndex], aspectRatio = 16f / 9f),
+            model              = rememberFullWidthImageRequest(thumbnailUrls[thumbnailIndex], aspectRatio = 16f / 9f, allowRgb565 = true),
             contentDescription = null,
             contentScale       = ContentScale.Crop,
             modifier           = Modifier.matchParentSize(),
@@ -98,7 +99,7 @@ internal fun YouTubeCard(
         Text(
             text = "YouTube",
             color = Color.White,
-            fontSize = 12.sp,
+            style = AppTextStyles.footnote,
             fontWeight = FontWeight.SemiBold,
             modifier = Modifier
                 .align(Alignment.BottomStart)

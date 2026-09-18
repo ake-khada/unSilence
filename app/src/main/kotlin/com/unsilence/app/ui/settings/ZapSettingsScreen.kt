@@ -1,5 +1,6 @@
 package com.unsilence.app.ui.settings
 
+import com.unsilence.app.ui.theme.AppTextStyles
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -69,9 +70,10 @@ private const val PRESET_SAVE_DEBOUNCE_MS = 350L
 @Composable
 fun ZapSettingsScreen(
     onDismiss: () -> Unit,
+    navigationOwnsBack: Boolean = false,
     vm: ZapSettingsViewModel = hiltViewModel(key = "zap-settings-${LocalAppSessionKey.current}"),
 ) {
-    BackHandler(onBack = onDismiss)
+    BackHandler(enabled = !navigationOwnsBack, onBack = onDismiss)
     val showSnackbar = LocalShowSnackbar.current
     val state by vm.preferences.collectAsStateWithLifecycle()
     val balanceSats by vm.balanceSats.collectAsStateWithLifecycle()
@@ -99,7 +101,7 @@ fun ZapSettingsScreen(
             Text(
                 "Zap settings",
                 color = Color.White,
-                fontSize = AppType.subheading,
+                style = AppTextStyles.subheading,
                 fontWeight = FontWeight.Medium,
             )
         }
@@ -188,7 +190,7 @@ private fun SectionLabel(text: String) {
     Text(
         text = text.uppercase(),
         color = TextSecondary,
-        fontSize = AppType.caption,
+        style = AppTextStyles.caption,
         fontWeight = FontWeight.Medium,
         modifier = Modifier.padding(
             start = Spacing.medium + 2.dp,
@@ -203,7 +205,7 @@ private fun HelperText(text: String) {
     Text(
         text = text,
         color = TextSecondary,
-        fontSize = AppType.caption,
+        style = AppTextStyles.caption,
         modifier = Modifier.padding(
             horizontal = Spacing.medium + 4.dp,
             vertical = Spacing.small,
@@ -241,26 +243,26 @@ private fun WalletCard(
             Text(
                 if (connected) (label ?: "Connected") else "No wallet connected",
                 color = Color.White,
-                fontSize = AppType.bodySmall,
+                style = AppTextStyles.bodySmall,
             )
             if (connected && balanceSats != null) {
                 Text(
                     "${formatSats(balanceSats)} sats available",
                     color = Zap,
-                    fontSize = AppType.caption,
+                    style = AppTextStyles.caption,
                 )
             } else {
                 Text(
                     if (connected) "Tap to disconnect" else "Tap to connect via NWC",
                     color = TextSecondary,
-                    fontSize = AppType.caption,
+                    style = AppTextStyles.caption,
                 )
             }
         }
         Text(
             if (connected) "Disconnect" else "Connect",
             color = Brand,
-            fontSize = AppType.bodySmall,
+            style = AppTextStyles.bodySmall,
         )
     }
 }
@@ -326,7 +328,7 @@ private fun PresetRow(
             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
             modifier = Modifier.width(60.dp),
         )
-        Text("sats", color = TextSecondary, fontSize = AppType.caption)
+        Text("sats", color = TextSecondary, style = AppTextStyles.caption)
         Spacer(Modifier.width(Spacing.small))
         BasicTextField(
             value = messageText,
@@ -340,7 +342,7 @@ private fun PresetRow(
             modifier = Modifier.weight(1f),
             decorationBox = { inner ->
                 if (messageText.isEmpty()) {
-                    Text("optional message", color = TextSecondary.copy(alpha = 0.5f), fontSize = AppType.bodySmall)
+                    Text("optional message", color = TextSecondary.copy(alpha = 0.5f), style = AppTextStyles.bodySmall)
                 }
                 inner()
             },
@@ -400,6 +402,6 @@ private fun PrivacyPill(
     ) {
         Icon(icon, contentDescription = null, tint = fg, modifier = Modifier.size(17.dp))
         Spacer(Modifier.width(6.dp))
-        Text(label, color = fg, fontSize = AppType.bodySmall, fontWeight = if (selected) FontWeight.Medium else FontWeight.Normal)
+        Text(label, color = fg, style = AppTextStyles.bodySmall, fontWeight = if (selected) FontWeight.Medium else FontWeight.Normal)
     }
 }

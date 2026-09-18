@@ -1,5 +1,6 @@
 package com.unsilence.app.ui.feed
 
+import com.unsilence.app.ui.theme.AppTextStyles
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -58,7 +59,7 @@ internal fun InlineMention(
         Text(
             text     = if (displayText.startsWith("@")) displayText else "@$displayText",
             color    = Brand,
-            fontSize = AppType.footnote,
+            style = AppTextStyles.footnote,
         )
     }
 }

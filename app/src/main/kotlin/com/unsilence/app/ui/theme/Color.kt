@@ -41,6 +41,11 @@ val BgElev3 = Color(0xFF1E1E1E)
 val BorderFaint   = Color(0x0DFFFFFF)   // ~5% white — hairline separators
 val BorderSubtle  = Color(0x14FFFFFF)   // ~8% white — input outlines at rest
 val BorderDefault = Color(0x1FFFFFFF)   // ~12% white — focused inputs, outlined buttons
+val DividerColor = White.copy(alpha = 0.10f)
+val PressOverlay = White.copy(alpha = 0.08f)
+val Error = Color(0xFFCF6679)
+/** Dark error surface for transient media-save messages; white text stays legible. */
+val ErrorContainer = Color(0xFF4A1F1F)
 
 // ── Aliases (migration shims — old name → new token) ────────────────────
 val BgBase  = Black

@@ -9,59 +9,40 @@ import com.unsilence.app.data.memory.ZapDetail
 import com.unsilence.app.data.repository.UserRepository
 import javax.inject.Inject
 import dagger.hilt.android.scopes.ViewModelScoped
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.flow.SharingStarted
-import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.flow.stateIn
 
 private const val CARD_FLOW_CACHE_SIZE = 500
-private const val CARD_FLOW_STOP_TIMEOUT_MS = 5_000L
 
 /**
  * Shared implementation, with one cache owner per ViewModel (not a global instance).
  *
  * Feed, profile, thread, and article-reader screens all render the same card
  * primitives. Keeping their profile/stat caches here prevents each screen from
- * drifting into slightly different cache sizing, source selection, and stop
- * timeout behavior.
+ * drifting into slightly different cache sizing and source selection.
  *
- * Cached flows use their owning ViewModel's scope. Never promote this to Singleton:
- * a later screen would inherit flows whose original scope has already been cancelled.
+ * The cache contains cold handles, not ViewModel-owned sharing jobs. Collection
+ * belongs to visible card lifecycles, so LRU eviction cannot strand jobs in a
+ * long-lived feed ViewModel or interrupt an already-visible card.
  */
 @ViewModelScoped
 class TimelineCardData @Inject constructor(
     private val userRepository: UserRepository,
     private val memoryEventStore: MemoryEventStore,
 ) {
-    private val profileCache = LruCache<String, StateFlow<UserEntity?>>(CARD_FLOW_CACHE_SIZE)
-    private val statsCache = LruCache<String, StateFlow<EventStats>>(CARD_FLOW_CACHE_SIZE)
+    private val profileCache = LruCache<String, CardDataFlow<UserEntity?>>(CARD_FLOW_CACHE_SIZE)
+    private val statsCache = LruCache<String, CardDataFlow<EventStats>>(CARD_FLOW_CACHE_SIZE)
 
-    fun profileFlow(pubkey: String, scope: CoroutineScope): StateFlow<UserEntity?> =
+    fun profileFlow(pubkey: String): CardDataFlow<UserEntity?> =
         synchronized(profileCache) {
-            val current = userRepository.getUser(pubkey)
-            val cached = profileCache.get(pubkey)
-            if (cached != null && !needsProfileFlowRefresh(cached.value, current)) {
-                return@synchronized cached
-            }
-            userRepository.userFlow(pubkey)
-                .stateIn(scope, SharingStarted.WhileSubscribed(CARD_FLOW_STOP_TIMEOUT_MS), current)
-                .also { profileCache.put(pubkey, it) }
+            profileCache.get(pubkey) ?: CardDataFlow(userRepository.userFlow(pubkey)) {
+                userRepository.getUser(pubkey)
+            }.also { profileCache.put(pubkey, it) }
         }
 
-    private fun needsProfileFlowRefresh(cached: UserEntity?, current: UserEntity?): Boolean {
-        if (current == null) return false
-        return cached == null || cached.updatedAt < current.updatedAt || cached.picture != current.picture
-    }
-
-    fun statsFlow(eventId: String, scope: CoroutineScope): StateFlow<EventStats> =
+    fun statsFlow(eventId: String): CardDataFlow<EventStats> =
         synchronized(statsCache) {
-            statsCache.get(eventId) ?: memoryEventStore.statsFlow(eventId)
-                .stateIn(
-                    scope,
-                    SharingStarted.WhileSubscribed(CARD_FLOW_STOP_TIMEOUT_MS),
-                    memoryEventStore.currentStatsSnapshot(eventId),
-                )
-                .also { statsCache.put(eventId, it) }
+            statsCache.get(eventId) ?: CardDataFlow(memoryEventStore.statsFlow(eventId)) {
+                memoryEventStore.currentStatsSnapshot(eventId)
+            }.also { statsCache.put(eventId, it) }
         }
 
     fun zapDetailsForEvent(eventId: String): List<ZapDetail> =

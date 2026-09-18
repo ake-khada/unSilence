@@ -1,5 +1,6 @@
 package com.unsilence.app.ui.profile
 
+import com.unsilence.app.ui.theme.AppTextStyles
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -72,12 +73,13 @@ fun ConnectionsScreen(
     pubkey: String,
     initialTab: ConnectionsTab,
     onDismiss: () -> Unit,
+    navigationOwnsBack: Boolean = false,
     onProfileClick: (String) -> Unit,
     viewModel: ConnectionsViewModel = hiltViewModel(
         key = "connections-${LocalAppSessionKey.current}-$pubkey-${initialTab.name}",
     ),
 ) {
-    BackHandler(onBack = onDismiss)
+    BackHandler(enabled = !navigationOwnsBack, onBack = onDismiss)
     LaunchedEffect(pubkey, initialTab) { viewModel.initialize(pubkey, initialTab) }
     val state by viewModel.uiState.collectAsStateWithLifecycle()
     val listState = rememberLazyListState()
@@ -111,7 +113,7 @@ fun ConnectionsScreen(
             Text(
                 text = "Connections",
                 color = Color.White,
-                fontSize = AppType.subheading,
+                style = AppTextStyles.subheading,
                 fontWeight = FontWeight.SemiBold,
                 modifier = Modifier.weight(1f),
             )
@@ -145,7 +147,7 @@ fun ConnectionsScreen(
                 Text(
                     text = "Approximate — gathered from index relays.",
                     color = TextSecondary,
-                    fontSize = AppType.caption,
+                    style = AppTextStyles.caption,
                 )
             }
         }
@@ -163,7 +165,7 @@ fun ConnectionsScreen(
                     modifier = Modifier.align(Alignment.Center),
                     horizontalAlignment = Alignment.CenterHorizontally,
                 ) {
-                    Text("Couldn't load connections", color = Text3, fontSize = AppType.body)
+                    Text("Couldn't load connections", color = Text3, style = AppTextStyles.body)
                     TextButton(onClick = viewModel::retry) { Text("Retry", color = Brand) }
                 }
                 !state.loading && state.rows.isEmpty() -> Text(
@@ -173,7 +175,7 @@ fun ConnectionsScreen(
                         "No followers found"
                     },
                     color = Text3,
-                    fontSize = AppType.body,
+                    style = AppTextStyles.body,
                     modifier = Modifier.align(Alignment.Center),
                 )
                 else -> LazyColumn(
@@ -250,7 +252,7 @@ private fun ConnectionsTabs(
                         }
                     },
                     color = if (active) Color.White else Text3,
-                    fontSize = AppType.body,
+                    style = AppTextStyles.body,
                     fontWeight = if (active) FontWeight.SemiBold else FontWeight.Normal,
                 )
                 if (active) {
@@ -300,7 +302,7 @@ private fun ConnectionPersonRow(row: ConnectionRow, onClick: () -> Unit) {
                         ?: row.user.name?.takeIf(String::isNotBlank)
                         ?: shortConnectionNpub(row.pubkey),
                     color = Color.White,
-                    fontSize = AppType.body,
+                    style = AppTextStyles.body,
                     fontWeight = FontWeight.SemiBold,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
@@ -321,7 +323,7 @@ private fun ConnectionPersonRow(row: ConnectionRow, onClick: () -> Unit) {
             Text(
                 text = shortConnectionNpub(row.pubkey),
                 color = Text3,
-                fontSize = AppType.caption,
+                style = AppTextStyles.caption,
                 fontFamily = FontFamily.Monospace,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,

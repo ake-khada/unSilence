@@ -32,6 +32,7 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import javax.inject.Inject
 
+@kotlinx.serialization.Serializable
 enum class ConnectionsTab { Following, Followers }
 
 data class ConnectionRow(

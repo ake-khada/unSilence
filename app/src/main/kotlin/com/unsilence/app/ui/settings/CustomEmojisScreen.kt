@@ -1,5 +1,6 @@
 package com.unsilence.app.ui.settings
 
+import com.unsilence.app.ui.theme.AppTextStyles
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeOut
@@ -77,11 +78,11 @@ import com.unsilence.app.ui.theme.Mint
 import com.unsilence.app.ui.theme.Warn
 
 @Composable
-fun CustomEmojisScreen(onDismiss: () -> Unit) {
+fun CustomEmojisScreen(onDismiss: () -> Unit, navigationOwnsBack: Boolean = false) {
     val viewModel: CustomEmojiSettingsViewModel = hiltViewModel(
         key = "custom-emojis-${LocalAppSessionKey.current}",
     )
-    BackHandler(onBack = onDismiss)
+    BackHandler(enabled = !navigationOwnsBack, onBack = onDismiss)
 
     val pinnedEmojis    by viewModel.pinnedEmojis.collectAsStateWithLifecycle()
     val subscribedSets  by viewModel.subscribedSets.collectAsStateWithLifecycle()
@@ -113,7 +114,7 @@ fun CustomEmojisScreen(onDismiss: () -> Unit) {
                 Text(
                     text = "Custom Emojis",
                     color = Color.White,
-                    fontSize = 16.sp,
+                    style = AppTextStyles.subheading,
                     fontWeight = FontWeight.SemiBold,
                     modifier = Modifier.weight(1f),
                 )
@@ -166,7 +167,7 @@ fun CustomEmojisScreen(onDismiss: () -> Unit) {
                         Text(
                             text = "No sets yet. Paste a link above or browse below to add one.",
                             color = TextSecondary,
-                            fontSize = AppType.bodySmall,
+                            style = AppTextStyles.bodySmall,
                             modifier = Modifier.padding(
                                 horizontal = Spacing.medium,
                                 vertical = Spacing.small,
@@ -256,7 +257,7 @@ private fun PasteBar(
                     Text(
                         "Paste a set link (naddr1…)",
                         color = Text3,
-                        fontSize = AppType.body,
+                        style = AppTextStyles.body,
                     )
                 },
                 singleLine = true,
@@ -287,7 +288,7 @@ private fun PasteBar(
                 shape = RoundedCornerShape(8.dp),
                 contentPadding = PaddingValues(horizontal = Spacing.medium, vertical = Spacing.small),
             ) {
-                Text("Add", fontSize = AppType.body)
+                Text("Add", style = AppTextStyles.body)
             }
         }
 
@@ -305,14 +306,14 @@ private fun PasteBar(
                         strokeWidth = 2.dp,
                     )
                     Spacer(Modifier.width(Spacing.small))
-                    Text("Subscribing…", color = TextSecondary, fontSize = AppType.bodySmall)
+                    Text("Subscribing…", color = TextSecondary, style = AppTextStyles.bodySmall)
                 }
             }
             is PasteState.Error -> {
                 Text(
                     text = pasteState.message,
-                    color = Color(0xFFCF6679),
-                    fontSize = AppType.bodySmall,
+                    color = com.unsilence.app.ui.theme.Error,
+                    style = AppTextStyles.bodySmall,
                     modifier = Modifier.padding(top = Spacing.small),
                 )
             }
@@ -320,7 +321,7 @@ private fun PasteBar(
                 Text(
                     text = "Subscribed",
                     color = BrandDeep,
-                    fontSize = AppType.bodySmall,
+                    style = AppTextStyles.bodySmall,
                     fontWeight = FontWeight.Medium,
                     modifier = Modifier.padding(top = Spacing.small),
                 )
@@ -340,7 +341,7 @@ private fun PinnedStrip(
         Text(
             text = "Long-press emoji in the picker to pin them here",
             color = TextSecondary,
-            fontSize = AppType.caption,
+            style = AppTextStyles.caption,
             modifier = Modifier
                 .fillMaxWidth()
                 .clickable(onClick = onTap)
@@ -391,7 +392,7 @@ private fun SubscribedSetCard(
             Text(
                 text = row.title ?: row.dTag,
                 color = Color.White,
-                fontSize = AppType.body,
+                style = AppTextStyles.body,
                 fontWeight = FontWeight.Medium,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
@@ -402,7 +403,7 @@ private fun SubscribedSetCard(
                     Text(
                         text = " · ${row.emojis.size} emojis",
                         color = Text3,
-                        fontSize = AppType.caption,
+                        style = AppTextStyles.caption,
                     )
                 }
             }
@@ -414,12 +415,12 @@ private fun SubscribedSetCard(
                     Text(
                         text = "couldn't reach · ",
                         color = Warn,
-                        fontSize = AppType.caption,
+                        style = AppTextStyles.caption,
                     )
                     Text(
                         text = "retry",
                         color = Warn,
-                        fontSize = AppType.caption,
+                        style = AppTextStyles.caption,
                         fontWeight = FontWeight.Medium,
                     )
                 }
@@ -428,7 +429,7 @@ private fun SubscribedSetCard(
 
         // Remove button
         TextButton(onClick = onRemove) {
-            Text("Remove", color = TextSecondary, fontSize = AppType.bodySmall)
+            Text("Remove", color = TextSecondary, style = AppTextStyles.bodySmall)
         }
     }
 }
@@ -456,7 +457,7 @@ private fun DiscoverSetCard(
             Text(
                 text = row.title,
                 color = Color.White,
-                fontSize = AppType.body,
+                style = AppTextStyles.body,
                 fontWeight = FontWeight.Medium,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
@@ -466,7 +467,7 @@ private fun DiscoverSetCard(
                 Text(
                     text = " · ${row.emojis.size} emojis",
                     color = Text3,
-                    fontSize = AppType.caption,
+                    style = AppTextStyles.caption,
                 )
             }
         }
@@ -497,7 +498,7 @@ private fun DiscoverSetCard(
                     modifier = Modifier.size(16.dp),
                 )
                 Spacer(Modifier.width(4.dp))
-                Text("Add", fontSize = AppType.bodySmall)
+                Text("Add", style = AppTextStyles.bodySmall)
             }
         }
     }
@@ -517,7 +518,7 @@ private fun SectionHeader(
             Text(
                 text = title,
                 color = Color.White,
-                fontSize = AppType.subheading,
+                style = AppTextStyles.subheading,
                 fontWeight = FontWeight.SemiBold,
             )
             if (count != null) {
@@ -530,7 +531,7 @@ private fun SectionHeader(
                     Text(
                         text = count.toString(),
                         color = TextSecondary,
-                        fontSize = AppType.caption,
+                        style = AppTextStyles.caption,
                     )
                 }
             }
@@ -539,7 +540,7 @@ private fun SectionHeader(
             Text(
                 text = subtitle,
                 color = Text3,
-                fontSize = AppType.caption,
+                style = AppTextStyles.caption,
                 modifier = Modifier.padding(top = 2.dp),
             )
         }
@@ -611,7 +612,7 @@ private fun AuthorChip(profile: UserEntity?, pubkey: String) {
         Text(
             text = name,
             color = Text3,
-            fontSize = AppType.caption,
+            style = AppTextStyles.caption,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
         )

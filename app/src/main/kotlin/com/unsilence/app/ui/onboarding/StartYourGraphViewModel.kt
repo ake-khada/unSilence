@@ -85,11 +85,6 @@ internal class StartYourGraphViewModel @Inject constructor(
     private val _uiState = MutableStateFlow(StartGraphUiState())
     val uiState: StateFlow<StartGraphUiState> = _uiState.asStateFlow()
 
-    private val _autoOpen = MutableStateFlow(false)
-    val autoOpen: StateFlow<Boolean> = _autoOpen.asStateFlow()
-    private val _showEmptyFollowingEntry = MutableStateFlow(false)
-    val showEmptyFollowingEntry: StateFlow<Boolean> = _showEmptyFollowingEntry.asStateFlow()
-
     private val landingChannel = Channel<GraphLanding>(capacity = Channel.BUFFERED)
     val landingEvents = landingChannel.receiveAsFlow()
 
@@ -102,54 +97,9 @@ internal class StartYourGraphViewModel @Inject constructor(
     private var loadStarted = false
 
     init {
+        open()
         viewModelScope.launch {
-            initGate.awaitFollows()
-            val freshPending = keyManager.isGraphOnboardingPending()
-            var follows = ownPubkey?.let(memoryEventStore::getFollows)
-            if (shouldMaterializeEmptyFollows(
-                    follows = follows,
-                    freshIdentityPending = freshPending,
-                    graphKnownEmpty = keyManager.isGraphKnownEmpty(),
-                )
-            ) {
-                follows = materializeEmptyFollowsIfNeeded()
-            }
-            if (follows?.isNotEmpty() == true && !keyManager.isGraphOnboardingCompleted()) {
-                keyManager.completeGraphOnboarding(hasFollows = true)
-            }
-            _autoOpen.value = shouldAutoOpenStartGraph(
-                freshIdentityPending = freshPending,
-                onboardingCompleted = keyManager.isGraphOnboardingCompleted(),
-                follows = follows,
-            )
-            _showEmptyFollowingEntry.value = shouldShowEmptyFollowingEntry(
-                followsResolved = true,
-                follows = follows,
-            )
-            if (_autoOpen.value) open()
-        }
-        viewModelScope.launch {
-            memoryEventStore.followsSignalFlow.collect {
-                val follows = ownPubkey?.let(memoryEventStore::getFollows)
-                if (initGate.followsReady) {
-                    if (follows?.isNotEmpty() == true && !keyManager.isGraphOnboardingCompleted()) {
-                        keyManager.completeGraphOnboarding(hasFollows = true)
-                    } else if (shouldAutoOpenStartGraph(
-                            freshIdentityPending = keyManager.isGraphOnboardingPending(),
-                            onboardingCompleted = keyManager.isGraphOnboardingCompleted(),
-                            follows = follows,
-                        )
-                    ) {
-                        _autoOpen.value = true
-                        open()
-                    }
-                }
-                _showEmptyFollowingEntry.value = shouldShowEmptyFollowingEntry(
-                    followsResolved = initGate.followsReady,
-                    follows = follows,
-                )
-                rebuildUi()
-            }
+            memoryEventStore.followsSignalFlow.collect { rebuildUi() }
         }
         viewModelScope.launch {
             memoryEventStore.profileSignalFlow.collect { rebuildUi() }
@@ -157,10 +107,6 @@ internal class StartYourGraphViewModel @Inject constructor(
         viewModelScope.launch {
             memoryEventStore.wotSignalFlow.collect { rebuildUi() }
         }
-    }
-
-    fun consumeAutoOpen() {
-        _autoOpen.value = false
     }
 
     fun open() {
@@ -228,7 +174,6 @@ internal class StartYourGraphViewModel @Inject constructor(
                     return@launch
                 }
                 keyManager.completeGraphOnboarding(hasFollows = follows.isNotEmpty())
-                _showEmptyFollowingEntry.value = follows.isEmpty()
                 landingChannel.send(graphLanding(follows))
             } catch (cancelled: CancellationException) {
                 throw cancelled

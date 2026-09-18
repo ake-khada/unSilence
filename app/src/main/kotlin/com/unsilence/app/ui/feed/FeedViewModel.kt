@@ -1,6 +1,10 @@
 package com.unsilence.app.ui.feed
 
+import com.unsilence.app.ui.shared.CardDataFlow
+
+import android.os.Bundle
 import android.util.Log
+import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.unsilence.app.data.auth.KeyManager
@@ -39,6 +43,9 @@ import com.unsilence.app.data.repository.MuteListRepository
 import com.unsilence.app.data.repository.MuteResult
 import com.unsilence.app.data.repository.ReportRepository
 import com.unsilence.app.data.repository.UserRepository
+import com.unsilence.app.data.repository.NotificationRepository
+import com.unsilence.app.data.repository.GraphOnboardingRepository
+import com.unsilence.app.data.repository.GraphOnboardingPrompt
 import com.unsilence.app.domain.model.FeedFilter
 import com.unsilence.app.domain.model.GlobalFeedLens
 import com.unsilence.app.domain.model.ShowType
@@ -149,6 +156,7 @@ enum class FeedContentFilter(val value: Int) {
 @OptIn(FlowPreview::class)
 @HiltViewModel
 class FeedViewModel @Inject constructor(
+    private val savedStateHandle: SavedStateHandle,
     private val keyManager: KeyManager,
     private val memoryEventStore: MemoryEventStore,
     private val timelineService: TimelineService,
@@ -162,18 +170,32 @@ class FeedViewModel @Inject constructor(
     private val relayPool: RelayPool,
     private val muteListRepository: MuteListRepository,
     private val reportRepository: ReportRepository,
+    private val notificationRepository: NotificationRepository,
+    private val graphOnboardingRepository: GraphOnboardingRepository,
 ) : ViewModel() {
+
+    private val restoredSession = decodeFeedSession(
+        savedStateHandle.get<Bundle>(FEED_STATE_KEY)?.getString(FEED_JSON_KEY),
+        keyManager.getPublicKeyHex().orEmpty(),
+    )
+    private var hasFeedChoice = restoredSession != null
+    private var restoreTimelineOnSubscribe = restoredSession != null
+    private var pendingRestoredSession = restoredSession
+
+    val hasNewNotifications = notificationRepository.unread(keyManager.getPublicKeyHex().orEmpty())
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(0), false)
+    val graphOnboardingPrompt = graphOnboardingRepository.prompts(keyManager.getPublicKeyHex().orEmpty())
+        .stateIn(viewModelScope, SharingStarted.Eagerly, GraphOnboardingPrompt())
 
     // ── Timeline state (mirrors Jumble NoteList component state) ──────────────
 
     /** Main timeline events, sorted by createdAt-DESC. */
-    private val _events = MutableStateFlow<List<NostrEvent>>(emptyList())
-    val events: StateFlow<List<NostrEvent>> = _events.asStateFlow()
+    private val _timeline = MutableStateFlow(FeedTimeline())
 
     /** Pending events buffer — populated when user is scrolled away from top. */
     private val _newEvents = MutableStateFlow<List<NostrEvent>>(emptyList())
 
-    private val _isAtTop = MutableStateFlow(true)
+    private val _isAtTop = MutableStateFlow(restoredSession?.isAtTop ?: true)
     val isAtTop: StateFlow<Boolean> = _isAtTop.asStateFlow()
     private val _isLoading = MutableStateFlow(false)
     private val _isLoadingMore = MutableStateFlow(false)
@@ -181,16 +203,9 @@ class FeedViewModel @Inject constructor(
     val isLoading: StateFlow<Boolean> = _isLoading.asStateFlow()
     val isLoadingMore: StateFlow<Boolean> = _isLoadingMore.asStateFlow()
 
-    val pendingCount: StateFlow<Int> = _newEvents
-        .map { it.size }
-        .stateIn(viewModelScope, SharingStarted.Eagerly, 0)
 
-    val showDot: StateFlow<Boolean> = _newEvents
-        .map { it.isNotEmpty() }
-        .stateIn(viewModelScope, SharingStarted.Eagerly, false)
-
-    val rawEventCount: StateFlow<Int> = _events
-        .map { it.size }
+    val rawEventCount: StateFlow<Int> = _timeline
+        .map { it.events.size }
         .stateIn(viewModelScope, SharingStarted.Eagerly, 0)
 
     /** IDs of events that arrived via live-tail (not initial load, snapshot, or Load More). */
@@ -204,18 +219,23 @@ class FeedViewModel @Inject constructor(
     // -- Feed type + Global lens (must be before feedRows) --------------------
 
     private val _feedType = MutableStateFlow<FeedType>(
-        if (keyManager.getPublicKeyHex() != null) FeedType.Following else FeedType.Global,
+        restoredSession?.source?.restore()
+            ?: if (keyManager.getPublicKeyHex() != null) FeedType.Following else FeedType.Global,
     )
     val feedType: StateFlow<FeedType> = _feedType.asStateFlow()
 
     private val storedGlobalFeedLens = relayPreferencesStore.globalFeedLensFlow()
-        .stateIn(viewModelScope, SharingStarted.Eagerly, GlobalFeedLens.TRUSTED)
-    private val automaticTrustedGlobal = MutableStateFlow(false)
-    val globalFeedLens: StateFlow<GlobalFeedLens> = combine(
+        .map<GlobalFeedLens, GlobalFeedLens?> { it }
+        .stateIn(viewModelScope, SharingStarted.Eagerly, null)
+    private val automaticTrustedGlobal = MutableStateFlow(restoredSession?.automaticTrustedGlobal ?: false)
+    private val resolvedGlobalFeedLens = combine(
         storedGlobalFeedLens,
         automaticTrustedGlobal,
-        ::effectiveGlobalFeedLens,
-    ).stateIn(viewModelScope, SharingStarted.Eagerly, GlobalFeedLens.TRUSTED)
+    ) { stored, automatic -> stored?.let { effectiveGlobalFeedLens(it, automatic) } }
+        .stateIn(viewModelScope, SharingStarted.Eagerly, null)
+    val globalFeedLens: StateFlow<GlobalFeedLens> = resolvedGlobalFeedLens
+        .map { it ?: GlobalFeedLens.TRUSTED }
+        .stateIn(viewModelScope, SharingStarted.Eagerly, GlobalFeedLens.TRUSTED)
 
     private val globalFeedPolicy = GlobalFeedPolicy()
     private val trustedSweepRequested: MutableSet<String> = ConcurrentHashMap.newKeySet()
@@ -229,6 +249,9 @@ class FeedViewModel @Inject constructor(
     val trustedHydrationFailed: StateFlow<Boolean> = _trustedHydrationFailed.asStateFlow()
 
     fun setFeedType(type: FeedType) {
+        hasFeedChoice = true
+        pendingRestoredSession = null
+        restoreTimelineOnSubscribe = false
         automaticTrustedGlobal.value = false
         val restored = restoreFeedTypeOrGlobal(type)
         feedTrace { "setFeedType: ${_feedType.value} → $restored" }
@@ -242,6 +265,9 @@ class FeedViewModel @Inject constructor(
     }
 
     fun setGlobalFeedLens(lens: GlobalFeedLens) {
+        hasFeedChoice = true
+        pendingRestoredSession = null
+        restoreTimelineOnSubscribe = false
         val wasAutomatic = automaticTrustedGlobal.value
         automaticTrustedGlobal.value = false
         if (!wasAutomatic && lens == storedGlobalFeedLens.value) return
@@ -249,10 +275,24 @@ class FeedViewModel @Inject constructor(
     }
 
     private fun selectAutomaticTrustedGlobal(reason: String) {
+        if (hasFeedChoice) {
+            finishColdStart()
+            return
+        }
         automaticTrustedGlobal.value = true
         _feedType.value = FeedType.Global
         _coldStartState.value = ColdStartState.READY_GLOBAL
         feedTrace { "cold-start: $reason -> Trusted Global" }
+    }
+
+    private fun finishColdStart() {
+        _coldStartState.value = if (_feedType.value is FeedType.Following)
+            ColdStartState.READY_FOLLOWING else ColdStartState.READY_GLOBAL
+    }
+
+    private fun selectInitialFollowing() {
+        if (!hasFeedChoice) _feedType.value = FeedType.Following
+        finishColdStart()
     }
 
     fun clearLiveArrival(id: String) {
@@ -268,10 +308,13 @@ class FeedViewModel @Inject constructor(
 
     // -- Content filter (must be before feedRows which references it) ----------
 
-    private val _contentFilter = MutableStateFlow(FeedContentFilter.NOTES_ONLY)
+    private val _contentFilter = MutableStateFlow(
+        FeedContentFilter.entries.firstOrNull { it.value == restoredSession?.contentFilter }
+            ?: FeedContentFilter.NOTES_ONLY,
+    )
     val contentFilter: StateFlow<FeedContentFilter> = _contentFilter.asStateFlow()
 
-    private val _filter = MutableStateFlow(FeedFilter())
+    private val _filter = MutableStateFlow(restoredSession?.filter ?: FeedFilter())
     val filterFlow: StateFlow<FeedFilter> = _filter.asStateFlow()
 
     // ── feedRows derivation (incremental row cache) ────────────────────────────
@@ -287,16 +330,20 @@ class FeedViewModel @Inject constructor(
         val filter: FeedFilter,
         val type: FeedType,
         val lens: GlobalFeedLens,
+        val restorationReady: Boolean,
     )
 
     private val eventsWithFilter = combine(
-        _events,
+        _timeline,
         _filter,
         _feedType,
-        globalFeedLens,
+        resolvedGlobalFeedLens,
         memoryEventStore.wotSignalFlow,
-    ) { events, filter, type, lens, _ ->
-        FeedProjectionInput(events, filter, type, lens)
+    ) { timeline, filter, type, lens, _ ->
+        FeedProjectionInput(
+            timeline.events, filter, type, lens ?: GlobalFeedLens.TRUSTED,
+            timeline.isSeededFor(type, filter) && (type != FeedType.Global || lens != null),
+        )
     }
     private val feedSafetyFlow = combine(
         memoryEventStore.ownMuteListFlow(),
@@ -307,7 +354,7 @@ class FeedViewModel @Inject constructor(
         FeedSafety(muteList, hashtagCap, sensitiveMode)
     }
 
-    val feedRows: StateFlow<List<FeedRow>> =
+    internal val presentation: StateFlow<FeedPresentation> =
         combine(
             eventsWithFilter,
             _contentFilter,
@@ -315,23 +362,18 @@ class FeedViewModel @Inject constructor(
         ) { input, cf, safety ->
             val events = input.events
             val filter = input.filter
+            val projected = FeedPresentation(
+                selection = FeedSelection(input.type.savedSource(), filter, cf.value),
+                restorationReady = input.restorationReady,
+            )
             if (events.isEmpty()) {
                 feedRowCache.evictAll()
                 _globalFeedDropCounters.value = GlobalFeedDropCounters()
                 _trustedHiddenCount.value = 0
                 requestTrustedCandidateSweep(emptyList())
-                return@combine emptyList()
+                return@combine projected
             }
-            val hideSensitive = safety.sensitiveMode == SensitiveContentMode.HIDE
-            val nowSec = System.currentTimeMillis() / 1000L
-            val baseCandidates = events.asSequence()
-                .filterNot { memoryEventStore.isDeleted(it) }
-                .filter { !isMuted(it, safety.muteList, memoryEventStore::getNostrEvent) }
-                .filter { !exceedsHashtagCap(it, safety.hashtagCap, memoryEventStore::getNostrEvent) }
-                .filter { matchesFeedFilterBeforeActivity(it, filter, nowSec) }
-                .filter { matchesContentFilter(it, cf) }
-                .filter { !hideSensitive || !it.hasContentWarning }
-                .toList()
+            val baseCandidates = baseFeedCandidates(events, filter, cf, safety)
 
             val policyMode = feedPolicyMode(input.type, input.lens)
             val trustedGlobal = policyMode == FeedPolicyMode.TRUSTED
@@ -355,7 +397,7 @@ class FeedViewModel @Inject constructor(
                 .toList()
             if (displayed.isEmpty()) {
                 feedRowCache.evictAll()
-                return@combine emptyList()
+                return@combine projected
             }
 
             // Determine which IDs need fresh rows (not in cache)
@@ -387,11 +429,52 @@ class FeedViewModel @Inject constructor(
 
             // LRU bounds the cache — no manual eviction needed
             // Build ordered result from cache
-            displayed.mapNotNull { evt -> feedRowCache.get(evt.id) }
+            projected.copy(rows = displayed.mapNotNull { evt -> feedRowCache.get(evt.id) })
         }
             .conflate()
             .flowOn(Dispatchers.Default)
-            .stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
+            .stateIn(viewModelScope, SharingStarted.Eagerly, FeedPresentation())
+
+    private val feedRows = presentation.map { it.rows }.distinctUntilChanged()
+
+    // Count the pending buffer with the same safety/filter policy as displayed
+    // rows. This is a bounded Default-dispatcher projection, never a scroll read.
+    val pendingCount: StateFlow<Int> = combine(
+        _newEvents, eventsWithFilter, _contentFilter, feedSafetyFlow,
+    ) { pending, input, cf, safety ->
+        if (pending.isEmpty()) return@combine 0
+        val existingIds = input.events.mapTo(HashSet()) { it.id }
+        val candidates = baseFeedCandidates(pending, input.filter, cf, safety)
+            .filterNot { it.id in existingIds }
+        val policy = feedPolicyMode(input.type, input.lens)
+        globalFeedPolicy.project(
+            candidates,
+            applyHeuristics = policy != FeedPolicyMode.NONE,
+            trustLookup = if (policy == FeedPolicyMode.TRUSTED) memoryEventStore::wotFor else null,
+        ).accepted.count { matchesActivityThresholds(it, input.filter) }
+    }.flowOn(Dispatchers.Default)
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(0), 0)
+
+    val showDot: StateFlow<Boolean> = pendingCount.map { it > 0 }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(0), false)
+
+    private fun baseFeedCandidates(
+        events: List<NostrEvent>,
+        filter: FeedFilter,
+        cf: FeedContentFilter,
+        safety: FeedSafety,
+    ): List<NostrEvent> {
+        val hideSensitive = safety.sensitiveMode == SensitiveContentMode.HIDE
+        val nowSec = System.currentTimeMillis() / 1000L
+        return events.asSequence()
+            .filterNot { memoryEventStore.isDeleted(it) }
+            .filter { !isMuted(it, safety.muteList, memoryEventStore::getNostrEvent) }
+            .filter { !exceedsHashtagCap(it, safety.hashtagCap, memoryEventStore::getNostrEvent) }
+            .filter { matchesFeedFilterBeforeActivity(it, filter, nowSec) }
+            .filter { matchesContentFilter(it, cf) }
+            .filter { !hideSensitive || !it.hasContentWarning }
+            .toList()
+    }
 
     // -- Relay-metadata version (triggers resubscribe on kind-10002 arrival) ---
 
@@ -431,6 +514,8 @@ class FeedViewModel @Inject constructor(
 
     fun setContentFilter(f: FeedContentFilter) {
         if (_contentFilter.value == f) return
+        pendingRestoredSession = null
+        restoreTimelineOnSubscribe = false
         feedTrace { "setContentFilter: ${_contentFilter.value} → $f" }
         _contentFilter.value = f
         // Pure client-side projection — feedRows recomposes via its own
@@ -438,6 +523,10 @@ class FeedViewModel @Inject constructor(
     }
 
     fun updateFilter(filter: FeedFilter) {
+        if (filter != _filter.value) {
+            pendingRestoredSession = null
+            restoreTimelineOnSubscribe = false
+        }
         _filter.value = filter
     }
 
@@ -474,13 +563,13 @@ class FeedViewModel @Inject constructor(
 
     // -- Profile lookup for repost original authors ----------------------------
 
-    fun profileFlow(pubkey: String): StateFlow<UserEntity?> =
-        timelineCardData.profileFlow(pubkey, viewModelScope)
+    fun profileFlow(pubkey: String): CardDataFlow<UserEntity?> =
+        timelineCardData.profileFlow(pubkey)
 
     // -- Per-event stats lookup (replyCount, reactionCount, etc.) -------------
 
-    fun statsFlow(eventId: String): StateFlow<EventStats> =
-        timelineCardData.statsFlow(eventId, viewModelScope)
+    fun statsFlow(eventId: String): CardDataFlow<EventStats> =
+        timelineCardData.statsFlow(eventId)
 
     // -- Engagement contributor accessors (delegates to MES indexes) ------------
 
@@ -682,10 +771,21 @@ class FeedViewModel @Inject constructor(
         if (resetView) resetTrustedCandidateSweep()
         val cachedEvents = if (resetView) loadCachedEvents(key.type, key.filter) else emptyList()
         if (resetView) {
-            _events.value = cachedEvents
+            val restoring = restoredSession?.takeIf {
+                restoreTimelineOnSubscribe && it.source.restore() == key.type && it.filter == key.filter
+            }
+            restoreTimelineOnSubscribe = false
+            _timeline.value = FeedTimeline(
+                events = TimelineMerge.merge(
+                    cachedEvents,
+                    restoring?.eventIds.orEmpty().mapNotNull(memoryEventStore::getNostrEvent),
+                ),
+                source = key.type,
+                filter = key.filter,
+            )
             _newEvents.value = emptyList()
             _liveArrivalIds.value = emptySet()
-            setAtTop(true)
+            setAtTop(restoring?.isAtTop ?: true)
         }
 
         val subRequests = buildSubRequests(key.type, key.filter)
@@ -698,7 +798,7 @@ class FeedViewModel @Inject constructor(
         _isLoading.value = shouldShowFeedLoading(
             resetView = resetView,
             hadActiveHandle = hadActiveHandle,
-            hasVisibleEvents = _events.value.isNotEmpty(),
+            hasVisibleEvents = _timeline.value.events.isNotEmpty(),
         )
 
         // Admission gate for relay batches arriving after subscription starts.
@@ -707,7 +807,7 @@ class FeedViewModel @Inject constructor(
         // resetView=false (metaVer resub): head-since from current _events — relay
         //   data newer than this merges on top, older is skipped (already displayed).
         // Clamped to now — defense against poisoned future-dated events in snapshot.
-        val since: Long? = if (resetView) null else _events.value.firstOrNull()?.createdAt
+        val since: Long? = if (resetView) null else _timeline.value.events.firstOrNull()?.createdAt
             ?.coerceAtMost(System.currentTimeMillis() / 1000L)
 
         currentHandle = timelineService.subscribeTimeline(
@@ -721,7 +821,7 @@ class FeedViewModel @Inject constructor(
             },
             onNew    = { event -> handleNew(event) },
         )
-        feedTrace { "setupSubscription: started subs=${subRequests.size} since=$since cached=${cachedEvents.size} events=${_events.value.size}" }
+        feedTrace { "setupSubscription: started subs=${subRequests.size} since=$since cached=${cachedEvents.size} events=${_timeline.value.events.size}" }
 
         if (_isRefreshing.value) {
             refreshTimeoutJob = viewModelScope.launch {
@@ -740,10 +840,10 @@ class FeedViewModel @Inject constructor(
      *   if (eosed)    setInitialLoading(false)
      */
     private fun handleBatch(batch: List<NostrEvent>, eosed: Boolean, since: Long?) {
-        feedTrace { "handleBatch: size=${batch.size} eosed=$eosed since=$since current=${_events.value.size}" }
+        feedTrace { "handleBatch: size=${batch.size} eosed=$eosed since=$since current=${_timeline.value.events.size}" }
         if (batch.isNotEmpty()) {
             if (since == null) {
-                _events.update { current -> TimelineMerge.merge(current, batch) }
+                _timeline.update { it.copy(events = TimelineMerge.merge(it.events, batch)) }
             } else {
                 val newer = batch.filter { it.createdAt >= since }
                 if (newer.isNotEmpty()) {
@@ -754,7 +854,7 @@ class FeedViewModel @Inject constructor(
         if (eosed) {
             _isLoading.value = false
         }
-        if (_events.value.isNotEmpty()) {
+        if (_timeline.value.events.isNotEmpty()) {
             _isLoading.value = false
         }
     }
@@ -767,7 +867,7 @@ class FeedViewModel @Inject constructor(
     private fun handleNew(event: NostrEvent) {
         if (_isAtTop.value) {
             _liveArrivalIds.update { it + event.id }
-            _events.update { current -> TimelineMerge.merge(current, listOf(event)) }
+            _timeline.update { it.copy(events = TimelineMerge.merge(it.events, listOf(event))) }
         } else {
             _newEvents.update { current -> TimelineMerge.merge(current, listOf(event)) }
         }
@@ -777,7 +877,7 @@ class FeedViewModel @Inject constructor(
     private fun handleNewBatch(newEvents: List<NostrEvent>) {
         if (_isAtTop.value) {
             _liveArrivalIds.update { it + newEvents.map { e -> e.id }.toSet() }
-            _events.update { current -> TimelineMerge.merge(current, newEvents) }
+            _timeline.update { it.copy(events = TimelineMerge.merge(it.events, newEvents)) }
         } else {
             _newEvents.update { current -> TimelineMerge.merge(current, newEvents) }
         }
@@ -812,20 +912,20 @@ class FeedViewModel @Inject constructor(
         val pending = _newEvents.value
         if (pending.isEmpty()) return
         _liveArrivalIds.update { it + pending.map { e -> e.id }.toSet() }
-        _events.update { current -> TimelineMerge.merge(current, pending) }
+        _timeline.update { it.copy(events = TimelineMerge.merge(it.events, pending)) }
         _newEvents.value = emptyList()
     }
 
     fun loadMore() {
         if (_isLoadingMore.value) return
         val handle = currentHandle ?: return
-        val until = _events.value.lastOrNull()?.createdAt ?: return
+        val until = _timeline.value.events.lastOrNull()?.createdAt ?: return
         viewModelScope.launch {
             _isLoadingMore.value = true
             try {
                 val older = timelineService.fetchOlderTimeline(handle.timelineKey, until, 100)
                 if (older.isNotEmpty()) {
-                    _events.update { current -> TimelineMerge.merge(current, older, capTail = false) }
+                    _timeline.update { it.copy(events = TimelineMerge.merge(it.events, older, capTail = false)) }
                 }
             } finally {
                 _isLoadingMore.value = false
@@ -834,6 +934,8 @@ class FeedViewModel @Inject constructor(
     }
 
     fun refresh() {
+        pendingRestoredSession = null
+        restoreTimelineOnSubscribe = false
         if (_trustedHydrationFailed.value) retryTrustedHydration()
         _refreshCounter.value = _refreshCounter.value + 1
     }
@@ -859,6 +961,8 @@ class FeedViewModel @Inject constructor(
         val now = System.currentTimeMillis()
         if (_isRefreshing.value) return
         if (now - lastRefreshAt < REFRESH_DEBOUNCE_MS) return
+        pendingRestoredSession = null
+        restoreTimelineOnSubscribe = false
         lastRefreshAt = now
         if (_trustedHydrationFailed.value) retryTrustedHydration()
         _isRefreshing.value = true
@@ -869,6 +973,25 @@ class FeedViewModel @Inject constructor(
 
     init {
         feedTrace { "init: ownPubkey=${keyManager.getPublicKeyHex()?.take(8)}" }
+
+        // Serialize only when Android saves the Activity, not on each scroll frame.
+        savedStateHandle.setSavedStateProvider(FEED_STATE_KEY) {
+            Bundle().apply {
+                if (_coldStartState.value != ColdStartState.LOADING || pendingRestoredSession != null) {
+                    val current = SavedFeedSession(
+                        owner = keyManager.getPublicKeyHex().orEmpty(),
+                        source = _feedType.value.savedSource(),
+                        filter = _filter.value,
+                        contentFilter = _contentFilter.value.value,
+                        automaticTrustedGlobal = automaticTrustedGlobal.value,
+                        isAtTop = _isAtTop.value,
+                    )
+                    putString(FEED_JSON_KEY, encodeFeedSession(
+                        feedSessionForSave(current, pendingRestoredSession, presentation.value),
+                    ))
+                }
+            }
+        }
 
         // Surface auth-unavailable for SingleRelay feeds
         viewModelScope.launch {
@@ -899,13 +1022,20 @@ class FeedViewModel @Inject constructor(
         // Cold-start: figure out initial feed type FIRST (no resubscribe yet),
         // then the resubscribe collector fires once coldStartState leaves LOADING.
         viewModelScope.launch {
+            if (restoredSession != null) {
+                // Unlike snapshotRestoredFlow, this also completes for a missing or
+                // rejected file. Seed once, after the local data has actually settled.
+                if (ownPubkey != null) initGate.awaitSnapshot()
+                _hasFollows.value = ownPubkey?.let(memoryEventStore::getFollows)?.isNotEmpty() == true
+                finishColdStart()
+                return@launch
+            }
             if (ownPubkey != null) {
                 // Fast path: snapshot already has follows — skip relay wait
                 val snapshotFollows = memoryEventStore.getFollows(ownPubkey)
                 if (snapshotFollows?.isNotEmpty() == true) {
                     _hasFollows.value = true
-                    _feedType.value = FeedType.Following
-                    _coldStartState.value = ColdStartState.READY_FOLLOWING
+                    selectInitialFollowing()
                     feedTrace { "cold-start: ${snapshotFollows.size} follows in snapshot -> Following" }
                 } else if (keyManager.isGraphKnownEmpty()) {
                     selectAutomaticTrustedGlobal("completed empty graph")
@@ -931,8 +1061,7 @@ class FeedViewModel @Inject constructor(
                                 .filter { it.isNotEmpty() }
                                 .first()
                         }
-                        _feedType.value = FeedType.Following
-                        _coldStartState.value = ColdStartState.READY_FOLLOWING
+                        selectInitialFollowing()
                         feedTrace { "cold-start: ${follows.orEmpty().size} follows from relay -> Following" }
                     }
                 }
@@ -1008,10 +1137,14 @@ class FeedViewModel @Inject constructor(
         // One-shot: merge cached events when snapshot restore completes.
         viewModelScope.launch {
             memoryEventStore.snapshotRestoredFlow.filter { it > 0L }.first()
-            val cached = loadCachedEvents(_feedType.value, _filter.value)
-            if (cached.isNotEmpty() && _events.value.size < SNAPSHOT_MERGE_CEILING) {
-                feedTrace { "snapshot restored: merging ${cached.size} cached events into ${_events.value.size} current" }
-                _events.update { current -> TimelineMerge.merge(current, cached) }
+            // Restored sessions seed after awaitSnapshot; do not race that seed.
+            if (restoredSession != null && restoreTimelineOnSubscribe) return@launch
+            val cached = if (_timeline.value.events.size < SNAPSHOT_MERGE_CEILING) {
+                loadCachedEvents(_feedType.value, _filter.value)
+            } else emptyList()
+            if (cached.isNotEmpty()) {
+                feedTrace { "snapshot restored: merging ${cached.size} cached events into ${_timeline.value.events.size} current" }
+                _timeline.update { it.copy(events = TimelineMerge.merge(it.events, cached)) }
             }
         }
     }
@@ -1305,6 +1438,8 @@ class FeedViewModel @Inject constructor(
     )
 
     private companion object {
+        const val FEED_STATE_KEY = "feed_session"
+        const val FEED_JSON_KEY = "json"
         const val WARM_ZONE_ABOVE = 10
         const val WARM_ZONE_BELOW = 50
         /** Churny feeds (Global, SingleRelay) — narrower warm zone to reduce speculative fetches. */

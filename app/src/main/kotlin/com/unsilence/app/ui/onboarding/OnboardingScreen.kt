@@ -1,5 +1,6 @@
 package com.unsilence.app.ui.onboarding
 
+import com.unsilence.app.ui.theme.AppTextStyles
 import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -130,7 +131,7 @@ fun OnboardingScreen(keyManager: KeyManager, onComplete: () -> Unit) {
         Text(
             text       = "unSilence is a Nostr client. Your identity lives on a key, not a server \u2014 and goes with you everywhere.",
             color      = TextSecondary,
-            fontSize   = AppType.bodyLarge,
+            style = AppTextStyles.bodyLarge,
             lineHeight = 21.sp,
             modifier   = Modifier.widthIn(max = 320.dp),
         )
@@ -148,11 +149,11 @@ fun OnboardingScreen(keyManager: KeyManager, onComplete: () -> Unit) {
             contentPadding = ButtonPadding,
             colors         = ButtonDefaults.buttonColors(
                 containerColor = Brand,
-                contentColor   = Color(0xFF001012),
+                contentColor   = com.unsilence.app.ui.theme.Black,
             ),
             modifier = Modifier.fillMaxWidth(),
         ) {
-            Text("Create new identity", fontSize = AppType.bodyLarge, fontWeight = FontWeight.SemiBold)
+            Text("Create new identity", style = AppTextStyles.bodyLarge, fontWeight = FontWeight.SemiBold)
         }
 
         // 10.
@@ -167,7 +168,7 @@ fun OnboardingScreen(keyManager: KeyManager, onComplete: () -> Unit) {
             colors         = ButtonDefaults.outlinedButtonColors(contentColor = White),
             modifier       = Modifier.fillMaxWidth(),
         ) {
-            Text("I already have keys", fontSize = AppType.bodyLarge)
+            Text("I already have keys", style = AppTextStyles.bodyLarge)
         }
 
         // Import key expansion
@@ -197,7 +198,7 @@ fun OnboardingScreen(keyManager: KeyManager, onComplete: () -> Unit) {
                         contentDescription = null,
                         modifier           = Modifier.padding(end = Spacing.small).size(16.dp),
                     )
-                    Text("Paste from clipboard", fontSize = AppType.body)
+                    Text("Paste from clipboard", style = AppTextStyles.body)
                 }
             } else {
                 // Confirm the paste without exposing key material.
@@ -212,7 +213,7 @@ fun OnboardingScreen(keyManager: KeyManager, onComplete: () -> Unit) {
                     Text(
                         text       = "Key pasted \u2014 tap to import",
                         color      = White,
-                        fontSize   = AppType.body,
+                        style = AppTextStyles.body,
                         maxLines   = 1,
                         modifier   = Modifier.weight(1f).padding(end = Spacing.small),
                         overflow   = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
@@ -242,8 +243,8 @@ fun OnboardingScreen(keyManager: KeyManager, onComplete: () -> Unit) {
             if (importError != null) {
                 Text(
                     text     = importError!!,
-                    color    = Color(0xFFCF6679),
-                    fontSize = AppType.caption,
+                    color    = com.unsilence.app.ui.theme.Error,
+                    style = AppTextStyles.caption,
                     textAlign = TextAlign.Center,
                     modifier = Modifier.fillMaxWidth().padding(top = Spacing.micro),
                 )
@@ -270,7 +271,7 @@ fun OnboardingScreen(keyManager: KeyManager, onComplete: () -> Unit) {
                 contentDescription = null,
                 modifier           = Modifier.padding(end = Spacing.medium).size(16.dp),
             )
-            Text("Sign in with Amber", fontSize = AppType.body)
+            Text("Sign in with Amber", style = AppTextStyles.body)
         }
 
         // 14. Buttons → footer
@@ -284,14 +285,14 @@ fun OnboardingScreen(keyManager: KeyManager, onComplete: () -> Unit) {
             Text(
                 text          = "YOUR KEYS  \u00B7  YOUR VOICE  \u00B7  NO RECOVERY",
                 color         = Text3,
-                fontSize      = AppType.footnote,
+                style = AppTextStyles.footnote,
                 letterSpacing = 1.5.sp,
             )
             TextButton(
                 onClick = { uriHandler.openUri("https://nostr.com") },
                 colors  = ButtonDefaults.textButtonColors(contentColor = TextSecondary),
             ) {
-                Text("What is Nostr? \u2197", fontSize = AppType.bodyLarge)
+                Text("What is Nostr? \u2197", style = AppTextStyles.bodyLarge)
             }
         }
 

@@ -30,7 +30,6 @@ import com.unsilence.app.ui.theme.TextSecondary
 import com.unsilence.app.ui.theme.Zap
 import com.vitorpamplona.quartz.nip01Core.relay.normalizer.NormalizedRelayUrl
 import com.vitorpamplona.quartz.nip19Bech32.entities.NEvent
-import kotlinx.coroutines.flow.StateFlow
 
 /**
  * Text exposed by the action sheet. Repost envelopes are never copyable:
@@ -54,7 +53,7 @@ internal fun copyablePostText(
 @Composable
 fun PostActionsHost(
     row: FeedRow?,
-    profileFlow: (String) -> StateFlow<UserEntity?>,
+    profileFlow: (String) -> CardDataFlow<UserEntity?>,
     canDelete: (FeedRow) -> Boolean,
     onMuteUser: (String) -> MuteResult,
     onReport: (FeedRow, ReportType) -> Unit,

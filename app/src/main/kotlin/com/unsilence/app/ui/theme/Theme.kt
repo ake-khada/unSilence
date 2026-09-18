@@ -4,6 +4,8 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Typography
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.foundation.LocalIndication
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
@@ -45,15 +47,15 @@ internal val UnsilenceTypography = Typography(
     displayLarge = TextStyle(fontSize = AppType.display, lineHeight = 32.sp, fontWeight = FontWeight.Normal),
     displayMedium = TextStyle(fontSize = AppType.display, lineHeight = 32.sp, fontWeight = FontWeight.Normal),
     displaySmall = TextStyle(fontSize = AppType.title, lineHeight = 30.sp, fontWeight = FontWeight.Normal),
-    headlineLarge = TextStyle(fontSize = AppType.title, lineHeight = 30.sp, fontWeight = FontWeight.SemiBold),
-    headlineMedium = TextStyle(fontSize = AppType.heading, lineHeight = 26.sp, fontWeight = FontWeight.SemiBold),
-    headlineSmall = TextStyle(fontSize = AppType.subheading, lineHeight = 24.sp, fontWeight = FontWeight.SemiBold),
+    headlineLarge = AppTextStyles.title.copy(fontWeight = FontWeight.SemiBold),
+    headlineMedium = AppTextStyles.heading.copy(fontWeight = FontWeight.SemiBold),
+    headlineSmall = AppTextStyles.subheading.copy(fontWeight = FontWeight.SemiBold),
     titleLarge = TextStyle(fontSize = AppType.title, lineHeight = 30.sp, fontWeight = FontWeight.Medium),
     titleMedium = TextStyle(fontSize = AppType.subheading, lineHeight = 24.sp, fontWeight = FontWeight.Medium),
     titleSmall = TextStyle(fontSize = AppType.body, lineHeight = 20.sp, fontWeight = FontWeight.Medium),
-    bodyLarge = TextStyle(fontSize = AppType.bodyLarge, lineHeight = 22.sp, fontWeight = FontWeight.Normal),
-    bodyMedium = TextStyle(fontSize = AppType.body, lineHeight = 20.sp, fontWeight = FontWeight.Normal),
-    bodySmall = TextStyle(fontSize = AppType.bodySmall, lineHeight = 18.sp, fontWeight = FontWeight.Normal),
+    bodyLarge = AppTextStyles.bodyLarge,
+    bodyMedium = AppTextStyles.body,
+    bodySmall = AppTextStyles.bodySmall,
     labelLarge = TextStyle(fontSize = AppType.body, lineHeight = 20.sp, fontWeight = FontWeight.Medium),
     labelMedium = TextStyle(fontSize = AppType.footnote, lineHeight = 16.sp, fontWeight = FontWeight.Medium),
     labelSmall = TextStyle(fontSize = AppType.caption, lineHeight = 16.sp, fontWeight = FontWeight.Medium),
@@ -91,7 +93,7 @@ private val UnsilenceColorScheme = darkColorScheme(
     surfaceContainerHighest = BgElev3,
     surfaceDim              = Black,
     surfaceBright           = Surface2,
-    error            = Color(0xFFCF6679),
+    error            = Error,
 )
 
 @Composable
@@ -99,6 +101,8 @@ fun UnsilenceTheme(content: @Composable () -> Unit) {
     MaterialTheme(
         colorScheme = UnsilenceColorScheme,
         typography = UnsilenceTypography,
-        content = content,
+        content = {
+            CompositionLocalProvider(LocalIndication provides PressTint, content = content)
+        },
     )
 }

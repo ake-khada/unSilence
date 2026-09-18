@@ -1,5 +1,6 @@
 package com.unsilence.app.ui.relays
 
+import com.unsilence.app.ui.theme.AppTextStyles
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -93,12 +94,13 @@ enum class DiscoveryFacet(val label: String) {
 @Composable
 fun RelayDiscoveryScreen(
     onDismiss: () -> Unit,
+    navigationOwnsBack: Boolean = false,
     onOpenDetail: (url: String) -> Unit,
     viewModel: RelayManagementViewModel = hiltViewModel(
         key = "relay-management-${LocalAppSessionKey.current}",
     ),
 ) {
-    BackHandler(onBack = onDismiss)
+    BackHandler(enabled = !navigationOwnsBack, onBack = onDismiss)
     LaunchedEffect(Unit) { viewModel.ensureDirectory() }   // firehose runs ONLY here
 
     val directory by viewModel.relayDirectory.collectAsStateWithLifecycle()
@@ -193,7 +195,7 @@ private fun LazyListScope.relaySection(
         Text(
             label.uppercase(),
             color = Text3,
-            fontSize = 11.sp,
+            style = AppTextStyles.caption,
             fontWeight = FontWeight.Medium,
             letterSpacing = 0.8.sp,
             modifier = Modifier.fillMaxWidth().padding(start = Spacing.medium, end = Spacing.medium, top = Spacing.medium, bottom = Spacing.small),
@@ -224,7 +226,7 @@ private fun DiscoveryCard(e: RelayDirectoryEntry, isAdded: Boolean, onAdd: () ->
                 RelayIcon(e.icon, Modifier.size(34.dp))
                 Spacer(Modifier.width(Spacing.small))
                 Column(modifier = Modifier.weight(1f)) {
-                    Text(e.name ?: discoveryHost(e.url), color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    Text(e.name ?: discoveryHost(e.url), color = Color.White, style = AppTextStyles.body, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
                     Text(discoveryHost(e.url), color = Text3, fontSize = 11.5f.sp, fontFamily = FontFamily.Monospace, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 }
             }
@@ -294,7 +296,7 @@ private fun AddTargetSheet(
         Column(modifier = Modifier.fillMaxWidth().navigationBarsPadding().padding(bottom = Spacing.medium)) {
             Text(
                 "Add $host to…",
-                color = Color.White, fontSize = 15.sp, fontWeight = FontWeight.SemiBold,
+                color = Color.White, style = AppTextStyles.bodyLarge, fontWeight = FontWeight.SemiBold,
                 modifier = Modifier.padding(horizontal = Spacing.large, vertical = Spacing.small),
             )
             // Default is My relays (read+write) — listed first.
@@ -311,7 +313,7 @@ private fun SheetRow(title: String, subtitle: String, onClick: () -> Unit) {
     Column(
         modifier = Modifier.fillMaxWidth().clickable(onClick = onClick).padding(horizontal = Spacing.large, vertical = 12.dp),
     ) {
-        Text(title, color = Color.White, fontSize = 15.sp, fontWeight = FontWeight.Medium)
+        Text(title, color = Color.White, style = AppTextStyles.bodyLarge, fontWeight = FontWeight.Medium)
         Text(subtitle, color = TextSecondary, fontSize = 12.5f.sp)
     }
 }
@@ -332,7 +334,7 @@ private fun DiscoverySearchField(query: String, onQuery: (String) -> Unit) {
         Icon(Icons.Filled.Search, contentDescription = null, tint = Text3, modifier = Modifier.size(18.dp))
         Spacer(Modifier.width(8.dp))
         Box(modifier = Modifier.weight(1f), contentAlignment = Alignment.CenterStart) {
-            if (query.isEmpty()) Text("Search by name, topic, or operator…", color = Text3, fontSize = 14.sp)
+            if (query.isEmpty()) Text("Search by name, topic, or operator…", color = Text3, style = AppTextStyles.body)
             BasicTextField(
                 value = query,
                 onValueChange = onQuery,
@@ -372,7 +374,7 @@ private fun FacetChips(activeIndex: Int, onSelect: (Int) -> Unit) {
                     .clickable { onSelect(i) }
                     .padding(horizontal = 12.dp, vertical = 7.dp),
             ) {
-                Text(f.label, color = if (on) Brand else TextSecondary, fontSize = 12.sp, fontWeight = if (on) FontWeight.Medium else FontWeight.Normal, maxLines = 1)
+                Text(f.label, color = if (on) Brand else TextSecondary, style = AppTextStyles.footnote, fontWeight = if (on) FontWeight.Medium else FontWeight.Normal, maxLines = 1)
             }
         }
     }
@@ -414,9 +416,9 @@ private fun DiscoveryLoading(loading: Boolean) {
             if (loading) {
                 CircularProgressIndicator(color = Brand, modifier = Modifier.size(28.dp), strokeWidth = 2.5.dp)
                 Spacer(Modifier.height(Spacing.medium))
-                Text("Scanning the relay directory…", color = TextSecondary, fontSize = 13.sp)
+                Text("Scanning the relay directory…", color = TextSecondary, style = AppTextStyles.bodySmall)
             } else {
-                Text("No relays found — check your connection.", color = TextSecondary, fontSize = 13.sp, modifier = Modifier.padding(Spacing.xl))
+                Text("No relays found — check your connection.", color = TextSecondary, style = AppTextStyles.bodySmall, modifier = Modifier.padding(Spacing.xl))
             }
         }
     }
@@ -425,7 +427,7 @@ private fun DiscoveryLoading(loading: Boolean) {
 @Composable
 private fun NoMatches(message: String) {
     Box(modifier = Modifier.fillMaxWidth().padding(Spacing.xl), contentAlignment = Alignment.Center) {
-        Text(message, color = TextSecondary, fontSize = 13.sp)
+        Text(message, color = TextSecondary, style = AppTextStyles.bodySmall)
     }
 }
 

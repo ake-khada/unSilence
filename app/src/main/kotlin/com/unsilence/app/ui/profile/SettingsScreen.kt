@@ -1,5 +1,6 @@
 package com.unsilence.app.ui.profile
 
+import com.unsilence.app.ui.theme.AppTextStyles
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -172,7 +173,7 @@ fun SettingsScreen(
                                 ?: profile?.name?.takeIf { it.isNotBlank() }
                                 ?: "Your profile",
                             color = Color.White,
-                            fontSize = 14.sp,
+                            style = AppTextStyles.body,
                             fontWeight = FontWeight.SemiBold,
                             maxLines = 1,
                         )
@@ -226,7 +227,7 @@ fun SettingsScreen(
                         horizontalArrangement = Arrangement.spacedBy(10.dp),
                     ) {
                         Icon(Icons.AutoMirrored.Filled.Logout, null, tint = Like, modifier = Modifier.size(17.dp))
-                        Text("Log out", color = Like, fontSize = 14.sp, fontWeight = FontWeight.Medium)
+                        Text("Log out", color = Like, style = AppTextStyles.body, fontWeight = FontWeight.Medium)
                     }
                     Text(
                         text = "unSilence v${BuildConfig.VERSION_NAME}",
@@ -335,7 +336,7 @@ private fun SettingsRow(
         }
         Spacer(Modifier.width(14.dp))
         Column(modifier = Modifier.weight(1f)) {
-            Text(title, color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.Medium)
+            Text(title, color = Color.White, style = AppTextStyles.body, fontWeight = FontWeight.Medium)
             Text(description, color = Text3, fontSize = 11.5.sp, modifier = Modifier.padding(top = 2.dp))
         }
         if (badge != null) {
@@ -370,7 +371,7 @@ private fun SoonRow(icon: ImageVector, title: String) {
             Icon(icon, null, tint = Color.White, modifier = Modifier.size(16.dp))
         }
         Spacer(Modifier.width(14.dp))
-        Text(title, color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.Medium, modifier = Modifier.weight(1f))
+        Text(title, color = Color.White, style = AppTextStyles.body, fontWeight = FontWeight.Medium, modifier = Modifier.weight(1f))
         Text(
             text = "SOON",
             color = Text3,
@@ -393,11 +394,11 @@ private fun LogoutConfirmSheet(onConfirm: () -> Unit, onDismiss: () -> Unit) {
         sheetState = rememberModalBottomSheetState(),
     ) {
         Column(modifier = Modifier.fillMaxWidth().padding(horizontal = Spacing.large, vertical = Spacing.small)) {
-            Text("Log out?", color = Color.White, fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
+            Text("Log out?", color = Color.White, style = AppTextStyles.heading, fontWeight = FontWeight.SemiBold)
             Text(
                 "You'll need your key to sign back in. Your notes stay on the relays.",
                 color = TextSecondary,
-                fontSize = 13.sp,
+                style = AppTextStyles.bodySmall,
                 modifier = Modifier.padding(top = Spacing.small),
             )
             Spacer(Modifier.height(Spacing.large))
@@ -410,7 +411,7 @@ private fun LogoutConfirmSheet(onConfirm: () -> Unit, onDismiss: () -> Unit) {
                     .padding(vertical = 13.dp),
                 horizontalArrangement = Arrangement.Center,
             ) {
-                Text("Log out", color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+                Text("Log out", color = Color.White, style = AppTextStyles.body, fontWeight = FontWeight.SemiBold)
             }
             Row(
                 modifier = Modifier
@@ -419,7 +420,7 @@ private fun LogoutConfirmSheet(onConfirm: () -> Unit, onDismiss: () -> Unit) {
                     .padding(vertical = 13.dp),
                 horizontalArrangement = Arrangement.Center,
             ) {
-                Text("Cancel", color = TextSecondary, fontSize = 14.sp)
+                Text("Cancel", color = TextSecondary, style = AppTextStyles.body)
             }
             Spacer(Modifier.height(Spacing.large))
         }

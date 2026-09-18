@@ -1,5 +1,6 @@
 package com.unsilence.app.ui.feed
 
+import com.unsilence.app.ui.theme.AppTextStyles
 import androidx.compose.animation.animateContentSize
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.animateDpAsState
@@ -29,6 +30,12 @@ import com.unsilence.app.ui.shared.ResumedEffect
 import androidx.lifecycle.compose.LifecycleResumeEffect
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.runtime.rememberCoroutineScope
+import kotlinx.coroutines.launch
+import androidx.compose.ui.platform.LocalHapticFeedback
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import com.unsilence.app.ui.common.PullThresholdFeedback
 import com.unsilence.app.ui.shared.rememberCardWotLookup
 import com.unsilence.app.ui.shared.rememberArticleSelection
 import androidx.compose.runtime.DisposableEffect
@@ -150,7 +157,8 @@ fun FeedScreen(
     val isLoadingV     by viewModel.isLoading.collectAsStateWithLifecycle()
     val isLoadingMore by viewModel.isLoadingMore.collectAsStateWithLifecycle()
     val isRefreshing by viewModel.isRefreshing.collectAsStateWithLifecycle()
-    val feedEvents    by viewModel.feedRows.collectAsStateWithLifecycle()
+    val presentation by viewModel.presentation.collectAsStateWithLifecycle()
+    val feedEvents = presentation.rows
     val engagementRetryRevision by actionsViewModel.engagementRetryRevision.collectAsStateWithLifecycle()
     LaunchedEffect(engagementRetryRevision) {
         viewModel.retryVisibleEngagement(engagementRetryRevision)
@@ -163,7 +171,11 @@ fun FeedScreen(
     val coldStartState by viewModel.coldStartState.collectAsStateWithLifecycle()
     val trustedHydrationFailed by viewModel.trustedHydrationFailed.collectAsStateWithLifecycle()
     val sensitiveMode  by viewModel.sensitiveContentMode.collectAsStateWithLifecycle()
-    val listState = rememberFeedScrollState(feedEvents)
+    val listState = rememberFeedScrollState(
+        feedEvents,
+        restorationReady = presentation.restorationReady,
+    )
+    val scrollScope = rememberCoroutineScope()
     val cardWidthPx = LocalWindowInfo.current.containerSize.width
 
     var articleRow by rememberArticleSelection(actionsViewModel)
@@ -413,6 +425,16 @@ fun FeedScreen(
 
             else -> {
                 val pullState = rememberPullToRefreshState()
+                val haptic = LocalHapticFeedback.current
+                val refreshingNow by rememberUpdatedState(isRefreshing)
+                LaunchedEffect(pullState, haptic) {
+                    val threshold = PullThresholdFeedback()
+                    snapshotFlow { pullState.distanceFraction to refreshingNow }.collect { (fraction, refreshing) ->
+                        if (threshold.update(fraction, refreshing)) {
+                            haptic.performHapticFeedback(HapticFeedbackType.GestureThresholdActivate)
+                        }
+                    }
+                }
                 LaunchedEffect(pullState, onPullRefreshProgress) {
                     snapshotFlow { pullState.distanceFraction }
                         .collect { onPullRefreshProgress(it.coerceAtLeast(0f)) }
@@ -449,7 +471,7 @@ fun FeedScreen(
                             Text(
                                 text = "Trusted hides $trustedHiddenCount unscored or spam-shaped notes \u00B7 local filter",
                                 color = TextSecondary,
-                                fontSize = AppType.caption,
+                                style = AppTextStyles.caption,
                                 modifier = Modifier
                                     .fillMaxWidth()
                                     .padding(horizontal = Spacing.large, vertical = Spacing.medium),
@@ -477,12 +499,12 @@ fun FeedScreen(
                                 } else {
                                     Text(
                                         text = "Load more",
-                                        fontSize = AppType.bodySmall,
+                                        style = AppTextStyles.bodySmall,
                                         color = TextSecondary,
                                         modifier = Modifier
                                             .clickable(
                                                 interactionSource = remember { MutableInteractionSource() },
-                                                indication = null,
+                                                indication = androidx.compose.foundation.LocalIndication.current,
                                             ) { viewModel.loadMore() }
                                             .background(
                                                 color = Surface1,
@@ -546,6 +568,17 @@ fun FeedScreen(
 
         // ── Tab row overlay (slides with top bar via offset, no height collapse) ─
         if (!immersiveMode) {
+            PendingPostsPill(
+                pendingCount = viewModel.pendingCount,
+                atTop = isAtTop,
+                onClick = {
+                    viewModel.onDotTapped()
+                    scrollScope.launch { listState.scrollToItem(0) }
+                },
+                modifier = Modifier
+                    .align(Alignment.TopCenter)
+                    .padding(top = if (topBarShown) totalTopPadding + Spacing.small else Spacing.xl),
+            )
             Box(
                 modifier = Modifier
                     .align(Alignment.TopStart)
@@ -660,14 +693,14 @@ private fun EmptyFollowingGraphState(onFindPeople: () -> Unit) {
         Text(
             text = "Your feed is waiting",
             color = White,
-            fontSize = AppType.subheading,
+            style = AppTextStyles.subheading,
             fontWeight = FontWeight.SemiBold,
             modifier = Modifier.padding(top = Spacing.medium),
         )
         Text(
             text = "Follow a few people to make this space yours.",
             color = TextSecondary,
-            fontSize = AppType.body,
+            style = AppTextStyles.body,
             modifier = Modifier.padding(top = Spacing.small),
         )
         Button(
@@ -705,7 +738,7 @@ private fun FeedContentTabs(
                     .weight(1f)
                     .clickable(
                         interactionSource = remember { MutableInteractionSource() },
-                        indication = null,
+                        indication = androidx.compose.foundation.LocalIndication.current,
                         onClick = { onSelect(tab) },
                     )
                     .padding(vertical = 12.dp),
@@ -714,7 +747,7 @@ private fun FeedContentTabs(
                 Text(
                     text = label,
                     color = if (isSelected) White else White.copy(alpha = 0.4f),
-                    fontSize = AppType.body,
+                    style = AppTextStyles.body,
                     fontWeight = if (isSelected) FontWeight.SemiBold else FontWeight.Normal,
                 )
             }

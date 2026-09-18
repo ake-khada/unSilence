@@ -1,5 +1,6 @@
 package com.unsilence.app.ui.relays
 
+import com.unsilence.app.ui.theme.AppTextStyles
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.background
@@ -98,13 +99,14 @@ import com.vitorpamplona.quartz.nip19Bech32.toNpub
 fun RelayDetailScreen(
     relayUrl: String,
     onDismiss: () -> Unit,
+    navigationOwnsBack: Boolean = false,
     onOpenProfile: (pubkeyHex: String) -> Unit = {},
     onBrowse: (url: String, label: String) -> Unit = { _, _ -> },
     viewModel: RelayManagementViewModel = hiltViewModel(
         key = "relay-management-${LocalAppSessionKey.current}",
     ),
 ) {
-    BackHandler(onBack = onDismiss)
+    BackHandler(enabled = !navigationOwnsBack, onBack = onDismiss)
     val clipboard = LocalClipboardManager.current
     val context = LocalContext.current
 
@@ -139,7 +141,7 @@ fun RelayDetailScreen(
                     IconButton(onClick = onDismiss) {
                         Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back", tint = Color.White, modifier = Modifier.size(22.dp))
                     }
-                    Text("Relay", color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+                    Text("Relay", color = Color.White, style = AppTextStyles.subheading, fontWeight = FontWeight.SemiBold)
                 }
             }
 
@@ -225,7 +227,7 @@ private fun RelayDetailHero(url: String, e: RelayDirectoryEntry?, loading: Boole
             Text(
                 text = e?.name ?: relayHost(url),
                 color = Color.White,
-                fontSize = 18.sp,
+                style = AppTextStyles.heading,
                 fontWeight = FontWeight.SemiBold,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
@@ -235,7 +237,7 @@ private fun RelayDetailHero(url: String, e: RelayDirectoryEntry?, loading: Boole
                 Text(
                     text = url.removeSuffix("/"),
                     color = TextSecondary,
-                    fontSize = 12.sp,
+                    style = AppTextStyles.footnote,
                     fontFamily = FontFamily.Monospace,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
@@ -280,7 +282,7 @@ private fun ReachabilityRow(e: RelayDirectoryEntry) {
     ) {
         Box(modifier = Modifier.size(8.dp).clip(RoundedCornerShape(4.dp)).background(color))
         Spacer(Modifier.width(10.dp))
-        Text(headline, color = color, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+        Text(headline, color = color, style = AppTextStyles.body, fontWeight = FontWeight.SemiBold)
         Spacer(Modifier.width(6.dp))
         Text("· $detail", color = TextSecondary, fontSize = 12.5f.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
     }
@@ -315,7 +317,7 @@ private fun StatCell(modifier: Modifier, value: String, unit: String?, label: St
             if (unit != null) Text(unit, color = valueColor, fontSize = 10.sp, modifier = Modifier.padding(start = 1.dp, bottom = 2.dp))
         }
         Spacer(Modifier.height(3.dp))
-        Text(label, color = Text3, fontSize = 11.sp)
+        Text(label, color = Text3, style = AppTextStyles.caption)
     }
 }
 
@@ -343,7 +345,7 @@ private fun NipChip(text: String, highlighted: Boolean) {
             .background(if (highlighted) BrandSoft else Surface1)
             .padding(horizontal = 9.dp, vertical = 5.dp),
     ) {
-        Text(text, color = if (highlighted) Brand else TextSecondary, fontSize = 12.sp, fontWeight = if (highlighted) FontWeight.Medium else FontWeight.Normal)
+        Text(text, color = if (highlighted) Brand else TextSecondary, style = AppTextStyles.footnote, fontWeight = if (highlighted) FontWeight.Medium else FontWeight.Normal)
     }
 }
 
@@ -396,14 +398,14 @@ private fun HostedInRow(countryCode: String) {
         modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Text("Hosted in", color = TextSecondary, fontSize = 13.sp, modifier = Modifier.weight(1f))
+        Text("Hosted in", color = TextSecondary, style = AppTextStyles.bodySmall, modifier = Modifier.weight(1f))
         Text(
             buildString { flag?.let { append("$it ") }; append(name) },
-            color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.Medium,
+            color = Color.White, style = AppTextStyles.bodySmall, fontWeight = FontWeight.Medium,
             maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.widthIn(max = 150.dp),
         )
-        Text(" · ", color = TextSecondary, fontSize = 13.sp)
-        Text(eyesLabel, color = eyesColor, fontSize = 13.sp, fontWeight = FontWeight.Medium, maxLines = 1)
+        Text(" · ", color = TextSecondary, style = AppTextStyles.bodySmall)
+        Text(eyesLabel, color = eyesColor, style = AppTextStyles.bodySmall, fontWeight = FontWeight.Medium, maxLines = 1)
     }
 }
 
@@ -438,13 +440,13 @@ private fun OperatorRow(pubkeyHex: String, viewModel: RelayManagementViewModel, 
         verticalAlignment = Alignment.CenterVertically,
     ) {
         // "Operator" label takes the left slack so the author chip right-aligns like the KV rows.
-        Text("Operator", color = TextSecondary, fontSize = 13.sp, modifier = Modifier.weight(1f))
+        Text("Operator", color = TextSecondary, style = AppTextStyles.bodySmall, modifier = Modifier.weight(1f))
         AvatarImage(pubkey = pubkeyHex, picture = profile?.picture, modifier = Modifier.size(24.dp))
         Spacer(Modifier.width(7.dp))
         Text(
             name,
             color = Color.White,
-            fontSize = 13.sp,
+            style = AppTextStyles.bodySmall,
             fontWeight = FontWeight.Medium,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
@@ -471,15 +473,15 @@ private fun PolicyRow(key: String, value: String, valueColor: Color, onClick: ((
             .padding(vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Text(key, color = TextSecondary, fontSize = 13.sp, modifier = Modifier.weight(1f))
-        Text(value, color = valueColor, fontSize = 13.sp, fontWeight = FontWeight.Medium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        Text(key, color = TextSecondary, style = AppTextStyles.bodySmall, modifier = Modifier.weight(1f))
+        Text(value, color = valueColor, style = AppTextStyles.bodySmall, fontWeight = FontWeight.Medium, maxLines = 1, overflow = TextOverflow.Ellipsis)
     }
 }
 
 @Composable
 private fun DetailSection(label: String, content: @Composable () -> Unit) {
     Column(modifier = Modifier.fillMaxWidth().padding(horizontal = Spacing.medium, vertical = Spacing.small)) {
-        Text(label.uppercase(), color = Text3, fontSize = 11.sp, fontWeight = FontWeight.Medium, letterSpacing = 0.8.sp)
+        Text(label.uppercase(), color = Text3, style = AppTextStyles.caption, fontWeight = FontWeight.Medium, letterSpacing = 0.8.sp)
         Spacer(Modifier.height(Spacing.small))
         content()
     }
@@ -548,7 +550,7 @@ private fun RelayDetailFooter(
         ) {
             Icon(Icons.Filled.PlayArrow, contentDescription = null, tint = Brand, modifier = Modifier.size(18.dp))
             Spacer(Modifier.width(6.dp))
-            Text("Browse $relayLabel's feed", color = Brand, fontSize = 14.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Text("Browse $relayLabel's feed", color = Brand, style = AppTextStyles.body, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
         }
         Spacer(Modifier.height(Spacing.small))
 
@@ -560,12 +562,12 @@ private fun RelayDetailFooter(
                 modifier = Modifier.fillMaxWidth().padding(bottom = Spacing.small),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                Text("Reads / writes", color = TextSecondary, fontSize = 13.sp, modifier = Modifier.weight(1f))
+                Text("Reads / writes", color = TextSecondary, style = AppTextStyles.bodySmall, modifier = Modifier.weight(1f))
                 RwPill("R", readOn) { val n = !readOn; if (n || writeOn) onSetMarker(rwMarkerOf(n, writeOn)) }
                 Spacer(Modifier.width(4.dp))
                 RwPill("W", writeOn) { val n = !writeOn; if (readOn || n) onSetMarker(rwMarkerOf(readOn, n)) }
                 Spacer(Modifier.width(14.dp))
-                Text("Remove", color = Like, fontSize = 13.sp, fontWeight = FontWeight.Medium, modifier = Modifier.clickable(onClick = onRemoveMember))
+                Text("Remove", color = Like, style = AppTextStyles.bodySmall, fontWeight = FontWeight.Medium, modifier = Modifier.clickable(onClick = onRemoveMember))
             }
         }
 
@@ -584,7 +586,7 @@ private fun RelayDetailFooter(
                 Text(
                     if (isMember) markerStateLabel(memberConfig?.marker) else "Add to my relays",
                     color = if (isMember) Color.White else Color.Black,
-                    fontSize = 14.sp,
+                    style = AppTextStyles.body,
                     fontWeight = FontWeight.SemiBold,
                 )
             }
@@ -596,8 +598,8 @@ private fun RelayDetailFooter(
             Box {
                 FooterIconButton(Icons.Filled.MoreVert, TextSecondary, "More", { showMenu = true })
                 DropdownMenu(expanded = showMenu, onDismissRequest = { showMenu = false }) {
-                    DropdownMenuItem(text = { Text("Copy URL", color = Color.White, fontSize = 14.sp) }, onClick = { showMenu = false; onCopyUrl() })
-                    DropdownMenuItem(text = { Text("Share", color = Color.White, fontSize = 14.sp) }, onClick = { showMenu = false; onShare() })
+                    DropdownMenuItem(text = { Text("Copy URL", color = Color.White, style = AppTextStyles.body) }, onClick = { showMenu = false; onCopyUrl() })
+                    DropdownMenuItem(text = { Text("Share", color = Color.White, style = AppTextStyles.body) }, onClick = { showMenu = false; onShare() })
                 }
             }
         }

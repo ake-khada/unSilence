@@ -1,5 +1,8 @@
 package com.unsilence.app.ui.feed
 
+import com.unsilence.app.ui.theme.AppTextStyles
+import com.unsilence.app.ui.shared.collectCardDataAsState
+
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.expandVertically
 import androidx.compose.animation.shrinkVertically
@@ -105,7 +108,8 @@ internal fun ImmersiveEngagementSheet(
 
     val liveStats = host.surface.statsFlow?.let { statsFlow ->
         key(model.engagementId) {
-            statsFlow(model.engagementId).collectAsStateWithLifecycle().value
+            val flow = statsFlow(model.engagementId)
+            flow.collectCardDataAsState().value
         }
     }
     val eventEngagement = remember(model.engagementId, engagement) {
@@ -153,7 +157,6 @@ internal fun ImmersiveEngagementSheet(
                         onAuthorClick = host.actions.onAuthorClick,
                         onNoteClick = { host.actions.onNoteClick(model.navigateId) },
                         lookupProfile = lookupProfile,
-                        profileFlow = host.surface.profileFlow,
                         wotLookup = host.surface.wotLookup,
                         feedWotDisplayMode = host.surface.feedWotDisplayMode,
                     )
@@ -244,7 +247,7 @@ internal fun ImmersiveEngagementSheet(
                             else -> "${threadState.replies.size} ${if (threadState.replies.size == 1) "comment" else "comments"}"
                         },
                         color = TextSecondary,
-                        fontSize = AppType.footnote,
+                        style = AppTextStyles.footnote,
                         fontWeight = FontWeight.SemiBold,
                         modifier = Modifier.padding(
                             horizontal = Spacing.medium,
@@ -302,7 +305,7 @@ internal fun ImmersiveEngagementSheet(
                     Text(
                         text = "Reply",
                         color = White,
-                        fontSize = AppType.body,
+                        style = AppTextStyles.body,
                         fontWeight = FontWeight.SemiBold,
                     )
                 }

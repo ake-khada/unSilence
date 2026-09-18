@@ -1,5 +1,10 @@
 package com.unsilence.app.ui.feed
 
+import com.unsilence.app.ui.theme.AppTextStyles
+import com.unsilence.app.ui.shared.collectCardDataAsState
+
+import com.unsilence.app.ui.shared.CardDataFlow
+
 import android.content.Intent
 import android.util.Log
 import androidx.compose.foundation.ExperimentalFoundationApi
@@ -63,7 +68,6 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.FlowPreview
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.sample
-import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.withContext
 import androidx.compose.ui.window.DialogProperties
 import androidx.hilt.navigation.compose.hiltViewModel
@@ -130,8 +134,8 @@ fun ArticleReaderScreen(
     onAuthorClick: (String) -> Unit = {},
     onHashtagClick: (String) -> Unit = {},
     lookupProfile: (suspend (String) -> com.unsilence.app.data.memory.UserEntity?)? = null,
-    profileFlow: ((String) -> StateFlow<com.unsilence.app.data.memory.UserEntity?>)? = null,
-    statsFlow: ((String) -> StateFlow<com.unsilence.app.data.memory.EventStats>)? = null,
+    profileFlow: ((String) -> CardDataFlow<com.unsilence.app.data.memory.UserEntity?>)? = null,
+    statsFlow: ((String) -> CardDataFlow<com.unsilence.app.data.memory.EventStats>)? = null,
     zapDetailsForEvent: ((String) -> List<com.unsilence.app.data.memory.ZapDetail>)? = null,
     repostPubkeysForEvent: ((String) -> List<String>)? = null,
     reactionsForEvent: ((String) -> List<com.unsilence.app.data.memory.ReactionInfo>)? = null,
@@ -301,7 +305,7 @@ fun ArticleReaderScreen(
     val articleStatsFlow = remember(model.engagementId) {
         statsFlow?.invoke(model.engagementId) ?: articleReaderVm.statsFlow(model.engagementId)
     }
-    val articleStats by articleStatsFlow.collectAsStateWithLifecycle()
+    val articleStats by articleStatsFlow.collectCardDataAsState()
     val sensitiveMode by articleReaderVm.sensitiveContentMode.collectAsStateWithLifecycle()
     val replyCount    = articleStats.replyCount
     val repostCount   = articleStats.repostCount
@@ -512,7 +516,6 @@ fun ArticleReaderScreen(
                                 onAuthorClick = onAuthorTap,
                                 onNoteClick   = {},
                                 lookupProfile = lookupProfile,
-                                profileFlow   = profileFlow,
                                 wotLookup = wotLookup,
                                 feedWotDisplayMode = feedWotDisplayMode,
                                 repostSourcePubkey = if (isRepost) model.sourcePubkey else null,
@@ -547,8 +550,7 @@ fun ArticleReaderScreen(
                                         text       = title,
                                         color      = Color.White,
                                         fontWeight = FontWeight.Bold,
-                                        fontSize   = AppType.title,
-                                        lineHeight = 30.sp,
+                                        style = AppTextStyles.title,
                                         textAlign  = TextAlign.Center,
                                         modifier   = Modifier.fillMaxWidth(),
                                     )
@@ -556,7 +558,7 @@ fun ArticleReaderScreen(
                                         Text(
                                             text     = "$readingMinutes min read",
                                             color    = TextSecondary,
-                                            fontSize = AppType.caption,
+                                            style = AppTextStyles.caption,
                                             modifier = Modifier.padding(top = Spacing.small),
                                         )
                                     }
@@ -610,7 +612,7 @@ fun ArticleReaderScreen(
                                             Text(
                                                 text     = "#$tag",
                                                 color    = BrandDeep,
-                                                fontSize = AppType.footnote,
+                                                style = AppTextStyles.footnote,
                                                 modifier = Modifier
                                                     .clip(RoundedCornerShape(50))
                                                     .background(Surface2)
@@ -697,7 +699,7 @@ fun ArticleReaderScreen(
                             Text(
                                 text     = "${comments.size} ${if (comments.size == 1) "comment" else "comments"}",
                                 color    = TextSecondary,
-                                fontSize = AppType.footnote,
+                                style = AppTextStyles.footnote,
                                 modifier = Modifier
                                     .fillMaxWidth()
                                     .padding(horizontal = Spacing.medium, vertical = Spacing.small),

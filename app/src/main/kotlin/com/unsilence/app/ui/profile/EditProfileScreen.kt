@@ -1,5 +1,6 @@
 package com.unsilence.app.ui.profile
 
+import com.unsilence.app.ui.theme.AppTextStyles
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
@@ -195,7 +196,7 @@ fun EditProfileScreen(
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 TextButton(onClick = dismiss) {
-                    Text(text = "Cancel", color = TextSecondary, fontSize = 14.sp)
+                    Text(text = "Cancel", color = TextSecondary, style = AppTextStyles.body)
                 }
                 Spacer(Modifier.weight(1f))
                 TextButton(
@@ -209,7 +210,7 @@ fun EditProfileScreen(
                     Text(
                         text  = if (isSaving) "Saving…" else "Save",
                         color = if (hasChanges && !isSaving) Brand else TextSecondary,
-                        fontSize = 14.sp,
+                        style = AppTextStyles.body,
                         fontWeight = FontWeight.SemiBold,
                     )
                 }
@@ -258,7 +259,7 @@ fun EditProfileScreen(
                         Text(
                             text     = "Tap to set banner",
                             color    = TextSecondary,
-                            fontSize = 12.sp,
+                            style = AppTextStyles.footnote,
                         )
                     }
                 }
@@ -304,7 +305,7 @@ fun EditProfileScreen(
                 Text(
                     text     = "Tap to change",
                     color    = TextSecondary,
-                    fontSize = 11.sp,
+                    style = AppTextStyles.caption,
                     modifier = Modifier.padding(top = 4.dp),
                 )
 
@@ -381,7 +382,7 @@ private fun ProfileField(
         Text(
             text     = label,
             color    = TextSecondary,
-            fontSize = 12.sp,
+            style = AppTextStyles.footnote,
         )
         Spacer(Modifier.height(4.dp))
         BasicTextField(
@@ -394,7 +395,7 @@ private fun ProfileField(
             decorationBox = { inner ->
                 Box {
                     if (value.isEmpty() && hint.isNotBlank()) {
-                        Text(hint, color = Text3, fontSize = 15.sp)
+                        Text(hint, color = Text3, style = AppTextStyles.bodyLarge)
                     }
                     inner()
                 }

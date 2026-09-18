@@ -1,5 +1,6 @@
 package com.unsilence.app.ui.relays
 
+import com.unsilence.app.ui.theme.AppTextStyles
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.ExperimentalFoundationApi
@@ -145,7 +146,7 @@ private fun RelayCategoryRail(
             ) {
                 itemsIndexed(RelayCategories) { i, cat ->
                     val active = i == selectedIndex
-                    val fg = if (active) Color(0xFF001012) else TextSecondary
+                    val fg = if (active) com.unsilence.app.ui.theme.Black else TextSecondary
                     Row(
                         modifier = Modifier
                             .clip(RoundedCornerShape(999.dp))
@@ -157,7 +158,7 @@ private fun RelayCategoryRail(
                         horizontalArrangement = Arrangement.spacedBy(6.dp),
                     ) {
                         Icon(cat.icon, null, tint = fg, modifier = Modifier.size(13.dp))
-                        Text(cat.label, color = fg, fontSize = 12.sp, fontWeight = FontWeight.Medium, maxLines = 1)
+                        Text(cat.label, color = fg, style = AppTextStyles.footnote, fontWeight = FontWeight.Medium, maxLines = 1)
                     }
                 }
             }
@@ -198,13 +199,14 @@ private fun RelayCategoryRail(
 @Composable
 fun RelayManagementScreen(
     onDismiss: () -> Unit,
+    navigationOwnsBack: Boolean = false,
     onOpenDetail: (url: String) -> Unit = {},
     onOpenDiscovery: () -> Unit = {},
     viewModel: RelayManagementViewModel = hiltViewModel(
         key = "relay-management-${LocalAppSessionKey.current}",
     ),
 ) {
-    BackHandler(onBack = onDismiss)
+    BackHandler(enabled = !navigationOwnsBack, onBack = onDismiss)
 
     val pagerState = rememberPagerState(pageCount = { 6 })
     val scope = rememberCoroutineScope()
@@ -257,7 +259,7 @@ fun RelayManagementScreen(
                     Text(
                         text       = "Relay Settings",
                         color      = Color.White,
-                        fontSize   = 16.sp,
+                        style = AppTextStyles.subheading,
                         fontWeight = FontWeight.SemiBold,
                         modifier   = Modifier.weight(1f),
                     )
@@ -345,8 +347,8 @@ fun RelayManagementScreen(
                             item {
                                 Text(
                                     text     = "No indexer relays configured. Profile and follow list resolution will not work.",
-                                    color    = Color(0xFFFF6B6B),
-                                    fontSize = 13.sp,
+                                    color    = com.unsilence.app.ui.theme.Like,
+                                    style = AppTextStyles.bodySmall,
                                     modifier = Modifier.padding(Spacing.medium),
                                 )
                             }
@@ -395,7 +397,7 @@ fun RelayManagementScreen(
                             ) {
                                 Icon(Icons.Filled.Add, contentDescription = null, tint = Brand, modifier = Modifier.size(18.dp))
                                 Spacer(Modifier.width(6.dp))
-                                Text("New Relay Set", color = Brand, fontSize = 14.sp)
+                                Text("New Relay Set", color = Brand, style = AppTextStyles.body)
                             }
                         }
                         items(relaySets, key = { it.dTag }) { set ->
@@ -477,7 +479,7 @@ private fun AddRelayInput(placeholder: String, onAdd: (String) -> Unit) {
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(10.dp),
     ) {
-        Text("wss://", color = Text4, fontSize = 11.sp, fontFamily = FontFamily.Monospace)
+        Text("wss://", color = Text4, style = AppTextStyles.caption, fontFamily = FontFamily.Monospace)
         BasicTextField(
             value         = input,
             onValueChange = { input = it },
@@ -488,7 +490,7 @@ private fun AddRelayInput(placeholder: String, onAdd: (String) -> Unit) {
                 // CenterStart + matching font/size = cursor sits on the placeholder baseline.
                 Box(contentAlignment = Alignment.CenterStart) {
                     if (input.isEmpty()) {
-                        Text(hint, color = Text3, fontSize = 12.sp, fontFamily = FontFamily.Monospace, maxLines = 1)
+                        Text(hint, color = Text3, style = AppTextStyles.footnote, fontFamily = FontFamily.Monospace, maxLines = 1)
                     }
                     inner()
                 }
@@ -554,7 +556,7 @@ private fun SwipeToRemove(
                     horizontalArrangement = Arrangement.spacedBy(6.dp),
                 ) {
                     Icon(Icons.Filled.Delete, null, tint = Black, modifier = Modifier.size(15.dp))
-                    Text("Remove", color = Black, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                    Text("Remove", color = Black, style = AppTextStyles.caption, fontWeight = FontWeight.Bold)
                 }
             }
         },
@@ -608,8 +610,8 @@ private fun DiscoverEmptyCta(onOpenDiscovery: () -> Unit) {
         Icon(Icons.Filled.Search, contentDescription = null, tint = Brand, modifier = Modifier.size(20.dp))
         Spacer(Modifier.width(Spacing.small))
         Column(modifier = Modifier.weight(1f)) {
-            Text("Discover relays", color = Brand, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
-            Text("Find relays by name, topic, or who you follow", color = TextSecondary, fontSize = 12.sp)
+            Text("Discover relays", color = Brand, style = AppTextStyles.body, fontWeight = FontWeight.SemiBold)
+            Text("Find relays by name, topic, or who you follow", color = TextSecondary, style = AppTextStyles.footnote)
         }
     }
 }
@@ -639,7 +641,7 @@ private fun SimpleRelayRow(
             Text(
                 text     = displayUrl(url),
                 color    = Color.White,
-                fontSize = 13.sp,
+                style = AppTextStyles.bodySmall,
                 modifier = Modifier.weight(1f),
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
@@ -675,7 +677,7 @@ private fun ReadWriteRelayRow(
             Text(
                 text     = displayUrl(relay.url),
                 color    = Color.White,
-                fontSize = 13.sp,
+                style = AppTextStyles.bodySmall,
                 modifier = Modifier.weight(1f),
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
@@ -724,7 +726,7 @@ private fun FavoriteRelayRow(
         Text(
             text = displayUrl(url),
             color = Color.White,
-            fontSize = 13.sp,
+            style = AppTextStyles.bodySmall,
             modifier = Modifier.weight(1f),
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
@@ -734,13 +736,13 @@ private fun FavoriteRelayRow(
         DropdownMenu(expanded = showMenu, onDismissRequest = { showMenu = false }) {
             if (relaySets.isNotEmpty()) {
                 DropdownMenuItem(
-                    text = { Text("Add to Set", color = Color.White, fontSize = 14.sp) },
+                    text = { Text("Add to Set", color = Color.White, style = AppTextStyles.body) },
                     onClick = {},
                     enabled = false,
                 )
                 relaySets.forEach { set ->
                     DropdownMenuItem(
-                        text = { Text("  ${set.title ?: set.dTag}", color = TextSecondary, fontSize = 13.sp) },
+                        text = { Text("  ${set.title ?: set.dTag}", color = TextSecondary, style = AppTextStyles.bodySmall) },
                         onClick = { showMenu = false; onAddToSet(set.dTag) },
                     )
                 }
@@ -774,13 +776,13 @@ private fun RelaySetRow(
                 Text(
                     text     = set.title ?: set.dTag,
                     color    = Color.White,
-                    fontSize = 13.sp,
+                    style = AppTextStyles.bodySmall,
                     modifier = Modifier.weight(1f),
                 )
                 Text(
                     text  = "${members.size} relays",
                     color = TextSecondary,
-                    fontSize = 11.sp,
+                    style = AppTextStyles.caption,
                 )
                 IconButton(
                     onClick = onEdit,
@@ -802,7 +804,7 @@ private fun RelaySetRow(
                         modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
-                        Text(displayUrl(member), color = TextSecondary, fontSize = 12.sp, modifier = Modifier.weight(1f))
+                        Text(displayUrl(member), color = TextSecondary, style = AppTextStyles.footnote, modifier = Modifier.weight(1f))
                         IconButton(
                             onClick = { viewModel.removeRelayFromSet(set.dTag, member) },
                             modifier = Modifier.size(24.dp),
@@ -872,7 +874,7 @@ private fun RelayHealthSummary(
 private fun SummarySeg(color: Color, text: String) {
     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(5.dp)) {
         Canvas(modifier = Modifier.size(7.dp)) { drawCircle(color = color) }
-        Text(text, color = TextSecondary, fontSize = 11.sp)
+        Text(text, color = TextSecondary, style = AppTextStyles.caption)
     }
 }
 

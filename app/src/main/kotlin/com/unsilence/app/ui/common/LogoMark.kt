@@ -8,7 +8,6 @@ import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.layout.size
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.getValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
@@ -33,16 +32,16 @@ fun LogoMark(
     sizeDp: Dp = 88.dp,
     color: Color = Brand,
     firstBarColor: Color? = null,
-    barHeightScale: Float = 1f,
+    barHeightScale: () -> Float = { 1f },
     static: Boolean = false,
 ) {
     val barColor = color
     val dimColor = color.copy(alpha = 0.5f)
-    val cursorAlpha: Float = if (static) {
-        1f
+    val cursorAlpha = if (static) {
+        null
     } else {
         val infiniteTransition = rememberInfiniteTransition(label = "cursorBlink")
-        val alpha by infiniteTransition.animateFloat(
+        infiniteTransition.animateFloat(
             initialValue = 1f,
             targetValue = 0f,
             animationSpec = infiniteRepeatable(
@@ -58,7 +57,6 @@ fun LogoMark(
             ),
             label = "cursorAlpha",
         )
-        alpha
     }
 
     Canvas(modifier = modifier.size(sizeDp)) {
@@ -74,30 +72,23 @@ fun LogoMark(
         )
 
         // Signal bars — heights are deliberate (24,56,40,88,64,36,20)
-        val bars = arrayOf(
-            floatArrayOf(76f, 88f, 8f, 24f),
-            floatArrayOf(90f, 72f, 8f, 56f),
-            floatArrayOf(104f, 80f, 8f, 40f),
-            floatArrayOf(118f, 56f, 8f, 88f),
-            floatArrayOf(132f, 68f, 8f, 64f),
-            floatArrayOf(146f, 82f, 8f, 36f),
-            floatArrayOf(160f, 90f, 8f, 20f),
-        )
-        val resolvedBarHeightScale = barHeightScale.coerceIn(1f, 1.6f)
-        for ((index, bar) in bars.withIndex()) {
-            val scaledHeight = bar[3] * resolvedBarHeightScale
+        val resolvedBarHeightScale = barHeightScale().coerceIn(1f, 1.6f)
+        for (index in SIGNAL_BAR_HEIGHTS.indices) {
+            val scaledHeight = SIGNAL_BAR_HEIGHTS[index] * resolvedBarHeightScale
             drawRect(
                 color = if (index == 0) firstBarColor ?: barColor else barColor,
-                topLeft = Offset(bar[0] * s, (100f - scaledHeight / 2f) * s),
-                size = Size(bar[2] * s, scaledHeight * s),
+                topLeft = Offset((76f + 14f * index) * s, (100f - scaledHeight / 2f) * s),
+                size = Size(8f * s, scaledHeight * s),
             )
         }
 
         // Terminal cursor (blinks)
         drawRect(
-            color = barColor.copy(alpha = cursorAlpha),
+            color = barColor.copy(alpha = cursorAlpha?.value ?: 1f),
             topLeft = Offset(172f * s, 94f * s),
             size = Size(4f * s, 12f * s),
         )
     }
 }
+
+private val SIGNAL_BAR_HEIGHTS = floatArrayOf(24f, 56f, 40f, 88f, 64f, 36f, 20f)

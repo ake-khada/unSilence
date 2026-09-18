@@ -133,8 +133,10 @@ class UnsilenceApp : Application(), SingletonImageLoader.Factory, androidx.work.
             }
             .bitmapFactoryMaxParallelism(3)
             .allowHardware(true)
-            .allowRgb565(true)
-            .crossfade(false)
+            // Viewers and unconstrained images keep full color precision. Sized
+            // feed requests may opt into RGB565 independently.
+            .allowRgb565(false)
+            .crossfade(120)
             .components {
                 add(OkHttpNetworkFetcherFactory(callFactory = { imageClient }))
                 if (Build.VERSION.SDK_INT >= 28) {

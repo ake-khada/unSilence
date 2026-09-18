@@ -1,5 +1,6 @@
 package com.unsilence.app.ui.navigation
 
+import com.unsilence.app.ui.theme.AppTextStyles
 import android.os.Bundle
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
@@ -89,6 +90,14 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.State
+import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.ui.platform.LocalHapticFeedback
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import com.unsilence.app.ui.shared.ResumedEffect
+import com.unsilence.app.ui.shared.FeedDividerBrush
+import androidx.compose.runtime.snapshotFlow
+import kotlinx.coroutines.flow.collectLatest
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
@@ -186,24 +195,6 @@ private val NavUnselected = Text3
 
 private data class NavTab(val icon: ImageVector, val contentDescription: String)
 
-private val ConnectionsDestinationSaver = Saver<Pair<String, ConnectionsTab>?, Bundle>(
-    save = { destination ->
-        Bundle().apply {
-            destination?.let {
-                putString("pubkey", it.first)
-                putString("tab", it.second.name)
-            }
-        }
-    },
-    restore = { saved ->
-        val pubkey = saved.getString("pubkey")
-        val tab = saved.getString("tab")?.let {
-            runCatching { ConnectionsTab.valueOf(it) }.getOrNull()
-        }
-        if (pubkey != null && tab != null) pubkey to tab else null
-    },
-)
-
 private val TABS = listOf(
     NavTab(Icons.Outlined.Home,          "Home"),
     NavTab(Icons.Outlined.Search,        "Search"),
@@ -247,26 +238,12 @@ fun AppNavigation(
     }
     var selectedTab          by rememberSaveable { mutableIntStateOf(0) }
     var barsVisible          by remember { mutableStateOf(true) }
-    var showCompose          by rememberSaveable { mutableStateOf(false) }
     var showFeedSheet        by rememberSaveable { mutableStateOf(false) }
     var showFilter           by rememberSaveable { mutableStateOf(false) }
-    var showCreateRelaySet   by rememberSaveable { mutableStateOf(false) }
-    var showRelaySettings    by rememberSaveable { mutableStateOf(false) }
-    var relayDetailUrl       by rememberSaveable { mutableStateOf<String?>(null) }
-    var showDiscovery        by rememberSaveable { mutableStateOf(false) }
     val navigator = rememberAppNavigator(sessionKey)
-    var replyToEventId       by rememberSaveable { mutableStateOf<String?>(null) }
-    var quoteNoteId          by rememberSaveable { mutableStateOf<String?>(null) }
-    var connectionsTarget    by rememberSaveable(stateSaver = ConnectionsDestinationSaver) {
-        mutableStateOf<Pair<String, ConnectionsTab>?>(null)
-    }
-    var profileRelaysPubkey  by rememberSaveable { mutableStateOf<String?>(null) }
     var scrollToTopTrigger   by rememberSaveable { mutableIntStateOf(0) }
     var profileScrollToTopTrigger by rememberSaveable { mutableIntStateOf(0) }
-    var showEmojiSettings    by rememberSaveable { mutableStateOf(false) }
-    var showZapSettings      by rememberSaveable { mutableStateOf(false) }
     var hashtagSearchQuery   by rememberSaveable { mutableStateOf<String?>(null) }
-    var showStartGraph       by rememberSaveable { mutableStateOf(false) }
     val pullRefreshFraction = remember { mutableFloatStateOf(0f) }
     val updatePullRefreshFraction: (Float) -> Unit = remember(pullRefreshFraction) {
         { fraction -> pullRefreshFraction.floatValue = fraction }
@@ -293,65 +270,44 @@ fun AppNavigation(
     // instances. Without keying, hiltViewModel() returns the Activity-scoped VM that
     // captured the old user's pubkey at init and never re-initializes.
     val feedViewModel: FeedViewModel = hiltViewModel(key = "feed-$sessionKey")
-    val relayManagementVm: RelayManagementViewModel = hiltViewModel(key = "relay-$sessionKey")
     // Browse a relay's feed (§05 detail footer): make it active WITHOUT pinning it.
     // The source pill names this transient relay until the user switches away.
     val onBrowseRelayFeed: (String, String) -> Unit = { url, lbl ->
         feedViewModel.setFeedType(FeedType.SingleRelay(url, lbl))
-        relayDetailUrl = null
-        showRelaySettings = false
-        showDiscovery = false
-        profileRelaysPubkey = null
-        connectionsTarget = null
         navigator.popToTabs()
         selectedTab = 0
     }
-    val notifViewModel: NotificationsViewModel = hiltViewModel(key = "notif-$sessionKey")
-    val zapSettingsVm: ZapSettingsViewModel = hiltViewModel(key = "zap-settings-$sessionKey")
+    val notifViewModel: NotificationsViewModel? = if (selectedTab == 2) {
+        hiltViewModel(key = "notif-$sessionKey")
+    } else null
     val noteActionsVm: NoteActionsViewModel = hiltViewModel(key = "note-actions-$sessionKey")
+    val haptic = LocalHapticFeedback.current
+    ResumedEffect(noteActionsVm, haptic) {
+        noteActionsVm.actionConfirmed.collect {
+            haptic.performHapticFeedback(HapticFeedbackType.Confirm)
+        }
+    }
     val deepLinkVm: DeepLinkNavigationViewModel = hiltViewModel(key = "deep-links-$sessionKey")
-    val startGraphVm: StartYourGraphViewModel = hiltViewModel(key = "start-graph-$sessionKey")
     val splashDone    by feedViewModel.splashDone.collectAsStateWithLifecycle()
     val feedType      by feedViewModel.feedType.collectAsStateWithLifecycle()
     val userSets      by feedViewModel.userSetsFlow.collectAsStateWithLifecycle()
     val pinnedRelays  by feedViewModel.pinnedRelays.collectAsStateWithLifecycle()
-    val relayHealth   by relayManagementVm.relayHealth.collectAsStateWithLifecycle(initialValue = emptyMap())
     val currentFilter by feedViewModel.filterFlow.collectAsStateWithLifecycle()
     val globalFeedLens by feedViewModel.globalFeedLens.collectAsStateWithLifecycle()
     val isFeedRefreshing by feedViewModel.isRefreshing.collectAsStateWithLifecycle()
     val userAvatarUrl by feedViewModel.userAvatarUrl.collectAsStateWithLifecycle()
     val hasNewTopPost by feedViewModel.showDot.collectAsStateWithLifecycle()
-    val notifFilter        by notifViewModel.filter.collectAsStateWithLifecycle()
-    val hasNewNotifications by notifViewModel.hasNewNotifications.collectAsStateWithLifecycle()
-    val zapPreferences      by zapSettingsVm.preferences.collectAsStateWithLifecycle()
+    val hasNewNotifications by feedViewModel.hasNewNotifications.collectAsStateWithLifecycle()
+    val zapPreferences by noteActionsVm.zapPreferences.collectAsStateWithLifecycle()
     val pendingDeepLink     by deepLinkVm.pendingTarget.collectAsStateWithLifecycle()
     val pendingDeepLinkFailure by deepLinkVm.pendingFailure.collectAsStateWithLifecycle()
-    val startGraphState by startGraphVm.uiState.collectAsStateWithLifecycle()
-    val startGraphAutoOpen by startGraphVm.autoOpen.collectAsStateWithLifecycle()
-    val showEmptyFollowingEntry by startGraphVm.showEmptyFollowingEntry.collectAsStateWithLifecycle()
+    val graphPrompt by feedViewModel.graphOnboardingPrompt.collectAsStateWithLifecycle()
     val isPowerSaveMode = rememberPowerSaveMode()
     val animatorDurationScale = rememberAnimatorDurationScale()
     val headerMotionEnabled = feedHeaderMotionEnabled(isPowerSaveMode, animatorDurationScale)
 
-    LaunchedEffect(startGraphAutoOpen) {
-        if (startGraphAutoOpen) {
-            showStartGraph = true
-            startGraphVm.consumeAutoOpen()
-        }
-    }
-
-    LaunchedEffect(startGraphVm) {
-        startGraphVm.landingEvents.collect { landing ->
-            showStartGraph = false
-            selectedTab = 0
-            when (landing) {
-                GraphLanding.FOLLOWING -> feedViewModel.setFeedType(FeedType.Following)
-                GraphLanding.GLOBAL_TRUSTED -> {
-                    feedViewModel.setGlobalFeedLens(GlobalFeedLens.TRUSTED)
-                    feedViewModel.setFeedType(FeedType.Global)
-                }
-            }
-        }
+    LaunchedEffect(graphPrompt.autoOpen) {
+        if (graphPrompt.autoOpen) navigator.push(AppDestination.StartGraph)
     }
 
     LaunchedEffect(pendingDeepLinkFailure) {
@@ -364,11 +320,6 @@ fun AppNavigation(
         val target = pendingDeepLink ?: return@LaunchedEffect
         if (!deepLinkVm.consume(target)) return@LaunchedEffect
 
-        showCompose = false
-        replyToEventId = null
-        quoteNoteId = null
-        connectionsTarget = null
-        profileRelaysPubkey = null
         when (target) {
             is DeepLinkTarget.Profile -> {
                 deepLinkVm.prefetchProfile(target)
@@ -450,10 +401,10 @@ fun AppNavigation(
     CompositionLocalProvider(
         LocalAppSessionKey provides sessionKey,
         LocalShowSnackbar provides showSnackbar,
-        LocalOpenRelayDetail provides { url -> relayDetailUrl = url },
+        LocalOpenRelayDetail provides { url -> navigator.push(AppDestination.RelayDetail(url)) },
         LocalZapPreferences provides zapPreferences,
-        com.unsilence.app.ui.common.LocalOpenEmojiSettings provides { showEmojiSettings = true },
-        com.unsilence.app.ui.common.LocalOpenZapSettings provides { showZapSettings = true },
+        com.unsilence.app.ui.common.LocalOpenEmojiSettings provides { navigator.push(AppDestination.EmojiSettings) },
+        com.unsilence.app.ui.common.LocalOpenZapSettings provides { navigator.push(AppDestination.ZapSettings) },
     ) {
     Box(
         modifier = Modifier
@@ -480,15 +431,14 @@ fun AppNavigation(
                                 staticTopPadding   = staticTopPadding,
                                 staticBottomPadding = staticBottomPadding,
                                 onNoteClick        = onNoteClick,
-                                onComment          = { eventId -> replyToEventId = eventId },
+                                onComment          = { eventId -> navigator.push(AppDestination.Compose(replyToEventId = eventId)) },
                                 onAuthorClick      = onAuthorClick,
                                 onHashtagClick     = onHashtagClick,
-                                onQuote            = { noteId  -> quoteNoteId   = noteId  },
+                                onQuote            = { noteId  -> navigator.push(AppDestination.Compose(quoteEventId = noteId))  },
                                 onPullRefreshProgress = updatePullRefreshFraction,
-                                showFindPeopleEmptyState = showEmptyFollowingEntry,
+                                showFindPeopleEmptyState = graphPrompt.showEmptyFollowing,
                                 onFindPeople = {
-                                    startGraphVm.open()
-                                    showStartGraph = true
+                                    navigator.push(AppDestination.StartGraph)
                                 },
                                 viewModel          = feedViewModel,
                                 actionsViewModel   = noteActionsVm,
@@ -497,10 +447,10 @@ fun AppNavigation(
                                 SearchScreen(
                                     staticBottomPadding = staticBottomPadding,
                                     onNoteClick   = onNoteClick,
-                                    onComment     = { eventId -> replyToEventId = eventId },
+                                    onComment     = { eventId -> navigator.push(AppDestination.Compose(replyToEventId = eventId)) },
                                     onAuthorClick = onAuthorClick,
                                     onHashtagClick = onHashtagClick,
-                                    onQuote       = { noteId  -> quoteNoteId   = noteId  },
+                                    onQuote       = { noteId  -> navigator.push(AppDestination.Compose(quoteEventId = noteId))  },
                                     initialQuery  = hashtagSearchQuery,
                                     onInitialQueryConsumed = { hashtagSearchQuery = null },
                                     actionsViewModel = noteActionsVm,
@@ -510,11 +460,11 @@ fun AppNavigation(
                                 onNoteClick      = onNoteClick,
                                 onProfileClick   = onAuthorClick,
                                 onHashtagClick   = onHashtagClick,
-                                onQuote          = { quoteNoteId = it },
+                                onQuote          = { navigator.push(AppDestination.Compose(quoteEventId = it)) },
                                 actionsViewModel = noteActionsVm,
                                 staticTopPadding = staticTopPadding,
                                 staticBottomPadding = staticBottomPadding,
-                                viewModel        = notifViewModel,
+                                viewModel        = requireNotNull(notifViewModel),
                             )
                             3    -> ProfileScreen(
                                 staticBottomPadding = staticBottomPadding,
@@ -522,11 +472,11 @@ fun AppNavigation(
                                 onLogout = onLogout,
                                 onBack = { selectedTab = 0 },
                                 onNoteClick = onNoteClick,
-                                onComment = { eventId -> replyToEventId = eventId },
+                                onComment = { eventId -> navigator.push(AppDestination.Compose(replyToEventId = eventId)) },
                                 onAuthorClick = onAuthorClick,
-                                onQuote = { noteId -> quoteNoteId = noteId },
-                                onConnectionsClick = { tab -> connectionsTarget = ownPubkey to tab },
-                                onRelaysClick = { profileRelaysPubkey = ownPubkey },
+                                onQuote = { noteId -> navigator.push(AppDestination.Compose(quoteEventId = noteId)) },
+                                onConnectionsClick = { tab -> navigator.push(AppDestination.Connections(ownPubkey, tab)) },
+                                onRelaysClick = { navigator.push(AppDestination.ProfileRelays(ownPubkey)) },
                                 onHashtagClick = onHashtagClick,
                                 onBrowseRelay = onBrowseRelayFeed,
                                 viewModel = hiltViewModel(key = "profile-$sessionKey"),
@@ -563,8 +513,8 @@ fun AppNavigation(
                                 )
                                 // Center: notification filter carousel
                                 NotifFilterCarousel(
-                                    current = notifFilter,
-                                    onChanged = { notifViewModel.setFilter(it) },
+                                    current = requireNotNull(notifViewModel).filter.collectAsStateWithLifecycle().value,
+                                    onChanged = { requireNotNull(notifViewModel).setFilter(it) },
                                     modifier = Modifier.align(Alignment.Center),
                                 )
                             }
@@ -573,7 +523,7 @@ fun AppNavigation(
                                 feedType = feedType,
                                 lens = globalFeedLens,
                                 filter = currentFilter,
-                                pullFraction = pullRefreshFraction.floatValue,
+                                pullFraction = pullRefreshFraction,
                                 isRefreshing = isFeedRefreshing,
                                 motionEnabled = headerMotionEnabled,
                                 onLogoClick = { scrollToTopTrigger++ },
@@ -603,7 +553,7 @@ fun AppNavigation(
                                     .size(56.dp)
                                     .background(BrandDeep, CircleShape)
                                     .clip(CircleShape)
-                                    .clickable { showCompose = true },
+                                    .clickable { navigator.push(AppDestination.Compose()) },
                                 contentAlignment = Alignment.Center,
                             ) {
                                 Icon(
@@ -655,7 +605,6 @@ fun AppNavigation(
                                                     TabReselectAction.PROFILE_TOP -> profileScrollToTopTrigger++
                                                     TabReselectAction.NONE -> Unit
                                                 }
-                                                if (index == 2) notifViewModel.markSeen()
                                                 selectedTab = index
                                             },
                                         ),
@@ -716,8 +665,8 @@ fun AppNavigation(
                     relayHints = destination.relayHints,
                     openArticleOnLoad = destination.openArticleOnLoad,
                     onDismiss = navigator::pop,
-                    onQuote = { quoteNoteId = it },
-                    onComment = { replyToEventId = it },
+                    onQuote = { navigator.push(AppDestination.Compose(quoteEventId = it)) },
+                    onComment = { navigator.push(AppDestination.Compose(replyToEventId = it)) },
                     onAuthorClick = onAuthorClick,
                     onHashtagClick = onHashtagClick,
                     actionsViewModel = noteActionsVm,
@@ -727,31 +676,112 @@ fun AppNavigation(
                     pubkey = destination.pubkey,
                     onDismiss = navigator::pop,
                     onNoteClick = onNoteClick,
-                    onComment = { replyToEventId = it },
+                    onComment = { navigator.push(AppDestination.Compose(replyToEventId = it)) },
                     onAuthorClick = onAuthorClick,
-                    onQuote = { quoteNoteId = it },
-                    onConnectionsClick = { connectionsTarget = destination.pubkey to it },
-                    onRelaysClick = { profileRelaysPubkey = destination.pubkey },
+                    onQuote = { navigator.push(AppDestination.Compose(quoteEventId = it)) },
+                    onConnectionsClick = { navigator.push(AppDestination.Connections(destination.pubkey, it)) },
+                    onRelaysClick = { navigator.push(AppDestination.ProfileRelays(destination.pubkey)) },
                     onHashtagClick = onHashtagClick,
                     actionsViewModel = noteActionsVm,
                 )
+
+                is AppDestination.Compose -> ComposeScreen(
+                    navigationOwnsBack = true,
+                    replyToEventId = destination.replyToEventId,
+                    quoteEventId = destination.quoteEventId,
+                    onDismiss = navigator::pop,
+                    actionsViewModel = noteActionsVm,
+                )
+                is AppDestination.Connections -> ConnectionsScreen(
+                    pubkey = destination.pubkey,
+                    initialTab = destination.tab,
+                    onDismiss = navigator::pop,
+                    onProfileClick = onAuthorClick,
+                    navigationOwnsBack = true,
+                )
+                is AppDestination.ProfileRelays -> ProfileRelaysScreen(
+                    pubkey = destination.pubkey,
+                    onDismiss = navigator::pop,
+                    onOpenRelay = { navigator.push(AppDestination.RelayDetail(it)) },
+                    navigationOwnsBack = true,
+                )
+                is AppDestination.RelayDetail -> RelayDetailScreen(
+                    relayUrl = destination.url,
+                    onDismiss = navigator::pop,
+                    onOpenProfile = onAuthorClick,
+                    onBrowse = onBrowseRelayFeed,
+                    navigationOwnsBack = true,
+                )
+                AppDestination.RelaySettings -> RelayManagementScreen(
+                    onDismiss = navigator::pop,
+                    onOpenDetail = { navigator.push(AppDestination.RelayDetail(it)) },
+                    onOpenDiscovery = { navigator.push(AppDestination.RelayDiscovery) },
+                    navigationOwnsBack = true,
+                )
+                AppDestination.RelayDiscovery -> RelayDiscoveryScreen(
+                    onDismiss = navigator::pop,
+                    onOpenDetail = { navigator.push(AppDestination.RelayDetail(it)) },
+                    navigationOwnsBack = true,
+                )
+                AppDestination.CreateRelaySet -> RelaySetEditorScreen(
+                    onDismiss = navigator::pop,
+                    viewModel = hiltViewModel(key = "relay-editor-${entry.id}"),
+                    navigationOwnsBack = true,
+                )
+                AppDestination.EmojiSettings -> com.unsilence.app.ui.settings.CustomEmojisScreen(
+                    onDismiss = navigator::pop,
+                    navigationOwnsBack = true,
+                )
+                AppDestination.ZapSettings -> com.unsilence.app.ui.settings.ZapSettingsScreen(
+                    onDismiss = {
+                        navigator.pop()
+                        noteActionsVm.refreshNwcConfigured()
+                    },
+                    navigationOwnsBack = true,
+                )
+                AppDestination.StartGraph -> {
+                    val vm: StartYourGraphViewModel = hiltViewModel()
+                    val state by vm.uiState.collectAsStateWithLifecycle()
+                    LaunchedEffect(vm) {
+                        vm.landingEvents.collect { landing ->
+                            navigator.popToTabs()
+                            selectedTab = 0
+                            when (landing) {
+                                GraphLanding.FOLLOWING -> feedViewModel.setFeedType(FeedType.Following)
+                                GraphLanding.GLOBAL_TRUSTED -> {
+                                    feedViewModel.setGlobalFeedLens(GlobalFeedLens.TRUSTED)
+                                    feedViewModel.setFeedType(FeedType.Global)
+                                }
+                            }
+                        }
+                    }
+                    StartYourGraphScreen(
+                        state = state,
+                        onTogglePack = vm::togglePack,
+                        onTogglePerson = vm::togglePerson,
+                        onPersonVisible = vm::requestVisiblePerson,
+                        onDone = vm::finish,
+                        onRetry = vm::retry,
+                    )
+                }
             }
         }
 
             // ── Feed selector bottom sheet ───────────────────────────────────
             if (showFeedSheet) {
+                val relayManagementVm: RelayManagementViewModel = hiltViewModel(key = "relay-sheet-$sessionKey")
                 FeedSelectorSheet(
                     feedType        = feedType,
                     userSets        = userSets,
                     pinnedRelays    = pinnedRelays,
-                    relayHealth     = relayHealth,
+                    viewModel       = relayManagementVm,
                     onFeedChanged   = { type ->
                         feedViewModel.setFeedType(type)
                         showFeedSheet = false
                     },
                     onRemoveFavorite = { url -> relayManagementVm.removeFavoriteRelay(url) },
-                    onNewRelaySet   = { showFeedSheet = false; showCreateRelaySet = true },
-                    onRelaySettings = { showFeedSheet = false; showRelaySettings = true },
+                    onNewRelaySet   = { showFeedSheet = false; navigator.push(AppDestination.CreateRelaySet) },
+                    onRelaySettings = { showFeedSheet = false; navigator.push(AppDestination.RelaySettings) },
                     onDeleteSet     = { dTag ->
                         relayManagementVm.deleteRelaySet(dTag)
                         if (feedType is FeedType.RelaySet && (feedType as FeedType.RelaySet).dTag == dTag) {
@@ -771,120 +801,6 @@ fun AppNavigation(
                 )
             }
 
-            // ── Create relay set overlay ──────────────────────────────────────
-            if (showCreateRelaySet) {
-                RelaySetEditorScreen(
-                    onDismiss = { showCreateRelaySet = false },
-                    viewModel = relayManagementVm,
-                )
-            }
-
-            // ── Relay settings overlay ──────────────────────────────────────
-            if (showRelaySettings) {
-                RelayManagementScreen(
-                    onDismiss    = { showRelaySettings = false },
-                    onOpenDetail = { url -> relayDetailUrl = url },
-                    onOpenDiscovery = { showDiscovery = true },
-                    viewModel = relayManagementVm,
-                )
-            }
-
-            // ── Relay discovery overlay (§04) — over the relay list ─────────
-            if (showDiscovery) {
-                RelayDiscoveryScreen(
-                    onDismiss = { showDiscovery = false },
-                    onOpenDetail = { url -> relayDetailUrl = url },
-                    viewModel = relayManagementVm,
-                )
-            }
-
-            // ── Compose overlay ───────────────────────────────────────────────
-            if (showCompose) {
-                ComposeScreen(onDismiss = { showCompose = false })
-            }
-
-            connectionsTarget?.let { (pubkey, initialTab) ->
-                ConnectionsScreen(
-                    pubkey = pubkey,
-                    initialTab = initialTab,
-                    onDismiss = { connectionsTarget = null },
-                    onProfileClick = { targetPubkey ->
-                        connectionsTarget = null
-                        navigator.push(AppDestination.Profile(targetPubkey))
-                    },
-                )
-            }
-
-            profileRelaysPubkey?.let { pubkey ->
-                ProfileRelaysScreen(
-                    pubkey = pubkey,
-                    onDismiss = { profileRelaysPubkey = null },
-                    onOpenRelay = { url -> relayDetailUrl = url },
-                )
-            }
-
-            // ── Reply-compose overlay ─────────────────────────────────────────
-            replyToEventId?.let { eventId ->
-                ComposeScreen(
-                    replyToEventId = eventId,
-                    onDismiss      = { replyToEventId = null },
-                )
-            }
-
-            // ── Quote-compose overlay ─────────────────────────────────────────
-            quoteNoteId?.let { noteId ->
-                ComposeScreen(
-                    quoteEventId = noteId,
-                    onDismiss    = { quoteNoteId = null },
-                )
-            }
-
-            // ── Settings → Custom Emojis overlay ────────────────────────────
-            if (showEmojiSettings) {
-                com.unsilence.app.ui.settings.CustomEmojisScreen(
-                    onDismiss = { showEmojiSettings = false },
-                )
-            }
-
-            // ── Zap settings overlay ────────────────────────────────────────
-            if (showZapSettings) {
-                com.unsilence.app.ui.settings.ZapSettingsScreen(
-                    onDismiss = {
-                        showZapSettings = false
-                        noteActionsVm.refreshNwcConfigured()
-                    },
-                    vm = zapSettingsVm,
-                )
-            }
-
-            if (showStartGraph) {
-                StartYourGraphScreen(
-                    state = startGraphState,
-                    onTogglePack = startGraphVm::togglePack,
-                    onTogglePerson = startGraphVm::togglePerson,
-                    onPersonVisible = startGraphVm::requestVisiblePerson,
-                    onDone = startGraphVm::finish,
-                    onRetry = startGraphVm::retry,
-                )
-            }
-
-            // Globally topmost content overlay: relay rows can be opened from a profile,
-            // thread, search result, or bottom sheet without dismissing that context.
-            relayDetailUrl?.let { url ->
-                RelayDetailScreen(
-                    relayUrl = url,
-                    onDismiss = { relayDetailUrl = null },
-                    onOpenProfile = { pubkey ->
-                        relayDetailUrl = null
-                        profileRelaysPubkey = null
-                        connectionsTarget = null
-                        navigator.push(AppDestination.Profile(pubkey))
-                    },
-                    onBrowse = onBrowseRelayFeed,
-                    viewModel = relayManagementVm,
-                )
-            }
-
             // ── Snackbar host ────────────────────────────────────────────────
             SnackbarHost(
                 hostState = snackbarHostState,
@@ -901,7 +817,7 @@ private fun UnifiedFeedHeader(
     feedType: FeedType,
     lens: GlobalFeedLens,
     filter: FeedFilter,
-    pullFraction: Float,
+    pullFraction: State<Float>,
     isRefreshing: Boolean,
     motionEnabled: Boolean,
     onLogoClick: () -> Unit,
@@ -956,13 +872,13 @@ private fun UnifiedFeedHeader(
             LogoMark(
                 sizeDp = Spacing.xxl,
                 firstBarColor = lensAccent,
-                barHeightScale = barHeightScale,
+                barHeightScale = { barHeightScale.value },
                 static = !motionEnabled,
                 modifier = Modifier
                     .semantics { contentDescription = "Scroll feed to top" }
                     .clickable(
                         interactionSource = remember { MutableInteractionSource() },
-                        indication = null,
+                        indication = androidx.compose.foundation.LocalIndication.current,
                         onClick = onLogoClick,
                     ),
             )
@@ -993,27 +909,28 @@ private fun UnifiedFeedHeader(
 
 @Composable
 private fun rememberPullBarHeightScale(
-    pullFraction: Float,
+    pullFraction: State<Float>,
     isRefreshing: Boolean,
     motionEnabled: Boolean,
-): Float {
+): State<Float> {
     val animatedScale = remember { Animatable(1f) }
-    val activePullFraction = if (isRefreshing) 0f else pullFraction
-    LaunchedEffect(activePullFraction, motionEnabled) {
-        val target = effectivePullStretchFactor(activePullFraction, motionEnabled)
-        if (!motionEnabled || activePullFraction > 0f) {
-            animatedScale.snapTo(target)
-        } else {
-            animatedScale.animateTo(
-                targetValue = target,
-                animationSpec = spring(
-                    dampingRatio = Spring.DampingRatioMediumBouncy,
-                    stiffness = Spring.StiffnessMedium,
-                ),
-            )
+    LaunchedEffect(pullFraction, isRefreshing, motionEnabled) {
+        snapshotFlow { if (isRefreshing) 0f else pullFraction.value }.collectLatest { fraction ->
+            val target = effectivePullStretchFactor(fraction, motionEnabled)
+            if (!motionEnabled || fraction > 0f) {
+                animatedScale.snapTo(target)
+            } else {
+                animatedScale.animateTo(
+                    targetValue = target,
+                    animationSpec = spring(
+                        dampingRatio = Spring.DampingRatioMediumBouncy,
+                        stiffness = Spring.StiffnessMedium,
+                    ),
+                )
+            }
         }
     }
-    return animatedScale.value
+    return animatedScale.asState()
 }
 
 @Composable
@@ -1049,14 +966,7 @@ private fun FeedHeaderHairline(
         Box(
             modifier = Modifier
                 .fillMaxSize()
-                .background(
-                    Brush.horizontalGradient(
-                        0f to Color.Transparent,
-                        0.3f to Color.White.copy(alpha = 0.10f),
-                        0.7f to Color.White.copy(alpha = 0.10f),
-                        1f to Color.Transparent,
-                    ),
-                ),
+                .background(FeedDividerBrush),
         )
         Box(
             modifier = Modifier
@@ -1107,7 +1017,7 @@ private fun FeedSourcePill(
             .semantics { contentDescription = "Feed source: $label. Tap to change" }
             .clickable(
                 interactionSource = remember { MutableInteractionSource() },
-                indication = null,
+                indication = androidx.compose.foundation.LocalIndication.current,
                 onClick = onClick,
             )
             .padding(start = 10.dp, end = 7.dp),
@@ -1117,7 +1027,7 @@ private fun FeedSourcePill(
         Text(
             text = label,
             color = Color.White,
-            fontSize = 13.sp,
+            style = AppTextStyles.bodySmall,
             fontWeight = FontWeight.SemiBold,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
@@ -1153,7 +1063,7 @@ private fun FeedTrustChip(
             .semantics { contentDescription = description }
             .clickable(
                 interactionSource = remember { MutableInteractionSource() },
-                indication = null,
+                indication = androidx.compose.foundation.LocalIndication.current,
                 onClick = onClick,
             )
             .padding(horizontal = if (trusted) 7.dp else 9.dp),
@@ -1170,7 +1080,7 @@ private fun FeedTrustChip(
             Text(
                 text = "Raw",
                 color = accent,
-                fontSize = 12.sp,
+                style = AppTextStyles.footnote,
                 fontWeight = FontWeight.SemiBold,
             )
         }
@@ -1215,7 +1125,7 @@ private fun FeedFormatAction(
             }
             .clickable(
                 interactionSource = remember { MutableInteractionSource() },
-                indication = null,
+                indication = androidx.compose.foundation.LocalIndication.current,
                 onClick = onClick,
             ),
         contentAlignment = Alignment.Center,
@@ -1247,10 +1157,9 @@ private fun NotifFilterCarousel(
     val pagerState = rememberPagerState(initialPage = initialPage) { virtualCount }
     val coroutineScope = rememberCoroutineScope()
 
-    LaunchedEffect(pagerState.settledPage) {
-        val settled = items[pagerState.settledPage.mod(realCount)]
-        if (settled != current) onChanged(settled)
-    }
+    val selectedNow by rememberUpdatedState(current)
+    val onChangedNow by rememberUpdatedState(onChanged)
+    val haptic = LocalHapticFeedback.current
 
     LaunchedEffect(current) {
         val targetReal = items.indexOf(current)
@@ -1267,9 +1176,10 @@ private fun NotifFilterCarousel(
             .height(pageHeightDp * 1.7f)
             .widthIn(min = 80.dp, max = 150.dp)
             .clip(RoundedCornerShape(10.dp))
-            .pointerInput(pagerState) {
+            .pointerInput(pagerState, haptic) {
                 awaitEachGesture {
                     val down = awaitFirstDown(requireUnconsumed = false)
+                    val startingSelection = selectedNow
                     down.consume()
                     do {
                         val event = awaitPointerEvent()
@@ -1277,13 +1187,18 @@ private fun NotifFilterCarousel(
                         if (change.pressed) {
                             val dragY = change.positionChange().y
                             change.consume()
-                            coroutineScope.launch { pagerState.scrollBy(-dragY) }
+                            pagerState.dispatchRawDelta(-dragY)
                         } else {
                             break
                         }
                     } while (true)
                     coroutineScope.launch {
                         pagerState.animateScrollToPage(pagerState.currentPage)
+                        val settled = items[pagerState.settledPage.mod(realCount)]
+                        if (settled != selectedNow) onChangedNow(settled)
+                        if (settled != startingSelection) {
+                            haptic.performHapticFeedback(HapticFeedbackType.SegmentTick)
+                        }
                     }
                 }
             },
@@ -1317,7 +1232,7 @@ private fun NotifFilterCarousel(
                 Text(
                     text = items[realIdx].name,
                     color = Color.White,
-                    fontSize = 14.sp,
+                    style = AppTextStyles.body,
                     fontWeight = FontWeight.SemiBold,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
@@ -1335,7 +1250,7 @@ private fun FeedSelectorSheet(
     feedType: FeedType,
     userSets: List<RelaySet>,
     pinnedRelays: List<FeedType.SingleRelay>,
-    relayHealth: Map<String, RelayHealthInfo>,
+    viewModel: RelayManagementViewModel,
     onFeedChanged: (FeedType) -> Unit,
     onRemoveFavorite: (String) -> Unit,
     onNewRelaySet: () -> Unit,
@@ -1343,6 +1258,7 @@ private fun FeedSelectorSheet(
     onDeleteSet: (String) -> Unit,
     onDismiss: () -> Unit,
 ) {
+    val relayHealth by viewModel.relayHealth.collectAsStateWithLifecycle(initialValue = emptyMap())
     val sheetState = rememberModalBottomSheetState()
     var confirmDeleteDTag by remember { mutableStateOf<String?>(null) }
 
@@ -1366,8 +1282,8 @@ private fun FeedSelectorSheet(
         ) {
             Text(
                 text       = label,
-                color      = if (selected) Brand else Color(0xFFDDDDDD),
-                fontSize   = 15.sp,
+                color      = if (selected) Brand else com.unsilence.app.ui.theme.White,
+                style = AppTextStyles.bodyLarge,
                 fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
                 maxLines   = 1,
                 overflow   = TextOverflow.Ellipsis,
@@ -1389,7 +1305,7 @@ private fun FeedSelectorSheet(
             Text(
                 text = text.uppercase(),
                 color = Text3,
-                fontSize = 11.sp,
+                style = AppTextStyles.caption,
                 fontWeight = FontWeight.SemiBold,
                 modifier = Modifier.padding(start = 32.dp, top = 16.dp, bottom = 4.dp),
         )
@@ -1404,7 +1320,7 @@ private fun FeedSelectorSheet(
                 modifier = Modifier
                     .padding(vertical = 10.dp)
                     .size(width = 32.dp, height = 4.dp)
-                    .background(Color(0xFF333333), RoundedCornerShape(2.dp)),
+                    .background(com.unsilence.app.ui.theme.Surface2, RoundedCornerShape(2.dp)),
             )
         },
     ) {
@@ -1424,8 +1340,8 @@ private fun FeedSelectorSheet(
                     val dotColor = when {
                         healthScore == null -> Text3
                         healthScore >= 70   -> Mint
-                        healthScore >= 40   -> Color(0xFFFFC107)
-                        else                -> Color(0xFFFF5252)
+                        healthScore >= 40   -> com.unsilence.app.ui.theme.Zap
+                        else                -> com.unsilence.app.ui.theme.Like
                     }
                     Row(
                         modifier = Modifier
@@ -1443,8 +1359,8 @@ private fun FeedSelectorSheet(
                         Spacer(Modifier.width(14.dp))
                         Text(
                             text       = relay.displayLabel,
-                            color      = if (selected) Brand else Color(0xFFDDDDDD),
-                            fontSize   = 15.sp,
+                            color      = if (selected) Brand else com.unsilence.app.ui.theme.White,
+                            style = AppTextStyles.bodyLarge,
                             fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
                             maxLines   = 1,
                             overflow   = TextOverflow.Ellipsis,
@@ -1504,7 +1420,7 @@ private fun FeedSelectorSheet(
                     modifier = Modifier.size(18.dp),
                 )
                 Spacer(Modifier.width(14.dp))
-                Text("New Relay Set", color = Brand, fontSize = 14.sp)
+                Text("New Relay Set", color = Brand, style = AppTextStyles.body)
             }
 
             Row(
@@ -1523,7 +1439,7 @@ private fun FeedSelectorSheet(
                     modifier = Modifier.size(18.dp),
                 )
                 Spacer(Modifier.width(14.dp))
-                Text("Manage relays", color = Color(0xFF999999), fontSize = 14.sp)
+                Text("Manage relays", color = com.unsilence.app.ui.theme.TextSecondary, style = AppTextStyles.body)
             }
         }
     }
@@ -1538,7 +1454,7 @@ private fun FeedSelectorSheet(
                 TextButton(onClick = {
                     onDeleteSet(dTag)
                     confirmDeleteDTag = null
-                }) { Text("Delete", color = Color(0xFFFF6B6B)) }
+                }) { Text("Delete", color = com.unsilence.app.ui.theme.Like) }
             },
             dismissButton = {
                 TextButton(onClick = { confirmDeleteDTag = null }) {
@@ -1559,7 +1475,7 @@ private fun PlaceholderScreen() {
         Text(
             text     = "Coming soon",
             color    = TextSecondary,
-            fontSize = 15.sp,
+            style = AppTextStyles.bodyLarge,
         )
     }
 }

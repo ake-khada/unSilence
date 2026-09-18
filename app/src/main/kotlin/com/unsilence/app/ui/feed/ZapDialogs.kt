@@ -1,5 +1,6 @@
 package com.unsilence.app.ui.feed
 
+import com.unsilence.app.ui.theme.AppTextStyles
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -77,7 +78,7 @@ fun ConnectWalletDialog(
                 Text(
                     text     = "Paste a nostr+walletconnect:// URI to enable one-tap zaps.",
                     color    = TextSecondary,
-                    fontSize = AppType.bodySmall,
+                    style = AppTextStyles.bodySmall,
                 )
                 Spacer(Modifier.height(12.dp))
                 BasicTextField(
@@ -92,7 +93,7 @@ fun ConnectWalletDialog(
                         .padding(horizontal = 12.dp, vertical = 10.dp),
                     decorationBox = { inner ->
                         if (uri.isEmpty()) {
-                            Text("nostr+walletconnect://…", color = TextSecondary, fontSize = AppType.bodySmall)
+                            Text("nostr+walletconnect://…", color = TextSecondary, style = AppTextStyles.bodySmall)
                         }
                         inner()
                     },
@@ -160,7 +161,7 @@ fun ZapAmountDialog(
             Text(
                 "Zap",
                 color = Color.White,
-                fontSize = AppType.subheading,
+                style = AppTextStyles.subheading,
                 fontWeight = FontWeight.Medium,
             )
             Spacer(Modifier.height(14.dp))
@@ -175,7 +176,7 @@ fun ZapAmountDialog(
                     Text(
                         text = formatPreset(amount),
                         color = if (isSelected) Zap else Color.White.copy(alpha = 0.55f),
-                        fontSize = AppType.footnote,
+                        style = AppTextStyles.footnote,
                         fontWeight = FontWeight.Medium,
                         textAlign = TextAlign.Center,
                         modifier = Modifier
@@ -226,7 +227,7 @@ fun ZapAmountDialog(
                             Text(
                                 "optional message",
                                 color = Color.White.copy(alpha = 0.4f),
-                                fontSize = AppType.bodySmall,
+                                style = AppTextStyles.bodySmall,
                             )
                         }
                         inner()
@@ -286,7 +287,7 @@ fun ZapAmountDialog(
                     if (isPrivate) "Zap ${formatPreset(selected)} sats privately"
                     else "Zap ${formatPreset(selected)} sats",
                     color = Black,
-                    fontSize = AppType.body,
+                    style = AppTextStyles.body,
                     fontWeight = FontWeight.Medium,
                 )
             }
@@ -324,7 +325,7 @@ private fun PrivacyPill(
         Text(
             label,
             color = fg,
-            fontSize = AppType.footnote,
+            style = AppTextStyles.footnote,
             fontWeight = if (selected) FontWeight.Medium else FontWeight.Normal,
         )
     }

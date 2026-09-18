@@ -1,5 +1,8 @@
 package com.unsilence.app.ui.notifications
 
+import com.unsilence.app.data.repository.projectMutedNotifications
+import com.unsilence.app.data.repository.mutedNotificationsFlow
+
 import app.cash.turbine.test
 import com.unsilence.app.data.memory.MuteList
 import com.unsilence.app.data.memory.NostrEvent
