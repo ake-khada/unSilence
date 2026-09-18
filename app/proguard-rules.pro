@@ -19,9 +19,8 @@
 # secp256k1-kmp JNI
 -keep class fr.acinq.secp256k1.** { *; }
 
-# Bouncy Castle
--keep class org.bouncycastle.** { *; }
--dontwarn org.bouncycastle.**
+# No Bouncy Castle implementation in releaseRuntimeClasspath. OkHttp's optional
+# provider references below need warning suppression, not a blanket keep rule.
 
 # OkHttp
 -dontwarn okhttp3.internal.platform.**
@@ -45,9 +44,13 @@
 # Jackson Kotlin module (transitive via Quartz) uses kotlin-reflect to
 # introspect stdlib types. R8 strips serialVersionUID from EmptyList /
 # EmptyMap and metadata Jackson needs, causing crash on Amber NIP-55 login.
--keep class com.fasterxml.jackson.** { *; }
--keep class kotlin.Metadata { *; }
--keepclassmembers class kotlin.collections.** {
+# Quartz keeps its Jackson-reflected protocol models in its consumer rules.
+# kotlin-reflect supplies Metadata retention. Preserve the concrete stdlib
+# singleton fields required by Jackson rather than all Jackson implementations.
+-keepclassmembers class kotlin.collections.EmptyList {
+    private static final long serialVersionUID;
+}
+-keepclassmembers class kotlin.collections.EmptyMap {
     private static final long serialVersionUID;
 }
 -dontwarn java.beans.ConstructorProperties
