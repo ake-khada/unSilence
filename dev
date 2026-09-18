@@ -1,0 +1,34 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+project_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+cd -- "$project_dir"
+source tools/dev/environment
+
+case "${1:-shell}" in
+    help|-h|--help)
+        printf '%s\n' './dev setup        Install the project tools and Android SDK' \
+            './dev              Open an interactive project shell' \
+            './dev -- COMMAND   Run a command with the project tools' \
+            './dev TASK         Run one of the mise tasks below'
+        exec mise tasks
+        ;;
+    setup)
+        shift
+        exec bash tools/dev/setup "$@"
+        ;;
+    mise)
+        shift
+        exec mise "$@"
+        ;;
+    --)
+        shift
+        exec mise exec -- "$@"
+        ;;
+    shell)
+        exec mise exec -- "${SHELL:-/bin/bash}" -i
+        ;;
+    *)
+        exec mise run "$@"
+        ;;
+esac

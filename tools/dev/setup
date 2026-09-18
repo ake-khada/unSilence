@@ -1,0 +1,56 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+project_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd -P)"
+cd -- "$project_dir"
+source tools/dev/environment
+
+if [[ $(uname -s) != Linux || $(uname -m) != x86_64 ]]; then
+    printf '%s\n' 'This development environment targets Linux x86_64.' >&2
+    exit 1
+fi
+command -v mise >/dev/null
+mise trust "$project_dir/mise.toml"
+
+java17_version="$(mise config get --file mise.toml vars.java17)"
+java21_version="$(mise config get --file mise.toml vars.java21)"
+python_version="$(mise config get --file mise.toml vars.python)"
+android_cli_version="$(mise config get --file mise.toml vars.android_cli)"
+perfetto_version="$(mise config get --file mise.toml vars.perfetto)"
+
+# install-into lets mise download and verify tools without placing them in $HOME.
+# Never replace an existing tool tree implicitly; version upgrades are explicit.
+if [[ ! -x .toolchains/jdk17/bin/java ]]; then
+    mise install-into "java@$java17_version" "$project_dir/.toolchains/jdk17"
+fi
+if [[ ! -x .toolchains/jdk21/bin/java ]]; then
+    mise install-into "java@$java21_version" "$project_dir/.toolchains/jdk21"
+fi
+if [[ ! -x .toolchains/python/bin/python3 ]]; then
+    mise install-into "python@$python_version" "$project_dir/.toolchains/python"
+fi
+if [[ ! -x .toolchains/android-sdk/cmdline-tools/$android_cli_version/bin/sdkmanager ]]; then
+    mise install-into "android-sdk@$android_cli_version" "$project_dir/.toolchains/android-sdk"
+fi
+if [[ ! -f .toolchains/perfetto/trace_processor_shell ]]; then
+    mise install-into "github:google/perfetto[matching=linux-amd64.zip]@$perfetto_version" \
+        "$project_dir/.toolchains/perfetto"
+fi
+# Perfetto's release zip may not preserve executable permissions on extraction.
+chmod u+x .toolchains/perfetto/trace_processor_shell .toolchains/perfetto/traceconv
+
+mkdir -p .toolchains/android-user .toolchains/gradle-home
+export JAVA_HOME="$project_dir/.toolchains/jdk17"
+export ANDROID_HOME="$project_dir/.toolchains/android-sdk"
+export ANDROID_USER_HOME="$project_dir/.toolchains/android-user"
+sdkmanager_path="$ANDROID_HOME/cmdline-tools/$android_cli_version/bin/sdkmanager"
+
+# sdkmanager consumes only as many answers as it needs. Ignore yes's SIGPIPE,
+# but preserve sdkmanager's exit status so a failed download cannot look successful.
+set +o pipefail
+yes | "$sdkmanager_path" --sdk_root="$ANDROID_HOME" --licenses
+set -o pipefail
+"$sdkmanager_path" --sdk_root="$ANDROID_HOME" --install \
+    'platform-tools' 'platforms;android-36' 'build-tools;35.0.0'
+
+exec mise run doctor

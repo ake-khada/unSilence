@@ -20,6 +20,10 @@ hilt              = "2.58"
 hilt-navigation   = "1.2.0"
 quartz            = "1.05.1"
 jetbrains-markdown = "0.7.3"
+benchmark         = "1.4.1"
+test-ext-junit    = "1.3.0"
+test-runner       = "1.7.0"
+uiautomator       = "2.4.0"
 
 [libraries]
 # Compose
@@ -78,8 +82,15 @@ quartz-android               = { group = "com.vitorpamplona.quartz",    name = "
 # Markdown → HTML (NIP-23 articles, rendered in WebView)
 jetbrains-markdown              = { group = "org.jetbrains",               name = "markdown",                              version.ref = "jetbrains-markdown" }
 
+# Release-device benchmarks
+benchmark-macro-junit4          = { group = "androidx.benchmark",           name = "benchmark-macro-junit4",                 version.ref = "benchmark" }
+test-ext-junit                  = { group = "androidx.test.ext",            name = "junit",                                  version.ref = "test-ext-junit" }
+test-runner                     = { group = "androidx.test",                name = "runner",                                 version.ref = "test-runner" }
+uiautomator                     = { group = "androidx.test.uiautomator",    name = "uiautomator",                            version.ref = "uiautomator" }
+
 [plugins]
 android-application         = { id = "com.android.application",           version.ref = "agp" }
+android-test                = { id = "com.android.test",                  version.ref = "agp" }
 kotlin-android              = { id = "org.jetbrains.kotlin.android",       version.ref = "kotlin" }
 kotlin-compose              = { id = "org.jetbrains.kotlin.plugin.compose",version.ref = "kotlin" }
 kotlin-serialization        = { id = "org.jetbrains.kotlin.plugin.serialization", version.ref = "kotlin" }

@@ -18,6 +18,7 @@ android {
         versionCode   = 1
         versionName   = "0.1.0"
         manifestPlaceholders["appLabel"] = "unSilence"
+        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
     buildTypes {
@@ -31,9 +32,23 @@ android {
             isMinifyEnabled   = true
             isShrinkResources = true
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
+            testProguardFiles("proguard-test-rules.pro")
             // Sign with debug key for local testing — replace with real
             // release signing config before publishing to F-Droid / Zapstore.
             signingConfig = signingConfigs.getByName("debug")
+        }
+        create("benchmark") {
+            initWith(getByName("release"))
+            signingConfig = signingConfigs.getByName("debug")
+            matchingFallbacks += listOf("release")
+        }
+        // Generate source-symbol profiles; measuring the optimized release is
+        // a separate benchmark. Shares the installed package/key, never its data.
+        create("baselineProfile") {
+            initWith(getByName("benchmark"))
+            isMinifyEnabled = false
+            isShrinkResources = false
+            matchingFallbacks += listOf("release")
         }
     }
 
@@ -51,6 +66,7 @@ android {
     testOptions {
         unitTests.isReturnDefaultValues = true
     }
+    testBuildType = providers.gradleProperty("validationBuildType").getOrElse("debug")
 
     buildFeatures {
         compose = true
@@ -131,6 +147,8 @@ dependencies {
     // Other
     implementation(libs.security.crypto)    // NWC key storage (Android Keystore)
     implementation(libs.splashscreen)
+    // Explicit for sideloaded/F-Droid builds; do not rely on a transitive edge.
+    implementation("androidx.profileinstaller:profileinstaller:1.4.1")
     // Nostr protocol (event parsing, signing, NIP implementations)
     implementation(libs.quartz.android)
 
@@ -149,4 +167,16 @@ dependencies {
     // Quartz resolves the Android JNI binding for the APK. JVM crypto tests
     // additionally need ACINQ's desktop natives at test runtime only.
     testRuntimeOnly("fr.acinq.secp256k1:secp256k1-kmp-jni-jvm:0.22.0")
+
+    androidTestImplementation(platform(libs.compose.bom))
+    androidTestImplementation("androidx.compose.ui:ui-test-junit4")
+    // Compose's transitive 3.5 runner reflects InputManager.getInstance,
+    // removed on Android 17. 3.7 uses the public system service instead.
+    androidTestImplementation("androidx.test.espresso:espresso-core:3.7.0")
+    // AndroidX Test references these annotations; include them in the test
+    // APK so release instrumentation can be shrunk without missing classes.
+    androidTestImplementation("com.google.errorprone:error_prone_annotations:2.27.0")
+    androidTestImplementation(libs.test.ext.junit)
+    androidTestImplementation(libs.test.runner)
+    debugImplementation("androidx.compose.ui:ui-test-manifest")
 }
