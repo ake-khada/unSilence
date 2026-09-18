@@ -1,5 +1,7 @@
 package com.unsilence.app.ui.profile
 
+import com.unsilence.app.ui.shared.CardDataFlow
+
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.viewModelScope
@@ -240,13 +242,13 @@ class UserProfileViewModel @Inject constructor(
 
     // ── Profile lookup for repost original authors ───────────────────────
 
-    fun profileFlow(pubkey: String): StateFlow<UserEntity?> =
-        timelineCardData.profileFlow(pubkey, viewModelScope)
+    fun profileFlow(pubkey: String): CardDataFlow<UserEntity?> =
+        timelineCardData.profileFlow(pubkey)
 
     // ── Per-event stats (matches FeedViewModel.statsFlow) ────────────────
 
-    fun statsFlow(eventId: String): StateFlow<EventStats> =
-        timelineCardData.statsFlow(eventId, viewModelScope)
+    fun statsFlow(eventId: String): CardDataFlow<EventStats> =
+        timelineCardData.statsFlow(eventId)
 
     fun zapDetailsForEvent(eventId: String): List<ZapDetail> =
         timelineCardData.zapDetailsForEvent(eventId)

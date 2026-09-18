@@ -19,7 +19,7 @@ import androidx.navigation3.ui.NavDisplay
 /** One motion and ownership policy for content destinations; screen code owns neither. */
 @Composable
 internal fun AppNavDisplay(navigator: AppNavigator, content: @Composable (AppEntry) -> Unit) {
-    key(navigator) {
+    key(navigator.stateKey) {
         NavDisplay(
             backStack = navigator.backStack,
             onBack = navigator::pop,

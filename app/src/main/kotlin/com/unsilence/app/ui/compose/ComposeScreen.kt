@@ -1,5 +1,6 @@
 package com.unsilence.app.ui.compose
 
+import com.unsilence.app.ui.theme.AppTextStyles
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
@@ -114,6 +115,7 @@ internal fun composerBackAction(hasUnsavedDraftChanges: Boolean): ComposerBackAc
 @Composable
 fun ComposeScreen(
     onDismiss: () -> Unit,
+    navigationOwnsBack: Boolean = false,
     replyToEventId: String? = null,
     quoteEventId: String? = null,
     articleCommentTarget: ArticleCommentTarget? = null,
@@ -235,15 +237,16 @@ fun ComposeScreen(
     }
 
     // System back during confirm → cancel (blocked during publishing)
+    BackHandler(enabled = isPublishing) { /* The entry owns an in-flight publish. */ }
     BackHandler(enabled = isConfirming || isFailed) {
         viewModel.cancelSend()
     }
 
-    // Always consume system back while composing. A dirty editor asks before
-    // discarding; an untouched editor closes immediately. Leaving this handler
-    // disabled for an empty editor lets back fall through to the tab beneath the
-    // full-screen composer instead of dismissing it.
-    BackHandler(enabled = sendState is SendState.Composing) {
+    // A dirty editor owns its discard confirmation. A clean navigation entry
+    // delegates back to NavDisplay, allowing the normal predictive preview.
+    // Legacy inline hosts still need their own dismiss handler.
+    BackHandler(enabled = sendState is SendState.Composing &&
+        (hasUnsavedDraftChanges || !navigationOwnsBack)) {
         when (composerBackAction(hasUnsavedDraftChanges)) {
             ComposerBackAction.CONFIRM_DISCARD -> showCloseDraftSheet = true
             ComposerBackAction.DISMISS -> finishAndDismiss()
@@ -295,7 +298,7 @@ fun ComposeScreen(
                         else    -> "New note"
                     },
                     color = if (isFailed) Like else TextSecondary,
-                    fontSize = AppType.body,
+                    style = AppTextStyles.body,
                     letterSpacing = 0.5.sp,
                 )
 
@@ -365,7 +368,7 @@ fun ComposeScreen(
                         Text(
                             text     = parentName,
                             color    = TextSecondary,
-                            fontSize = 12.sp,
+                            style = AppTextStyles.footnote,
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis,
                         )
@@ -373,8 +376,7 @@ fun ComposeScreen(
                         Text(
                             text       = parentText.take(140),
                             color      = Color.White.copy(alpha = 0.82f),
-                            fontSize   = 13.sp,
-                            lineHeight = 18.sp,
+                            style = AppTextStyles.bodySmall,
                             maxLines   = 2,
                             overflow   = TextOverflow.Ellipsis,
                         )
@@ -400,7 +402,7 @@ fun ComposeScreen(
                             if (pubkeyHex != null) {
                                 IdentIcon(pubkey = pubkeyHex, modifier = Modifier.size(Sizing.avatar))
                             } else {
-                                Box(modifier = Modifier.size(Sizing.avatar).background(Color(0xFF333333)))
+                                Box(modifier = Modifier.size(Sizing.avatar).background(com.unsilence.app.ui.theme.Surface2))
                             }
                             if (!userAvatarUrl.isNullOrBlank()) {
                                 AsyncImage(
@@ -421,7 +423,7 @@ fun ComposeScreen(
                             Text(
                                 text       = displayName,
                                 color      = Color.White,
-                                fontSize   = AppType.body,
+                                style = AppTextStyles.body,
                                 fontWeight = FontWeight.SemiBold,
                                 maxLines   = 1,
                                 overflow   = TextOverflow.Ellipsis,
@@ -431,7 +433,7 @@ fun ComposeScreen(
                                 Text(
                                     text     = nip05,
                                     color    = TextSecondary,
-                                    fontSize = AppType.caption,
+                                    style = AppTextStyles.caption,
                                     maxLines = 1,
                                     overflow = TextOverflow.Ellipsis,
                                 )
@@ -555,7 +557,7 @@ fun ComposeScreen(
                                     Text(
                                         text     = quoteName,
                                         color    = TextSecondary,
-                                        fontSize = 12.sp,
+                                        style = AppTextStyles.footnote,
                                         maxLines = 1,
                                         overflow = TextOverflow.Ellipsis,
                                     )
@@ -563,8 +565,7 @@ fun ComposeScreen(
                                     Text(
                                         text       = quoteText.take(200),
                                         color      = Color.White.copy(alpha = 0.82f),
-                                        fontSize   = 13.sp,
-                                        lineHeight = 18.sp,
+                                        style = AppTextStyles.bodySmall,
                                         maxLines   = 3,
                                         overflow   = TextOverflow.Ellipsis,
                                     )
@@ -584,7 +585,7 @@ fun ComposeScreen(
                             Text(
                                 text = message,
                                 color = if (message == "Draft saved") Mint else TextSecondary,
-                                fontSize = AppType.caption,
+                                style = AppTextStyles.caption,
                                 maxLines = 1,
                                 overflow = TextOverflow.Ellipsis,
                             )
@@ -700,7 +701,7 @@ fun ComposeScreen(
                             Text(
                                 text = "$typedChars",
                                 color = if (typedChars > 9000) Warn else TextSecondary,
-                                fontSize = 11.sp,
+                                style = AppTextStyles.caption,
                                 modifier = Modifier.padding(end = 4.dp),
                             )
                         }
@@ -720,7 +721,7 @@ fun ComposeScreen(
                         ) {
                             Text(
                                 text = "Post",
-                                fontSize = 14.sp,
+                                style = AppTextStyles.body,
                                 fontWeight = FontWeight.Medium,
                             )
                             Spacer(Modifier.width(6.dp))
@@ -779,7 +780,7 @@ fun ComposeScreen(
                             Text(
                                 text = "Replying to @${replyName.removePrefix("@")}",
                                 color = BrandDeep,
-                                fontSize = AppType.caption,
+                                style = AppTextStyles.caption,
                                 fontWeight = FontWeight.Medium,
                                 maxLines = 1,
                                 overflow = TextOverflow.Ellipsis,
@@ -806,7 +807,7 @@ fun ComposeScreen(
                                 Text(
                                     text = "Marked sensitive \u2014 viewers see a blur until tap",
                                     color = Warn,
-                                    fontSize = AppType.caption,
+                                    style = AppTextStyles.caption,
                                 )
                             }
                         }
@@ -856,7 +857,7 @@ fun ComposeScreen(
                                 verticalAlignment = Alignment.CenterVertically,
                                 modifier = Modifier.padding(horizontal = 22.dp),
                             ) {
-                                Text("Cancel", color = BrandDeep, fontSize = 14.sp, fontWeight = FontWeight.Medium)
+                                Text("Cancel", color = BrandDeep, style = AppTextStyles.body, fontWeight = FontWeight.Medium)
                             }
                         }
 
@@ -874,7 +875,7 @@ fun ComposeScreen(
                         ) {
                             Text(
                                 text = "Confirm",
-                                fontSize = 14.sp,
+                                style = AppTextStyles.body,
                                 fontWeight = FontWeight.Medium,
                             )
                             Spacer(Modifier.width(6.dp))
@@ -907,7 +908,7 @@ fun ComposeScreen(
                         Text(
                             text = state.reason,
                             color = Like,
-                            fontSize = AppType.body,
+                            style = AppTextStyles.body,
                             fontWeight = FontWeight.Medium,
                         )
                         Spacer(Modifier.height(Spacing.large))
@@ -920,7 +921,7 @@ fun ComposeScreen(
                             ),
                             contentPadding = PaddingValues(horizontal = 22.dp, vertical = 8.dp),
                         ) {
-                            Text("Retry", fontSize = 14.sp, fontWeight = FontWeight.Medium)
+                            Text("Retry", style = AppTextStyles.body, fontWeight = FontWeight.Medium)
                         }
                     }
                 }
@@ -1011,7 +1012,7 @@ private fun PollComposer(
                         Text(
                             text = label,
                             color = if (selected) BrandDeep else TextSecondary,
-                            fontSize = AppType.caption,
+                            style = AppTextStyles.caption,
                             fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
                         )
                     }
@@ -1022,7 +1023,7 @@ private fun PollComposer(
         Text(
             text = "Duration",
             color = TextSecondary,
-            fontSize = AppType.caption,
+            style = AppTextStyles.caption,
             modifier = Modifier.padding(top = 2.dp),
         )
         Row(
@@ -1047,7 +1048,7 @@ private fun PollComposer(
                         Text(
                             text = label,
                             color = if (selected) BrandDeep else TextSecondary,
-                            fontSize = AppType.caption,
+                            style = AppTextStyles.caption,
                             fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
                         )
                     }
@@ -1113,7 +1114,7 @@ private fun NotifyToggleRow(
         Text(
             text = "Notify",
             color = TextSecondary,
-            fontSize = AppType.caption,
+            style = AppTextStyles.caption,
             modifier = Modifier.padding(bottom = 6.dp),
         )
         LazyRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -1144,7 +1145,7 @@ private fun NotifyChip(
                 else Color.Transparent
             )
             .border(
-                width = 0.5.dp,
+                width = 1.dp,
                 color = if (isActive) BrandDeep
                         else Color.White.copy(alpha = 0.18f),
                 shape = RoundedCornerShape(999.dp),
@@ -1170,7 +1171,7 @@ private fun NotifyChip(
         Text(
             text = displayName,
             color = if (isActive) Color.White else TextSecondary,
-            fontSize = 12.sp,
+            style = AppTextStyles.footnote,
             fontWeight = if (isActive) FontWeight.Medium else FontWeight.Normal,
             textDecoration = if (isActive) null else TextDecoration.LineThrough,
             maxLines = 1,
@@ -1198,7 +1199,7 @@ private fun PublishStatusPanel(
             text = if (accepted == 0) "Publishing to $total relays\u2026"
                    else "Published to $accepted of $total relays",
             color = Color.White,
-            fontSize = AppType.body,
+            style = AppTextStyles.body,
             fontWeight = FontWeight.SemiBold,
         )
         Spacer(Modifier.height(Spacing.medium))
@@ -1219,7 +1220,7 @@ private fun PublishStatusPanel(
                 Text(
                     text = compactRelayName(relay),
                     color = TextSecondary,
-                    fontSize = AppType.caption,
+                    style = AppTextStyles.caption,
                 )
             }
         }

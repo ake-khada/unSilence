@@ -1,5 +1,6 @@
 package com.unsilence.app.ui.feed
 
+import com.unsilence.app.ui.theme.AppTextStyles
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
@@ -38,7 +39,6 @@ import com.unsilence.app.ui.shared.NostrAddressPresentation
 import com.unsilence.app.ui.shared.SelfDeclaredNostrAddressText
 import com.unsilence.app.ui.shared.WotFeedMetaTimestamp
 import com.unsilence.app.ui.shared.selfDeclaredNostrAddressPresentation
-import kotlinx.coroutines.flow.StateFlow
 import com.unsilence.app.ui.theme.Sizing
 import com.unsilence.app.ui.theme.Spacing
 import com.unsilence.app.ui.theme.TextSecondary
@@ -60,7 +60,6 @@ internal fun AuthorHeader(
     onNoteClick: () -> Unit,
     modifier: Modifier = Modifier,
     lookupProfile: (suspend (String) -> UserEntity?)? = null,
-    profileFlow: ((String) -> StateFlow<UserEntity?>)? = null,
     wotLookup: ((String) -> WotLookup?)? = null,
     feedWotDisplayMode: FeedWotDisplayMode = FeedWotDisplayMode.NUMBERS,
     repostSourcePubkey: String? = null,
@@ -94,7 +93,6 @@ internal fun AuthorHeader(
             onNoteClick = onNoteClick,
             modifier = modifier,
             lookupProfile = lookupProfile,
-            profileFlow = profileFlow,
             wotLookup = wotLookup,
             feedWotDisplayMode = feedWotDisplayMode,
         )
@@ -119,7 +117,6 @@ internal fun AuthorHeader(
                 picture       = picture,
                 modifier      = Modifier.size(Sizing.avatar),
                 lookupProfile = lookupProfile,
-                profileFlow   = profileFlow,
             )
             Spacer(Modifier.width(Spacing.small))
             if (referenceRepost) {
@@ -155,7 +152,7 @@ internal fun AuthorHeader(
         WotFeedMetaTimestamp(
             lookup = rememberCardWot(pubkey, wotLookup),
             mode = feedWotDisplayMode,
-            timestamp = createdAt?.let(::relativeTime),
+            createdAt = createdAt,
             modifier = Modifier.clickable { onNoteClick() },
         )
     }
@@ -175,7 +172,6 @@ private fun RepostAuthorHeader(
     onNoteClick: () -> Unit,
     modifier: Modifier = Modifier,
     lookupProfile: (suspend (String) -> UserEntity?)? = null,
-    profileFlow: ((String) -> StateFlow<UserEntity?>)? = null,
     wotLookup: ((String) -> WotLookup?)? = null,
     feedWotDisplayMode: FeedWotDisplayMode = FeedWotDisplayMode.NUMBERS,
 ) {
@@ -196,7 +192,6 @@ private fun RepostAuthorHeader(
                 reposterPicture = reposterPicture,
                 reposterLabel = reposterLabel,
                 lookupProfile = lookupProfile,
-                profileFlow = profileFlow,
                 onAuthorClick = { onAuthorClick(pubkey) },
                 onReposterClick = { onAuthorClick(reposterPubkey) },
             )
@@ -236,7 +231,7 @@ private fun RepostAuthorHeader(
         WotFeedMetaTimestamp(
             lookup = rememberCardWot(pubkey, wotLookup),
             mode = feedWotDisplayMode,
-            timestamp = createdAt?.let(::relativeTime),
+            createdAt = createdAt,
             modifier = Modifier.clickable { onNoteClick() },
         )
     }
@@ -250,7 +245,6 @@ internal fun RepostCompositeAvatar(
     reposterPicture: String?,
     reposterLabel: String,
     lookupProfile: (suspend (String) -> UserEntity?)? = null,
-    profileFlow: ((String) -> StateFlow<UserEntity?>)? = null,
     onAuthorClick: () -> Unit,
     onReposterClick: () -> Unit,
     modifier: Modifier = Modifier,
@@ -267,7 +261,6 @@ internal fun RepostCompositeAvatar(
                 .size(Sizing.avatar)
                 .clickable(onClick = onAuthorClick),
             lookupProfile = lookupProfile,
-            profileFlow = profileFlow,
         )
         Box(
             modifier = Modifier
@@ -284,7 +277,6 @@ internal fun RepostCompositeAvatar(
                 modifier = Modifier.size(16.dp),
                 sizeDp = 16.dp,
                 lookupProfile = lookupProfile,
-                profileFlow = profileFlow,
             )
         }
     }
@@ -299,8 +291,7 @@ private fun RowScope.AuthorNameRow(
     Text(
         text       = authorLabel,
         color      = MaterialTheme.colorScheme.onSurface,
-        fontWeight = FontWeight.SemiBold,
-        fontSize   = AppType.body,
+        style = AppTextStyles.author,
         maxLines   = 1,
         overflow   = TextOverflow.Ellipsis,
         modifier   = Modifier.weight(if (nostrAddress != null) 0.45f else 1f, fill = false),

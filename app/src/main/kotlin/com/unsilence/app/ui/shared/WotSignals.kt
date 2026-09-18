@@ -1,5 +1,6 @@
 package com.unsilence.app.ui.shared
 
+import com.unsilence.app.ui.theme.AppTextStyles
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -40,13 +41,15 @@ import com.unsilence.app.ui.theme.Surface2
 import com.unsilence.app.ui.theme.Text3
 import com.unsilence.app.ui.theme.TextSecondary
 import com.unsilence.app.ui.theme.Zap
+import com.unsilence.app.ui.common.LocalMinuteClock
+import com.unsilence.app.ui.feed.relativeTime
 
 /** An optional content time alongside the independent grapevine signal. */
 @Composable
 fun WotFeedMetaTimestamp(
     lookup: WotLookup?,
     mode: FeedWotDisplayMode,
-    timestamp: String?,
+    createdAt: Long?,
     modifier: Modifier = Modifier,
     timestampColor: Color = TextSecondary,
 ) {
@@ -66,33 +69,35 @@ fun WotFeedMetaTimestamp(
             Text(
                 text = text,
                 color = color,
-                fontSize = 10.5.sp,
+                style = AppTextStyles.metadata,
                 fontWeight = FontWeight.SemiBold,
-                fontFamily = FontFamily.Monospace,
                 maxLines = 1,
                 overflow = TextOverflow.Clip,
             )
-            if (timestamp != null) {
+            if (createdAt != null) {
                 Text(
                     text = " · ",
                     color = Text3,
-                    fontSize = 10.5.sp,
-                    fontFamily = FontFamily.Monospace,
+                    style = AppTextStyles.metadata,
                     maxLines = 1,
                 )
             }
         }
-        if (timestamp != null) {
-            Text(
-                text = timestamp,
-                color = timestampColor,
-                fontSize = 10.5.sp,
-                fontFamily = FontFamily.Monospace,
-                maxLines = 1,
-                overflow = TextOverflow.Clip,
-            )
+        if (createdAt != null) {
+            RelativeTimestamp(createdAt, timestampColor)
         }
     }
+}
+
+@Composable
+private fun RelativeTimestamp(createdAt: Long, color: Color) {
+    Text(
+        text = relativeTime(createdAt, LocalMinuteClock.current.value),
+        color = color,
+        style = AppTextStyles.metadata,
+        maxLines = 1,
+        overflow = TextOverflow.Clip,
+    )
 }
 
 fun hasWotFeedSignal(lookup: WotLookup?, mode: FeedWotDisplayMode): Boolean =
@@ -158,7 +163,7 @@ fun WotSearchSignal(
         WotLookup.Absent -> Text(
             text = "–",
             color = Text3,
-            fontSize = 11.sp,
+            style = AppTextStyles.caption,
             lineHeight = 12.sp,
             fontWeight = FontWeight.SemiBold,
             fontFamily = FontFamily.Monospace,
@@ -196,7 +201,7 @@ fun WotImpersonationBadge(
             Text(
                 text = "name match: ${risk.protectedProfile.displayLabel}",
                 color = Zap.copy(alpha = 0.92f),
-                fontSize = AppType.caption,
+                style = AppTextStyles.caption,
                 lineHeight = 12.sp,
                 fontWeight = FontWeight.Medium,
                 maxLines = 1,
@@ -243,7 +248,7 @@ fun WotBreakdownProvenance(
         Text(
             text = text,
             color = TextSecondary,
-            fontSize = AppType.caption,
+            style = AppTextStyles.caption,
             maxLines = 2,
             overflow = TextOverflow.Ellipsis,
         )

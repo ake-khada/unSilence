@@ -1,5 +1,6 @@
 package com.unsilence.app.ui.thread
 
+import com.unsilence.app.ui.theme.AppTextStyles
 import androidx.lifecycle.compose.LifecycleResumeEffect
 import androidx.compose.runtime.saveable.rememberSaveable
 import com.unsilence.app.ui.shared.ResumedEffect
@@ -291,11 +292,11 @@ fun ThreadScreen(
                 Text(
                     text     = "Thread",
                     color    = Color.White,
-                    fontSize = AppType.subheading,
+                    style = AppTextStyles.subheading,
                 )
             }
 
-            HorizontalDivider(color = MaterialTheme.colorScheme.surfaceVariant, thickness = 0.5.dp)
+            HorizontalDivider(color = com.unsilence.app.ui.theme.DividerColor, thickness = 1.dp)
 
             // ── Content ───────────────────────────────────────────────────────
             when {
@@ -335,7 +336,7 @@ fun ThreadScreen(
                                 Text(
                                     text     = "${state.replies.size} ${if (state.replies.size == 1) "reply" else "replies"}",
                                     color    = TextSecondary,
-                                    fontSize = AppType.footnote,
+                                    style = AppTextStyles.footnote,
                                     modifier = Modifier.padding(
                                         horizontal = Spacing.medium,
                                         vertical   = Spacing.small,

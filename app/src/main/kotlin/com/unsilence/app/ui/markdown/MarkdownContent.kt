@@ -1,5 +1,6 @@
 package com.unsilence.app.ui.markdown
 
+import com.unsilence.app.ui.theme.AppTextStyles
 import androidx.compose.foundation.background
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
@@ -140,7 +141,7 @@ private fun MdBlockView(
                         Text(
                             text     = if (block.ordered) "${index + 1}. " else "•  ",
                             color    = textColor,
-                            fontSize = AppType.bodyLarge,
+                            style = AppTextStyles.bodyLarge,
                             lineHeight = 24.sp,
                         )
                         Column(
@@ -169,7 +170,7 @@ private fun MdBlockView(
                     text       = block.code,
                     color      = textColor,
                     fontFamily = FontFamily.Monospace,
-                    fontSize   = AppType.bodySmall,
+                    style = AppTextStyles.bodySmall,
                     lineHeight = 20.sp,
                 )
             }

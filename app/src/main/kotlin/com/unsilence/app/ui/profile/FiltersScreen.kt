@@ -1,5 +1,6 @@
 package com.unsilence.app.ui.profile
 
+import com.unsilence.app.ui.theme.AppTextStyles
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -115,7 +116,7 @@ fun FiltersScreen(
                 Text(
                     text = "Filters",
                     color = Color.White,
-                    fontSize = AppType.subheading,
+                    style = AppTextStyles.subheading,
                     fontWeight = FontWeight.SemiBold,
                 )
             }
@@ -134,7 +135,7 @@ fun FiltersScreen(
                     Text(
                         text = "$total mutes" + if (privateCount > 0) " · $privateCount private" else "",
                         color = TextSecondary,
-                        fontSize = AppType.caption,
+                        style = AppTextStyles.caption,
                         modifier = Modifier.padding(
                             horizontal = Spacing.medium,
                             vertical = Spacing.medium,
@@ -297,14 +298,14 @@ private fun HashtagCapSelector(
         Text(
             text = "Hide hashtag-stuffed notes",
             color = Color.White,
-            fontSize = AppType.body,
+            style = AppTextStyles.body,
             fontWeight = FontWeight.SemiBold,
         )
         Spacer(Modifier.height(2.dp))
         Text(
             text = "Hides notes with more than N hashtags",
             color = TextSecondary,
-            fontSize = AppType.caption,
+            style = AppTextStyles.caption,
         )
         Spacer(Modifier.height(Spacing.small))
         Row(
@@ -335,7 +336,7 @@ private fun HashtagCapSelector(
                     Text(
                         text = label,
                         color = if (selected) Brand else TextSecondary,
-                        fontSize = AppType.bodySmall,
+                        style = AppTextStyles.bodySmall,
                         fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
                     )
                 }
@@ -351,7 +352,7 @@ private fun SectionLabel(title: String) {
     Text(
         text = title,
         color = TextSecondary,
-        fontSize = AppType.caption,
+        style = AppTextStyles.caption,
         fontWeight = FontWeight.SemiBold,
         letterSpacing = AppType.caption * 0.08f,
         modifier = Modifier.padding(horizontal = Spacing.large, vertical = Spacing.small),
@@ -391,7 +392,7 @@ private fun SegmentedToggle(
                 Text(
                     text = label,
                     color = if (selected) Brand else TextSecondary,
-                    fontSize = AppType.body,
+                    style = AppTextStyles.body,
                     fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
                 )
             }
@@ -428,7 +429,7 @@ private fun TabLabel(label: String, count: Int, selected: Boolean, onClick: () -
         Text(
             text = "$label $count",
             color = if (selected) Brand else TextSecondary,
-            fontSize = AppType.body,
+            style = AppTextStyles.body,
             fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
         )
         if (selected) {
@@ -472,7 +473,7 @@ private fun SearchBar(query: String, onQueryChange: (String) -> Unit) {
             modifier = Modifier.weight(1f),
             decorationBox = { inner ->
                 if (query.isEmpty()) {
-                    Text("Search", color = TextSecondary, fontSize = AppType.body)
+                    Text("Search", color = TextSecondary, style = AppTextStyles.body)
                 }
                 inner()
             },
@@ -512,10 +513,10 @@ private fun MutedUserRow(
                     ?: profile?.name?.takeIf { it.isNotBlank() }
                     ?: "${pubkey.take(8)}…",
                 color = Color.White,
-                fontSize = AppType.body,
+                style = AppTextStyles.body,
             )
             profile?.nip05?.takeIf { it.isNotBlank() }?.let {
-                Text(it, color = TextSecondary, fontSize = AppType.caption)
+                Text(it, color = TextSecondary, style = AppTextStyles.caption)
             }
         }
         IconButton(onClick = onRemove, modifier = Modifier.size(32.dp)) {
@@ -568,7 +569,7 @@ private fun AddBar(
             modifier = Modifier.weight(1f),
             decorationBox = { inner ->
                 if (value.isEmpty()) {
-                    Text(placeholder, color = TextSecondary, fontSize = AppType.body)
+                    Text(placeholder, color = TextSecondary, style = AppTextStyles.body)
                 }
                 inner()
             },
@@ -584,7 +585,7 @@ private fun AddBar(
             Text(
                 text = "Add",
                 color = Brand,
-                fontSize = AppType.bodySmall,
+                style = AppTextStyles.bodySmall,
                 modifier = Modifier.clickable(onClick = onAdd),
             )
         }
@@ -604,7 +605,7 @@ private fun MutedTagRow(text: String, onRemove: () -> Unit) {
         Text(
             text = text,
             color = Color.White,
-            fontSize = AppType.body,
+            style = AppTextStyles.body,
             modifier = Modifier.weight(1f),
         )
         IconButton(onClick = onRemove, modifier = Modifier.size(32.dp)) {
@@ -629,7 +630,7 @@ private fun EmptyLabel(text: String) {
     Text(
         text = text,
         color = TextSecondary,
-        fontSize = AppType.body,
+        style = AppTextStyles.body,
         modifier = Modifier.padding(horizontal = Spacing.large, vertical = Spacing.large),
     )
 }
@@ -664,7 +665,7 @@ private fun MuteSyncBanner(
                 MuteSyncState.Ready -> "Mute sync is ready."
             },
             color = Warn,
-            fontSize = AppType.caption,
+            style = AppTextStyles.caption,
         )
         if (isAmberMode && state == MuteSyncState.EncryptionUnavailable) {
             Spacer(Modifier.height(Spacing.small))
@@ -680,7 +681,7 @@ private fun MuteSyncBanner(
                 Text(
                     text = "Retry Amber access",
                     fontWeight = FontWeight.SemiBold,
-                    fontSize = AppType.body,
+                    style = AppTextStyles.body,
                 )
             }
         }

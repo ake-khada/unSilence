@@ -1,5 +1,6 @@
 package com.unsilence.app.ui.settings.console
 
+import com.unsilence.app.ui.theme.AppTextStyles
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
@@ -172,7 +173,7 @@ private fun RelaysCard(state: ConsoleUiState) {
         Text(
             text = state.relaySummary,
             color = Color.White,
-            fontSize = 14.sp,
+            style = AppTextStyles.body,
             fontWeight = FontWeight.SemiBold,
         )
         Text(
@@ -183,7 +184,7 @@ private fun RelaysCard(state: ConsoleUiState) {
         )
         Spacer(Modifier.height(Spacing.small))
         if (state.relays.isEmpty()) {
-            Text("No relay connections", color = Text3, fontSize = 12.sp)
+            Text("No relay connections", color = Text3, style = AppTextStyles.footnote)
         } else {
             Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 state.relays.forEach { row ->
@@ -208,7 +209,7 @@ private fun RelayRow(row: ConsoleRelayRow) {
             Text(
                 text = row.url,
                 color = Color.White,
-                fontSize = 12.sp,
+                style = AppTextStyles.footnote,
                 fontFamily = FontFamily.Monospace,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
@@ -239,13 +240,13 @@ private fun StoreCard(state: ConsoleUiState) {
     ConsoleCard(title = "Store & gates", icon = Icons.Filled.Storage) {
         val store = state.store
         if (store == null) {
-            Text("Store snapshot unavailable", color = Text3, fontSize = 12.sp)
+            Text("Store snapshot unavailable", color = Text3, style = AppTextStyles.footnote)
             return@ConsoleCard
         }
         Text(
             text = "${store.eventCount} events · ${formatConsoleBytes(store.totalEstimatedBytes)} estimated",
             color = Color.White,
-            fontSize = 14.sp,
+            style = AppTextStyles.body,
             fontWeight = FontWeight.SemiBold,
         )
         Text(
@@ -267,7 +268,7 @@ private fun StoreCard(state: ConsoleUiState) {
         Text(
             text = state.gatesSummary,
             color = Color.White,
-            fontSize = 12.sp,
+            style = AppTextStyles.footnote,
             fontFamily = FontFamily.Monospace,
         )
         state.gates.wotTargetsHash.takeIf { it.isNotBlank() }?.let { hash ->
@@ -314,12 +315,12 @@ private fun LogTailCard(
             unavailable != null -> Text(
                 text = "logs unavailable on this device",
                 color = Text3,
-                fontSize = 12.sp,
+                style = AppTextStyles.footnote,
             )
             state.filteredLogs.isEmpty() -> Text(
                 text = "No matching logs",
                 color = Text3,
-                fontSize = 12.sp,
+                style = AppTextStyles.footnote,
             )
             else -> Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                 state.filteredLogs.take(80).forEach { line ->
@@ -379,7 +380,7 @@ private fun ConsoleCard(
                 Icon(icon, contentDescription = null, tint = Color.White, modifier = Modifier.size(16.dp))
             }
             Spacer(Modifier.width(10.dp))
-            Text(title, color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+            Text(title, color = Color.White, style = AppTextStyles.body, fontWeight = FontWeight.SemiBold)
         }
         Spacer(Modifier.height(12.dp))
         content()
@@ -406,7 +407,7 @@ private fun ConsoleButton(
     ) {
         Icon(icon, contentDescription = null, tint = Color.White, modifier = Modifier.size(15.dp))
         Spacer(Modifier.width(6.dp))
-        Text(text, color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+        Text(text, color = Color.White, style = AppTextStyles.footnote, fontWeight = FontWeight.SemiBold)
     }
 }
 
@@ -434,7 +435,7 @@ private fun FilterChip(
     Text(
         text = label,
         color = if (selected) Color.Black else TextSecondary,
-        fontSize = 11.sp,
+        style = AppTextStyles.caption,
         fontWeight = FontWeight.SemiBold,
         modifier = Modifier
             .clip(RoundedCornerShape(999.dp))

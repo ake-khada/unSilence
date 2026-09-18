@@ -1,5 +1,6 @@
 package com.unsilence.app.ui.feed
 
+import com.unsilence.app.ui.theme.AppTextStyles
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.spring
@@ -250,7 +251,7 @@ private fun RepostStripTile(
             Text(
                 text = label,
                 color = ActionTint,
-                fontSize = AppType.footnote,
+                style = AppTextStyles.footnote,
                 maxLines = 1,
             )
         }
@@ -289,7 +290,7 @@ internal fun EventActionButton(
             Text(
                 text     = formatCount(count),
                 color    = tint,
-                fontSize = AppType.footnote,
+                style = AppTextStyles.footnote,
             )
         }
     }
@@ -336,7 +337,7 @@ internal fun EventReactButton(
                 Text(
                     text     = formatCount(count),
                     color    = tint,
-                    fontSize = AppType.footnote,
+                    style = AppTextStyles.footnote,
                 )
             }
         }
@@ -437,7 +438,7 @@ internal fun EventZapButton(
                 Text(
                     text     = sats.toCompactSats(),
                     color    = tint,
-                    fontSize = AppType.footnote,
+                    style = AppTextStyles.footnote,
                 )
             }
         }

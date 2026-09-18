@@ -1,5 +1,6 @@
 package com.unsilence.app.ui.feed
 
+import com.unsilence.app.ui.theme.AppTextStyles
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.LinearEasing
@@ -142,7 +143,7 @@ internal fun ImmersiveVideoFeed(
             Text(
                 text = "No playable videos match",
                 color = TextSecondary,
-                fontSize = AppType.body,
+                style = AppTextStyles.body,
                 modifier = Modifier.align(Alignment.Center),
             )
             Row(
@@ -705,7 +706,6 @@ private fun ImmersiveAuthorBar(
                 picture = profile?.picture ?: row.authorPicture.takeIf { rowDescribesAuthor },
                 sizeDp = 34.dp,
                 lookupProfile = lookupProfile,
-                profileFlow = host.surface.profileFlow,
                 modifier = Modifier
                     .size(34.dp)
                     .clickable { host.actions.onAuthorClick(authorPubkey) },
@@ -718,7 +718,7 @@ private fun ImmersiveAuthorBar(
                 Text(
                     text = displayName,
                     color = White,
-                    fontSize = AppType.body,
+                    style = AppTextStyles.body,
                     fontWeight = FontWeight.SemiBold,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
@@ -746,7 +746,7 @@ private fun ImmersiveAuthorBar(
                 Text(
                     text = caption,
                     color = White.copy(alpha = 0.86f),
-                    fontSize = AppType.bodySmall,
+                    style = AppTextStyles.bodySmall,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                 )

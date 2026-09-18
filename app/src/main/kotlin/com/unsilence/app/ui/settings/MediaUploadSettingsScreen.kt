@@ -1,5 +1,6 @@
 package com.unsilence.app.ui.settings
 
+import com.unsilence.app.ui.theme.AppTextStyles
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -94,7 +95,7 @@ fun MediaUploadSettingsScreen(
                 Text(
                     text = "Media Upload",
                     color = Color.White,
-                    fontSize = 16.sp,
+                    style = AppTextStyles.subheading,
                     fontWeight = FontWeight.SemiBold,
                     modifier = Modifier.weight(1f),
                 )
@@ -114,14 +115,14 @@ fun MediaUploadSettingsScreen(
                 Text(
                     text = "Servers",
                     color = Color.White,
-                    fontSize = 14.sp,
+                    style = AppTextStyles.body,
                     fontWeight = FontWeight.SemiBold,
                 )
                 Spacer(Modifier.height(Spacing.micro))
                 Text(
                     text = "Where your photos and videos are stored. Your selection is published as a kind-10063 event so other clients can find your media.",
                     color = Text3,
-                    fontSize = 11.sp,
+                    style = AppTextStyles.caption,
                 )
                 Spacer(Modifier.height(Spacing.medium))
 
@@ -152,7 +153,7 @@ fun MediaUploadSettingsScreen(
                     Text(
                         text = "Add custom server",
                         color = BrandDeep,
-                        fontSize = 14.sp,
+                        style = AppTextStyles.body,
                     )
                 }
 
@@ -164,7 +165,7 @@ fun MediaUploadSettingsScreen(
                 Text(
                     text = "Image upload",
                     color = Color.White,
-                    fontSize = 14.sp,
+                    style = AppTextStyles.body,
                     fontWeight = FontWeight.SemiBold,
                 )
                 Spacer(Modifier.height(Spacing.medium))
@@ -179,7 +180,7 @@ fun MediaUploadSettingsScreen(
                 Text(
                     text = "Quality: ${imageSteps[displayedImageIndex].imageSettingsLabel()}",
                     color = TextSecondary,
-                    fontSize = 13.sp,
+                    style = AppTextStyles.bodySmall,
                 )
                 Spacer(Modifier.height(Spacing.micro))
                 Slider(
@@ -205,7 +206,7 @@ fun MediaUploadSettingsScreen(
                 Text(
                     text = "Video upload",
                     color = Color.White,
-                    fontSize = 14.sp,
+                    style = AppTextStyles.body,
                     fontWeight = FontWeight.SemiBold,
                 )
                 Spacer(Modifier.height(Spacing.medium))
@@ -221,7 +222,7 @@ fun MediaUploadSettingsScreen(
                 Text(
                     text = "Quality: ${videoSteps[displayedVideoIndex].label}",
                     color = TextSecondary,
-                    fontSize = 13.sp,
+                    style = AppTextStyles.bodySmall,
                 )
                 Spacer(Modifier.height(Spacing.micro))
                 Slider(
@@ -285,18 +286,18 @@ private fun ServerRow(
             Text(
                 text = server.displayName,
                 color = Color.White,
-                fontSize = 14.sp,
+                style = AppTextStyles.body,
             )
             Text(
                 text = server.url,
                 color = Text3,
-                fontSize = 11.sp,
+                style = AppTextStyles.caption,
             )
             if (server.freeTierNote.isNotEmpty()) {
                 Text(
                     text = server.freeTierNote,
                     color = TextSecondary,
-                    fontSize = 12.sp,
+                    style = AppTextStyles.footnote,
                 )
             }
         }
@@ -324,8 +325,8 @@ private fun ServerRow(
         }
     }
     HorizontalDivider(
-        color = MaterialTheme.colorScheme.surfaceVariant,
-        thickness = 0.5.dp,
+        color = com.unsilence.app.ui.theme.DividerColor,
+        thickness = 1.dp,
         modifier = Modifier.padding(start = 48.dp),
     )
 }

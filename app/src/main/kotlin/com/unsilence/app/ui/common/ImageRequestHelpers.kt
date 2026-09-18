@@ -7,6 +7,7 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalWindowInfo
 import androidx.compose.ui.unit.Dp
 import coil3.request.ImageRequest
+import coil3.request.allowRgb565
 import coil3.size.Dimension
 import coil3.size.Size
 
@@ -23,12 +24,17 @@ fun rememberSizedImageRequest(
     url: String?,
     widthPx: Int,
     heightPx: Int,
+    allowRgb565: Boolean = false,
 ): ImageRequest {
     val context = LocalContext.current
-    return remember(url, widthPx, heightPx) {
+    return remember(context, url, widthPx, heightPx, allowRgb565) {
         ImageRequest.Builder(context)
             .data(url)
             .size(Size(Dimension.Pixels(widthPx), Dimension.Pixels(heightPx)))
+            .allowRgb565(allowRgb565)
+            // Coil validates cached size/hardware, not RGB565 color precision.
+            // Never let a feed decode satisfy a full-color viewer request.
+            .apply { if (allowRgb565) memoryCacheKeyExtra("unsilence.decode", "feed-rgb565") }
             .build()
     }
 }
@@ -44,12 +50,13 @@ fun rememberWidthImageRequest(
     url: String?,
     widthDp: Dp,
     aspectRatio: Float = 16f / 9f,
+    allowRgb565: Boolean = false,
 ): ImageRequest {
     val density = LocalDensity.current
     val widthPx = with(density) { widthDp.roundToPx() }.coerceAtLeast(1)
     val safeAspect = if (aspectRatio > 0f) aspectRatio else (16f / 9f)
     val heightPx = (widthPx / safeAspect).toInt().coerceIn(100, 4000)
-    return rememberSizedImageRequest(url, widthPx, heightPx)
+    return rememberSizedImageRequest(url, widthPx, heightPx, allowRgb565)
 }
 
 /**
@@ -75,9 +82,10 @@ fun rememberAvatarImageRequest(
 fun rememberFullWidthImageRequest(
     url: String?,
     aspectRatio: Float = 16f / 9f,
+    allowRgb565: Boolean = false,
 ): ImageRequest {
     val widthPx = LocalWindowInfo.current.containerSize.width.coerceAtLeast(1)
     val safeAspect = if (aspectRatio > 0f) aspectRatio else (16f / 9f)
     val heightPx = (widthPx / safeAspect).toInt().coerceIn(100, 4000)
-    return rememberSizedImageRequest(url, widthPx, heightPx)
+    return rememberSizedImageRequest(url, widthPx, heightPx, allowRgb565)
 }

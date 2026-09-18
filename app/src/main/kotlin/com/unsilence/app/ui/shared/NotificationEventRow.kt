@@ -1,5 +1,6 @@
 package com.unsilence.app.ui.shared
 
+import com.unsilence.app.ui.theme.AppTextStyles
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -46,7 +47,6 @@ import com.unsilence.app.data.memory.NotificationRow
 import com.unsilence.app.data.memory.WotLookup
 import com.unsilence.app.data.relay.FeedWotDisplayMode
 import com.unsilence.app.ui.common.IdentIcon
-import com.unsilence.app.ui.feed.relativeTime
 import com.unsilence.app.ui.theme.AppType
 import com.unsilence.app.ui.theme.Brand
 import com.unsilence.app.ui.theme.Like
@@ -132,7 +132,7 @@ private fun NotificationTimestamp(
     WotFeedMetaTimestamp(
         lookup = lookup,
         mode = mode,
-        timestamp = relativeTime(createdAt),
+        createdAt = createdAt,
         modifier = modifier,
         timestampColor = TextSecondary,
     )
@@ -342,7 +342,7 @@ private fun ActorStrip(
                 Text(
                     text = "+$extra",
                     color = TextSecondary,
-                    fontSize = AppType.caption,
+                    style = AppTextStyles.caption,
                     maxLines = 1,
                 )
             }

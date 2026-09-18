@@ -1,5 +1,6 @@
 package com.unsilence.app.ui.feed
 
+import com.unsilence.app.ui.theme.AppTextStyles
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -100,7 +101,7 @@ internal fun OgPreviewCard(
                 .fillMaxWidth()
                 .clip(RoundedCornerShape(Sizing.mediaCornerRadius))
                 .background(SurfaceVariant)
-                .border(0.5.dp, BorderFaint, RoundedCornerShape(Sizing.mediaCornerRadius))
+                .border(1.dp, BorderFaint, RoundedCornerShape(Sizing.mediaCornerRadius))
                 .clickable { runCatching { uriHandler.openUri(url) } },
         ) {
             if (!loadedOg.imageUrl.isNullOrBlank() && !imageLoadFailed) {
@@ -115,7 +116,7 @@ internal fun OgPreviewCard(
                         .background(Surface1),
                 ) {
                     AsyncImage(
-                        model              = rememberWidthImageRequest(loadedOg.imageUrl, maxWidth, 16f / 9f),
+                        model              = rememberWidthImageRequest(loadedOg.imageUrl, maxWidth, 16f / 9f, allowRgb565 = true),
                         contentDescription = null,
                         contentScale       = ContentScale.Crop,
                         onError            = { imageLoadFailed = true },
@@ -129,7 +130,7 @@ internal fun OgPreviewCard(
                         text       = loadedOg.title,
                         color      = MaterialTheme.colorScheme.onSurface,
                         fontWeight = FontWeight.SemiBold,
-                        fontSize   = AppType.bodySmall,
+                        style = AppTextStyles.bodySmall,
                         lineHeight = 17.sp,
                         maxLines   = 2,
                         overflow   = TextOverflow.Ellipsis,
@@ -139,8 +140,7 @@ internal fun OgPreviewCard(
                     Text(
                         text     = loadedOg.description,
                         color    = TextSecondary,
-                        fontSize = AppType.footnote,
-                        lineHeight = 16.sp,
+                        style = AppTextStyles.footnote,
                         maxLines = 2,
                         overflow = TextOverflow.Ellipsis,
                         modifier = Modifier.padding(top = 2.dp),
@@ -149,7 +149,7 @@ internal fun OgPreviewCard(
                 Text(
                     text     = loadedOg.siteName ?: domain,
                     color    = TextSecondary,
-                    fontSize = AppType.caption,
+                    style = AppTextStyles.caption,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                     modifier = Modifier.padding(top = 2.dp),

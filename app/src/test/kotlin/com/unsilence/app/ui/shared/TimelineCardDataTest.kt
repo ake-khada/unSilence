@@ -11,6 +11,9 @@ import java.util.concurrent.ConcurrentHashMap
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertSame
+import org.junit.Assert.assertNotSame
+import kotlinx.coroutines.flow.first
 import org.junit.Test
 
 class TimelineCardDataTest {
@@ -20,22 +23,46 @@ class TimelineCardDataTest {
         store.insert(profileEvent(pubkey = "alice", picture = "https://example.com/alice.jpg"))
         val data = TimelineCardData(userRepository(store), store)
 
-        val flow = data.profileFlow("alice", backgroundScope)
+        val flow = data.profileFlow("alice")
 
         assertEquals("https://example.com/alice.jpg", flow.value?.picture)
     }
 
     @Test
-    fun `profileFlow replaces stale null cache when profile arrives while inactive`() = runTest {
+    fun `profileFlow reads fresh state without replacing a handle or retaining a sharing job`() = runTest {
         val store = memoryEventStore()
         val data = TimelineCardData(userRepository(store), store)
-        val missing = data.profileFlow("alice", backgroundScope)
+        val missing = data.profileFlow("alice")
         assertNull(missing.value)
 
         store.insert(profileEvent(pubkey = "alice", picture = "https://example.com/alice.jpg"))
-        val refreshed = data.profileFlow("alice", backgroundScope)
+        val refreshed = data.profileFlow("alice")
 
+        assertSame(missing, refreshed)
         assertEquals("https://example.com/alice.jpg", refreshed.value?.picture)
+    }
+
+    @Test
+    fun `LRU eviction never invalidates a handle still held by a card`() = runTest {
+        val store = memoryEventStore()
+        val data = TimelineCardData(userRepository(store), store)
+        val heldByCard = data.profileFlow("alice")
+        repeat(501) { data.profileFlow("author-$it") }
+        val freshHandle = data.profileFlow("alice")
+        assertNotSame(heldByCard, freshHandle)
+        store.insert(profileEvent(pubkey = "alice", picture = "https://example.com/new.jpg"))
+        assertEquals(freshHandle.value, heldByCard.value)
+        assertEquals("https://example.com/new.jpg", heldByCard.first()?.picture)
+    }
+
+    @Test
+    fun `stats handles stay valid after cache eviction`() = runTest {
+        val store = memoryEventStore()
+        val data = TimelineCardData(userRepository(store), store)
+        val heldByCard = data.statsFlow("note")
+        repeat(501) { data.statsFlow("note-$it") }
+        assertNotSame(heldByCard, data.statsFlow("note"))
+        assertEquals(store.currentStatsSnapshot("note"), heldByCard.first())
     }
 
     private fun userRepository(store: MemoryEventStore): UserRepository {

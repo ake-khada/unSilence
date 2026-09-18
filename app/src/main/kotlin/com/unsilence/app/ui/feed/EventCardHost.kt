@@ -1,5 +1,7 @@
 package com.unsilence.app.ui.feed
 
+import com.unsilence.app.ui.shared.CardDataFlow
+
 import androidx.compose.runtime.Stable
 import com.unsilence.app.data.memory.CustomEmoji
 import com.unsilence.app.data.memory.EventEntity
@@ -61,8 +63,8 @@ data class EventCardServices(
 /** Screen-specific display providers and policies used by card leaves. */
 @Stable
 data class EventCardSurface(
-    val profileFlow: ((String) -> StateFlow<UserEntity?>)?,
-    val statsFlow: ((String) -> StateFlow<EventStats>)?,
+    val profileFlow: ((String) -> CardDataFlow<UserEntity?>)?,
+    val statsFlow: ((String) -> CardDataFlow<EventStats>)?,
     val zapDetailsForEvent: ((String) -> List<ZapDetail>)?,
     val repostPubkeysForEvent: ((String) -> List<String>)?,
     val reactionsForEvent: ((String) -> List<ReactionInfo>)?,
@@ -146,8 +148,8 @@ internal fun NoteActionsViewModel.eventCardServices(): EventCardServices = Event
 
 internal fun NoteActionsViewModel.eventCardHost(
     actions: EventCardActions,
-    profileFlow: ((String) -> StateFlow<UserEntity?>)?,
-    statsFlow: ((String) -> StateFlow<EventStats>)?,
+    profileFlow: ((String) -> CardDataFlow<UserEntity?>)?,
+    statsFlow: ((String) -> CardDataFlow<EventStats>)?,
     zapDetailsForEvent: ((String) -> List<ZapDetail>)?,
     repostPubkeysForEvent: ((String) -> List<String>)?,
     reactionsForEvent: ((String) -> List<ReactionInfo>)?,

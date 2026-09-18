@@ -1,5 +1,8 @@
 package com.unsilence.app.ui.feed
 
+import com.unsilence.app.ui.theme.AppTextStyles
+import com.unsilence.app.ui.shared.CardDataFlow
+
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -62,7 +65,6 @@ import com.unsilence.app.ui.theme.TextSecondary
 import com.unsilence.app.ui.theme.Text3
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.flow.StateFlow
 import kotlin.math.roundToInt
 
 @androidx.compose.runtime.Immutable
@@ -160,7 +162,7 @@ fun PollCard(
     callbacks: PollActionCallbacks?,
     modifier: Modifier = Modifier,
     lookupProfile: (suspend (String) -> UserEntity?)? = null,
-    profileFlow: ((String) -> StateFlow<UserEntity?>)? = null,
+    profileFlow: ((String) -> CardDataFlow<UserEntity?>)? = null,
     wotLookup: ((String) -> WotLookup?)? = null,
     onVoterClick: (String) -> Unit = {},
     onWotSubjectsVisible: (Collection<String>) -> Unit = {},
@@ -245,7 +247,7 @@ fun PollCard(
                     Text(
                         text = option.label,
                         color = Color.White,
-                        fontSize = AppType.body,
+                        style = AppTextStyles.body,
                         maxLines = 3,
                         overflow = TextOverflow.Ellipsis,
                         modifier = Modifier.weight(1f),
@@ -255,7 +257,7 @@ fun PollCard(
                         Text(
                             text = "${(fraction * 100).roundToInt()}%",
                             color = TextSecondary,
-                            fontSize = AppType.caption,
+                            style = AppTextStyles.caption,
                             fontWeight = FontWeight.Medium,
                         )
                     }
@@ -281,7 +283,7 @@ fun PollCard(
                 Text(
                     text = "Show results",
                     color = BrandDeep,
-                    fontSize = AppType.caption,
+                    style = AppTextStyles.caption,
                     fontWeight = FontWeight.Medium,
                 )
             }
@@ -305,7 +307,7 @@ fun PollCard(
                     }
                 },
                 color = TextSecondary,
-                fontSize = AppType.caption,
+                style = AppTextStyles.caption,
                 modifier = Modifier
                     .weight(1f)
                     .clickable(enabled = totalVotes > 0 && showResults) { showVoters = true }
@@ -361,7 +363,7 @@ private fun PollVotersSheet(
     totalVoters: Int,
     currentPubkey: String?,
     lookupProfile: (suspend (String) -> UserEntity?)?,
-    profileFlow: ((String) -> StateFlow<UserEntity?>)?,
+    profileFlow: ((String) -> CardDataFlow<UserEntity?>)?,
     wotLookup: ((String) -> WotLookup?)?,
     onVoterClick: (String) -> Unit,
     onDismiss: () -> Unit,
@@ -375,7 +377,7 @@ private fun PollVotersSheet(
             Text(
                 text = "$totalVoters ${if (totalVoters == 1) "voter" else "voters"}",
                 color = Color.White,
-                fontSize = AppType.subheading,
+                style = AppTextStyles.subheading,
                 fontWeight = FontWeight.SemiBold,
                 modifier = Modifier.padding(horizontal = 20.dp, vertical = 12.dp),
             )
@@ -395,7 +397,7 @@ private fun PollVotersSheet(
                             Text(
                                 text = group.optionLabel,
                                 color = Color.White,
-                                fontSize = AppType.body,
+                                style = AppTextStyles.body,
                                 fontWeight = FontWeight.Medium,
                                 maxLines = 2,
                                 overflow = TextOverflow.Ellipsis,
@@ -404,7 +406,7 @@ private fun PollVotersSheet(
                             Text(
                                 text = "${group.voters.size} · ${group.percentage}%",
                                 color = TextSecondary,
-                                fontSize = AppType.caption,
+                                style = AppTextStyles.caption,
                             )
                         }
                     }
@@ -432,7 +434,7 @@ private fun PollVoterRow(
     pubkey: String,
     isCurrentUser: Boolean,
     lookupProfile: (suspend (String) -> UserEntity?)?,
-    profileFlow: ((String) -> StateFlow<UserEntity?>)?,
+    profileFlow: ((String) -> CardDataFlow<UserEntity?>)?,
     wotLookup: ((String) -> WotLookup?)?,
     onClick: () -> Unit,
 ) {
@@ -453,13 +455,12 @@ private fun PollVoterRow(
             modifier = Modifier.size(36.dp),
             sizeDp = 36.dp,
             lookupProfile = lookupProfile,
-            profileFlow = profileFlow,
         )
         Spacer(Modifier.width(10.dp))
         Text(
             text = label,
             color = Color.White,
-            fontSize = AppType.body,
+            style = AppTextStyles.body,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
             modifier = Modifier.weight(1f),
@@ -468,7 +469,7 @@ private fun PollVoterRow(
             Text(
                 text = "you",
                 color = BrandDeep,
-                fontSize = AppType.caption,
+                style = AppTextStyles.caption,
                 fontWeight = FontWeight.Medium,
                 modifier = Modifier.padding(horizontal = 8.dp),
             )
@@ -483,7 +484,7 @@ private fun PollVoterWotNumeral(lookup: WotLookup?) {
         is WotLookup.Scored -> Text(
             text = lookup.assertion.rank.toString(),
             color = wotTierColor(lookup.assertion.rank),
-            fontSize = 11.sp,
+            style = AppTextStyles.caption,
             fontWeight = FontWeight.SemiBold,
             fontFamily = FontFamily.Monospace,
             maxLines = 1,
@@ -491,7 +492,7 @@ private fun PollVoterWotNumeral(lookup: WotLookup?) {
         WotLookup.Absent -> Text(
             text = "-",
             color = Text3,
-            fontSize = 11.sp,
+            style = AppTextStyles.caption,
             fontFamily = FontFamily.Monospace,
             maxLines = 1,
         )

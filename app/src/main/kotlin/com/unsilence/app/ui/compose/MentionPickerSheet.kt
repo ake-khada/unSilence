@@ -1,5 +1,6 @@
 package com.unsilence.app.ui.compose
 
+import com.unsilence.app.ui.theme.AppTextStyles
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -126,7 +127,7 @@ private fun UserRow(
                     ?: user.name?.takeIf { it.isNotBlank() }
                     ?: "${user.pubkey.take(6)}\u2026${user.pubkey.takeLast(4)}",
                 color = Color.White,
-                fontSize = AppType.body,
+                style = AppTextStyles.body,
                 fontWeight = FontWeight.SemiBold,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
@@ -135,7 +136,7 @@ private fun UserRow(
                 Text(
                     text = user.nip05,
                     color = TextSecondary,
-                    fontSize = AppType.caption,
+                    style = AppTextStyles.caption,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                 )

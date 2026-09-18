@@ -1,5 +1,6 @@
 package com.unsilence.app.ui.feed
 
+import com.unsilence.app.ui.theme.AppTextStyles
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -155,6 +156,7 @@ internal fun EventMediaGrid(
                         model = rememberFullWidthImageRequest(
                             images[page].url,
                             aspectRatio = frameAspect,
+                            allowRgb565 = true,
                         ),
                         contentDescription = null,
                         contentScale       = ContentScale.Fit,
@@ -261,7 +263,7 @@ internal fun EventMediaImage(
 
     Box(modifier = imageModifier, contentAlignment = Alignment.Center) {
         AsyncImage(
-            model              = rememberFullWidthImageRequest(image.url, aspectRatio = displayAspect),
+            model              = rememberFullWidthImageRequest(image.url, aspectRatio = displayAspect, allowRgb565 = true),
             contentDescription = null,
             contentScale       = ContentScale.Fit,
             modifier           = Modifier.fillMaxSize(),
@@ -367,7 +369,7 @@ private fun FullScreenImageDialog(
                     Text(
                         text       = "${pagerState.currentPage + 1} / ${imageUrls.size}",
                         color      = Color.White,
-                        fontSize   = 14.sp,
+                        style = AppTextStyles.body,
                         fontWeight = FontWeight.SemiBold,
                     )
                     Spacer(Modifier.weight(1f))

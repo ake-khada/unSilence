@@ -1,5 +1,6 @@
 package com.unsilence.app.ui.feed
 
+import com.unsilence.app.ui.theme.AppTextStyles
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
@@ -98,11 +99,11 @@ fun PostActionsBottomSheet(
                         text = authorProfile?.displayName?.takeIf { it.isNotBlank() }
                             ?: authorProfile?.name?.takeIf { it.isNotBlank() }
                             ?: "${authorPubkey.take(8)}…",
-                        fontSize = AppType.body,
+                        style = AppTextStyles.body,
                         color = Color.White,
                     )
                     authorProfile?.nip05?.takeIf { it.isNotBlank() }?.let {
-                        Text(it, fontSize = AppType.caption, color = TextSecondary)
+                        Text(it, style = AppTextStyles.caption, color = TextSecondary)
                     }
                 }
             }
@@ -132,7 +133,7 @@ fun PostActionsBottomSheet(
                     Spacer(Modifier.width(16.dp))
                     Text(
                         text = "Seen on ${relayItems.size} ${if (relayItems.size == 1) "relay" else "relays"}",
-                        fontSize = AppType.body,
+                        style = AppTextStyles.body,
                         color = Color.White,
                         modifier = Modifier.weight(1f),
                     )
@@ -164,7 +165,7 @@ fun PostActionsBottomSheet(
                                 Spacer(Modifier.width(12.dp))
                                 Text(
                                     text = relay.host,
-                                    fontSize = AppType.body,
+                                    style = AppTextStyles.body,
                                     color = TextSecondary,
                                     modifier = Modifier.weight(1f),
                                 )
@@ -217,6 +218,6 @@ internal fun SheetActionRow(
     ) {
         Icon(icon, contentDescription = null, tint = tint, modifier = Modifier.size(20.dp))
         Spacer(Modifier.width(16.dp))
-        Text(label, fontSize = AppType.body, color = tint)
+        Text(label, style = AppTextStyles.body, color = tint)
     }
 }

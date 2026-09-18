@@ -1,5 +1,6 @@
 package com.unsilence.app.ui.profile
 
+import com.unsilence.app.ui.theme.AppTextStyles
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -369,7 +370,7 @@ fun ProfileScreen(
                     Text(
                         text       = displayName,
                         color      = Color.White,
-                        fontSize   = AppType.heading,
+                        style = AppTextStyles.heading,
                         fontWeight = FontWeight.Bold,
                         textAlign  = TextAlign.Center,
                         maxLines   = 1,
@@ -494,7 +495,7 @@ fun ProfileScreen(
                         Text(
                             text = "${verified.toCompactSats()} verified in your grapevine",
                             color = Text3,
-                            fontSize = AppType.caption,
+                            style = AppTextStyles.caption,
                             modifier = Modifier.fillMaxWidth(),
                             textAlign = TextAlign.Center,
                         )
@@ -734,7 +735,7 @@ fun ProfileScreen(
                 Text(
                     text = "Web of trust",
                     color = Color.White,
-                    fontSize = AppType.subheading,
+                    style = AppTextStyles.subheading,
                     fontWeight = FontWeight.SemiBold,
                 )
                 Spacer(Modifier.height(Spacing.medium))
@@ -782,7 +783,7 @@ private fun ProfileAvatar(
         if (pubkeyHex != null) {
             IdentIcon(pubkey = pubkeyHex, modifier = Modifier.fillMaxSize())
         } else {
-            Box(modifier = Modifier.fillMaxSize().background(Color(0xFF333333)))
+            Box(modifier = Modifier.fillMaxSize().background(com.unsilence.app.ui.theme.Surface2))
         }
         if (!pictureUrl.isNullOrBlank()) {
             AsyncImage(
@@ -806,7 +807,7 @@ private fun StatLabel(label: String, value: String?, onClick: (() -> Unit)? = nu
             Text(
                 text       = it,
                 color      = Color.White,
-                fontSize   = AppType.bodySmall,
+                style = AppTextStyles.bodySmall,
                 fontWeight = FontWeight.SemiBold,
             )
             Spacer(Modifier.size(4.dp))
@@ -814,7 +815,7 @@ private fun StatLabel(label: String, value: String?, onClick: (() -> Unit)? = nu
         Text(
             text     = label,
             color    = TextSecondary,
-            fontSize = AppType.bodySmall,
+            style = AppTextStyles.bodySmall,
         )
     }
 }

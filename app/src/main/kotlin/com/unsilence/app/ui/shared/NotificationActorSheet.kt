@@ -1,5 +1,6 @@
 package com.unsilence.app.ui.shared
 
+import com.unsilence.app.ui.theme.AppTextStyles
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
@@ -75,7 +76,7 @@ fun NotificationActorSheet(
                 Text(
                     text = "${row.people} $verb",
                     color = Color.White,
-                    fontSize = AppType.subheading,
+                    style = AppTextStyles.subheading,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                 )
@@ -85,7 +86,7 @@ fun NotificationActorSheet(
                         text = "· ${formatSats(row.sumSats)} sats",
                         color = Zap,
                         fontWeight = FontWeight.Medium,
-                        fontSize = AppType.subheading,
+                        style = AppTextStyles.subheading,
                     )
                 }
             }
@@ -156,7 +157,7 @@ private fun ActorSheetRow(
             text = label,
             modifier = Modifier.weight(1f),
             color = Color.White,
-            fontSize = AppType.bodyLarge,
+            style = AppTextStyles.bodyLarge,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
         )
@@ -168,7 +169,7 @@ private fun ActorSheetRow(
                     text = "${formatSats(actor.sats)} sats",
                     color = Zap,
                     fontWeight = FontWeight.Medium,
-                    fontSize = AppType.bodySmall,
+                    style = AppTextStyles.bodySmall,
                 )
             }
         }
@@ -197,7 +198,7 @@ private fun AnonymousActorRow(count: Int, sats: Long, notifType: String) {
             text = if (count == 1) "1 anonymous" else "$count anonymous",
             modifier = Modifier.weight(1f),
             color = TextSecondary,
-            fontSize = AppType.bodyLarge,
+            style = AppTextStyles.bodyLarge,
             maxLines = 1,
         )
         if (notifType == "zap" && sats > 0) {
@@ -205,7 +206,7 @@ private fun AnonymousActorRow(count: Int, sats: Long, notifType: String) {
                 text = "${formatSats(sats)} sats",
                 color = Zap,
                 fontWeight = FontWeight.Medium,
-                fontSize = AppType.bodySmall,
+                style = AppTextStyles.bodySmall,
             )
         }
     }
@@ -217,7 +218,7 @@ private fun ReactionGlyph(reaction: ReactionContent) {
     when (reaction) {
         is ReactionContent.Standard -> Text(
             text = if (reaction.emoji == "+" || reaction.emoji.isBlank()) "❤" else reaction.emoji,
-            fontSize = AppType.subheading,
+            style = AppTextStyles.subheading,
         )
         is ReactionContent.Custom -> AsyncImage(
             model = reaction.url,

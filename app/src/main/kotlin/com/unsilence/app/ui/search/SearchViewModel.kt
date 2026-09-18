@@ -1,5 +1,7 @@
 package com.unsilence.app.ui.search
 
+import com.unsilence.app.ui.shared.CardDataFlow
+
 import android.util.Log
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
@@ -225,11 +227,11 @@ class SearchViewModel @Inject constructor(
         if (_entityTarget.value == target) deepLinkRouter.submit(target)
     }
 
-    fun profileFlow(pubkey: String): StateFlow<UserEntity?> =
-        timelineCardData.profileFlow(pubkey, viewModelScope)
+    fun profileFlow(pubkey: String): CardDataFlow<UserEntity?> =
+        timelineCardData.profileFlow(pubkey)
 
-    fun statsFlow(eventId: String): StateFlow<EventStats> =
-        timelineCardData.statsFlow(eventId, viewModelScope)
+    fun statsFlow(eventId: String): CardDataFlow<EventStats> =
+        timelineCardData.statsFlow(eventId)
 
     fun zapDetailsForEvent(eventId: String): List<ZapDetail> =
         timelineCardData.zapDetailsForEvent(eventId)

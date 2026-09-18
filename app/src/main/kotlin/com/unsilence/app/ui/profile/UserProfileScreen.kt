@@ -1,5 +1,6 @@
 package com.unsilence.app.ui.profile
 
+import com.unsilence.app.ui.theme.AppTextStyles
 import androidx.lifecycle.compose.LifecycleResumeEffect
 import com.unsilence.app.ui.shared.ResumedEffect
 import androidx.compose.foundation.background
@@ -456,7 +457,7 @@ fun UserProfileScreen(
                             Text(
                                 text       = displayName,
                                 color      = Color.White,
-                                fontSize   = AppType.heading,
+                                style = AppTextStyles.heading,
                                 fontWeight = FontWeight.Bold,
                                 textAlign  = TextAlign.Center,
                                 maxLines   = 1,
@@ -474,7 +475,7 @@ fun UserProfileScreen(
                         Text(
                             text       = displayName,
                             color      = Color.White,
-                            fontSize   = AppType.heading,
+                            style = AppTextStyles.heading,
                             fontWeight = FontWeight.Bold,
                             textAlign  = TextAlign.Center,
                             maxLines   = 1,
@@ -600,7 +601,7 @@ fun UserProfileScreen(
                         Text(
                             text = "${verified.toCompactSats()} verified in your grapevine",
                             color = Text3,
-                            fontSize = AppType.caption,
+                            style = AppTextStyles.caption,
                             modifier = Modifier.fillMaxWidth(),
                             textAlign = TextAlign.Center,
                         )
@@ -668,7 +669,7 @@ fun UserProfileScreen(
                 Text(
                     text       = "Profile",
                     color      = Color.White,
-                    fontSize   = AppType.subheading,
+                    style = AppTextStyles.subheading,
                     fontWeight = FontWeight.SemiBold,
                 )
                 if (!isOwnProfile) {
@@ -696,7 +697,7 @@ fun UserProfileScreen(
                                             else -> "Follow"
                                         },
                                         color = if (!isFollowing) Mint else TextSecondary,
-                                        fontSize = AppType.body,
+                                        style = AppTextStyles.body,
                                         fontWeight = if (!isFollowing) {
                                             FontWeight.SemiBold
                                         } else {
@@ -734,7 +735,7 @@ fun UserProfileScreen(
                                     Text(
                                         text     = if (isMuted) "Unmute user" else "Mute user",
                                         color    = Color.White,
-                                        fontSize = AppType.body,
+                                        style = AppTextStyles.body,
                                     )
                                 },
                                 leadingIcon = {
@@ -770,7 +771,7 @@ fun UserProfileScreen(
                                     Text(
                                         text     = "Report profile",
                                         color    = Color.White,
-                                        fontSize = AppType.body,
+                                        style = AppTextStyles.body,
                                     )
                                 },
                                 leadingIcon = {
@@ -875,7 +876,7 @@ fun UserProfileScreen(
                 Text(
                     text = "Web of trust",
                     color = Color.White,
-                    fontSize = AppType.subheading,
+                    style = AppTextStyles.subheading,
                     fontWeight = FontWeight.SemiBold,
                 )
                 Spacer(Modifier.height(Spacing.medium))
@@ -936,7 +937,7 @@ private fun StatLabel(label: String, value: String?, onClick: (() -> Unit)? = nu
             Text(
                 text       = it,
                 color      = Color.White,
-                fontSize   = AppType.bodySmall,
+                style = AppTextStyles.bodySmall,
                 fontWeight = FontWeight.SemiBold,
             )
             Spacer(Modifier.size(4.dp))
@@ -944,7 +945,7 @@ private fun StatLabel(label: String, value: String?, onClick: (() -> Unit)? = nu
         Text(
             text     = label,
             color    = TextSecondary,
-            fontSize = AppType.bodySmall,
+            style = AppTextStyles.bodySmall,
         )
     }
 }

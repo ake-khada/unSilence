@@ -1,5 +1,7 @@
 package com.unsilence.app.ui.thread
 
+import com.unsilence.app.ui.shared.CardDataFlow
+
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.unsilence.app.data.auth.KeyManager
@@ -323,8 +325,8 @@ class ThreadViewModel @Inject constructor(
     }
 
     // ── Per-event stats (reactive counts for thread cards) ─────────────
-    fun statsFlow(eventId: String): StateFlow<EventStats> =
-        timelineCardData.statsFlow(eventId, viewModelScope)
+    fun statsFlow(eventId: String): CardDataFlow<EventStats> =
+        timelineCardData.statsFlow(eventId)
 
     // ── Engagement drawer data (contributor indexes) ─────────────────────
     fun zapDetailsForEvent(eventId: String): List<ZapDetail> =
@@ -336,8 +338,8 @@ class ThreadViewModel @Inject constructor(
 
     // ── Profile flow (reactive avatar/name for drawer chips) ─────────────
 
-    fun profileFlow(pubkey: String): StateFlow<UserEntity?> =
-        timelineCardData.profileFlow(pubkey, viewModelScope)
+    fun profileFlow(pubkey: String): CardDataFlow<UserEntity?> =
+        timelineCardData.profileFlow(pubkey)
 
     /** Wipe stale state so next open doesn't flash old content. */
     fun clearThread() {

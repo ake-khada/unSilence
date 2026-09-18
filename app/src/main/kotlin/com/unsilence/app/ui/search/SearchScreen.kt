@@ -1,5 +1,6 @@
 package com.unsilence.app.ui.search
 
+import com.unsilence.app.ui.theme.AppTextStyles
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -379,7 +380,7 @@ fun SearchScreen(
                             Text(
                                 text     = "Search voices, notes, npubs\u2026",
                                 color    = Text3,
-                                fontSize = AppType.bodySmall,
+                                style = AppTextStyles.bodySmall,
                             )
                         }
                         inner()
@@ -450,7 +451,7 @@ fun SearchScreen(
                         Text(
                             text       = label,
                             color      = if (isActive) Color.White else Text3,
-                            fontSize   = AppType.footnote,
+                            style = AppTextStyles.footnote,
                             fontWeight = if (isActive) FontWeight.SemiBold else FontWeight.Medium,
                         )
                     }
@@ -518,7 +519,7 @@ fun SearchScreen(
                                 strokeWidth = 2.dp,
                             )
                             Spacer(Modifier.width(Spacing.small))
-                            Text("Searching relays\u2026", color = TextSecondary, fontSize = AppType.body)
+                            Text("Searching relays\u2026", color = TextSecondary, style = AppTextStyles.body)
                         }
                     } else {
                         // Notes/Tags/All tab loading
@@ -800,13 +801,13 @@ private fun SearchEntityResultRow(
                 text = "Open note",
                 color = Color.White,
                 fontWeight = FontWeight.SemiBold,
-                fontSize = AppType.body,
+                style = AppTextStyles.body,
             )
             Text(
                 text = identity,
                 color = TextSecondary,
                 fontFamily = FontFamily.Monospace,
-                fontSize = AppType.footnote,
+                style = AppTextStyles.footnote,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
             )
@@ -864,7 +865,7 @@ private fun ProfileCard(
                     text       = title,
                     color      = Color.White,
                     fontWeight = FontWeight.SemiBold,
-                    fontSize   = AppType.body,
+                    style = AppTextStyles.body,
                     maxLines   = 1,
                     overflow   = TextOverflow.Ellipsis,
                     modifier   = if (impersonationRisk != null) {
@@ -885,14 +886,14 @@ private fun ProfileCard(
                 Text(
                     text     = remember(user.pubkey) { shortNpub(user.pubkey) },
                     color    = TextSecondary,
-                    fontSize = AppType.footnote,
+                    style = AppTextStyles.footnote,
                 )
             }
             if (!user.about.isNullOrBlank()) {
                 Text(
                     text     = user.about,
                     color    = TextSecondary,
-                    fontSize = AppType.bodySmall,
+                    style = AppTextStyles.bodySmall,
                     maxLines = 2,
                     overflow = TextOverflow.Ellipsis,
                     modifier = Modifier.padding(top = 2.dp),
@@ -967,7 +968,7 @@ private fun TrendingDiscovery(
                     Text(
                         text           = "TRENDING TONIGHT",
                         color          = Text3,
-                        fontSize       = AppType.caption,
+                        style = AppTextStyles.caption,
                         fontWeight     = FontWeight.Medium,
                         fontFamily     = FontFamily.Monospace,
                         letterSpacing  = 1.5.sp,
@@ -1012,7 +1013,7 @@ private fun TrendingDiscovery(
                     Text(
                         text           = "VOICES TO FOLLOW",
                         color          = Text3,
-                        fontSize       = AppType.caption,
+                        style = AppTextStyles.caption,
                         fontWeight     = FontWeight.Medium,
                         fontFamily     = FontFamily.Monospace,
                         letterSpacing  = 1.5.sp,
@@ -1028,8 +1029,8 @@ private fun TrendingDiscovery(
                 )
                 if (index < users.lastIndex) {
                     HorizontalDivider(
-                        color     = BorderFaint,
-                        thickness = 0.5.dp,
+                        color     = com.unsilence.app.ui.theme.DividerColor,
+                        thickness = 1.dp,
                         modifier  = Modifier.padding(horizontal = Spacing.medium),
                     )
                 }
@@ -1057,14 +1058,14 @@ private fun HashtagPill(tag: String, count: Int, filled: Boolean, onClick: () ->
         Text(
             text       = "#$tag",
             color      = if (filled) Brand else Color.White,
-            fontSize   = AppType.caption,
+            style = AppTextStyles.caption,
             fontWeight = if (filled) FontWeight.Medium else FontWeight.Normal,
         )
         if (count > 1) {
             Text(
                 text       = formatCount(count.toLong()),
                 color      = Text3,
-                fontSize   = AppType.caption,
+                style = AppTextStyles.caption,
                 fontFamily = FontFamily.Monospace,
             )
         }
@@ -1109,7 +1110,7 @@ private fun TrendingUserRow(
                     text       = displayName,
                     color      = Color.White,
                     fontWeight = FontWeight.SemiBold,
-                    fontSize   = AppType.body,
+                    style = AppTextStyles.body,
                     maxLines   = 1,
                     overflow   = TextOverflow.Ellipsis,
                 )
@@ -1128,7 +1129,7 @@ private fun TrendingUserRow(
             Text(
                 text       = meta,
                 color      = Text3,
-                fontSize   = AppType.caption,
+                style = AppTextStyles.caption,
                 fontFamily = FontFamily.Monospace,
                 maxLines   = 1,
                 overflow   = TextOverflow.Ellipsis,

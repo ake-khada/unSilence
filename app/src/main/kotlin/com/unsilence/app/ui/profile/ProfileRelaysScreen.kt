@@ -1,5 +1,6 @@
 package com.unsilence.app.ui.profile
 
+import com.unsilence.app.ui.theme.AppTextStyles
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -61,12 +62,13 @@ import com.unsilence.app.ui.theme.Zap
 fun ProfileRelaysScreen(
     pubkey: String,
     onDismiss: () -> Unit,
+    navigationOwnsBack: Boolean = false,
     onOpenRelay: (String) -> Unit,
     viewModel: ProfileRelaysViewModel = hiltViewModel(
         key = "profile-relays-${LocalAppSessionKey.current}-$pubkey",
     ),
 ) {
-    BackHandler(onBack = onDismiss)
+    BackHandler(enabled = !navigationOwnsBack, onBack = onDismiss)
     LaunchedEffect(pubkey) { viewModel.initialize(pubkey) }
     val state by viewModel.uiState.collectAsStateWithLifecycle()
     val facts = state.facts
@@ -89,7 +91,7 @@ fun ProfileRelaysScreen(
             Text(
                 text = "Relays",
                 color = Color.White,
-                fontSize = AppType.subheading,
+                style = AppTextStyles.subheading,
                 fontWeight = FontWeight.SemiBold,
                 modifier = Modifier.weight(1f),
             )
@@ -148,13 +150,13 @@ fun ProfileRelaysScreen(
                     modifier = Modifier.align(Alignment.Center),
                     horizontalAlignment = Alignment.CenterHorizontally,
                 ) {
-                    Text("Couldn't load relay lists", color = Text3, fontSize = AppType.body)
+                    Text("Couldn't load relay lists", color = Text3, style = AppTextStyles.body)
                     TextButton(onClick = viewModel::retry) { Text("Retry", color = Brand) }
                 }
                 else -> Text(
                     text = "No relay list published",
                     color = Text3,
-                    fontSize = AppType.body,
+                    style = AppTextStyles.body,
                     modifier = Modifier.align(Alignment.Center),
                 )
             }
@@ -167,7 +169,7 @@ private fun RelaySectionLabel(text: String) {
     Text(
         text = text,
         color = Text3,
-        fontSize = AppType.caption,
+        style = AppTextStyles.caption,
         fontWeight = FontWeight.SemiBold,
         modifier = Modifier.padding(
             start = Spacing.medium,
@@ -201,7 +203,7 @@ private fun ProfileRelayRow(
             Text(
                 text = relayDisplayHost(url),
                 color = Color.White,
-                fontSize = AppType.body,
+                style = AppTextStyles.body,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
                 modifier = Modifier.weight(1f),
@@ -229,14 +231,14 @@ private fun RelayMarkerChip(marker: String?) {
         modifier = Modifier
             .height(22.dp)
             .background(accent.copy(alpha = 0.12f), RoundedCornerShape(4.dp))
-            .border(0.5.dp, accent.copy(alpha = 0.45f), RoundedCornerShape(4.dp))
+            .border(1.dp, accent.copy(alpha = 0.45f), RoundedCornerShape(4.dp))
             .padding(horizontal = 6.dp),
         contentAlignment = Alignment.Center,
     ) {
         Text(
             text = label,
             color = accent,
-            fontSize = AppType.caption,
+            style = AppTextStyles.caption,
             fontWeight = FontWeight.SemiBold,
         )
     }

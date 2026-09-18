@@ -1,5 +1,6 @@
 package com.unsilence.app.ui.feed
 
+import com.unsilence.app.ui.theme.AppTextStyles
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Column
@@ -81,7 +82,7 @@ fun MinimalLinkCard(
         verticalAlignment = Alignment.CenterVertically,
         modifier = modifier
             .fillMaxWidth()
-            .border(0.5.dp, Color.White.copy(alpha = 0.08f), RoundedCornerShape(12.dp))
+            .border(1.dp, Color.White.copy(alpha = 0.08f), RoundedCornerShape(12.dp))
             .clip(RoundedCornerShape(12.dp))
             .clickable { onClick() }
             .padding(horizontal = Spacing.medium, vertical = Spacing.small),
@@ -109,14 +110,14 @@ fun MinimalLinkCard(
                 text = host,
                 color = Color.White.copy(alpha = 0.85f),
                 fontWeight = FontWeight.SemiBold,
-                fontSize = AppType.bodySmall,
+                style = AppTextStyles.bodySmall,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
             )
             Text(
                 text = url,
                 color = TextSecondary,
-                fontSize = AppType.caption,
+                style = AppTextStyles.caption,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
             )

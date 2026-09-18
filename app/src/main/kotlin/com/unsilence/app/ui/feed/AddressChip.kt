@@ -1,5 +1,6 @@
 package com.unsilence.app.ui.feed
 
+import com.unsilence.app.ui.theme.AppTextStyles
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
@@ -99,7 +100,7 @@ internal fun AddressChip(
     Box(
         modifier = modifier
             .fillMaxWidth()
-            .border(0.5.dp, Color.White.copy(alpha = 0.08f), RoundedCornerShape(12.dp))
+            .border(1.dp, Color.White.copy(alpha = 0.08f), RoundedCornerShape(12.dp))
             .clip(RoundedCornerShape(12.dp))
             .clickable {
                 if (resolutionState == AddressResolutionState.RESOLVING) return@clickable
@@ -132,7 +133,6 @@ internal fun AddressChip(
                     modifier = Modifier.size(24.dp),
                     sizeDp   = 24.dp,
                     lookupProfile = lookupProfile,
-                    profileFlow = host.surface.profileFlow,
                 )
                 Spacer(Modifier.width(6.dp))
                 Text(
@@ -141,7 +141,7 @@ internal fun AddressChip(
                         ?: "${segment.author.take(6)}…${segment.author.takeLast(4)}",
                     color    = Color.White.copy(alpha = 0.7f),
                     fontWeight = FontWeight.SemiBold,
-                    fontSize = AppType.bodySmall,
+                    style = AppTextStyles.bodySmall,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                     modifier = Modifier.weight(1f),
@@ -152,7 +152,7 @@ internal fun AddressChip(
                 Text(
                     text       = kindLabel,
                     color      = Brand,
-                    fontSize   = AppType.footnote,
+                    style = AppTextStyles.footnote,
                     fontWeight = FontWeight.Medium,
                 )
                 if (resolutionState == AddressResolutionState.RESOLVING) {
@@ -169,7 +169,7 @@ internal fun AddressChip(
                 Text(
                     text       = segment.dTag.replace("-", " "),
                     color      = Color.White.copy(alpha = 0.7f),
-                    fontSize   = AppType.body,
+                    style = AppTextStyles.body,
                     lineHeight = 18.sp,
                     maxLines   = 2,
                     overflow   = TextOverflow.Ellipsis,
@@ -181,7 +181,7 @@ internal fun AddressChip(
                     Text(
                         text = "Loading…",
                         color = TextSecondary,
-                        fontSize = AppType.footnote,
+                        style = AppTextStyles.footnote,
                     )
                 }
                 AddressResolutionState.FAILED -> {
@@ -189,7 +189,7 @@ internal fun AddressChip(
                     Text(
                         text = "Couldn't load",
                         color = TextSecondary,
-                        fontSize = AppType.footnote,
+                        style = AppTextStyles.footnote,
                         fontWeight = FontWeight.Medium,
                     )
                 }

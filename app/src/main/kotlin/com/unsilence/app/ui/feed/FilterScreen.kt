@@ -1,5 +1,6 @@
 package com.unsilence.app.ui.feed
 
+import com.unsilence.app.ui.theme.AppTextStyles
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -95,7 +96,7 @@ fun FilterBottomSheet(
                 modifier = Modifier
                     .padding(vertical = 10.dp)
                     .size(width = 32.dp, height = 4.dp)
-                    .background(Color(0xFF333333), RoundedCornerShape(2.dp)),
+                    .background(com.unsilence.app.ui.theme.Surface2, RoundedCornerShape(2.dp)),
             )
         },
     ) {
@@ -158,7 +159,7 @@ fun FilterBottomSheet(
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 TextButton(onClick = { reset() }) {
-                    Text("Reset", color = Text3, fontSize = AppType.body)
+                    Text("Reset", color = Text3, style = AppTextStyles.body)
                 }
                 Box(
                     modifier = Modifier
@@ -166,7 +167,7 @@ fun FilterBottomSheet(
                         .background(Brand)
                         .clickable(
                             interactionSource = remember { MutableInteractionSource() },
-                            indication = null,
+                            indication = androidx.compose.foundation.LocalIndication.current,
                         ) {
                             onApply(buildFilter())
                             onDismiss()
@@ -177,7 +178,7 @@ fun FilterBottomSheet(
                     Text(
                         text = "Apply",
                         color = Black,
-                        fontSize = AppType.body,
+                        style = AppTextStyles.body,
                         fontWeight = FontWeight.SemiBold,
                     )
                 }
@@ -207,7 +208,7 @@ private fun ShowFilterChip(type: ShowType, selected: Boolean, onClick: () -> Uni
             )
             .clickable(
                 interactionSource = remember { MutableInteractionSource() },
-                indication = null,
+                indication = androidx.compose.foundation.LocalIndication.current,
                 onClick = onClick,
             )
             .semantics {
@@ -228,7 +229,7 @@ private fun ShowFilterChip(type: ShowType, selected: Boolean, onClick: () -> Uni
             Text(
                 text = type.label,
                 color = Black,
-                fontSize = AppType.bodySmall,
+                style = AppTextStyles.bodySmall,
                 fontWeight = FontWeight.SemiBold,
             )
         }
@@ -253,7 +254,7 @@ private fun SectionLabel(text: String) {
     Text(
         text = text,
         color = Text3,
-        fontSize = AppType.caption,
+        style = AppTextStyles.caption,
         fontWeight = FontWeight.SemiBold,
         letterSpacing = 1.sp,
         modifier = Modifier.padding(start = 16.dp, bottom = 8.dp),
@@ -273,7 +274,7 @@ private fun FilterChip(label: String, selected: Boolean, onClick: () -> Unit) {
             )
             .clickable(
                 interactionSource = remember { MutableInteractionSource() },
-                indication = null,
+                indication = androidx.compose.foundation.LocalIndication.current,
             ) { onClick() }
             .padding(horizontal = 14.dp, vertical = 8.dp),
         contentAlignment = Alignment.Center,
@@ -281,7 +282,7 @@ private fun FilterChip(label: String, selected: Boolean, onClick: () -> Unit) {
         Text(
             text = label,
             color = if (selected) Brand else White.copy(alpha = 0.82f),
-            fontSize = AppType.bodySmall,
+            style = AppTextStyles.bodySmall,
             fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
         )
     }

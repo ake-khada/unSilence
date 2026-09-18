@@ -1,5 +1,8 @@
 package com.unsilence.app.ui.feed
 
+import com.unsilence.app.ui.theme.AppTextStyles
+import com.unsilence.app.ui.shared.collectCardDataAsState
+
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.tween
@@ -138,8 +141,11 @@ fun EventCard(
         }
     }
 
-    // Resolve source profile for repost header (kind-6 wrapper author).
-    val liveSourceProfile = if (model.repost != null) {
+    val authorProfile = collectProfileAsState(model.pubkey, surface.profileFlow)
+    // Self-reposts reuse the same resolved author, too.
+    val liveSourceProfile = if (model.repost != null && model.sourcePubkey == model.pubkey) {
+        authorProfile
+    } else if (model.repost != null) {
         collectProfileAsState(model.sourcePubkey, surface.profileFlow)
     } else null
     val sourceProfile = liveSourceProfile?.takeIf { !it.picture.isNullOrBlank() }
@@ -175,8 +181,6 @@ fun EventCard(
     // a fallback when the flow hasn't emitted yet, so the first frame after
     // mount doesn't flash empty avatars on rows whose profiles MES already
     // has cached.
-    val authorProfile = collectProfileAsState(model.pubkey, surface.profileFlow)
-
     // For repost cards, model.pubkey is the inner (effective) author and
     // model.sourcePubkey is the wrapper author. authorProfile reactively
     // resolves the inner author for both cases.
@@ -193,7 +197,8 @@ fun EventCard(
     // after the slot diffs to a new ID.
     val liveStats = if (surface.statsFlow != null) {
         key(model.engagementId) {
-            surface.statsFlow.invoke(model.engagementId).collectAsStateWithLifecycle().value
+            val flow = surface.statsFlow.invoke(model.engagementId)
+            flow.collectCardDataAsState().value
         }
     } else null
     val liveReplyCount    = liveStats?.replyCount    ?: row.replyCount
@@ -220,6 +225,7 @@ fun EventCard(
                 reactionCount = liveReactionCount,
                 zapTotalSats = liveZapTotalSats,
                 sourceProfile = sourceProfile,
+                authorProfile = authorProfile,
                 role = role,
                 host = host,
                 boundActions = boundActions,
@@ -261,7 +267,7 @@ fun EventCard(
         Column(
             modifier = longPressModifier.clickable(
                 interactionSource = contentInteractionSource,
-                indication = null,
+                indication = androidx.compose.foundation.LocalIndication.current,
             ) { actions.onNoteClick(model.navigateId) },
         ) {
         // Author header. Picture/displayName/nip05 read live from authorProfile
@@ -291,7 +297,6 @@ fun EventCard(
             onAuthorClick = actions.onAuthorClick,
             onNoteClick = { actions.onNoteClick(model.navigateId) },
             lookupProfile = lookupProfile,
-            profileFlow   = surface.profileFlow,
             wotLookup     = surface.wotLookup,
             feedWotDisplayMode = surface.feedWotDisplayMode,
             repostSourcePubkey = if (isRepost) model.sourcePubkey else null,
@@ -445,6 +450,7 @@ private fun ArticleLayout(
     reactionCount: Int,
     zapTotalSats: Long,
     sourceProfile: UserEntity?,
+    authorProfile: UserEntity?,
     role: CardRole,
     host: EventCardHost,
     boundActions: BoundEventActions,
@@ -462,7 +468,7 @@ private fun ArticleLayout(
     // path (see the standard-layout AuthorHeader) so a reposted article never shows
     // the reposter's identity.
     val isRepost = model.repost != null
-    val articleAuthorProfile = collectProfileAsState(model.pubkey, surface.profileFlow)
+    val articleAuthorProfile = authorProfile
 
     Column(
         modifier = modifier
@@ -489,7 +495,6 @@ private fun ArticleLayout(
             onAuthorClick = actions.onAuthorClick,
             onNoteClick = { actions.onArticleClick(row) },
             lookupProfile = lookupProfile,
-            profileFlow   = surface.profileFlow,
             wotLookup     = surface.wotLookup,
             feedWotDisplayMode = surface.feedWotDisplayMode,
             repostSourcePubkey = if (isRepost) model.sourcePubkey else null,
@@ -512,7 +517,7 @@ private fun ArticleLayout(
                         .aspectRatio(16f / 9f),
                 ) {
                     AsyncImage(
-                        model              = rememberWidthImageRequest(article.image, maxWidth, aspectRatio = 16f / 9f),
+                        model              = rememberWidthImageRequest(article.image, maxWidth, aspectRatio = 16f / 9f, allowRgb565 = true),
                         contentDescription = null,
                         contentScale       = ContentScale.Crop,
                         modifier           = Modifier.fillMaxSize(),
@@ -526,7 +531,7 @@ private fun ArticleLayout(
                     text       = article.title,
                     color      = Color.White,
                     fontWeight = FontWeight.Bold,
-                    fontSize   = AppType.subheading,
+                    style = AppTextStyles.subheading,
                     lineHeight = 22.sp,
                     maxLines   = 2,
                     overflow   = TextOverflow.Ellipsis,
@@ -544,7 +549,7 @@ private fun ArticleLayout(
                 Text(
                     text     = summary,
                     color    = TextSecondary,
-                    fontSize = AppType.body,
+                    style = AppTextStyles.body,
                     maxLines = 3,
                     overflow = TextOverflow.Ellipsis,
                     modifier = Modifier

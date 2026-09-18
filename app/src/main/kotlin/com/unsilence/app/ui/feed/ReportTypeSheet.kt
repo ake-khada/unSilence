@@ -1,5 +1,6 @@
 package com.unsilence.app.ui.feed
 
+import com.unsilence.app.ui.theme.AppTextStyles
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
@@ -32,7 +33,7 @@ fun ReportTypeSheet(
         Column(modifier = Modifier.padding(bottom = 24.dp)) {
             Text(
                 "Why are you reporting?",
-                fontSize = AppType.subheading,
+                style = AppTextStyles.subheading,
                 color = Color.White,
                 modifier = Modifier.padding(horizontal = 20.dp, vertical = 12.dp),
             )

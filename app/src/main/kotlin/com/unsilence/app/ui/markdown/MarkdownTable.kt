@@ -1,5 +1,6 @@
 package com.unsilence.app.ui.markdown
 
+import com.unsilence.app.ui.theme.AppTextStyles
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Box
@@ -83,7 +84,7 @@ internal fun MarkdownTable(
     }
 }
 
-private val GridColor = Color(0xFF2A2A2A)
+private val GridColor = com.unsilence.app.ui.theme.DividerColor
 
 @Composable
 private fun TableCell(
@@ -115,7 +116,7 @@ private fun TableCell(
         androidx.compose.material3.Text(
             text       = text,
             color      = textColor,
-            fontSize   = AppType.bodySmall,
+            style = AppTextStyles.bodySmall,
             fontWeight = fontWeight,
             textAlign  = textAlign,
             modifier   = Modifier.fillMaxWidth(),

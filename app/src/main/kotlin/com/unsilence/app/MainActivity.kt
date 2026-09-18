@@ -5,10 +5,12 @@ import android.os.Bundle
 import android.widget.Toast
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.activity.SystemBarStyle
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.fragment.app.FragmentActivity
+import androidx.core.splashscreen.SplashScreen.Companion.installSplashScreen
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.repeatOnLifecycle
@@ -22,6 +24,7 @@ import com.unsilence.app.data.relay.RelayPreferencesStore
 import kotlinx.coroutines.launch
 import com.unsilence.app.ui.onboarding.RootScreen
 import com.unsilence.app.ui.common.LocalNip05VerificationController
+import com.unsilence.app.ui.common.ProvideMinuteClock
 import com.unsilence.app.ui.navigation.DeepLinkRouter
 import com.unsilence.app.ui.theme.UnsilenceTheme
 import dagger.hilt.android.AndroidEntryPoint
@@ -70,8 +73,13 @@ class MainActivity : FragmentActivity() {
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
+        installSplashScreen()
         super.onCreate(savedInstanceState)
-        enableEdgeToEdge()
+        // unSilence is always dark, independently of the device's night-mode setting.
+        enableEdgeToEdge(
+            statusBarStyle = SystemBarStyle.dark(android.graphics.Color.TRANSPARENT),
+            navigationBarStyle = SystemBarStyle.dark(android.graphics.Color.TRANSPARENT),
+        )
         handleDeepLinkIntent(intent)
 
         // Debug: set sensitive content mode via intent extra
@@ -117,7 +125,7 @@ class MainActivity : FragmentActivity() {
                 CompositionLocalProvider(
                     LocalNip05VerificationController provides nip05Verifier,
                 ) {
-                    RootScreen()
+                    ProvideMinuteClock { RootScreen() }
                 }
             }
         }

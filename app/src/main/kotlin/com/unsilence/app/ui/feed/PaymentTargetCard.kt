@@ -1,5 +1,6 @@
 package com.unsilence.app.ui.feed
 
+import com.unsilence.app.ui.theme.AppTextStyles
 import android.content.ClipData
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -120,13 +121,13 @@ internal fun PaymentTargetCard(
                 Text(
                     text = presentation.title,
                     color = MaterialTheme.colorScheme.onSurface,
-                    fontSize = AppType.body,
+                    style = AppTextStyles.body,
                     fontWeight = FontWeight.SemiBold,
                 )
                 Text(
                     text = presentation.summary,
                     color = TextSecondary,
-                    fontSize = AppType.footnote,
+                    style = AppTextStyles.footnote,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                 )
@@ -136,7 +137,7 @@ internal fun PaymentTargetCard(
         Text(
             text = target.displayValue,
             color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.82f),
-            fontSize = AppType.caption,
+            style = AppTextStyles.caption,
             fontFamily = FontFamily.Monospace,
             lineHeight = AppType.subheading,
             maxLines = 2,
@@ -145,7 +146,7 @@ internal fun PaymentTargetCard(
                 .fillMaxWidth()
                 .padding(top = Spacing.small)
                 .background(Color.Black.copy(alpha = 0.24f), RoundedCornerShape(6.dp))
-                .border(0.5.dp, BorderSubtle, RoundedCornerShape(6.dp))
+                .border(1.dp, BorderSubtle, RoundedCornerShape(6.dp))
                 .padding(horizontal = Spacing.small, vertical = Spacing.micro),
         )
 
@@ -158,7 +159,7 @@ internal fun PaymentTargetCard(
                 Text(
                     text = it,
                     color = TextSecondary,
-                    fontSize = AppType.caption,
+                    style = AppTextStyles.caption,
                     modifier = Modifier.weight(1f),
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
@@ -181,7 +182,7 @@ internal fun PaymentTargetCard(
                     modifier = Modifier.size(16.dp),
                 )
                 Spacer(Modifier.width(Spacing.micro))
-                Text("Copy", fontSize = AppType.bodySmall)
+                Text("Copy", style = AppTextStyles.bodySmall)
             }
             TextButton(
                 onClick = {
@@ -196,7 +197,7 @@ internal fun PaymentTargetCard(
                     modifier = Modifier.size(17.dp),
                 )
                 Spacer(Modifier.width(Spacing.micro))
-                Text(presentation.action, fontSize = AppType.bodySmall)
+                Text(presentation.action, style = AppTextStyles.bodySmall)
             }
         }
     }

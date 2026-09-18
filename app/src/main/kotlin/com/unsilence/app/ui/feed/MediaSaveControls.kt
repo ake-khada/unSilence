@@ -1,5 +1,6 @@
 package com.unsilence.app.ui.feed
 
+import com.unsilence.app.ui.theme.AppTextStyles
 import android.Manifest
 import android.content.Context
 import android.content.pm.PackageManager
@@ -149,7 +150,7 @@ internal fun MediaSaveStatusPill(
         modifier = modifier
             .background(
                 color = if (message.isError) {
-                    Color(0xFF4A1F1F).copy(alpha = 0.88f)
+                    com.unsilence.app.ui.theme.ErrorContainer.copy(alpha = 0.88f)
                 } else {
                     Color.Black.copy(alpha = 0.72f)
                 },
@@ -160,7 +161,7 @@ internal fun MediaSaveStatusPill(
         Text(
             text = message.text,
             color = Color.White,
-            fontSize = 13.sp,
+            style = AppTextStyles.bodySmall,
             fontWeight = FontWeight.Medium,
         )
     }

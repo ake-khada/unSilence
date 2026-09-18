@@ -7,6 +7,47 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class AppNavigatorTest {
+    @Test fun `all full screen destinations serialize and unwind without skipping their caller`() {
+        val nav = navigator()
+        val path = listOf(
+            AppDestination.Thread("note"),
+            AppDestination.Compose(replyToEventId = "note"),
+            AppDestination.Compose(quoteEventId = "quote"),
+            AppDestination.Connections("alice", com.unsilence.app.ui.profile.ConnectionsTab.Followers),
+            AppDestination.Profile("bob"),
+            AppDestination.ProfileRelays("bob"),
+            AppDestination.RelayDetail("wss://relay.example"),
+            AppDestination.RelaySettings, AppDestination.RelayDiscovery,
+            AppDestination.CreateRelaySet, AppDestination.EmojiSettings,
+            AppDestination.ZapSettings, AppDestination.StartGraph,
+        )
+        path.forEach(nav::push)
+        val entries = nav.backStack.map { it as AppEntry }
+        val restored = Json.decodeFromString<List<AppEntry>>(Json.encodeToString(entries))
+        assertEquals(entries, restored)
+        val resumed = AppNavigator(restored.toMutableList<NavKey>())
+        for (entry in restored.drop(1).reversed()) {
+            assertEquals(entry, resumed.backStack.last())
+            resumed.pop()
+        }
+        assertEquals(listOf(entries.first()), resumed.backStack)
+    }
+
+    @Test fun `display saved state key survives a recreated navigator`() {
+        val original = navigator()
+        original.push(AppDestination.Thread("note"))
+        val restored = AppNavigator(original.backStack.toMutableList())
+        assertNotSame(original, restored)
+        assertEquals(original.stateKey, restored.stateKey)
+        restored.pop()
+        assertEquals(original.stateKey, restored.stateKey)
+    }
+
+    @Test fun `display saved state is isolated between account sessions`() {
+        val first = AppNavigator(mutableListOf(AppEntry("tabs:alice-0", AppDestination.Tabs)))
+        val second = AppNavigator(mutableListOf(AppEntry("tabs:alice-1", AppDestination.Tabs)))
+        assertNotEquals(first.stateKey, second.stateKey)
+    }
     private fun navigator(): AppNavigator {
         var next = 0
         return AppNavigator(mutableListOf<NavKey>(AppEntry("tabs", AppDestination.Tabs))) { "visit-${++next}" }

@@ -1,5 +1,6 @@
 package com.unsilence.app.ui.compose
 
+import com.unsilence.app.ui.theme.AppTextStyles
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -216,7 +217,7 @@ fun AttachmentBlock(
                     Text(
                         text = state.displayName,
                         color = Color.White.copy(alpha = 0.95f),
-                        fontSize = 13.sp,
+                        style = AppTextStyles.bodySmall,
                         fontWeight = FontWeight.Medium,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
@@ -257,7 +258,7 @@ fun AttachmentBlock(
                     Text(
                         text = sizeLine,
                         color = TextSecondary,
-                        fontSize = 11.sp,
+                        style = AppTextStyles.caption,
                     )
                 }
 
@@ -289,7 +290,7 @@ fun AttachmentBlock(
                         Text(
                             text = phaseLabel,
                             color = TextSecondary,
-                            fontSize = 11.sp,
+                            style = AppTextStyles.caption,
                         )
                         Spacer(Modifier.height(3.dp))
                         val progressModifier = Modifier
@@ -323,7 +324,7 @@ fun AttachmentBlock(
                         Text(
                             text = "${state.quality.displayLabel()} \u00b7 ${formatBytes(state.blob.sizeBytes)}",
                             color = TextSecondary,
-                            fontSize = 11.sp,
+                            style = AppTextStyles.caption,
                         )
                         if (host.isNotEmpty()) {
                             Text(
@@ -337,7 +338,7 @@ fun AttachmentBlock(
                         Text(
                             text = state.message.ifBlank { "Upload failed" },
                             color = Like,
-                            fontSize = 11.sp,
+                            style = AppTextStyles.caption,
                             maxLines = 2,
                             overflow = TextOverflow.Ellipsis,
                         )
@@ -356,7 +357,7 @@ fun AttachmentBlock(
                             Text(
                                 text = "Retry",
                                 color = BrandDeep,
-                                fontSize = 12.sp,
+                                style = AppTextStyles.footnote,
                                 fontWeight = FontWeight.Medium,
                             )
                         }
@@ -430,7 +431,7 @@ private fun QualityPills(
                         else Color.Transparent
                     )
                     .border(
-                        width = 0.5.dp,
+                        width = 1.dp,
                         color = if (isSelected) BrandDeep.copy(alpha = alpha)
                                 else Color.White.copy(alpha = 0.12f * alpha),
                         shape = RoundedCornerShape(999.dp),
@@ -442,7 +443,7 @@ private fun QualityPills(
                     text = quality.displayLabel(),
                     color = if (isSelected) BrandDeep.copy(alpha = alpha)
                             else TextSecondary.copy(alpha = alpha),
-                    fontSize = 11.sp,
+                    style = AppTextStyles.caption,
                     fontWeight = if (isSelected) FontWeight.Medium else FontWeight.Normal,
                 )
             }

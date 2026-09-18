@@ -1,5 +1,6 @@
 package com.unsilence.app.ui.settings.keys
 
+import com.unsilence.app.ui.theme.AppTextStyles
 import android.app.Activity
 import android.app.KeyguardManager
 import android.content.ClipData
@@ -360,7 +361,7 @@ private fun PublicKeyCard(
         Text(
             text = publicNpub ?: "No public key loaded.",
             color = Color.White,
-            fontSize = 12.sp,
+            style = AppTextStyles.footnote,
             lineHeight = 17.sp,
             fontFamily = FontFamily.Monospace,
             modifier = Modifier.fillMaxWidth(),
@@ -399,7 +400,7 @@ private fun LocalSecretKeyCard(
             Text(
                 text = "nsec1••••••••••••••••••••••••••••••••",
                 color = TextSecondary,
-                fontSize = 12.sp,
+                style = AppTextStyles.footnote,
                 fontFamily = FontFamily.Monospace,
             )
             Spacer(Modifier.height(Spacing.small))
@@ -415,7 +416,7 @@ private fun LocalSecretKeyCard(
             Text(
                 text = value,
                 color = Color.White,
-                fontSize = 12.sp,
+                style = AppTextStyles.footnote,
                 lineHeight = 17.sp,
                 fontFamily = FontFamily.Monospace,
                 modifier = Modifier.fillMaxWidth(),
@@ -452,7 +453,7 @@ private fun LocalSecretKeyCard(
             Text(
                 text = statusMessage,
                 color = Text3,
-                fontSize = 11.sp,
+                style = AppTextStyles.caption,
                 modifier = Modifier.padding(top = Spacing.small),
             )
         }
@@ -471,7 +472,7 @@ private fun AmberModeCard(
         Text(
             text = if (state.amberInstalled) "Amber identity connected" else "Amber not installed",
             color = Color.White,
-            fontSize = 14.sp,
+            style = AppTextStyles.body,
             fontWeight = FontWeight.SemiBold,
         )
         Text(
@@ -512,7 +513,7 @@ private fun AmberModeCard(
             Text(
                 text = statusMessage,
                 color = Text3,
-                fontSize = 11.sp,
+                style = AppTextStyles.caption,
                 modifier = Modifier.padding(top = Spacing.small),
             )
         }
@@ -577,7 +578,7 @@ private fun KeyCard(
                 Icon(icon, contentDescription = null, tint = Color.White, modifier = Modifier.size(16.dp))
             }
             Spacer(Modifier.width(10.dp))
-            Text(title, color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+            Text(title, color = Color.White, style = AppTextStyles.body, fontWeight = FontWeight.SemiBold)
         }
         Spacer(Modifier.height(12.dp))
         content()
@@ -610,7 +611,7 @@ private fun KeyButton(
         Text(
             text = text,
             color = if (enabled) Color.White else Text4,
-            fontSize = 12.sp,
+            style = AppTextStyles.footnote,
             fontWeight = FontWeight.SemiBold,
             maxLines = 1,
         )

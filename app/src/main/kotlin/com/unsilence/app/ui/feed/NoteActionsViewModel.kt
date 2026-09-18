@@ -41,6 +41,7 @@ import com.unsilence.app.data.wallet.NwcManager
 import com.unsilence.app.data.wallet.WalletPaymentPendingException
 import com.unsilence.app.data.wallet.ZapRepository
 import com.unsilence.app.data.wallet.ZapRequest
+import com.unsilence.app.data.wallet.ZapPreferencesStore
 import com.vitorpamplona.quartz.nip01Core.core.Event
 import com.vitorpamplona.quartz.nip01Core.signers.EventTemplate
 import com.vitorpamplona.quartz.nip18Reposts.RepostEvent
@@ -115,6 +116,7 @@ class NoteActionsViewModel @Inject constructor(
     private val ogFetcher: OgFetcher,
     private val nwcManager: NwcManager,
     private val zapRepository: ZapRepository,
+    private val zapPreferencesStore: ZapPreferencesStore,
     private val settingsStore: SettingsStore,
     private val muteListRepository: MuteListRepository,
     private val reportRepository: ReportRepository,
@@ -125,6 +127,7 @@ class NoteActionsViewModel @Inject constructor(
 
     private val pubkeyHex: String? = keyManager.getPublicKeyHex()
     val currentPubkey: String? get() = pubkeyHex
+    val zapPreferences = zapPreferencesStore.state
 
     init {
         viewModelScope.launch { settingsStore.initialize() }
@@ -433,6 +436,11 @@ class NoteActionsViewModel @Inject constructor(
     /** Zap results: eventId → success(amountSats) or failure. */
     private val _zapResult = MutableSharedFlow<Pair<String, Result<Long>>>(extraBufferCapacity = 10)
 
+    // Ephemeral, no replay: returning to a card/background resume must not buzz
+    // for an old action. One root UI collector handles all visible destinations.
+    private val _actionConfirmed = MutableSharedFlow<Unit>(extraBufferCapacity = 1)
+    val actionConfirmed: SharedFlow<Unit> = _actionConfirmed.asSharedFlow()
+
     /**
      * Most recent zap result, lifted to screen-level observation.
      * Cards key their flash effect on this value instead of each collecting the SharedFlow.
@@ -448,6 +456,7 @@ class NoteActionsViewModel @Inject constructor(
         viewModelScope.launch {
             _zapResult.collect { (id, result) ->
                 if (result.isSuccess) {
+                    _actionConfirmed.tryEmit(Unit)
                     _zapFlashState.value = ZapFlashState(
                         noteId = id,
                         success = true,
@@ -567,6 +576,7 @@ class NoteActionsViewModel @Inject constructor(
 
             // Optimistic insert → MES actor-index updates → reactedEventIdsFlow re-emits
             memoryEventStore.insert(signedEventToNostrEvent(signed))
+            _actionConfirmed.tryEmit(Unit)
             snapshotScheduler.scheduleImmediate()
             if (addingDefaultReaction) clearPendingReactionWhenStored(eventId)
             relayPool.publish(toEventJson(signed), engagementTargets(eventPubkey))

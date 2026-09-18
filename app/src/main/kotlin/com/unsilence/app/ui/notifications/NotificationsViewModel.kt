@@ -1,5 +1,7 @@
 package com.unsilence.app.ui.notifications
 
+import com.unsilence.app.ui.shared.CardDataFlow
+
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.unsilence.app.data.auth.KeyManager
@@ -13,18 +15,22 @@ import com.unsilence.app.data.relay.FeedWotDisplayMode
 import com.unsilence.app.data.relay.RelayPreferencesStore
 import com.unsilence.app.data.relay.WotHydrationCoalescer
 import com.unsilence.app.data.relay.wotLookupSnapshot
+import com.unsilence.app.data.repository.NotificationRepository
 import com.unsilence.app.data.repository.UserRepository
 import com.unsilence.app.ui.feed.EventReferenceTarget
 import com.unsilence.app.ui.shared.TimelineCardData
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
-import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.flatMapLatest
+import kotlinx.coroutines.flow.flowOf
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.onStart
+import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
@@ -38,6 +44,7 @@ data class NotificationsUiState(
 
 enum class NotifFilter { Following, Global }
 
+@OptIn(ExperimentalCoroutinesApi::class)
 @HiltViewModel
 class NotificationsViewModel @Inject constructor(
     private val keyManager: KeyManager,
@@ -46,16 +53,11 @@ class NotificationsViewModel @Inject constructor(
     private val userRepository: UserRepository,
     private val wotHydrationCoalescer: WotHydrationCoalescer,
     private val timelineCardData: TimelineCardData,
+    private val notifications: NotificationRepository,
 ) : ViewModel() {
-
-    private val _uiState = MutableStateFlow(NotificationsUiState())
-    val uiState: StateFlow<NotificationsUiState> = _uiState.asStateFlow()
 
     private val _filter = MutableStateFlow(NotifFilter.Global)
     val filter: StateFlow<NotifFilter> = _filter.asStateFlow()
-
-    private val _hasNew = MutableStateFlow(false)
-    val hasNewNotifications: StateFlow<Boolean> = _hasNew.asStateFlow()
     private val _wotSubjects = MutableStateFlow<Set<String>>(emptySet())
     private val previewWotSubjects = MutableStateFlow<Set<String>>(emptySet())
     val wotLookups: StateFlow<Map<String, WotLookup>> =
@@ -78,8 +80,8 @@ class NotificationsViewModel @Inject constructor(
         modelProvider = memoryEventStore::getOrParseEventModel,
     ).stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyMap())
 
-    fun profileFlow(pubkey: String): StateFlow<UserEntity?> =
-        timelineCardData.profileFlow(pubkey, viewModelScope)
+    fun profileFlow(pubkey: String): CardDataFlow<UserEntity?> =
+        timelineCardData.profileFlow(pubkey)
 
     fun requestPreviewWotHydration(pubkeys: Collection<String>) {
         // Embedded references can introduce authors too; retain only a small recent window.
@@ -109,99 +111,44 @@ class NotificationsViewModel @Inject constructor(
         onFinished = onFinished,
     )
 
-    /**
-     * In-memory mirror of the DataStore lastSeen timestamp. Seeded once per
-     * pubkey in [startCollecting]; [markSeen] updates BOTH this and DataStore,
-     * so each notification emission reads a fresh value without re-opening a
-     * DataStore flow (disk I/O per emission). Preserves the stale-capture fix:
-     * markSeen() writes are reflected immediately, the dot doesn't reappear.
-     */
-    private val lastSeenCache = MutableStateFlow(0L)
-    private var lastSeenPubkey: String? = null
 
-    /** Mark current notifications as seen — clears the blue dot. */
-    fun markSeen() {
-        val items = _uiState.value.items
-        if (items.isEmpty()) {
-            _hasNew.value = false
-            return
-        }
-        val pubkey = keyManager.getPublicKeyHex() ?: return
-        lastSeenCache.value = items.first().mostRecentAt
-        _hasNew.value = false
-        viewModelScope.launch {
-            relayPreferencesStore.setLastSeenTimestamp(pubkey, items.first().mostRecentAt)
-        }
-    }
-
-    private var collectJob: Job? = null
-
-    init {
-        keyManager.getPublicKeyHex()?.let { pubkey ->
-            startCollecting(pubkey)
-        }
-    }
-
-    fun setFilter(f: NotifFilter) {
-        if (_filter.value == f) return
-        _filter.value = f
-        _uiState.update { it.copy(loading = true) }
-        keyManager.getPublicKeyHex()?.let { startCollecting(it) }
-    }
-
-    private fun startCollecting(pubkey: String) {
-        collectJob?.cancel()
-        collectJob = viewModelScope.launch {
-            val followedOnly = _filter.value == NotifFilter.Following
-
-            // Seed lastSeenCache from DataStore once per pubkey — markSeen()
-            // keeps it in sync afterwards, so per-emission reads stay in memory.
-            if (lastSeenPubkey != pubkey) {
-                lastSeenCache.value = relayPreferencesStore.getLastSeenTimestamp(pubkey).first()
-                lastSeenPubkey = pubkey
-            }
-
-            mutedNotificationsFlow(
-                rows = memoryEventStore.notificationsFlow(pubkey, followedOnly = followedOnly),
-                muteLists = memoryEventStore.ownMuteListFlow(),
-                eventProvider = memoryEventStore::getNostrEvent,
-            )
-                .collect { items ->
-                    _uiState.update { it.copy(items = items, loading = false) }
-                    // Read the in-memory mirror — markSeen() updates it immediately
-                    // (stale capture caused dot reappearing). An entirely muted batch
-                    // cannot leave the new-activity dot lit.
-                    _hasNew.value = items.firstOrNull()?.mostRecentAt
-                        ?.let { it > lastSeenCache.value }
-                        ?: false
-
-                    // Fetch missing profiles across ALL actors (singles + every
-                    // grouped actor), not just one actor per row.
-                    val missingPubkeys = items.flatMap { row ->
-                        when (row) {
-                            is NotificationRow.Single ->
-                                if (row.actorPicture == null) listOf(row.actorPubkey) else emptyList()
-                            is NotificationRow.Grouped ->
-                                row.actors.filter { it.picture == null && it.pubkey != null }.map { it.pubkey!! }
-                        }
-                    }.distinct()
-                    if (missingPubkeys.isNotEmpty()) {
-                        userRepository.fetchMissingProfiles(missingPubkeys)
-                    }
-                    val actorPubkeys = items.flatMap { row ->
-                        when (row) {
-                            is NotificationRow.Single -> listOf(row.actorPubkey)
-                            is NotificationRow.Grouped -> row.actors.mapNotNull { it.pubkey }
-                        }
-                    }.toSet()
-                    _wotSubjects.value = actorPubkeys
-                    wotHydrationCoalescer.requestHydration(actorPubkeys)
+    // Collection and actor hydration stop as soon as the tab leaves composition.
+    val uiState: StateFlow<NotificationsUiState> = _filter.flatMapLatest { filter ->
+        val owner = keyManager.getPublicKeyHex()
+        if (owner == null) flowOf(NotificationsUiState(loading = false)) else
+            notifications.rows(owner, followedOnly = filter == NotifFilter.Following).map { items ->
+            // Fetch missing profiles across ALL actors (singles + every
+            // grouped actor), not just one actor per row.
+            val missingPubkeys = items.flatMap { row ->
+                when (row) {
+                    is NotificationRow.Single ->
+                        if (row.actorPicture == null) listOf(row.actorPubkey) else emptyList()
+                    is NotificationRow.Grouped ->
+                        row.actors.filter { it.picture == null && it.pubkey != null }.map { it.pubkey!! }
                 }
-        }
+            }.distinct()
+            if (missingPubkeys.isNotEmpty()) {
+                userRepository.fetchMissingProfiles(missingPubkeys)
+            }
+            val actorPubkeys = items.flatMap { row ->
+                when (row) {
+                    is NotificationRow.Single -> listOf(row.actorPubkey)
+                    is NotificationRow.Grouped -> row.actors.mapNotNull { it.pubkey }
+                }
+            }.toSet()
+            _wotSubjects.value = actorPubkeys
+            wotHydrationCoalescer.requestHydration(actorPubkeys)
+                NotificationsUiState(items = items, loading = false)
+            }.onStart { emit(NotificationsUiState()) }
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(0), NotificationsUiState())
+
+    fun markSeen() {
+        val timestamp = uiState.value.items.firstOrNull()?.mostRecentAt ?: return
+        val owner = keyManager.getPublicKeyHex() ?: return
+        viewModelScope.launch { notifications.markSeen(owner, timestamp) }
     }
 
-    override fun onCleared() {
-        collectJob?.cancel()
-        super.onCleared()
+    fun setFilter(filter: NotifFilter) {
+        _filter.value = filter
     }
 }
