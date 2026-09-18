@@ -7,8 +7,6 @@ import androidx.compose.animation.expandVertically
 import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.gestures.awaitEachGesture
-import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.aspectRatio
@@ -30,8 +28,6 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
-import androidx.compose.ui.input.pointer.PointerEventPass
-import androidx.compose.ui.input.pointer.changedToUp
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalHapticFeedback
@@ -40,6 +36,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import coil3.compose.AsyncImage
 import com.unsilence.app.data.memory.CustomEmoji
 import com.unsilence.app.data.memory.FeedRow
@@ -48,6 +45,7 @@ import com.unsilence.app.data.model.EventModel
 import com.unsilence.app.data.model.RepostPayload
 import com.unsilence.app.data.wallet.ZapRequest
 import com.unsilence.app.ui.common.rememberWidthImageRequest
+import com.unsilence.app.ui.common.detectCardLongPress
 import com.unsilence.app.ui.shared.CardRole
 import com.unsilence.app.ui.shared.EventEngagementSnapshot
 import com.unsilence.app.ui.shared.SensitiveContentGate
@@ -60,7 +58,6 @@ import com.unsilence.app.ui.theme.Spacing
 import com.unsilence.app.ui.theme.SurfaceVariant
 import com.unsilence.app.ui.theme.TextSecondary
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.withTimeoutOrNull
 
 private data class BoundEventActions(
     val react: () -> Unit,
@@ -250,28 +247,12 @@ fun EventCard(
         // stay long-press-free to avoid nested gesture ambiguity; tapping
         // their own body still opens the quote.
         val contentInteractionSource = remember { MutableInteractionSource() }
+        val lifecycle = LocalLifecycleOwner.current.lifecycle
         val longPressModifier = if (boundActions.longPress != null) {
-            Modifier.pointerInput(boundActions.longPress) {
-                awaitEachGesture {
-                    val down = awaitFirstDown(requireUnconsumed = false)
-                    val cancelled = withTimeoutOrNull(viewConfiguration.longPressTimeoutMillis) {
-                        while (true) {
-                            val event = awaitPointerEvent(PointerEventPass.Initial)
-                            val ch = event.changes.firstOrNull { it.id == down.id }
-                            if (ch == null || ch.changedToUp()) return@withTimeoutOrNull true
-                            val dist = (ch.position - down.position).getDistance()
-                            if (dist > viewConfiguration.touchSlop) return@withTimeoutOrNull true
-                        }
-                        @Suppress("UNREACHABLE_CODE") true
-                    }
-                    if (cancelled == null) {
-                        haptics.performHapticFeedback(HapticFeedbackType.LongPress)
-                        boundActions.longPress()
-                        do {
-                            val ev = awaitPointerEvent(PointerEventPass.Initial)
-                            ev.changes.forEach { it.consume() }
-                        } while (ev.changes.any { it.pressed })
-                    }
+            Modifier.pointerInput(lifecycle, boundActions.longPress) {
+                detectCardLongPress(lifecycle) {
+                    haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+                    boundActions.longPress()
                 }
             }
         } else {
