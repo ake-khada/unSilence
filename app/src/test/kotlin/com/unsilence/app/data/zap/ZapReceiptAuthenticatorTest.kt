@@ -1,5 +1,7 @@
 package com.unsilence.app.data.zap
 
+import com.unsilence.app.data.memory.copySnapshotForTest
+
 import com.unsilence.app.data.auth.MuteKeyProvider
 import com.unsilence.app.data.memory.MemoryEventStore
 import com.unsilence.app.data.memory.NostrEvent
@@ -383,7 +385,7 @@ class ZapReceiptAuthenticatorTest {
         val source = ownRecipientStore()
         source.insert(receipt(zapperSigner, request(senderSigner)))
         val bytes = ByteArrayOutputStream()
-        DataOutputStream(bytes).use { source.saveSnapshotBinary(it) }
+        DataOutputStream(bytes).use { source.copySnapshotForTest(it) }
 
         val restored = storeWithTarget(includeTarget = false)
         DataInputStream(ByteArrayInputStream(bytes.toByteArray())).use {

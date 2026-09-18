@@ -28,6 +28,7 @@ class InitGate @Inject constructor() {
         val follows: CompletableDeferred<Unit> = CompletableDeferred(),
         val relays: CompletableDeferred<Unit> = CompletableDeferred(),
         val feedConnections: CompletableDeferred<Unit> = CompletableDeferred(),
+        val snapshot: CompletableDeferred<Unit> = CompletableDeferred(),
     )
 
     private val lock = Any()
@@ -72,6 +73,10 @@ class InitGate @Inject constructor() {
     fun signalFeedConnectionsReady(session: InitSession) =
         signal(session, recompute = false) { it.feedConnections }
 
+    /** The local restore attempt finished, including a missing or rejected snapshot. */
+    fun signalSnapshotReady(session: InitSession) =
+        signal(session, recompute = false) { it.snapshot }
+
     suspend fun awaitFollows() = state.follows.await()
 
     suspend fun awaitRelays() = state.relays.await()
@@ -84,9 +89,12 @@ class InitGate @Inject constructor() {
 
     suspend fun awaitFeedConnections() = state.feedConnections.await()
 
+    suspend fun awaitSnapshot() = state.snapshot.await()
+
     val followsReady: Boolean get() = state.follows.isCompleted
     val relaysReady: Boolean get() = state.relays.isCompleted
     val feedConnectionsReady: Boolean get() = state.feedConnections.isCompleted
+    val snapshotReady: Boolean get() = state.snapshot.isCompleted
     val isReady: Boolean
         get() = state.let { it.follows.isCompleted && it.relays.isCompleted }
 

@@ -338,7 +338,7 @@ class ContentEvictionPolicyTest {
             )
         }
         val bytes = ByteArrayOutputStream()
-        DataOutputStream(bytes).use { source.saveSnapshotBinary(it) }
+        DataOutputStream(bytes).use { source.copySnapshotForTest(it) }
 
         val restored = MemoryEventStore(object : MuteKeyProvider {}, stubTimelineServiceProvider())
         DataInputStream(ByteArrayInputStream(bytes.toByteArray())).use {

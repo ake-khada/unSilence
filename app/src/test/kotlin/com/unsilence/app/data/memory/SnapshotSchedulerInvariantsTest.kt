@@ -457,7 +457,7 @@ class SnapshotSchedulerInvariantsTest {
             // jobs run on the IO dispatcher to allow real concurrency.
             val saveJob = async(Dispatchers.IO) {
                 DataOutputStream(bytes).use { out ->
-                    store.saveSnapshotBinary(out)
+                    store.copySnapshotForTest(out)
                 }
             }
             val mutateJob = launch(Dispatchers.IO) {

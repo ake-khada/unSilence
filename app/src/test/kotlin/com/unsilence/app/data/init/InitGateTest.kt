@@ -12,6 +12,32 @@ import org.junit.Test
 class InitGateTest {
 
     @Test
+    fun `snapshot completion releases restoration without claiming network readiness`() = runTest {
+        val gate = InitGate()
+        val session = gate.beginSession("alice")
+        val pending = async { gate.awaitSnapshot() }
+        assertFalse(gate.snapshotReady)
+        gate.signalSnapshotReady(session)
+        pending.await()
+        gate.awaitSnapshot() // warm Activity recreation must not suspend
+        assertTrue(gate.snapshotReady)
+        assertEquals(InitGate.Phase.CONNECTING, gate.phase.value)
+    }
+
+    @Test
+    fun `old account snapshot completion cannot release the new account`() = runTest {
+        val gate = InitGate()
+        val stale = gate.beginSession("alice")
+        val current = gate.beginSession("bob")
+        gate.signalSnapshotReady(stale)
+        assertFalse(gate.snapshotReady)
+        gate.signalSnapshotReady(current)
+        assertTrue(gate.snapshotReady)
+        gate.invalidateSession()
+        assertFalse(gate.snapshotReady)
+    }
+
+    @Test
     fun `awaitFollows suspends until signaled`() = runTest {
         val gate = InitGate()
         val session = gate.beginSession("alice")
