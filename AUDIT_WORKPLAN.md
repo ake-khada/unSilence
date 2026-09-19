@@ -7,6 +7,8 @@ between automated evidence and human UX acceptance. On 2026-09-19 the owner
 authorized committing the current batch with clear designations and deferring
 further tests. No push, user-account mutations, paid actions, uninstall, or data
 clearing is authorized.
+The subsequent navigation follow-through was also accepted on device and
+authorized for clearly designated commits on 2026-09-19; see the final section.
 
 ## Execution and evidence
 
@@ -19,8 +21,8 @@ clearing is authorized.
   foundational restoration/snapshot work. Then finish remaining ten audit findings.
 - Final debug/release and available device regression. Record missing older-device,
   accessibility, performance or subjective coverage; do not invent validation.
-- Final candidate contains no temporary timing probes. Phone has the probe-free
-  second-half minified candidate; preserve data on replacement.
+- Candidates contain no temporary timing probes. The current phone/build state
+  is recorded in the latest resumed-work section; preserve data on replacement.
 
 ## Work queue
 
@@ -29,7 +31,7 @@ clearing is authorized.
 | Feed restoration coordination | IMPLEMENTED; midpoint accepted | Edge-case tests pass; broader restoration/performance coverage remains |
 | Snapshot bounded memory + deadline | IMPLEMENTED; automated gate passed | Atomic rollback/large-data tests pass; phone has successful commits and one deadline rollback; allocation/deadline follow-through remains |
 | UI-15/16 system bars + splash | IMPLEMENTED; midpoint accepted | Older API/system-mode matrix remains |
-| UI-02/07/08/09/10/11 lifetimes/work | PARTIAL implementation committed in this batch | Root destinations/cold card handles/lazy shell done; nested settings/articles and session-root ownership remain |
+| UI-02/07/08/09/10/11 lifetimes/work | Nested navigation/session ownership committed in `655a683e`; owner accepted on device | Structural phone tests pass; full runtime collector/heap and interaction matrix remain |
 | UI-01/14 follow-through | IMPLEMENTED at HEAD | Preserve content-behind-bars, touch barrier, fail-closed sensitive rendering and playback consent; regression coverage |
 | Midpoint human checkpoint | ACCEPTED by owner | “Done. No evident hiccups.” Raw log captured before further work; persistence deadline remains open |
 | UI-03/04 geometry/draw | IMPLEMENTED; rendered tests passed | Actual first-frame geometry/hidden-tail and logo draw-phase assertions pass; full workload measurements remain |
@@ -147,7 +149,7 @@ moment and are superseded by later results and the commit-boundary section.
   explicit remaining coverage are in `SECOND_HALF_VALIDATION.md` in the artifact
   directory. These results do not complete the remaining navigation/profile work.
 
-## Commit boundary — 2026-09-19
+## Commit boundary — 2026-09-19 (historical)
 
 Owner: “commit these with clear designation. The tests we can run after.”
 Commit the current work in concern-based batches; do not call the audit complete.
@@ -173,3 +175,61 @@ exact build of these commits. Next validation should build committed HEAD.
   rendering/feedback work, including JVM and rendered regression tests.
 - This documentation commit — canonical backlog, evidence and explicit remaining
   work. No push authorized or performed.
+
+## Resumed navigation follow-through — 2026-09-19
+
+The owner pushed the five commits, then requested debug removal and an exact-HEAD
+release update. Both completed: release `5a871f59`, SHA-256 `0f69f642…89e248`,
+certificate/installed hash verified, data intact. That build supersedes the
+historical pre-commit phone state above; it is not a fresh full-suite result.
+Evidence: `.toolchains/head-5a871f59.iovT1D/STATUS.md`.
+
+Owner then authorized the proposed next step: finish nested navigation/lifetimes,
+validate, and reconcile the backlog. At that point no new commit/push was authorized. The
+candidate adds settings/editor/draft/relay-set/article destinations, an account
+session owner for shell VMs, separate profile-editor machinery, saved editor and
+reader state, and visibility-scoped own-profile/article work. Existing sensitive
+media/playback gates remain in force; neither guarded video source file changed.
+
+Final review also protects in-flight settings writes from ordinary Back/header
+dismissal, queues editor-upload results for the resumed form, and defers restored
+article layout until body/comments are available. This does not make pending
+writes durable across process death or account teardown.
+
+Artifacts: `.toolchains/nav-completion-5a871f59.CyBHuY/`. **1,815 JVM tests / 172
+suites, 9 Python tests, and 13 account-free phone tests pass**. Phone tests include
+four ownership/save-dismissal cases, two delayed article-anchor cases, five
+rendered regressions and two debug offline crypto cases. Fake-account replacement
+and StateRestorationTester use no real account actions. Final full mise gate
+passed: lint 0 errors/118 warnings, signed release and benchmark compilation.
+The final APK also passed **two minified offline crypto tests**. An intermediate
+repeat failed two screenshot tests while the phone was asleep; all 13 passed
+on the unchanged APK after unlock. Keep all runs in the evidence record.
+
+Installed the candidate release in place, SHA-256 `a0380fce…22490b5`; matching
+local development certificate and installed APK hash verified. appId 10339 and
+first-install time unchanged; launch returned Status ok, signed-in feed renders,
+no candidate fatal/ANR/OOM in the captured startup logs. Debug/test helpers remain
+installed. No agent-initiated social/account changes, uninstall, data clearing
+or push. Detailed results/limits:
+`.toolchains/nav-completion-5a871f59.CyBHuY/VALIDATION_SUMMARY.md`.
+Do not confuse automated state/ownership assertions with gesture acceptance,
+process-kill restoration, or measured frame/memory improvement. UI-13 measured
+profiles and the wider device matrix remain separate unfinished work.
+
+## Navigation commit boundary — 2026-09-19
+
+Owner: “Seems good, validated on device. Commit with clear designation.”
+
+- `655a683e` — `fix(navigation): scope nested destinations and preserve entry state`.
+  Interdependent navigation/session/editor lifetime changes and regression tests
+  stay together so the commit is self-contained.
+- Separate documentation commit — reconcile the backlog, device acceptance and
+  remaining audit evidence. No binaries, keys, private logs or toolchains staged.
+
+Before committing, compared all app/test sources to the archived source of the
+validated installed APK: no differences. Diff checks pass. No runtime edits,
+new build or phone actions were needed for this commit-only step. The APK remains
+the pre-commit build with matching source, not a claimed fresh exact-HEAD build.
+The owner's general device acceptance does not establish unspecified gesture
+coverage, process-death restoration, or measured frame/heap improvements.

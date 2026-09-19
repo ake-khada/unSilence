@@ -2,27 +2,45 @@
 
 Canonical list of unresolved work only.
 
-Last reconciled: **2026-09-19**, audit batch based on `0758322c`. UI audit implementation status
-and local Omarchy/phone evidence checked; this is not fresh runtime verification
-of every carried product/security item. Owner authorized concern-based commits of
-the current batch and deferral of further testing. This backlog is now tracked.
-Active completion plan and the owner's single-midpoint human-validation override:
+Last reconciled: **2026-09-19**, navigation completion committed in `655a683e`
+on baseline `5a871f59`. This is not fresh runtime
+verification of every carried product/security item. Active completion plan and
+the owner's single-midpoint human-validation override:
 [AUDIT_WORKPLAN.md](AUDIT_WORKPLAN.md).
 
-**Latest phone state — 2026-09-18:** second-half minified release installed in
-place, hash verified (`4de5e9f4…1510402`). Five rendered layout/draw/clock/press
-tests and two minified offline crypto/protocol tests pass. Full local gate:
-1,809 JVM tests, 9 Python tests, lint 0 errors/118 warnings. ART profile generation
-returned empty on GrapheneOS (JIT profiling disabled); emulator fallback deferred.
-No data cleared, keys copied, or social/payment actions performed.
-The last formatting/error-surface-token cleanup is not in the installed APK and
-has not had a fresh test run. Next install/validation should use committed HEAD.
+**Installed release:** navigation-completion candidate based on `5a871f59`,
+updated in place on 2026-09-19; certificate and phone APK hash verified
+(`a0380fce…22490b5`). Its app/test source matches `655a683e`; the APK was built
+before committing, not rebuilt from the commit.
+No uninstall/data clear; app ID and first-install time unchanged, signed-in feed
+renders. Debug and test helpers are installed alongside it for validation.
+The previous exact-HEAD APK remains available for rollback.
+[Current installation and validation evidence](.toolchains/nav-completion-5a871f59.CyBHuY/VALIDATION_SUMMARY.md).
+
+**Committed navigation follow-through (`655a683e`):** settings/editors/drafts/relay sets/articles moved
+to Nav3 entries; account-session store ownership added; own-profile timeline
+and article comment work are visibility-scoped. **1,815 JVM tests, 9 Python
+tests and 13 account-free phone tests pass**, plus **2 minified offline crypto
+tests**. Final mise gate passed: lint 0 errors/118 warnings, signed release and
+benchmark compilation. One intermediate phone run had two screenshot-test
+failures while the phone was asleep; the unchanged APK passed all 13 after
+unlocking. Failed-run logs are retained, not hidden by the successful repeat.
+Owner subsequently reported **“Seems good, validated on device”** and authorized
+clearly designated commits. No push. This is general device acceptance, not
+proof of every remaining interaction case or a measured performance gain.
+[Current execution record](.toolchains/nav-completion-5a871f59.CyBHuY/VALIDATION_SUMMARY.md).
+
+**Prior completed validation:** 1,809 JVM tests, 9 Python tests, lint 0 errors/
+118 warnings, five rendered layout/draw/clock/press tests and two minified
+offline crypto/protocol tests passed for the prior audit batch. ART profile
+generation returned empty on GrapheneOS; emulator capture remains pending.
+These results must not be presented as tests of the new navigation candidate.
 
 **Midpoint acceptance:** owner: “Done. No evident hiccups.”
 Captured log has three committed snapshots, one 3s stop-deadline rollback and
 no candidate fatal/ANR/OOM. Allocation stalls remain; no measured performance
 improvement is claimed. Continue the remaining findings under the agreed
-  single-checkpoint override when implementation resumes.
+single-checkpoint override.
 [Checkpoint evidence](.toolchains/audit-completion-0758322c.eqhcKV/human-validation.HIheHk/SUMMARY.md).
 
 **Earlier diagnostic:** isolated HEAD `0758322c` plus temporary
@@ -56,16 +74,11 @@ numbering**, separate from the security audit's H/M IDs. Source patterns are not
 proof of the audit's frame-time, allocation, or leak estimates; measure those
 claims before calling a performance fix successful.
 
-**Status: implementation and automated validation are underway under
-[AUDIT_WORKPLAN.md](AUDIT_WORKPLAN.md); midpoint accepted by the owner.
-The midpoint candidate is now installed in place: 1,802 JVM tests + 9 analyzer
-tests pass, lint 0 errors/111 warnings, minified release and benchmark compile pass.
-The single agreed human checkpoint is complete; see local
-[midpoint evidence/script](.toolchains/audit-completion-0758322c.eqhcKV/MIDPOINT_VALIDATION.md).
-UI-01's layout and touch
-follow-up are committed in `1c8ac453` and `a37a4f6f`; UI-14 is implemented in
-`7b591a62`. UI-01 and UI-14 retain validation follow-through.** The audit's payoff
-order was 02, 01, 14.
+**Status:** most UI implementation, including nested navigation/lifetimes, is
+committed. The agreed midpoint and the owner's subsequent device acceptance of
+`655a683e` are recorded above. UI-01 and UI-14 retain
+compatibility/performance validation; measured profiles and matched workload
+evidence remain open. The audit's payoff order was 02, 01, 14.
 Keep **UI-02 + UI-07 + UI-08 in the same workstream/week**, not isolated cleanups.
 UI-15/16 are independent compatibility fixes. This ordering does not authorize a
 broad rewrite.
@@ -92,121 +105,46 @@ broad rewrite.
   Local [validation evidence](.toolchains/ui01-scroll-padding-7b591a62.nq9oFA/VALIDATION_SUMMARY.md)
   records results and limits for the committed layout (not the new touch fix).
 
-- **UI-02 — IN PROGRESS: give full-screen navigation real transitions and lifetimes.**
-  Follow-up committed in `af47d122` migrates all remaining root-shell full-screen flags
-  (composer/reply/quote, connections, profile relays, relay editor/list/discovery/detail,
-  emoji/zap settings and graph picker) to serializable entries. Connections → profile
-  now retains the connections visit on back. Draft discard/publishing back guards
-  remain intentional. Combined release gate passes and the midpoint phone checkpoint
-  was accepted. Nested profile/settings/article hosts remain a
-  separate follow-through review, not silently declared migrated.
-  UI-02/07/08 workstream authorized 2026-09-17. First slice: feed → thread → user
-  profile. Unchanged `a37a4f6f` phone baseline captured: owner confirms Profile →
-  Feed skips the preceding Thread but preserves feed position. PID unchanged,
-  zero captured app fatal/ANR entries; aggregate memory growth does not establish
-  a ViewModel leak. Owner confirmed implementation. The first candidate uses
-  Navigation 3 for tabs/thread/user-profile, entry-owned stores, saved positions,
-  and visibility-gated work. Full post-playback checks passed: 1,759 JVM tests, nine analyzer
-  tests, lint zero errors/111 warnings, release and benchmark compilation.
-  Human checkpoint captured: same PID, zero app fatal/ANR entries, 70 navigation
-  playback state changes and 22 recorded requests, none while their gate was
-  closed. Owner accepted the work for commit after noting an intermittent feed
-  reset on backgrounding; rollback was cancelled before execution.
-  Owner approved the navigation playback gate: VideoPlaybackScope and the
-  separate immersive path now require RESUMED, release only their own player,
-  and keep live sensitive-content consent mandatory. Preview detectors/preloads
-  suspend and inline video surfaces become thumbnails. Nine new gate tests
-  pass; the full post-gate check passed. Signed candidate installed in place with
-  matching APK hash and clean startup (PID 21094); owner accepted and committed
-  as `68e63f36` (pushed; clean-HEAD release built and installed).
-  **Back-gesture haptic — owner accepted, committed `0758322c` (2026-09-18):** captured a separate
-  app-origin LONG_PRESS 320ms after Thread → Feed back, followed by a dialog.
-  The custom detector ignored Compose's consumed-up cancellation event. Candidate
-  ends any released pointer regardless of consumption and scopes detection to
-  RESUMED; intentional holds and child-content handling stay intact. Six new
-  regression tests pass; full gate passed (1,765 JVM tests, 9 analyzer tests,
-  lint 0 errors, release and benchmark compilation). Signed candidate installed;
-  owner reports "Works like a charm" after phone testing. Capture has the same
-  PID, zero matched app fatal/ANR, 12 thread and 4 profile resumes. Formal check
-  remains incomplete: four long-press haptics versus two scripted, and bounded
-  vibration history does not cover the whole session. Owner said they may have
-  performed extra holds and explicitly requested the commit. Human acceptance
-  recorded without claiming an exact-count log pass. Pushed by owner; local
-  HEAD and origin/main both `0758322c`.
-  [Diagnosis](.toolchains/thread-back-haptic-68e63f36.uJR1Zq/SUMMARY.md) and
-  [candidate status](.toolchains/thread-back-haptic-candidate-68e63f36.EzJWdT/STATUS.md).
-  **Feed resume — candidate in validation (2026-09-18):** owner confirms Home
-  gesture triggers the reset to Following and loss of position (Compose behaves
-  differently). All-buffer phone logs show repeated `low-mem` Activity destruction
-  and recreation inside the same PID 24106. FeedViewModel had no saved session;
-  AppNavDisplay also keyed saveable decorators by navigator object identity.
-  Candidate saves source/filter/content tab/live-edge intent plus at most 500
-  event IDs, uses the stable root-entry ID for navigation state, and defers scroll
-  anchor resolution until rows arrive. No whole-post persistence, new dependency,
-  video changes or per-frame saving. Eleven new regressions pass; full JVM suite
-  1,776/0 failures. Full gate passed (lint 0 errors/111 warnings, release,
-  benchmark compilation, nine analyzer tests). Signed candidate installed in
-  place with matching APK hash and clean startup, PID 28293. Owner confirms
-  selected feed and position recover after Home/return. Capture contains four
-  Activity destructions/recreations in the same process, zero app fatal/ANR;
-  screenshot shows Global/Raw restored. Exact before/after anchor comparison
-  was not captured (owner completed the round trip before the reference phase).
-  **Open:** roughly one-second loading screen before recovery; investigate warm
-  projection/initial preference state without bypassing moderation. Not committed.
-  **New snapshot-memory finding:** same session catches an OutOfMemoryError
-  allocating ~64 MiB in `ByteArrayOutputStream.grow` during binary snapshot save;
-  previous snapshot kept. Writer is unchanged; baseline capture has no matching
-  failure, so regression attribution is unproven. Owner approved a single-pass
-  streaming writer (2026-09-18): fixed 8 KiB output buffer, patch the 32-byte
-  header after flushing to AtomicFile's temporary file, preserve V16–V19 wire
-  format and retention bounds. Cancellation checks at write/section boundaries
-  protect the existing three-second background-save deadline. Eight new tests
-  cover >64 MiB snapshots, V16–V19 wire compatibility, file ownership/cursor
-  semantics, and failed/cancelled writes with successful retries. Full gate
-  passed: 1,784 JVM tests, nine analyzer tests, lint 0 errors/111 existing warnings,
-  release and benchmark compilation. **Phone check FAILED (2026-09-18):** owner
-  reports improvement, but PID 5502 logs show zero completed snapshot summaries
-  (expected at least two), three onStop save timeouts, zero OOM/save-failed
-  exceptions, and zero app fatal/ANR. Timeout message's mutex suffix is static,
-  not evidence of the cause. Do not mark persistence validated; pause for owner
-  direction before further changes. **Rollback authorized and completed:**
-  previous feed-resume APK restored in place (matching SHA-256, PID 9355), and
-  snapshot source/tests restored to the pre-candidate hashes. App data, feed-resume
-  changes and Omarchy work preserved; withdrawn implementation archived locally.
-  No commit. Original snapshot allocation risk remains open.
-  **Timeout investigation:** older logs already show a 44.9 MB completed snapshot
-  alongside the timeout warning; old serialization ignores cancellation. Two
-  temporary JVM diagnostics confirm it can commit after timeout cancellation
-  (20 tests passed including 18 scheduler invariants; probe removed from source).
-  Streaming candidate's cancellation checks changed this behavior. Which stage
-  exceeds the phone budget is not measured; don't infer mutex contention from
-  the static warning. Next proposed step is a temporary per-stage timing run,
-  retaining the three-second deadline and existing retention policy.
-  [Rollback and diagnosis](.toolchains/snapshot-timeout-investigation-0758322c.NdZoIt/DIAGNOSIS.md).
-  [Snapshot phone results and failure evidence](.toolchains/snapshot-streaming-0758322c.PyqIbd/validation.GHSyYn/SUMMARY.md).
-  **Next reported UI issue:** intermittent jumpy scrolling in this candidate;
-  owner requests addressing it next. Preserve the current log as evidence;
-  cause/attribution unproven, no scroll fix attempted in the snapshot pass.
-  [Implementation and build artifacts](.toolchains/snapshot-streaming-0758322c.PyqIbd/IMPLEMENTATION.md).
-  Existing event-selection copies and per-record encoding
-  remain; this removes whole-section byte arrays, not all snapshot allocations.
-  [Phone results and failure evidence](.toolchains/feed-resume-0758322c.PkuKUU/VALIDATION_SUMMARY.md).
-  [Diagnosis and artifacts](.toolchains/feed-resume-0758322c.PkuKUU/DIAGNOSIS.md).
-  Original navigation
-  [checkpoint results](.toolchains/nav-lifetimes-candidate-a37a4f6f.b2Gnp8/VALIDATION_SUMMARY.md).
-  Other flag-based
-  overlays remain a later slice, not implicitly migrated. Local
-  [candidate status](.toolchains/nav-lifetimes-candidate-a37a4f6f.b2Gnp8/STATUS.md) and
-  [baseline results](.toolchains/nav-lifetimes-baseline-a37a4f6f.ekZXET/VALIDATION_SUMMARY.md).
-  `AppNavigation.kt` still stacks flag-controlled sibling screens with hand-written
-  state savers; covered feed work needs explicit suspension. Evaluate Navigation 3
-  with keyed entries, saved state, entry-owned ViewModels, and predictive back.
-  A smaller alternative is `SaveableStateHolder` + `AnimatedContent` + predictive
-  back, but it also needs explicit ViewModel ownership and covered-work gating.
-  Neither saved state nor a dependency alone guarantees collector cleanup;
-  transitions can temporarily retain both entries. Verify deep links, scroll
-  restoration, pop/cancelled back, rotation/process recreation, and quiescence of
-  covered feeds. Coordinate with UI-07/08 and preserve playback consent.
+- **UI-02 — COMMITTED; structural tests pass and owner accepted on device.**
+  `655a683e` extends the Nav3 shell work (`68e63f36`, `af47d122`) to own-profile
+  editing/settings, every settings child, draft resumption, relay-set editing,
+  article reading and article comments. One shared entry/motion policy retains
+  actual caller history, including article → profile → Back → article and
+  settings → drafts → composer → Back → drafts. Route state contains IDs/hints,
+  not whole posts, drafts, profiles or relay sets. Dirty/publishing composer
+  guards remain intentional; editor save completion is RESUMED-only.
+  Article reading position/focused-comment state is saveable; the viewport waits
+  for parsed body and initial comments before consuming its restored anchor.
+  Restored editors resolve their IDs before rendering (a missing item never
+  becomes a blank new item). Pending image-upload results go to the current editor, not callbacks
+  captured by a disposed composition. Existing NIP-36 consent remains mandatory
+  for comments; the explicitly opened main article remains intentionally ungated.
+  Article player ownership uses the visit ID and existing navigation gate.
+  In-flight settings writes delay Back/header dismissal until they finish;
+  ordinary Back remains navigation-owned. This is not a durable publication
+  journal or protection against process death/account teardown.
+  Phone assertions pass for cover/pop ownership, fake account replacement,
+  saved-state restoration, queued-save dismissal and deferred article anchors.
+  Remaining: real predictive-back cancellation, keyboard/photo-picker/draft
+  behavior, process recreation, deep links and media handoff. StateRestorationTester
+  coverage is not a process-kill test, nor an account-changing integration test.
+  No measured frame/heap improvement claimed. Coordinate with UI-07/08.
+
+- **Related persistence/scroll follow-through — OPEN.**
+  `dab747b3` commits bounded atomic snapshot streaming, account-fenced restore
+  readiness and deadline outcomes. Feed source/filter/anchor restoration is
+  implemented; the owner accepted the midpoint. Its capture contains three
+  committed snapshots (~41–43 MB), one three-second stop-deadline rollback and
+  allocation stalls, without captured candidate fatal/ANR/OOM. The prior
+  whole-section byte-array writer is no longer current; the earlier withdrawn
+  candidate/rollback logs remain historical evidence, not current source status.
+  Existing selection copies and per-record UTF-8 allocations remain. Investigate
+  remaining deadline/allocation cost with matched phone workloads; preserve the
+  three-second budget and atomic rollback. Intermittent jumpy scrolling was
+  reported, but its cause/attribution and resolution are not established.
+  [Accepted midpoint capture](.toolchains/audit-completion-0758322c.eqhcKV/human-validation.HIheHk/SUMMARY.md).
+  [Prior timing evidence](.toolchains/snapshot-timing-0758322c.Xr6Mt1/validation.Zb05KN/SUMMARY.md).
+  [Earlier withdrawn-candidate evidence](.toolchains/snapshot-streaming-0758322c.PyqIbd/validation.GHSyYn/SUMMARY.md).
 
 - **UI-03 — IMPLEMENTED, RENDERED TESTS PASS: first-frame “Show more” geometry.**
   Exact formatted text/emoji preflight now replaces onTextLayout state feedback;
@@ -252,11 +190,18 @@ broad rewrite.
   with cold `CardDataFlow` handles and fresh synchronous snapshots. Cache eviction
   cannot strand sharing jobs or cancel a visible card. Full JVM tests pass, including
   cache eviction/remount cases. Actual runtime retention evidence is still pending.
-  The first candidate moves thread/user-profile stores to navigation entries and
+  The earlier committed work moves thread/user-profile stores to navigation entries and
   gates their work by visibility. Profile timeline handles close on cover/pop;
   tests cover cancellation, resumption and repeated cycles. `TimelineCardData`
   is now ViewModelScoped with two bounded 500-entry caches (profile and stats).
-  Remaining overlays/readers and runtime retention measurement are still open.
+  `655a683e` adds a replaceable account-session store for shell VMs
+  and entry ownership for the remaining settings/editors/readers. Own-profile
+  subscriptions now close on cover, retaining loaded pages for return; article
+  comment fetches/warming are RESUMED-only and cancellation-scoped. Account-free
+  phone assertions verify that popped entry stores clear, covered entries keep
+  state without active content, and account replacement clears shell plus nested
+  stores. Actual app collector/heap measurements remain open; probe-VM ownership
+  tests do not establish a heap plateau or absence of repository retention.
   Sensitive-content mode is intentionally one shared, always-current repository
   state (fail-closed before load), not a stopped per-screen cache that could
   replay stale SHOW. The ordinary WoT display preference is subscriber-driven.
@@ -690,10 +635,11 @@ Relay discovery is built (kind-30166 parse, `RelayDirectory`,
 - Macrobenchmark tooling is committed in `717bfeff`; the feed-fling benchmark and
   startup/scroll profile generators compile. Measured profiles remain open (UI-13:
   GrapheneOS empty capture, emulator setup deferred). Add immersive entry and
-  profile/composer journeys and run the performance comparisons. Five rendered UI
-  tests and two minified crypto tests already pass, but are not macrobenchmark
-  measurements. The sole agreed human midpoint checkpoint has been accepted;
-  further tests were deferred at the owner's 2026-09-19 commit boundary.
+  profile/composer journeys and run the performance comparisons. The resumed
+  navigation pass has 13 debug device assertions and two minified crypto checks;
+  these are not macrobenchmark measurements. The agreed midpoint and subsequent
+  owner device acceptance are recorded above. Measured profile generation and
+  broader performance/device coverage remain deferred.
 - Use the verified GrapheneOS capture path rather than treating Perfetto as
   unavailable. FrameTimeline recording worked on the current Pixel 9 Pro XL
   (Android 17/API 37) without changing OS security settings. CPU scheduling/ftrace
