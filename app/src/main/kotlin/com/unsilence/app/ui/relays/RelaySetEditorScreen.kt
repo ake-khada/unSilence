@@ -2,7 +2,6 @@ package com.unsilence.app.ui.relays
 
 import com.unsilence.app.ui.theme.AppTextStyles
 import androidx.activity.compose.BackHandler
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.saveable.listSaver
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -60,6 +59,8 @@ import com.unsilence.app.data.memory.RelaySet
 import com.unsilence.app.data.relay.normalizeRelayUrl
 import com.unsilence.app.ui.common.LocalAppSessionKey
 import com.unsilence.app.ui.common.LocalShowSnackbar
+import com.unsilence.app.ui.shared.EditorImageResult
+import com.unsilence.app.ui.shared.ResumedEffect
 import com.unsilence.app.ui.theme.Black
 import com.unsilence.app.ui.theme.Brand
 import com.unsilence.app.ui.theme.Sizing
@@ -94,7 +95,7 @@ fun RelaySetEditorScreen(
     var newRelayUrl by rememberSaveable { mutableStateOf("") }
     val uploadingImage by viewModel.uploadingRelaySetImage.collectAsStateWithLifecycle()
     val showSnackbar = LocalShowSnackbar.current
-    LaunchedEffect(saveState) {
+    ResumedEffect(saveState) {
         when (val result = saveState) {
             RelaySetSaveState.Saved -> {
                 viewModel.consumeRelaySetSaveResult()
@@ -108,6 +109,14 @@ fun RelaySetEditorScreen(
         }
     }
     val isEdit = relaySet != null
+    ResumedEffect(viewModel) {
+        viewModel.imageUploadResults.collect { result ->
+            when (result) {
+                is EditorImageResult.Uploaded -> image = result.url
+                is EditorImageResult.Failed -> showSnackbar(result.message)
+            }
+        }
+    }
     val canSave = name.isNotBlank() && relayUrls.isNotEmpty() && !uploadingImage && !saving
 
     val imagePicker = rememberLauncherForActivityResult(
@@ -116,8 +125,6 @@ fun RelaySetEditorScreen(
         if (uri != null) {
             viewModel.uploadRelaySetImage(
                 uri = uri,
-                onUrl = { image = it },
-                onError = showSnackbar,
             )
         }
     }

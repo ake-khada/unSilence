@@ -1,6 +1,7 @@
 package com.unsilence.app.ui.profile
 
 import androidx.lifecycle.ViewModel
+import com.unsilence.app.ui.shared.PendingEdits
 import androidx.lifecycle.viewModelScope
 import com.unsilence.app.data.WOT_REGISTRY_LOOKUP_RELAYS
 import com.unsilence.app.data.auth.KeyManager
@@ -118,6 +119,8 @@ class SocialGraphViewModel @Inject constructor(
     private val userRepository: UserRepository,
     private val signingManager: SigningManager,
 ) : ViewModel() {
+    internal val pendingEdits = PendingEdits(viewModelScope)
+
 
     private val ownPubkey = keyManager.getPublicKeyHex()
     private val ownNpub = ownPubkey?.let { runCatching { it.hexToByteArray().toNpub() }.getOrNull() }
@@ -178,13 +181,13 @@ class SocialGraphViewModel @Inject constructor(
     }
 
     fun selectDefault() {
-        viewModelScope.launch(Dispatchers.IO) {
+        pendingEdits.launch(Dispatchers.IO) {
             switchProvider(WotProviderSource.DEFAULT, defaultWotProviderDescriptor())
         }
     }
 
     fun selectOwnGrapevine() {
-        viewModelScope.launch(Dispatchers.IO) {
+        pendingEdits.launch(Dispatchers.IO) {
             val own = ownPubkey ?: return@launch setStatus("No account is loaded")
             var provider = memoryEventStore.ownWotProviderFromRegistry()
                 ?: localState.value.decryptedOwnProvider
@@ -233,13 +236,13 @@ class SocialGraphViewModel @Inject constructor(
     }
 
     fun setFeedWotDisplayMode(mode: FeedWotDisplayMode) {
-        viewModelScope.launch(Dispatchers.IO) {
+        pendingEdits.launch(Dispatchers.IO) {
             relayPreferencesStore.setFeedWotDisplayMode(mode)
         }
     }
 
     fun applyCustomProvider() {
-        viewModelScope.launch(Dispatchers.IO) {
+        pendingEdits.launch(Dispatchers.IO) {
             val local = localState.value
             val providerPubkey = normalizeWotProviderPubkeyInput(local.customPubkeyInput)
             val relay = normalizeRelayUrl(local.customRelayInput)
@@ -261,7 +264,7 @@ class SocialGraphViewModel @Inject constructor(
     }
 
     fun publishProviderList() {
-        viewModelScope.launch(Dispatchers.IO) {
+        pendingEdits.launch(Dispatchers.IO) {
             val own = ownPubkey ?: return@launch setPublishing(false, "No account is loaded")
             val activeProvider = memoryEventStore.activeWotProvider()
             try {

@@ -1,7 +1,7 @@
 package com.unsilence.app.ui.relays
 
 import com.unsilence.app.ui.theme.AppTextStyles
-import androidx.activity.compose.BackHandler
+import com.unsilence.app.ui.shared.rememberWriteAwareDismiss
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -100,7 +100,7 @@ fun RelayDiscoveryScreen(
         key = "relay-management-${LocalAppSessionKey.current}",
     ),
 ) {
-    BackHandler(enabled = !navigationOwnsBack, onBack = onDismiss)
+    rememberWriteAwareDismiss(viewModel.pendingEdits, navigationOwnsBack, onDismiss)
     LaunchedEffect(Unit) { viewModel.ensureDirectory() }   // firehose runs ONLY here
 
     val directory by viewModel.relayDirectory.collectAsStateWithLifecycle()

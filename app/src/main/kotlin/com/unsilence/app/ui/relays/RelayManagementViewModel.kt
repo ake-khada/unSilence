@@ -3,6 +3,7 @@ package com.unsilence.app.ui.relays
 import android.net.Uri
 import android.util.Log
 import androidx.lifecycle.ViewModel
+import com.unsilence.app.ui.shared.PendingEdits
 import androidx.lifecycle.viewModelScope
 import com.unsilence.app.data.auth.KeyManager
 import com.unsilence.app.data.auth.SigningManager
@@ -35,6 +36,9 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import javax.inject.Inject
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.flow.receiveAsFlow
+import com.unsilence.app.ui.shared.EditorImageResult
 
 sealed interface RelaySetSaveState {
     data object Idle : RelaySetSaveState
@@ -52,7 +56,10 @@ class RelayManagementViewModel @Inject constructor(
     private val keyManager: KeyManager,
     private val signingManager: SigningManager,
     private val blossomImageUploader: BlossomImageUploader,
+    private val initGate: com.unsilence.app.data.init.InitGate,
 ) : ViewModel() {
+    internal val pendingEdits = PendingEdits(viewModelScope)
+
 
     /** User-initiated one-shot RTT probe for the "Test" action (no background/persistence). */
     suspend fun measureRtt(url: String): Int? = relayPool.measureRtt(url)
@@ -109,6 +116,16 @@ class RelayManagementViewModel @Inject constructor(
     val relaySets: Flow<List<RelaySet>> =
         ownerPubkey?.let { memoryEventStore.getAllSetsFlow(it) } ?: emptyFlow()
 
+    private var editorSnapshot: Pair<String, RelaySet?>? = null
+
+    suspend fun resolveForEdit(dTag: String): RelaySet? {
+        editorSnapshot?.takeIf { it.first == dTag }?.let { return it.second }
+        initGate.awaitSnapshot()
+        val relaySet = ownerPubkey?.let { memoryEventStore.getRelaySet(it, dTag) }
+        editorSnapshot = dTag to relaySet
+        return relaySet
+    }
+
     /** Combined relay health (trust score + monitor) keyed by URL. */
     val relayHealth: Flow<Map<String, RelayHealthInfo>> =
         memoryEventStore.relayHealthFlow()
@@ -116,6 +133,8 @@ class RelayManagementViewModel @Inject constructor(
     val publishing = MutableStateFlow(false)
     private val _uploadingRelaySetImage = MutableStateFlow(false)
     val uploadingRelaySetImage: StateFlow<Boolean> = _uploadingRelaySetImage.asStateFlow()
+    private val imageResults = Channel<EditorImageResult>(Channel.BUFFERED)
+    internal val imageUploadResults = imageResults.receiveAsFlow()
     private val publishMutex = Mutex()
     private val _relaySetSave = MutableStateFlow<RelaySetSaveState>(RelaySetSaveState.Idle)
     val relaySetSave = _relaySetSave.asStateFlow()
@@ -126,7 +145,7 @@ class RelayManagementViewModel @Inject constructor(
     fun addReadWriteRelay(url: String) {
         val normalized = normalizeRelayUrl(url) ?: return
         val pk = ownerPubkey ?: return
-        viewModelScope.launch(Dispatchers.IO) {
+        pendingEdits.launch(Dispatchers.IO) {
             relayCapabilitiesStore.clearCooldownForRelay(normalized)
             memoryEventStore.addReadWriteRelay(pk, RelayConfig(normalized, null))
             publishChanges(10002)
@@ -135,7 +154,7 @@ class RelayManagementViewModel @Inject constructor(
 
     fun removeReadWriteRelay(url: String) {
         val pk = ownerPubkey ?: return
-        viewModelScope.launch(Dispatchers.IO) {
+        pendingEdits.launch(Dispatchers.IO) {
             memoryEventStore.removeReadWriteRelay(pk, url)
             publishChanges(10002)
         }
@@ -143,7 +162,7 @@ class RelayManagementViewModel @Inject constructor(
 
     fun toggleMarker(relay: RelayConfig) {
         val pk = ownerPubkey ?: return
-        viewModelScope.launch(Dispatchers.IO) {
+        pendingEdits.launch(Dispatchers.IO) {
             val newMarker = when (relay.marker) {
                 null    -> "read"
                 "read"  -> "write"
@@ -159,7 +178,7 @@ class RelayManagementViewModel @Inject constructor(
      *  via the SAME kind-10002 path as toggleMarker — for the independent R / W toggle pills. */
     fun setRelayMarker(relay: RelayConfig, marker: String?) {
         val pk = ownerPubkey ?: return
-        viewModelScope.launch(Dispatchers.IO) {
+        pendingEdits.launch(Dispatchers.IO) {
             memoryEventStore.updateRelayMarker(pk, relay.url, marker)
             publishChanges(10002)
         }
@@ -170,7 +189,7 @@ class RelayManagementViewModel @Inject constructor(
     fun addBlockedRelay(url: String) {
         val normalized = normalizeRelayUrl(url) ?: return
         val pk = ownerPubkey ?: return
-        viewModelScope.launch(Dispatchers.IO) {
+        pendingEdits.launch(Dispatchers.IO) {
             memoryEventStore.addBlockedRelay(pk, normalized)
             relayPool.onBlockedRelaysChanged(memoryEventStore.getBlockedRelayUrls(pk).toSet())
             publishChanges(10006)
@@ -179,7 +198,7 @@ class RelayManagementViewModel @Inject constructor(
 
     fun removeBlockedRelay(url: String) {
         val pk = ownerPubkey ?: return
-        viewModelScope.launch(Dispatchers.IO) {
+        pendingEdits.launch(Dispatchers.IO) {
             memoryEventStore.removeBlockedRelay(pk, url)
             relayPool.onBlockedRelaysChanged(memoryEventStore.getBlockedRelayUrls(pk).toSet())
             publishChanges(10006)
@@ -191,7 +210,7 @@ class RelayManagementViewModel @Inject constructor(
     fun addSearchRelay(url: String) {
         val normalized = normalizeRelayUrl(url) ?: return
         val pk = ownerPubkey ?: return
-        viewModelScope.launch(Dispatchers.IO) {
+        pendingEdits.launch(Dispatchers.IO) {
             relayCapabilitiesStore.clearCooldownForRelay(normalized)
             memoryEventStore.addSearchRelay(pk, normalized)
             publishChanges(10007)
@@ -200,7 +219,7 @@ class RelayManagementViewModel @Inject constructor(
 
     fun removeSearchRelay(url: String) {
         val pk = ownerPubkey ?: return
-        viewModelScope.launch(Dispatchers.IO) {
+        pendingEdits.launch(Dispatchers.IO) {
             memoryEventStore.removeSearchRelay(pk, url)
             publishChanges(10007)
         }
@@ -211,7 +230,7 @@ class RelayManagementViewModel @Inject constructor(
     fun addFavoriteRelay(url: String) {
         val normalized = normalizeRelayUrl(url) ?: return
         val pk = ownerPubkey ?: return
-        viewModelScope.launch(Dispatchers.IO) {
+        pendingEdits.launch(Dispatchers.IO) {
             relayCapabilitiesStore.clearCooldownForRelay(normalized)
             memoryEventStore.addFavoriteRelay(pk, FavoriteEntry(normalized, null))
             publishChanges(10012)
@@ -220,7 +239,7 @@ class RelayManagementViewModel @Inject constructor(
 
     fun removeFavoriteRelay(url: String) {
         val pk = ownerPubkey ?: return
-        viewModelScope.launch(Dispatchers.IO) {
+        pendingEdits.launch(Dispatchers.IO) {
             memoryEventStore.removeFavoriteRelay(pk, url)
             publishChanges(10012)
         }
@@ -228,7 +247,7 @@ class RelayManagementViewModel @Inject constructor(
 
     fun addFavoriteSetRef(setRef: String) {
         val pk = ownerPubkey ?: return
-        viewModelScope.launch(Dispatchers.IO) {
+        pendingEdits.launch(Dispatchers.IO) {
             memoryEventStore.addFavoriteRelay(pk, FavoriteEntry(null, setRef))
             publishChanges(10012)
         }
@@ -236,7 +255,7 @@ class RelayManagementViewModel @Inject constructor(
 
     fun removeFavoriteSetRef(setRef: String) {
         val pk = ownerPubkey ?: return
-        viewModelScope.launch(Dispatchers.IO) {
+        pendingEdits.launch(Dispatchers.IO) {
             memoryEventStore.removeFavoriteBySetRef(pk, setRef)
             publishChanges(10012)
         }
@@ -246,14 +265,14 @@ class RelayManagementViewModel @Inject constructor(
 
     fun addIndexerRelay(url: String) {
         val normalized = normalizeRelayUrl(url) ?: return
-        viewModelScope.launch(Dispatchers.IO) {
+        pendingEdits.launch(Dispatchers.IO) {
             relayCapabilitiesStore.clearCooldownForRelay(normalized)
             relayPreferencesStore.addIndexerUrl(normalized)
         }
     }
 
     fun removeIndexerRelay(url: String) {
-        viewModelScope.launch(Dispatchers.IO) {
+        pendingEdits.launch(Dispatchers.IO) {
             relayPreferencesStore.removeIndexerUrl(url)
         }
     }
@@ -294,17 +313,17 @@ class RelayManagementViewModel @Inject constructor(
 
     fun uploadRelaySetImage(
         uri: Uri,
-        onUrl: (String) -> Unit,
-        onError: (String) -> Unit,
     ) {
+        if (!_uploadingRelaySetImage.compareAndSet(false, true)) return
         viewModelScope.launch(Dispatchers.IO) {
-            _uploadingRelaySetImage.value = true
             try {
                 val url = blossomImageUploader.upload(uri, maxDimension = 512)
-                launch(Dispatchers.Main) { onUrl(url) }
+                imageResults.send(EditorImageResult.Uploaded(url))
+            } catch (cancelled: CancellationException) {
+                throw cancelled
             } catch (error: Exception) {
                 Log.w("RelayMgmt", "Relay-set image upload failed", error)
-                launch(Dispatchers.Main) { onError(error.message ?: "Upload failed") }
+                imageResults.send(EditorImageResult.Failed(error.message ?: "Upload failed"))
             } finally {
                 _uploadingRelaySetImage.value = false
             }
@@ -313,7 +332,7 @@ class RelayManagementViewModel @Inject constructor(
 
     fun deleteRelaySet(dTag: String) {
         val pk = ownerPubkey ?: return
-        viewModelScope.launch(Dispatchers.IO) {
+        pendingEdits.launch(Dispatchers.IO) {
             memoryEventStore.deleteRelaySet(pk, dTag, nowSeconds())
             publishRelaySet(dTag)
         }
@@ -327,7 +346,7 @@ class RelayManagementViewModel @Inject constructor(
     fun addRelayToSet(dTag: String, url: String) {
         val normalized = normalizeRelayUrl(url) ?: return
         val pk = ownerPubkey ?: return
-        viewModelScope.launch(Dispatchers.IO) {
+        pendingEdits.launch(Dispatchers.IO) {
             memoryEventStore.addRelayToSet(pk, dTag, normalized)
             publishRelaySet(dTag)
         }
@@ -335,7 +354,7 @@ class RelayManagementViewModel @Inject constructor(
 
     fun removeRelayFromSet(dTag: String, url: String) {
         val pk = ownerPubkey ?: return
-        viewModelScope.launch(Dispatchers.IO) {
+        pendingEdits.launch(Dispatchers.IO) {
             memoryEventStore.removeRelayFromSet(pk, dTag, url)
             publishRelaySet(dTag)
         }

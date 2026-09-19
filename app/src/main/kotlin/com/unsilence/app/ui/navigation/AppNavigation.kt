@@ -254,6 +254,9 @@ fun AppNavigation(
     val onAuthorClick: (String) -> Unit = remember(navigator) {
         { pubkey -> navigator.push(AppDestination.Profile(pubkey)) }
     }
+    val onArticleClick: (com.unsilence.app.data.memory.FeedRow) -> Unit = remember(navigator) {
+        { row -> navigator.push(articleDestination(row)) }
+    }
     val onNoteClick: (String) -> Unit = remember(navigator) {
         { eventId -> navigator.push(AppDestination.Thread(eventId)) }
     }
@@ -266,9 +269,8 @@ fun AppNavigation(
         selectedTab = 1
     }
 
-    // Key VMs by pubkey so logout → re-login with a different npub creates fresh
-    // instances. Without keying, hiltViewModel() returns the Activity-scoped VM that
-    // captured the old user's pubkey at init and never re-initializes.
+    // SessionContent owns these shell VMs and clears them on account replacement.
+    // Entry-local screens below get independent stores from AppNavDisplay.
     val feedViewModel: FeedViewModel = hiltViewModel(key = "feed-$sessionKey")
     // Browse a relay's feed (§05 detail footer): make it active WITHOUT pinning it.
     // The source pill names this transient relay until the user switches away.
@@ -426,6 +428,7 @@ fun AppNavigation(
                     ) {
                         when (selectedTab) {
                             0    -> FeedScreen(
+                                onArticleClick = onArticleClick,
                                 scrollToTopTrigger = scrollToTopTrigger,
                                 topBarShown        = topBarShown,
                                 staticTopPadding   = staticTopPadding,
@@ -445,6 +448,7 @@ fun AppNavigation(
                             )
                             1    -> Box(Modifier.padding(top = statusBarHeight)) {
                                 SearchScreen(
+                                    onArticleClick = onArticleClick,
                                     staticBottomPadding = staticBottomPadding,
                                     onNoteClick   = onNoteClick,
                                     onComment     = { eventId -> navigator.push(AppDestination.Compose(replyToEventId = eventId)) },
@@ -467,9 +471,11 @@ fun AppNavigation(
                                 viewModel        = requireNotNull(notifViewModel),
                             )
                             3    -> ProfileScreen(
+                                onArticleClick = onArticleClick,
+                                onOpenSettings = { navigator.push(AppDestination.Settings) },
+                                onEditProfile = { navigator.push(AppDestination.EditProfile) },
                                 staticBottomPadding = staticBottomPadding,
                                 scrollToTopTrigger = profileScrollToTopTrigger,
-                                onLogout = onLogout,
                                 onBack = { selectedTab = 0 },
                                 onNoteClick = onNoteClick,
                                 onComment = { eventId -> navigator.push(AppDestination.Compose(replyToEventId = eventId)) },
@@ -478,7 +484,6 @@ fun AppNavigation(
                                 onConnectionsClick = { tab -> navigator.push(AppDestination.Connections(ownPubkey, tab)) },
                                 onRelaysClick = { navigator.push(AppDestination.ProfileRelays(ownPubkey)) },
                                 onHashtagClick = onHashtagClick,
-                                onBrowseRelay = onBrowseRelayFeed,
                                 viewModel = hiltViewModel(key = "profile-$sessionKey"),
                                 actionsViewModel = noteActionsVm,
                             )
@@ -660,6 +665,7 @@ fun AppNavigation(
 
                 }
                 is AppDestination.Thread -> ThreadScreen(
+                    onArticleClick = { row, focus -> navigator.push(articleDestination(row, focus)) },
                     entryId = entry.id,
                     eventId = destination.eventId,
                     relayHints = destination.relayHints,
@@ -672,6 +678,7 @@ fun AppNavigation(
                     actionsViewModel = noteActionsVm,
                 )
                 is AppDestination.Profile -> UserProfileScreen(
+                    onArticleClick = onArticleClick,
                     entryId = entry.id,
                     pubkey = destination.pubkey,
                     onDismiss = navigator::pop,
@@ -689,8 +696,64 @@ fun AppNavigation(
                     navigationOwnsBack = true,
                     replyToEventId = destination.replyToEventId,
                     quoteEventId = destination.quoteEventId,
+                    articleCommentTarget = destination.articleComment,
                     onDismiss = navigator::pop,
                     actionsViewModel = noteActionsVm,
+                )
+                is AppDestination.Article -> ArticleDestinationScreen(
+                    entryId = entry.id,
+                    destination = destination,
+                    onDismiss = navigator::pop,
+                    onNoteClick = onNoteClick,
+                    onAuthorClick = onAuthorClick,
+                    onHashtagClick = onHashtagClick,
+                    onCompose = navigator::push,
+                    actions = noteActionsVm,
+                )
+                AppDestination.Settings -> com.unsilence.app.ui.profile.SettingsScreen(
+                    onDismiss = navigator::pop,
+                    onLogout = onLogout,
+                    onEditProfile = { navigator.push(AppDestination.EditProfile) },
+                    onOpen = { navigator.push(settingsDestination(it)) },
+                    navigationOwnsBack = true,
+                )
+                AppDestination.EditProfile -> com.unsilence.app.ui.profile.EditProfileScreen(
+                    onDismiss = navigator::pop,
+                    navigationOwnsBack = true,
+                )
+                AppDestination.MediaUploads -> com.unsilence.app.ui.settings.MediaUploadSettingsScreen(
+                    onDismiss = navigator::pop,
+                    navigationOwnsBack = true,
+                )
+                AppDestination.Filters -> com.unsilence.app.ui.profile.FiltersScreen(
+                    onDismiss = navigator::pop,
+                    navigationOwnsBack = true,
+                )
+                AppDestination.Keys -> com.unsilence.app.ui.settings.keys.KeysScreen(
+                    onDismiss = navigator::pop,
+                    navigationOwnsBack = true,
+                )
+                AppDestination.Console -> com.unsilence.app.ui.settings.console.ConsoleScreen(
+                    onDismiss = navigator::pop,
+                    navigationOwnsBack = true,
+                )
+                AppDestination.SocialGraph -> com.unsilence.app.ui.profile.SocialGraphScreen(
+                    onDismiss = navigator::pop,
+                    navigationOwnsBack = true,
+                )
+                AppDestination.Drafts -> com.unsilence.app.ui.drafts.DraftsScreen(
+                    onDismiss = navigator::pop,
+                    onResume = { navigator.push(AppDestination.ResumeDraft(it.key)) },
+                    navigationOwnsBack = true,
+                )
+                is AppDestination.ResumeDraft -> ResumeDraftScreen(
+                    draftKey = destination.key,
+                    onDismiss = navigator::pop,
+                    actions = noteActionsVm,
+                )
+                is AppDestination.EditRelaySet -> EditRelaySetScreen(
+                    dTag = destination.dTag,
+                    onDismiss = navigator::pop,
                 )
                 is AppDestination.Connections -> ConnectionsScreen(
                     pubkey = destination.pubkey,
@@ -713,6 +776,9 @@ fun AppNavigation(
                     navigationOwnsBack = true,
                 )
                 AppDestination.RelaySettings -> RelayManagementScreen(
+                    onEditRelaySet = { dTag ->
+                        navigator.push(dTag?.let(AppDestination::EditRelaySet) ?: AppDestination.CreateRelaySet)
+                    },
                     onDismiss = navigator::pop,
                     onOpenDetail = { navigator.push(AppDestination.RelayDetail(it)) },
                     onOpenDiscovery = { navigator.push(AppDestination.RelayDiscovery) },

@@ -40,7 +40,6 @@ import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import com.unsilence.app.ui.shared.rememberCardWotLookup
-import com.unsilence.app.ui.shared.rememberArticleSelection
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
@@ -81,7 +80,6 @@ import com.unsilence.app.ui.common.LocalShowSnackbar
 import com.unsilence.app.ui.common.ShimmerNoteCard
 import com.unsilence.app.ui.common.tabSwipe
 import com.unsilence.app.ui.feed.toCompactSats
-import com.unsilence.app.ui.feed.ArticleReaderScreen
 import com.unsilence.app.ui.feed.FullScreenVideoDialog
 import com.unsilence.app.ui.feed.NoteActionsViewModel
 import com.unsilence.app.ui.feed.NostrRichText
@@ -127,6 +125,7 @@ private val PROFILE_IMPERSONATION_INLINE_SLOT_WIDTH = 116.dp
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun UserProfileScreen(
+    onArticleClick: (FeedRow) -> Unit,
     pubkey: String,
     entryId: String,
     onDismiss: () -> Unit,
@@ -184,7 +183,6 @@ fun UserProfileScreen(
 
     val listState = rememberLazyListState()
     val cardWidthPx = LocalWindowInfo.current.containerSize.width
-    var articleRow by rememberArticleSelection(actionsViewModel)
     var actionsRow by remember { mutableStateOf<FeedRow?>(null) }
     var showProfileActions by remember { mutableStateOf(false) }
     var showReportSheet by remember { mutableStateOf(false) }
@@ -256,6 +254,7 @@ fun UserProfileScreen(
         onComment,
         interceptedAuthorClick,
         onHashtagClick,
+        onArticleClick,
         onQuote,
     ) {
         actionsViewModel.eventCardHost(
@@ -265,7 +264,7 @@ fun UserProfileScreen(
                 onAuthorClick = interceptedAuthorClick,
                 onHashtagClick = onHashtagClick,
                 onQuote = onQuote,
-                onArticleClick = { articleRow = it },
+                onArticleClick = onArticleClick,
                 onReactLongPress = { id, pk ->
                     emojiReactTarget = id to pk
                     showFullEmojiPicker = true
@@ -795,44 +794,6 @@ fun UserProfileScreen(
 
     }
 
-    articleRow?.let { row ->
-        // Effective engagement target (kind-6/16 reposts → original event).
-        val model = remember(row.id) {
-            actionsViewModel.getEventModel(row.id) ?: row.toEventModel()
-        }
-        ArticleReaderScreen(
-            row             = row,
-            model           = model,
-            onDismiss       = { articleRow = null },
-            onReact         = { actionsViewModel.react(model.engagementId, model.pubkey) },
-            onReactLongPress = {
-                emojiReactTarget = model.engagementId to model.pubkey
-                showFullEmojiPicker = true
-            },
-            pinnedEmojis    = pinnedEmojis,
-            onReactWithEmoji = { emoji ->
-                actionsViewModel.react(model.engagementId, model.pubkey, ":${emoji.shortcode}:", emoji.url)
-            },
-            onRepost        = { actionsViewModel.repost(model.engagementId, model.pubkey, row.relayUrl) },
-            onZap           = { req -> actionsViewModel.zap(model.engagementId, model.pubkey, row.relayUrl, req) },
-            onSaveNwcUri    = { uri -> actionsViewModel.saveNwcUri(uri) },
-            hasReacted      = row.engagementId in reactedIds,
-            hasReposted     = row.engagementId in repostedIds,
-            hasZapped       = row.engagementId in zappedIds,
-            isNwcConfigured = isNwcConfigured,
-            isZapLoading    = model.engagementId in zapLoadingIds,
-            extraZapSats    = optimisticSats[model.engagementId] ?: 0L,
-            zapFlash        = zapFlash,
-            onAuthorClick   = interceptedAuthorClick,
-            onHashtagClick  = onHashtagClick,
-            lookupProfile   = actionsViewModel::lookupProfile,
-            profileFlow     = viewModel::profileFlow,
-            statsFlow       = viewModel::statsFlow,
-            zapDetailsForEvent    = viewModel::zapDetailsForEvent,
-            repostPubkeysForEvent = viewModel::repostPubkeysForEvent,
-            reactionsForEvent     = viewModel::reactionsForEvent,
-        )
-    }
 
     if (videoScope.showFullscreenVideo) {
         FullScreenVideoDialog(

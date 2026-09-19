@@ -1,7 +1,7 @@
 package com.unsilence.app.ui.relays
 
 import com.unsilence.app.ui.theme.AppTextStyles
-import androidx.activity.compose.BackHandler
+import com.unsilence.app.ui.shared.rememberWriteAwareDismiss
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -106,7 +106,7 @@ fun RelayDetailScreen(
         key = "relay-management-${LocalAppSessionKey.current}",
     ),
 ) {
-    BackHandler(enabled = !navigationOwnsBack, onBack = onDismiss)
+    val dismiss = rememberWriteAwareDismiss(viewModel.pendingEdits, navigationOwnsBack, onDismiss)
     val clipboard = LocalClipboardManager.current
     val context = LocalContext.current
 
@@ -138,7 +138,7 @@ fun RelayDetailScreen(
                     modifier = Modifier.fillMaxWidth().height(Sizing.topBarHeight).padding(horizontal = Spacing.small),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    IconButton(onClick = onDismiss) {
+                    IconButton(onClick = dismiss) {
                         Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back", tint = Color.White, modifier = Modifier.size(22.dp))
                     }
                     Text("Relay", color = Color.White, style = AppTextStyles.subheading, fontWeight = FontWeight.SemiBold)

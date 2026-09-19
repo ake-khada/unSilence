@@ -1,7 +1,7 @@
 package com.unsilence.app.ui.relays
 
 import com.unsilence.app.ui.theme.AppTextStyles
-import androidx.activity.compose.BackHandler
+import com.unsilence.app.ui.shared.rememberWriteAwareDismiss
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
@@ -199,6 +199,7 @@ private fun RelayCategoryRail(
 @Composable
 fun RelayManagementScreen(
     onDismiss: () -> Unit,
+    onEditRelaySet: (dTag: String?) -> Unit,
     navigationOwnsBack: Boolean = false,
     onOpenDetail: (url: String) -> Unit = {},
     onOpenDiscovery: () -> Unit = {},
@@ -206,7 +207,7 @@ fun RelayManagementScreen(
         key = "relay-management-${LocalAppSessionKey.current}",
     ),
 ) {
-    BackHandler(enabled = !navigationOwnsBack, onBack = onDismiss)
+    rememberWriteAwareDismiss(viewModel.pendingEdits, navigationOwnsBack, onDismiss)
 
     val pagerState = rememberPagerState(pageCount = { 6 })
     val scope = rememberCoroutineScope()
@@ -222,24 +223,10 @@ fun RelayManagementScreen(
     // NB: the relay-directory firehose is NO LONGER triggered here — it fires only when the user
     // opens §04 Discovery (the firehose costs nothing until someone asks to discover).
 
-    var showRelaySetEditor by remember { mutableStateOf(false) }
-    var editingRelaySet by remember { mutableStateOf<RelaySet?>(null) }
     // Item 3: user-initiated "Test" results. value -1 = tested & offline; absent = not tested
     // (falls back to monitor RTT). No background pinger, no persistence (amendment a).
     val testedRtt = remember { mutableStateMapOf<String, Int>() }
     var testing by remember { mutableStateOf(false) }
-
-    if (showRelaySetEditor) {
-        RelaySetEditorScreen(
-            relaySet = editingRelaySet,
-            onDismiss = {
-                showRelaySetEditor = false
-                editingRelaySet = null
-            },
-            viewModel = viewModel,
-        )
-        return
-    }
 
     Box(
         modifier = Modifier
@@ -390,8 +377,7 @@ fun RelayManagementScreen(
                         item {
                             TextButton(
                                 onClick = {
-                                    editingRelaySet = null
-                                    showRelaySetEditor = true
+                                    onEditRelaySet(null)
                                 },
                                 modifier = Modifier.padding(horizontal = Spacing.medium, vertical = Spacing.small),
                             ) {
@@ -405,8 +391,7 @@ fun RelayManagementScreen(
                                 set       = set,
                                 viewModel = viewModel,
                                 onEdit    = {
-                                    editingRelaySet = set
-                                    showRelaySetEditor = true
+                                    onEditRelaySet(set.dTag)
                                 },
                                 onDelete  = { viewModel.deleteRelaySet(set.dTag) },
                             )

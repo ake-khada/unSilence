@@ -1,7 +1,7 @@
 package com.unsilence.app.ui.profile
 
 import com.unsilence.app.ui.theme.AppTextStyles
-import androidx.activity.compose.BackHandler
+import com.unsilence.app.ui.shared.rememberWriteAwareDismiss
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -97,11 +97,12 @@ import java.util.Locale
 @Composable
 fun SocialGraphScreen(
     onDismiss: () -> Unit,
+    navigationOwnsBack: Boolean = false,
     viewModel: SocialGraphViewModel = hiltViewModel(
         key = "social-graph-${LocalAppSessionKey.current}",
     ),
 ) {
-    BackHandler(onBack = onDismiss)
+    val dismiss = rememberWriteAwareDismiss(viewModel.pendingEdits, navigationOwnsBack, onDismiss)
     val state by viewModel.uiState.collectAsStateWithLifecycle()
     val now = remember(state.lastWotFetchAt, state.refreshing) { System.currentTimeMillis() }
     var confirmPublishProviderList by remember { mutableStateOf(false) }
@@ -128,7 +129,7 @@ fun SocialGraphScreen(
                     fontWeight = FontWeight.SemiBold,
                     modifier = Modifier.weight(1f),
                 )
-                IconButton(onClick = onDismiss, modifier = Modifier.size(36.dp)) {
+                IconButton(onClick = dismiss, modifier = Modifier.size(36.dp)) {
                     Icon(Icons.Filled.Close, contentDescription = "Close", tint = TextSecondary)
                 }
             }

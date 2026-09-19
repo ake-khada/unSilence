@@ -1,7 +1,7 @@
 package com.unsilence.app.ui.profile
 
 import com.unsilence.app.ui.theme.AppTextStyles
-import androidx.activity.compose.BackHandler
+import com.unsilence.app.ui.shared.rememberWriteAwareDismiss
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -71,11 +71,12 @@ private enum class MuteTab { USERS, WORDS, HASHTAGS }
 @Composable
 fun FiltersScreen(
     onDismiss: () -> Unit,
+    navigationOwnsBack: Boolean = false,
     viewModel: FiltersViewModel = hiltViewModel(
         key = "filters-${LocalAppSessionKey.current}",
     ),
 ) {
-    BackHandler(onBack = onDismiss)
+    rememberWriteAwareDismiss(viewModel.pendingEdits, navigationOwnsBack, onDismiss)
     val muteList by viewModel.muteList.collectAsStateWithLifecycle()
     val sensitiveMode by viewModel.sensitiveContentMode.collectAsStateWithLifecycle()
     val hashtagCap by viewModel.hashtagCap.collectAsStateWithLifecycle()

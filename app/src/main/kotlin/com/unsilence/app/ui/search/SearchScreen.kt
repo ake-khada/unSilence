@@ -40,7 +40,6 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import com.unsilence.app.ui.shared.rememberCardWotLookup
-import com.unsilence.app.ui.shared.rememberArticleSelection
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -88,7 +87,6 @@ import com.unsilence.app.ui.common.tabSwipe
 import com.unsilence.app.data.memory.FeedRow
 import com.unsilence.app.data.memory.toEventModel
 import com.unsilence.app.ui.common.LocalOpenEmojiSettings
-import com.unsilence.app.ui.feed.ArticleReaderScreen
 import com.unsilence.app.ui.feed.EventCardActions
 import com.unsilence.app.ui.feed.EmojiPickerSheet
 import com.unsilence.app.ui.feed.NoteActionsViewModel
@@ -126,6 +124,7 @@ private const val SEARCH_TAB_SWIPE_THRESHOLD_PX = 120f
 
 @Composable
 fun SearchScreen(
+    onArticleClick: (FeedRow) -> Unit,
     staticBottomPadding: Dp = 0.dp,
     onNoteClick: (String) -> Unit = {},
     onComment: (String) -> Unit = {},
@@ -160,7 +159,6 @@ fun SearchScreen(
 
     val showSnackbar = LocalShowSnackbar.current
     var selectedTab by remember { mutableIntStateOf(0) }
-    var articleRow by rememberArticleSelection(actionsViewModel)
     var actionsRow by remember { mutableStateOf<FeedRow?>(null) }
     val noteListState = rememberLazyListState()
     val cardWidthPx = LocalWindowInfo.current.containerSize.width
@@ -207,11 +205,11 @@ fun SearchScreen(
             onNoteClick(id)
         }
     }
-    val onArticleClickDismiss: (FeedRow) -> Unit = remember(keyboardController, focusManager) {
+    val onArticleClickDismiss: (FeedRow) -> Unit = remember(keyboardController, focusManager, onArticleClick) {
         { row ->
             keyboardController?.hide()
             focusManager.clearFocus()
-            articleRow = row
+            onArticleClick(row)
         }
     }
     val onCardReactLongPress: (String, String) -> Unit = remember {
@@ -228,6 +226,7 @@ fun SearchScreen(
         onComment,
         onAuthorClickDismiss,
         onHashtagClick,
+        onArticleClick,
         onQuote,
         actionsViewModel,
         onArticleClickDismiss,
@@ -668,46 +667,6 @@ fun SearchScreen(
         }
     }
 
-    articleRow?.let { row ->
-        // Effective engagement target (kind-6/16 reposts → original event).
-        val model = remember(row.id) {
-            actionsViewModel.getEventModel(row.id) ?: row.toEventModel()
-        }
-        ArticleReaderScreen(
-            row             = row,
-            model           = model,
-            onDismiss       = { articleRow = null },
-            onNoteClick     = onNoteClickDismiss,
-            onReact         = { actionsViewModel.react(model.engagementId, model.pubkey) },
-            onReactLongPress = {
-                emojiReactTarget = model.engagementId to model.pubkey
-                showFullEmojiPicker = true
-            },
-            pinnedEmojis    = pinnedEmojis,
-            onReactWithEmoji = { emoji ->
-                actionsViewModel.react(model.engagementId, model.pubkey, ":${emoji.shortcode}:", emoji.url)
-            },
-            onRepost        = { actionsViewModel.repost(model.engagementId, model.pubkey, row.relayUrl) },
-            onQuote         = onQuote,
-            onZap           = { req -> actionsViewModel.zap(model.engagementId, model.pubkey, row.relayUrl, req) },
-            onSaveNwcUri    = { uri -> actionsViewModel.saveNwcUri(uri) },
-            hasReacted      = row.engagementId in reactedIds,
-            hasReposted     = row.engagementId in repostedIds,
-            hasZapped       = row.engagementId in zappedIds,
-            isNwcConfigured = isNwcConfigured,
-            isZapLoading    = model.engagementId in zapLoadingIds,
-            extraZapSats    = optimisticSats[model.engagementId] ?: 0L,
-            zapFlash        = zapFlash,
-            onAuthorClick   = onAuthorClickDismiss,
-            onHashtagClick  = onHashtagClick,
-            lookupProfile   = actionsViewModel::lookupProfile,
-            profileFlow     = viewModel::profileFlow,
-            statsFlow       = viewModel::statsFlow,
-            zapDetailsForEvent    = viewModel::zapDetailsForEvent,
-            repostPubkeysForEvent = viewModel::repostPubkeysForEvent,
-            reactionsForEvent     = viewModel::reactionsForEvent,
-        )
-    }
 
     PostActionsHost(
         row = actionsRow,

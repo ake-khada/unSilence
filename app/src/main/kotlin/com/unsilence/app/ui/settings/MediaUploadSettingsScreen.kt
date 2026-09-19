@@ -1,7 +1,7 @@
 package com.unsilence.app.ui.settings
 
 import com.unsilence.app.ui.theme.AppTextStyles
-import androidx.activity.compose.BackHandler
+import com.unsilence.app.ui.shared.rememberWriteAwareDismiss
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
@@ -65,11 +65,12 @@ import kotlin.math.roundToInt
 @Composable
 fun MediaUploadSettingsScreen(
     onDismiss: () -> Unit,
+    navigationOwnsBack: Boolean = false,
     viewModel: MediaUploadSettingsViewModel = hiltViewModel(
         key = "media-upload-${LocalAppSessionKey.current}",
     ),
 ) {
-    BackHandler(onBack = onDismiss)
+    rememberWriteAwareDismiss(viewModel.pendingEdits, navigationOwnsBack, onDismiss)
 
     val servers by viewModel.servers.collectAsStateWithLifecycle()
     val imageUploadTier by viewModel.imageUploadTier.collectAsStateWithLifecycle()

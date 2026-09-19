@@ -2,6 +2,7 @@ package com.unsilence.app.ui.settings
 
 import android.util.Log
 import androidx.lifecycle.ViewModel
+import com.unsilence.app.ui.shared.PendingEdits
 import androidx.lifecycle.viewModelScope
 import com.unsilence.app.data.auth.KeyManager
 import com.unsilence.app.data.auth.SigningManager
@@ -69,6 +70,8 @@ class CustomEmojiSettingsViewModel @Inject constructor(
     private val relayPool: RelayPool,
     private val settingsStore: SettingsStore,
 ) : ViewModel() {
+    internal val pendingEdits = PendingEdits(viewModelScope)
+
 
     private val pubkeyHex: String? = keyManager.getPublicKeyHex()
 
@@ -117,7 +120,7 @@ class CustomEmojiSettingsViewModel @Inject constructor(
     val pinnedShortcodes: StateFlow<Set<String>> = settingsStore.pinnedEmojiShortcodes
 
     fun toggleEmojiPin(shortcode: String) {
-        viewModelScope.launch {
+        pendingEdits.launch {
             val current = settingsStore.pinnedEmojiShortcodes.value
             val updated = if (shortcode in current) current - shortcode else current + shortcode
             settingsStore.setPinnedEmojiShortcodes(updated)
@@ -196,7 +199,7 @@ class CustomEmojiSettingsViewModel @Inject constructor(
     fun subscribeByNaddr(rawInput: String) {
         val pk = pubkeyHex ?: return
         val trimmed = rawInput.trim()
-        viewModelScope.launch {
+        pendingEdits.launch {
             _pasteState.value = PasteState.Resolving(trimmed)
 
             // Parse naddr
@@ -250,7 +253,7 @@ class CustomEmojiSettingsViewModel @Inject constructor(
 
     fun subscribeDiscoverSet(authorPubkey: String, dTag: String) {
         val pk = pubkeyHex ?: return
-        viewModelScope.launch {
+        pendingEdits.launch {
             val existing = memoryEventStore.getUserEmojiList(pk)
             publishUpdatedEmojiList(pk, existing) { refs ->
                 refs + EmojiSetRef(authorPubkey, dTag, null)
@@ -260,7 +263,7 @@ class CustomEmojiSettingsViewModel @Inject constructor(
 
     fun unsubscribeSet(authorPubkey: String, dTag: String) {
         val pk = pubkeyHex ?: return
-        viewModelScope.launch {
+        pendingEdits.launch {
             val existing = memoryEventStore.getUserEmojiList(pk)
             publishUpdatedEmojiList(pk, existing) { refs ->
                 refs.filter { !(it.authorPubkey == authorPubkey && it.setName == dTag) }

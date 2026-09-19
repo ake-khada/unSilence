@@ -2,12 +2,15 @@ package com.unsilence.app.ui.profile
 
 import com.unsilence.app.ui.shared.CardDataFlow
 
-import android.net.Uri
-import android.util.Log
 import androidx.lifecycle.ViewModel
+import androidx.lifecycle.SavedStateHandle
+import com.unsilence.app.ui.shared.collectLatestWhileActive
+import kotlinx.coroutines.awaitCancellation
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.withContext
 import androidx.lifecycle.viewModelScope
 import com.unsilence.app.data.auth.KeyManager
-import com.unsilence.app.data.blossom.BlossomImageUploader
 import com.unsilence.app.data.memory.EventStats
 import com.unsilence.app.data.memory.FeedRow
 import com.unsilence.app.data.memory.NostrEvent
@@ -29,9 +32,6 @@ import com.unsilence.app.data.relay.reconciledFollowerCount
 import com.unsilence.app.data.relay.wotLookupSnapshot
 import com.unsilence.app.data.relay.wotSubjectsForFeedRows
 import com.unsilence.app.data.relay.wotVerifiedFollowers
-import com.unsilence.app.data.repository.EditableProfileMetadata
-import com.unsilence.app.data.repository.ProfileMetadataPublisher
-import com.unsilence.app.data.repository.ProfilePublishResult
 import com.unsilence.app.ui.feed.FeedContentFilter
 import com.unsilence.app.ui.shared.TimelineCardData
 import com.vitorpamplona.quartz.nip01Core.core.hexToByteArray
@@ -39,13 +39,11 @@ import com.vitorpamplona.quartz.nip19Bech32.toNpub
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.FlowPreview
-import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.emptyFlow
@@ -55,29 +53,18 @@ import kotlinx.coroutines.flow.sample
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
-import java.util.concurrent.atomic.AtomicLong
 import javax.inject.Inject
-
-private const val TAG = "ProfileVM"
-
-sealed interface ProfileSaveState {
-    data object Idle : ProfileSaveState
-    data object Saving : ProfileSaveState
-    data object Saved : ProfileSaveState
-    data class Failed(val message: String) : ProfileSaveState
-}
 
 @HiltViewModel
 class ProfileViewModel @Inject constructor(
+    private val savedStateHandle: SavedStateHandle,
     private val keyManager: KeyManager,
-    private val profileMetadataPublisher: ProfileMetadataPublisher,
     private val memoryEventStore: MemoryEventStore,
     private val relayPool: RelayPool,
     private val timelineService: TimelineService,
     private val relayPreferencesStore: com.unsilence.app.data.relay.RelayPreferencesStore,
     private val profilePipeline: com.unsilence.app.data.relay.ProfilePipeline,
     private val wotHydrationCoalescer: WotHydrationCoalescer,
-    private val blossomImageUploader: BlossomImageUploader,
     private val timelineCardData: TimelineCardData,
 ) : ViewModel() {
 
@@ -90,17 +77,6 @@ class ProfileViewModel @Inject constructor(
     /** NIP-36 sensitive-content display mode (shared with feed). */
     val sensitiveContentMode: StateFlow<com.unsilence.app.data.memory.SensitiveContentMode> =
         relayPreferencesStore.sensitiveContentMode
-
-    private val _uploadingAvatar = MutableStateFlow(false)
-    val uploadingAvatar: StateFlow<Boolean> = _uploadingAvatar.asStateFlow()
-
-    private val _uploadingBanner = MutableStateFlow(false)
-    val uploadingBanner: StateFlow<Boolean> = _uploadingBanner.asStateFlow()
-
-    private val _profileSaveState = MutableStateFlow<ProfileSaveState>(ProfileSaveState.Idle)
-    val profileSaveState: StateFlow<ProfileSaveState> = _profileSaveState.asStateFlow()
-    private var profileSaveJob: Job? = null
-    private val profileSaveGeneration = AtomicLong(0L)
 
     private val indexedFollowerCount = MutableStateFlow<Long?>(null)
     internal val followerCount: StateFlow<FollowerCount> = if (pubkeyHex == null) {
@@ -121,28 +97,6 @@ class ProfileViewModel @Inject constructor(
             .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), FollowerCount.Unknown)
     }
 
-    fun uploadProfileImage(
-        uri: Uri,
-        onUrl: (String) -> Unit,
-        onError: (String) -> Unit,
-        isBanner: Boolean,
-    ) {
-        val loading = if (isBanner) _uploadingBanner else _uploadingAvatar
-        viewModelScope.launch(Dispatchers.IO) {
-            loading.value = true
-            try {
-                val maxDim = if (isBanner) 1600 else 512
-                val url = blossomImageUploader.upload(uri, maxDimension = maxDim)
-                launch(Dispatchers.Main) { onUrl(url) }
-            } catch (e: Exception) {
-                Log.w(TAG, "Profile image upload failed", e)
-                launch(Dispatchers.Main) { onError(e.message ?: "Upload failed") }
-            } finally {
-                loading.value = false
-            }
-        }
-    }
-
     /** Live user metadata from MES (null until kind 0 arrives from relay). */
     val userFlow: Flow<UserEntity?> =
         if (pubkeyHex != null) memoryEventStore.userEntityFlow(pubkeyHex) else emptyFlow()
@@ -154,6 +108,18 @@ class ProfileViewModel @Inject constructor(
     private val _isAtTop = MutableStateFlow(true)
     private val _contentFilter = MutableStateFlow(FeedContentFilter.NOTES_ONLY)
     private var currentHandle: TimelineService.TimelineHandle? = null
+    private val screenActive = MutableStateFlow(false)
+    @Volatile private var subscriptionGeneration = 0L
+
+    fun setScreenActive(active: Boolean) {
+        if (screenActive.value == active) return
+        screenActive.value = active
+        if (!active) {
+            subscriptionGeneration++
+            currentHandle?.close()
+            currentHandle = null
+        }
+    }
     private val _wotSubjects = MutableStateFlow<Set<String>>(emptySet())
 
     val isLoadingPosts: StateFlow<Boolean> = _isLoading.asStateFlow()
@@ -225,7 +191,7 @@ class ProfileViewModel @Inject constructor(
 
     val feedWotDisplayMode: StateFlow<FeedWotDisplayMode> =
         relayPreferencesStore.feedWotDisplayModeFlow()
-            .stateIn(viewModelScope, SharingStarted.Eagerly, FeedWotDisplayMode.NUMBERS)
+            .stateIn(viewModelScope, SharingStarted.WhileSubscribed(0), FeedWotDisplayMode.NUMBERS)
 
     val relayCount: StateFlow<Int?> = pubkeyHex?.let { pubkey ->
         memoryEventStore.profileRelayCountFlow(pubkey)
@@ -234,7 +200,7 @@ class ProfileViewModel @Inject constructor(
 
     // ── Profile tabs ─────────────────────────────────────────────────────
 
-    val selectedTab = MutableStateFlow(ProfileTab.NOTES)
+    val selectedTab = MutableStateFlow(savedStateHandle.get<ProfileTab>("profileTab") ?: ProfileTab.NOTES)
 
     fun selectTab(tab: ProfileTab) {
         selectedTab.value = tab
@@ -249,9 +215,18 @@ class ProfileViewModel @Inject constructor(
             wotHydrationCoalescer.requestProfileHydration(pubkeyHex)
 
             viewModelScope.launch {
-                selectedTab.collectLatest { tab ->
-                    resubscribeForTab(pubkeyHex, tab)
+                selectedTab.collect { tab ->
+                    savedStateHandle["profileTab"] = tab
+                    _contentFilter.value = if (tab == ProfileTab.REPLIES) {
+                        FeedContentFilter.REPLIES_ONLY
+                    } else FeedContentFilter.NOTES_ONLY
                 }
+            }
+            viewModelScope.launch {
+                selectedTab.map(::subGroupFor).distinctUntilChanged()
+                    .collectLatestWhileActive(screenActive) { group ->
+                        collectProfileSubscription(pubkeyHex, group)
+                    }
             }
 
             // Fetch the integrity-checked follower count (MES-cached and pipeline-deduped).
@@ -350,13 +325,14 @@ class ProfileViewModel @Inject constructor(
 
     fun loadMore() {
         val handle = currentHandle ?: return
+        val generation = subscriptionGeneration
         // _events is the contiguous mixed-kind timeline. Paginating from its tail
         // avoids re-requesting filtered-out replies between the last visible note
         // and the actual cache boundary.
         val until = _events.value.lastOrNull()?.createdAt ?: return
         viewModelScope.launch {
             val older = timelineService.fetchOlderTimeline(handle.timelineKey, until, 100)
-            if (older.isNotEmpty()) {
+            if (screenActive.value && subscriptionGeneration == generation && older.isNotEmpty()) {
                 _events.update { current -> TimelineMerge.merge(current, older, capTail = false) }
             }
         }
@@ -364,104 +340,55 @@ class ProfileViewModel @Inject constructor(
 
     // ── Tab → subscription logic ─────────────────────────────────────────
 
-    private fun resubscribeForTab(pubkey: String, tab: ProfileTab) {
-        // Set content filter at render boundary
-        val contentFilter = when (tab) {
-            ProfileTab.NOTES, ProfileTab.LONGFORM -> FeedContentFilter.NOTES_ONLY
-            ProfileTab.REPLIES -> FeedContentFilter.REPLIES_ONLY
-        }
-        _contentFilter.value = contentFilter
-
-        // Notes↔Replies share the same kinds — skip resubscribe, just filter
-        val group = subGroupFor(tab)
-        if (lastSubGroup == group) return
-        lastSubGroup = group
-
-        // Close previous handle
-        currentHandle?.close()
-        currentHandle = null
+    private suspend fun collectProfileSubscription(pubkey: String, group: SubGroup) {
+        val sameTimeline = lastSubGroup == group
+        val tab = if (group == SubGroup.LONGFORM) ProfileTab.LONGFORM else ProfileTab.NOTES
+        val generation = ++subscriptionGeneration
+        fun acceptsEvents() = screenActive.value && subscriptionGeneration == generation
 
         val kinds = profileKindsForTab(tab)
-        val cached = memoryEventStore.userEvents(pubkey, kinds.toSet(), 300)
-        val writeRelays = memoryEventStore.writeRelaysFor(pubkey)
-            .ifEmpty { GLOBAL_RELAY_URLS }
+        val writeRelays = memoryEventStore.writeRelaysFor(pubkey).ifEmpty { GLOBAL_RELAY_URLS }
         val limit = if (tab == ProfileTab.LONGFORM) 100 else 300
-
-        // Pre-seed with MES-cached events for instant tab switching;
-        // relay subscription merges on top as batches arrive.
-        _events.value = cached
-        _isLoading.value = cached.isEmpty()
-
-        val subRequests = listOf(SubRequest(
-            urls = writeRelays,
-            filter = NostrFilter(
-                kinds = kinds,
-                authors = listOf(pubkey),
-                limit = limit,
-            ),
-        ))
-
-        viewModelScope.launch {
-            val handle = timelineService.subscribeTimeline(
-                subRequests = subRequests,
-                onEvents = { batch, eosed ->
-                    if (batch.isNotEmpty()) {
-                        // Always route through merge — handles dedup, sort, and
-                        // cap uniformly whether _events is empty or populated.
-                        _events.update { current -> TimelineMerge.merge(current, batch) }
-                    }
-                    if (_events.value.isNotEmpty()) _isLoading.value = false
-                    if (eosed) _isLoading.value = false
-                },
-                onNew = { event ->
-                    _events.update { current -> TimelineMerge.merge(current, listOf(event)) }
-                },
-            )
-            currentHandle = handle
-        }
-    }
-
-    // ── Save profile ─────────────────────────────────────────────────────
-
-    internal fun saveProfile(
-        original: EditableProfileMetadata,
-        edited: EditableProfileMetadata,
-    ) {
-        if (!_profileSaveState.compareAndSet(ProfileSaveState.Idle, ProfileSaveState.Saving)) return
-        val generation = profileSaveGeneration.incrementAndGet()
-        val ownPubkey = pubkeyHex
-        if (ownPubkey == null) {
-            _profileSaveState.value = profileSaveStateFor(ProfilePublishResult.AccountUnavailable)
-            return
-        }
-
-        profileSaveJob = viewModelScope.launch(Dispatchers.IO) {
-            val result = profileMetadataPublisher.publish(ownPubkey, original, edited)
-            // SigningManager deliberately converts Amber cancellation to null.
-            // The generation fence prevents that late result from resurrecting
-            // a failed state after the user has already cancelled and left.
-            if (profileSaveGeneration.get() == generation) {
-                _profileSaveState.value = profileSaveStateFor(result)
+        // Cover/uncover keeps loaded pages. Only a user-selected group seeds a new timeline.
+        if (!sameTimeline) {
+            _events.value = withContext(Dispatchers.Default) {
+                memoryEventStore.userEvents(pubkey, kinds.toSet(), 300)
             }
         }
-    }
+        _isLoading.value = _events.value.isEmpty()
+        lastSubGroup = group
 
-    fun consumeProfileSaveResult() {
-        _profileSaveState.update { state ->
-            if (state == ProfileSaveState.Saving) state else ProfileSaveState.Idle
+        val handle = timelineService.subscribeTimeline(
+            subRequests = listOf(SubRequest(
+                urls = writeRelays,
+                filter = NostrFilter(kinds = kinds, authors = listOf(pubkey), limit = limit),
+            )),
+            onEvents = { batch, eosed ->
+                if (!acceptsEvents()) return@subscribeTimeline
+                if (batch.isNotEmpty()) {
+                    _events.update { TimelineMerge.merge(it, batch) }
+                }
+                if (_events.value.isNotEmpty() || eosed) _isLoading.value = false
+            },
+            onNew = { event ->
+                if (acceptsEvents()) _events.update { TimelineMerge.merge(it, listOf(event)) }
+            },
+        )
+        try {
+            currentCoroutineContext().ensureActive()
+            currentHandle = handle
+            awaitCancellation()
+        } finally {
+            if (subscriptionGeneration == generation) subscriptionGeneration++
+            handle.close()
+            if (currentHandle === handle) currentHandle = null
         }
-    }
-
-    fun cancelProfileSave() {
-        profileSaveGeneration.incrementAndGet()
-        profileSaveJob?.cancel()
-        profileSaveJob = null
-        _profileSaveState.value = ProfileSaveState.Idle
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────
 
     override fun onCleared() {
+        setScreenActive(false)
         currentHandle?.close()
         currentHandle = null
         super.onCleared()
@@ -481,24 +408,4 @@ class ProfileViewModel @Inject constructor(
         }
 
     }
-}
-
-internal fun profileSaveStateFor(result: ProfilePublishResult): ProfileSaveState = when (result) {
-    ProfilePublishResult.Success -> ProfileSaveState.Saved
-    ProfilePublishResult.AccountUnavailable ->
-        ProfileSaveState.Failed("No signing account is available.")
-    ProfilePublishResult.FreshnessUnavailable ->
-        ProfileSaveState.Failed("Could not refresh your latest profile from relays. Nothing was changed.")
-    ProfilePublishResult.ProfileUnavailable ->
-        ProfileSaveState.Failed("Your profile has not loaded yet. Connect and try again.")
-    ProfilePublishResult.InvalidExistingProfile ->
-        ProfileSaveState.Failed("Your existing profile could not be read safely. Nothing was changed.")
-    ProfilePublishResult.SigningFailed ->
-        ProfileSaveState.Failed("Profile signing was cancelled or failed.")
-    ProfilePublishResult.ChangedWhileSigning ->
-        ProfileSaveState.Failed("Your profile changed while signing. Review it and try again.")
-    ProfilePublishResult.NoRelayAccepted ->
-        ProfileSaveState.Failed("No relay accepted the profile update. Check your connection and try again.")
-    ProfilePublishResult.SupersededAfterAcceptance ->
-        ProfileSaveState.Failed("A newer profile update arrived. Reload and try again.")
 }

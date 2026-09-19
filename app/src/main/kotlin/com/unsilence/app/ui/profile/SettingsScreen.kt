@@ -42,7 +42,6 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -57,21 +56,9 @@ import androidx.compose.ui.unit.sp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.unsilence.app.BuildConfig
-import com.unsilence.app.data.drafts.Draft
-import com.unsilence.app.data.drafts.DraftContext
 import com.unsilence.app.ui.common.LocalAppSessionKey
-import com.unsilence.app.ui.common.LocalOpenZapSettings
-import com.unsilence.app.ui.compose.ArticleCommentTarget
-import com.unsilence.app.ui.compose.ComposeScreen
-import com.unsilence.app.ui.drafts.DraftsScreen
 import com.unsilence.app.ui.drafts.DraftsViewModel
 import com.unsilence.app.ui.feed.AvatarImage
-import com.unsilence.app.ui.relays.RelayDetailScreen
-import com.unsilence.app.ui.relays.RelayDiscoveryScreen
-import com.unsilence.app.ui.relays.RelayManagementScreen
-import com.unsilence.app.ui.settings.keys.KeysScreen
-import com.unsilence.app.ui.settings.console.ConsoleScreen
-import com.unsilence.app.ui.settings.MediaUploadSettingsScreen
 import com.unsilence.app.ui.theme.Black
 import com.unsilence.app.ui.theme.BorderFaint
 import com.unsilence.app.ui.theme.BorderSubtle
@@ -86,13 +73,15 @@ import com.unsilence.app.ui.theme.Text3
 import com.unsilence.app.ui.theme.Text4
 import com.unsilence.app.ui.theme.TextSecondary
 
+enum class SettingsPage { RELAYS, MEDIA_UPLOADS, ZAPS, FILTERS, DRAFTS, EMOJIS, SOCIAL_GRAPH, KEYS, CONSOLE }
+
 @Composable
 fun SettingsScreen(
     onDismiss: () -> Unit,
     onLogout: () -> Unit,
-    onEditProfile: () -> Unit = {},
-    onOpenProfile: (pubkeyHex: String) -> Unit = {},
-    onBrowseRelay: (url: String, label: String) -> Unit = { _, _ -> },
+    onEditProfile: () -> Unit,
+    onOpen: (SettingsPage) -> Unit,
+    navigationOwnsBack: Boolean = false,
     viewModel: SettingsViewModel = hiltViewModel(
         key = "settings-${LocalAppSessionKey.current}",
     ),
@@ -100,25 +89,9 @@ fun SettingsScreen(
         key = "drafts-settings-${LocalAppSessionKey.current}",
     ),
 ) {
-    BackHandler(onBack = onDismiss)
-    var showRelays by rememberSaveable { mutableStateOf(false) }
-    var relayDetailUrl by rememberSaveable { mutableStateOf<String?>(null) }
-    var showDiscovery by rememberSaveable { mutableStateOf(false) }
-    var showMediaUpload by rememberSaveable { mutableStateOf(false) }
-    var showFilters by rememberSaveable { mutableStateOf(false) }
-    var showKeys by rememberSaveable { mutableStateOf(false) }
-    var showConsole by rememberSaveable { mutableStateOf(false) }
-    var showSocialGraph by rememberSaveable { mutableStateOf(false) }
-    var showCustomEmojis by rememberSaveable { mutableStateOf(false) }
-    var showDrafts by rememberSaveable { mutableStateOf(false) }
-    var draftToResumeKey by rememberSaveable { mutableStateOf<String?>(null) }
+    BackHandler(enabled = !navigationOwnsBack, onBack = onDismiss)
     var showLogoutConfirm by remember { mutableStateOf(false) }
-    val openZapSettings = LocalOpenZapSettings.current
     val drafts by draftsViewModel.drafts.collectAsStateWithLifecycle()
-    val draftToResume = remember(drafts, draftToResumeKey) {
-        drafts.firstOrNull { it.key == draftToResumeKey }
-    }
-
     // One-shot snapshots, read on open (lean — no ticker).
     val profile = remember(viewModel) { viewModel.ownProfile() }
     val onlineCount = remember(viewModel) { viewModel.onlineRelayCount() }
@@ -191,29 +164,29 @@ fun SettingsScreen(
                 // ── NETWORK ────────────────────────────────────────────────────
                 GroupLabel("Network")
                 SettingsRow(Icons.Filled.Dns, "Relays", "Where your notes are published & read",
-                    badge = if (onlineCount > 0) "$onlineCount online" else null) { showRelays = true }
-                SettingsRow(Icons.Filled.PhotoLibrary, "Media uploads", "Where images & video are hosted") { showMediaUpload = true }
+                    badge = if (onlineCount > 0) "$onlineCount online" else null) { onOpen(SettingsPage.RELAYS) }
+                SettingsRow(Icons.Filled.PhotoLibrary, "Media uploads", "Where images & video are hosted") { onOpen(SettingsPage.MEDIA_UPLOADS) }
 
                 // ── WALLET ─────────────────────────────────────────────────────
                 GroupLabel("Wallet")
-                SettingsRow(Icons.Filled.ElectricBolt, "Zaps", "Default amount & wallet connection") { openZapSettings() }
+                SettingsRow(Icons.Filled.ElectricBolt, "Zaps", "Default amount & wallet connection") { onOpen(SettingsPage.ZAPS) }
 
                 // ── CONTENT & SAFETY ───────────────────────────────────────────
                 GroupLabel("Content & safety")
-                SettingsRow(Icons.Filled.Security, "Filters", "Mute words, hide unwanted content") { showFilters = true }
+                SettingsRow(Icons.Filled.Security, "Filters", "Mute words, hide unwanted content") { onOpen(SettingsPage.FILTERS) }
                 SettingsRow(
                     Icons.Filled.Drafts,
                     "Drafts",
                     "Saved notes for this account",
                     badge = drafts.takeIf { it.isNotEmpty() }?.size?.toString(),
-                ) { showDrafts = true }
-                SettingsRow(Icons.Filled.EmojiEmotions, "Custom emojis", "Manage your emoji packs") { showCustomEmojis = true }
-                SettingsRow(Icons.Filled.AccountTree, "Social graph", "Web-of-trust provider and coverage") { showSocialGraph = true }
+                ) { onOpen(SettingsPage.DRAFTS) }
+                SettingsRow(Icons.Filled.EmojiEmotions, "Custom emojis", "Manage your emoji packs") { onOpen(SettingsPage.EMOJIS) }
+                SettingsRow(Icons.Filled.AccountTree, "Social graph", "Web-of-trust provider and coverage") { onOpen(SettingsPage.SOCIAL_GRAPH) }
 
                 // ── ADVANCED ───────────────────────────────────────────────────
                 GroupLabel("Advanced")
-                SettingsRow(Icons.Filled.Key, "Keys", "Public key, signer, and recovery") { showKeys = true }
-                SettingsRow(Icons.Filled.Code, "Console", "Relay, store, and log diagnostics") { showConsole = true }
+                SettingsRow(Icons.Filled.Key, "Keys", "Public key, signer, and recovery") { onOpen(SettingsPage.KEYS) }
+                SettingsRow(Icons.Filled.Code, "Console", "Relay, store, and log diagnostics") { onOpen(SettingsPage.CONSOLE) }
 
                 // ── Danger zone ────────────────────────────────────────────────
                 Column(modifier = Modifier.padding(start = 18.dp, end = 18.dp, top = Spacing.large)) {
@@ -247,56 +220,7 @@ fun SettingsScreen(
             onDismiss = { showLogoutConfirm = false },
         )
     }
-    if (showRelays) RelayManagementScreen(
-        onDismiss = { showRelays = false },
-        onOpenDetail = { url -> relayDetailUrl = url },
-        onOpenDiscovery = { showDiscovery = true },
-    )
-    if (showDiscovery) RelayDiscoveryScreen(
-        onDismiss = { showDiscovery = false },
-        onOpenDetail = { url -> relayDetailUrl = url },
-    )
-    relayDetailUrl?.let { url ->
-        RelayDetailScreen(relayUrl = url, onDismiss = { relayDetailUrl = null }, onOpenProfile = onOpenProfile, onBrowse = onBrowseRelay)
-    }
-    if (showMediaUpload) MediaUploadSettingsScreen(onDismiss = { showMediaUpload = false })
-    if (showFilters) FiltersScreen(onDismiss = { showFilters = false })
-    if (showKeys) KeysScreen(onDismiss = { showKeys = false })
-    if (showConsole) ConsoleScreen(onDismiss = { showConsole = false })
-    if (showSocialGraph) SocialGraphScreen(onDismiss = { showSocialGraph = false })
-    if (showCustomEmojis) com.unsilence.app.ui.settings.CustomEmojisScreen(onDismiss = { showCustomEmojis = false })
-    if (showDrafts) {
-        DraftsScreen(
-            onDismiss = { showDrafts = false },
-            onResume = { draft ->
-                showDrafts = false
-                draftToResumeKey = draft.key
-            },
-            viewModel = draftsViewModel,
-        )
-    }
-    draftToResume?.let { draft ->
-        ComposeScreen(
-            onDismiss = { draftToResumeKey = null },
-            replyToEventId = (draft.context as? DraftContext.Reply)?.parentId,
-            quoteEventId = (draft.context as? DraftContext.Quote)?.eventId,
-            articleCommentTarget = (draft.context as? DraftContext.ArticleComment)?.toArticleCommentTarget(),
-            initialDraft = draft,
-        )
-    }
 }
-
-private fun DraftContext.ArticleComment.toArticleCommentTarget(): ArticleCommentTarget =
-    ArticleCommentTarget(
-        articleId = articleId,
-        articleCoord = articleCoord,
-        articlePubkey = articlePubkey,
-        articleRelayHint = articleRelayHint,
-        parentId = parentId,
-        parentKind = parentKind,
-        parentPubkey = parentPubkey,
-        parentRelayHint = parentRelayHint,
-    )
 
 @Composable
 private fun GroupLabel(text: String) {
