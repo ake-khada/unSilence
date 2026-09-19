@@ -1,6 +1,7 @@
 package com.unsilence.app.ui.settings
 
 import androidx.lifecycle.ViewModel
+import com.unsilence.app.ui.shared.PendingEdits
 import androidx.lifecycle.viewModelScope
 import com.unsilence.app.data.wallet.NwcManager
 import com.unsilence.app.data.wallet.ZapPreferences
@@ -17,6 +18,8 @@ class ZapSettingsViewModel @Inject constructor(
     private val zapPreferencesStore: ZapPreferencesStore,
     private val nwcManager: NwcManager,
 ) : ViewModel() {
+    internal val pendingEdits = PendingEdits(viewModelScope)
+
     val preferences: StateFlow<ZapPreferences> = zapPreferencesStore.state
 
     val walletConnected: Boolean get() = nwcManager.isConfigured
@@ -38,13 +41,13 @@ class ZapSettingsViewModel @Inject constructor(
     }
 
     fun updatePreset(index: Int, amountSats: Long?, message: String?) {
-        viewModelScope.launch {
+        pendingEdits.launch {
             zapPreferencesStore.updatePreset(index, amountSats, message)
         }
     }
 
     fun setPrivacy(isPrivate: Boolean) {
-        viewModelScope.launch {
+        pendingEdits.launch {
             zapPreferencesStore.setDefaultPrivate(isPrivate)
         }
     }

@@ -1,7 +1,7 @@
 package com.unsilence.app.ui.settings
 
 import com.unsilence.app.ui.theme.AppTextStyles
-import androidx.activity.compose.BackHandler
+import com.unsilence.app.ui.shared.rememberWriteAwareDismiss
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -73,7 +73,7 @@ fun ZapSettingsScreen(
     navigationOwnsBack: Boolean = false,
     vm: ZapSettingsViewModel = hiltViewModel(key = "zap-settings-${LocalAppSessionKey.current}"),
 ) {
-    BackHandler(enabled = !navigationOwnsBack, onBack = onDismiss)
+    rememberWriteAwareDismiss(vm.pendingEdits, navigationOwnsBack, onDismiss)
     val showSnackbar = LocalShowSnackbar.current
     val state by vm.preferences.collectAsStateWithLifecycle()
     val balanceSats by vm.balanceSats.collectAsStateWithLifecycle()

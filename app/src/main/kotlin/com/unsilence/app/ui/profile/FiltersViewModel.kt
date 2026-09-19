@@ -1,6 +1,7 @@
 package com.unsilence.app.ui.profile
 
 import androidx.lifecycle.ViewModel
+import com.unsilence.app.ui.shared.PendingEdits
 import androidx.lifecycle.viewModelScope
 import com.unsilence.app.data.AppBootstrapper
 import com.unsilence.app.data.auth.KeyManager
@@ -29,6 +30,8 @@ class FiltersViewModel @Inject constructor(
     private val appBootstrapper: AppBootstrapper,
     private val userRepository: UserRepository,
 ) : ViewModel() {
+    internal val pendingEdits = PendingEdits(viewModelScope)
+
 
     val muteList: StateFlow<MuteList?> =
         memoryEventStore.ownMuteListFlow()
@@ -67,11 +70,11 @@ class FiltersViewModel @Inject constructor(
     fun unmuteHashtag(tag: String): MuteResult = muteListRepository.unmuteHashtag(tag)
 
     fun setSensitiveContentMode(mode: SensitiveContentMode) {
-        viewModelScope.launch { relayPreferencesStore.setSensitiveContentMode(mode) }
+        pendingEdits.launch { relayPreferencesStore.setSensitiveContentMode(mode) }
     }
 
     fun setHashtagCap(cap: Int?) {
-        viewModelScope.launch { relayPreferencesStore.setHashtagCap(cap) }
+        pendingEdits.launch { relayPreferencesStore.setHashtagCap(cap) }
     }
 
     /** Re-emit the Amber re-authorize signal. MainActivity picks it up and fires the intent. */

@@ -20,6 +20,16 @@ class AppNavigatorTest {
             AppDestination.RelaySettings, AppDestination.RelayDiscovery,
             AppDestination.CreateRelaySet, AppDestination.EmojiSettings,
             AppDestination.ZapSettings, AppDestination.StartGraph,
+            AppDestination.Settings, AppDestination.EditProfile,
+            AppDestination.MediaUploads, AppDestination.Filters, AppDestination.Keys,
+            AppDestination.Console, AppDestination.SocialGraph, AppDestination.Drafts,
+            AppDestination.ResumeDraft("local-draft"), AppDestination.EditRelaySet("my-set"),
+            AppDestination.Article("article", listOf("wss://article.example"), "focused-comment"),
+            AppDestination.Compose(articleComment = com.unsilence.app.ui.compose.ArticleCommentTarget(
+                articleId = "article", articleCoord = "30023:alice:essay", articlePubkey = "alice",
+                articleRelayHint = "wss://article.example", parentId = "comment", parentKind = 1111,
+                parentPubkey = "bob", parentRelayHint = "wss://comment.example",
+            )),
         )
         path.forEach(nav::push)
         val entries = nav.backStack.map { it as AppEntry }
@@ -144,5 +154,46 @@ class AppNavigatorTest {
             nav.pop()
             assertEquals(1, nav.backStack.size)
         }
+    }
+
+    @Test fun `article profile and reply visits return to the reader before its caller`() {
+        val nav = navigator()
+        nav.push(AppDestination.Thread("opening-note"))
+        val thread = nav.backStack.last()
+        nav.push(AppDestination.Article("article", focusedCommentId = "comment"))
+        val reader = nav.backStack.last()
+        nav.push(AppDestination.Profile("author"))
+        nav.pop()
+        assertSame(reader, nav.backStack.last())
+        nav.push(AppDestination.Compose(replyToEventId = "comment"))
+        nav.pop()
+        assertSame(reader, nav.backStack.last())
+        nav.pop()
+        assertSame(thread, nav.backStack.last())
+    }
+
+    @Test fun `every settings page retains settings as its caller`() {
+        val nav = navigator()
+        nav.push(AppDestination.Settings)
+        val settings = nav.backStack.last()
+        val pages = com.unsilence.app.ui.profile.SettingsPage.entries
+        assertEquals(pages.size, pages.map(::settingsDestination).distinct().size)
+        pages.forEach { page ->
+            nav.push(settingsDestination(page))
+            nav.pop()
+            assertSame(settings, nav.backStack.last())
+        }
+    }
+
+    @Test fun `resumed draft returns to the draft list before settings`() {
+        val nav = navigator()
+        nav.push(AppDestination.Settings)
+        nav.push(AppDestination.Drafts)
+        val list = nav.backStack.last()
+        nav.push(AppDestination.ResumeDraft("local-draft"))
+        nav.pop()
+        assertSame(list, nav.backStack.last())
+        nav.pop()
+        assertEquals(AppDestination.Settings, (nav.backStack.last() as AppEntry).destination)
     }
 }

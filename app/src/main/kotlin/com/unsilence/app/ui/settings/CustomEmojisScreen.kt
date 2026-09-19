@@ -1,7 +1,7 @@
 package com.unsilence.app.ui.settings
 
 import com.unsilence.app.ui.theme.AppTextStyles
-import androidx.activity.compose.BackHandler
+import com.unsilence.app.ui.shared.rememberWriteAwareDismiss
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.shrinkVertically
@@ -82,7 +82,7 @@ fun CustomEmojisScreen(onDismiss: () -> Unit, navigationOwnsBack: Boolean = fals
     val viewModel: CustomEmojiSettingsViewModel = hiltViewModel(
         key = "custom-emojis-${LocalAppSessionKey.current}",
     )
-    BackHandler(enabled = !navigationOwnsBack, onBack = onDismiss)
+    rememberWriteAwareDismiss(viewModel.pendingEdits, navigationOwnsBack, onDismiss)
 
     val pinnedEmojis    by viewModel.pinnedEmojis.collectAsStateWithLifecycle()
     val subscribedSets  by viewModel.subscribedSets.collectAsStateWithLifecycle()

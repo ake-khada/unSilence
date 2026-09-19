@@ -75,8 +75,9 @@ class RootViewModel @Inject constructor(
         viewModelScope.launch {
             isLoggingOut = true
             // Set isLoggedIn false on Main FIRST — this triggers recomposition,
-            // destroys AppNavigation and all nested ViewModels (FeedVM, etc.)
-            // BEFORE teardown clears keyManager/MES. Keep onboarding hidden until
+            // hides AppNavigation. SessionContent releases its owned ViewModels
+            // when composition applies this change; repository session fences
+            // protect work racing teardown. Keep onboarding hidden until
             // teardown completes, or a fast re-login can supersede the teardown
             // fence and keep account-scoped DataStore state from the old user.
             // Without this ordering,

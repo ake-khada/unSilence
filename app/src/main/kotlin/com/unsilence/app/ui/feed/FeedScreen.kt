@@ -37,7 +37,6 @@ import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import com.unsilence.app.ui.common.PullThresholdFeedback
 import com.unsilence.app.ui.shared.rememberCardWotLookup
-import com.unsilence.app.ui.shared.rememberArticleSelection
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -114,6 +113,7 @@ private data class FeedViewport(
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun FeedScreen(
+    onArticleClick: (FeedRow) -> Unit,
     scrollToTopTrigger: Int = 0,
     topBarShown: Boolean = true,
     staticTopPadding: Dp = 0.dp,
@@ -178,7 +178,6 @@ fun FeedScreen(
     val scrollScope = rememberCoroutineScope()
     val cardWidthPx = LocalWindowInfo.current.containerSize.width
 
-    var articleRow by rememberArticleSelection(actionsViewModel)
 
     // ── Long-press bottom sheet state ────────────────────────────────────────
     var actionsRow by remember { mutableStateOf<FeedRow?>(null) }
@@ -258,6 +257,7 @@ fun FeedScreen(
         onComment,
         onAuthorClick,
         onHashtagClick,
+        onArticleClick,
         onQuote,
     ) {
         actionsViewModel.eventCardHost(
@@ -267,7 +267,7 @@ fun FeedScreen(
                 onAuthorClick = onAuthorClick,
                 onHashtagClick = onHashtagClick,
                 onQuote = onQuote,
-                onArticleClick = { articleRow = it },
+                onArticleClick = onArticleClick,
                 onReactLongPress = { id, pk ->
                     emojiReactTarget = id to pk
                     showFullEmojiPicker = true
@@ -595,47 +595,6 @@ fun FeedScreen(
         }
     }
 
-    articleRow?.let { row ->
-        // Effective engagement target: for a kind-6/16 reposted article these route
-        // to the ORIGINAL event (model.engagementId/pubkey), not the wrapper.
-        val model = remember(row.id) {
-            actionsViewModel.getEventModel(row.id) ?: row.toEventModel()
-        }
-        ArticleReaderScreen(
-            row             = row,
-            model           = model,
-            onDismiss       = { articleRow = null },
-            onNoteClick     = onNoteClick,
-            onReact         = { actionsViewModel.react(model.engagementId, model.pubkey) },
-            onReactLongPress = {
-                emojiReactTarget = model.engagementId to model.pubkey
-                showFullEmojiPicker = true
-            },
-            pinnedEmojis    = pinnedEmojis,
-            onReactWithEmoji = { emoji ->
-                actionsViewModel.react(model.engagementId, model.pubkey, ":${emoji.shortcode}:", emoji.url)
-            },
-            onRepost        = { actionsViewModel.repost(model.engagementId, model.pubkey, row.relayUrl) },
-            onQuote         = onQuote,
-            onZap           = { req -> actionsViewModel.zap(model.engagementId, model.pubkey, row.relayUrl, req) },
-            onSaveNwcUri    = { uri -> actionsViewModel.saveNwcUri(uri) },
-            hasReacted      = row.engagementId in reactedIds,
-            hasReposted     = row.engagementId in repostedIds,
-            hasZapped       = row.engagementId in zappedIds,
-            isNwcConfigured = isNwcConfigured,
-            isZapLoading    = model.engagementId in zapLoadingIds,
-            extraZapSats    = optimisticSats[model.engagementId] ?: 0L,
-            zapFlash        = zapFlash,
-            onAuthorClick   = onAuthorClick,
-            onHashtagClick  = onHashtagClick,
-            lookupProfile   = actionsViewModel::lookupProfile,
-            profileFlow     = viewModel::profileFlow,
-            statsFlow       = viewModel::statsFlow,
-            zapDetailsForEvent    = viewModel::zapDetailsForEvent,
-            repostPubkeysForEvent = viewModel::repostPubkeysForEvent,
-            reactionsForEvent     = viewModel::reactionsForEvent,
-        )
-    }
 
     if (videoScope.showFullscreenVideo) {
         FullScreenVideoDialog(

@@ -81,10 +81,11 @@ import java.time.format.DateTimeFormatter
 @Composable
 fun DraftsScreen(
     onDismiss: () -> Unit,
+    navigationOwnsBack: Boolean = false,
     onResume: (Draft) -> Unit,
     viewModel: DraftsViewModel = hiltViewModel(key = "drafts-${LocalAppSessionKey.current}"),
 ) {
-    BackHandler(onBack = onDismiss)
+    BackHandler(enabled = !navigationOwnsBack, onBack = onDismiss)
     val drafts by viewModel.drafts.collectAsStateWithLifecycle()
 
     Column(

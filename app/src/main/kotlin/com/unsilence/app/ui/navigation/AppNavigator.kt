@@ -21,7 +21,23 @@ internal sealed interface AppDestination {
     @Serializable data class Compose(
         val replyToEventId: String? = null,
         val quoteEventId: String? = null,
+        val articleComment: com.unsilence.app.ui.compose.ArticleCommentTarget? = null,
     ) : AppDestination
+    @Serializable data class Article(
+        val eventId: String,
+        val relayHints: List<String> = emptyList(),
+        val focusedCommentId: String? = null,
+    ) : AppDestination
+    @Serializable data class ResumeDraft(val key: String) : AppDestination
+    @Serializable data class EditRelaySet(val dTag: String) : AppDestination
+    @Serializable data object Settings : AppDestination
+    @Serializable data object EditProfile : AppDestination
+    @Serializable data object MediaUploads : AppDestination
+    @Serializable data object Filters : AppDestination
+    @Serializable data object Keys : AppDestination
+    @Serializable data object Console : AppDestination
+    @Serializable data object SocialGraph : AppDestination
+    @Serializable data object Drafts : AppDestination
     @Serializable data class Connections(
         val pubkey: String,
         val tab: com.unsilence.app.ui.profile.ConnectionsTab,

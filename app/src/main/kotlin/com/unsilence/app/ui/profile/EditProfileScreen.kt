@@ -33,6 +33,9 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.saveable.listSaver
+import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -50,6 +53,8 @@ import com.unsilence.app.data.memory.UserEntity
 import com.unsilence.app.data.repository.EditableProfileMetadata
 import com.unsilence.app.data.repository.profileMetadataHasChanges
 import com.unsilence.app.ui.common.IdentIcon
+import com.unsilence.app.ui.shared.EditorImageResult
+import com.unsilence.app.ui.shared.ResumedEffect
 import com.unsilence.app.ui.common.rememberAvatarImageRequest
 import com.unsilence.app.ui.common.rememberFullWidthImageRequest
 import com.unsilence.app.ui.theme.Black
@@ -76,10 +81,16 @@ internal fun profileMetadataForEdit(user: UserEntity?): EditableProfileMetadata 
         website = user?.website ?: "",
     )
 
+private val ProfileMetadataSaver = listSaver<EditableProfileMetadata, String>(
+    save = { listOf(it.name, it.displayName, it.about, it.picture, it.banner, it.nip05, it.lud16, it.website) },
+    restore = { EditableProfileMetadata(it[0], it[1], it[2], it[3], it[4], it[5], it[6], it[7]) },
+)
+
 @Composable
 fun EditProfileScreen(
-    viewModel: ProfileViewModel,
     onDismiss: () -> Unit,
+    navigationOwnsBack: Boolean = false,
+    viewModel: ProfileEditorViewModel = hiltViewModel(),
 ) {
     val user by viewModel.userFlow.collectAsStateWithLifecycle(initialValue = null)
     val uploadingAvatar by viewModel.uploadingAvatar.collectAsStateWithLifecycle()
@@ -90,15 +101,24 @@ fun EditProfileScreen(
 
     // Start with a legitimate blank baseline so a never-published key can edit.
     // If cached/relay metadata arrives before the user types, hydrate it below.
-    var name         by remember { mutableStateOf("") }
-    var displayName  by remember { mutableStateOf("") }
-    var about        by remember { mutableStateOf("") }
-    var picture      by remember { mutableStateOf("") }
-    var bannerUrl    by remember { mutableStateOf("") }
-    var nip05        by remember { mutableStateOf("") }
-    var lud16        by remember { mutableStateOf("") }
-    var website      by remember { mutableStateOf("") }
-    var original     by remember { mutableStateOf(profileMetadataForEdit(null)) }
+    var name         by rememberSaveable { mutableStateOf("") }
+    var displayName  by rememberSaveable { mutableStateOf("") }
+    var about        by rememberSaveable { mutableStateOf("") }
+    var picture      by rememberSaveable { mutableStateOf("") }
+    var bannerUrl    by rememberSaveable { mutableStateOf("") }
+    var nip05        by rememberSaveable { mutableStateOf("") }
+    var lud16        by rememberSaveable { mutableStateOf("") }
+    var website      by rememberSaveable { mutableStateOf("") }
+    var original     by rememberSaveable(stateSaver = ProfileMetadataSaver) { mutableStateOf(profileMetadataForEdit(null)) }
+
+    ResumedEffect(viewModel) {
+        viewModel.imageUploadResults.collect { result ->
+            when (result) {
+                is EditorImageResult.Uploaded -> if (result.isBanner) bannerUrl = result.url else picture = result.url
+                is EditorImageResult.Failed -> showSnackbar(result.message)
+            }
+        }
+    }
 
     val edited = EditableProfileMetadata(
         name = name,
@@ -126,7 +146,7 @@ fun EditProfileScreen(
         website     = loaded.website
     }
 
-    LaunchedEffect(saveState) {
+    ResumedEffect(saveState) {
         when (val state = saveState) {
             ProfileSaveState.Saved -> {
                 viewModel.consumeProfileSaveResult()
@@ -158,8 +178,6 @@ fun EditProfileScreen(
             viewModel.uploadProfileImage(
                 uri = uri,
                 isBanner = false,
-                onUrl = { picture = it },
-                onError = { showSnackbar(it) },
             )
         }
     }
@@ -171,13 +189,11 @@ fun EditProfileScreen(
             viewModel.uploadProfileImage(
                 uri = uri,
                 isBanner = true,
-                onUrl = { bannerUrl = it },
-                onError = { showSnackbar(it) },
             )
         }
     }
 
-    BackHandler(onBack = dismiss)
+    BackHandler(enabled = !navigationOwnsBack || isSaving, onBack = dismiss)
     Box(
         modifier = Modifier
             .fillMaxSize()

@@ -1,6 +1,7 @@
 package com.unsilence.app.ui.settings
 
 import androidx.lifecycle.ViewModel
+import com.unsilence.app.ui.shared.PendingEdits
 import androidx.lifecycle.viewModelScope
 import com.unsilence.app.data.blossom.AttachmentQuality
 import com.unsilence.app.data.blossom.BlossomServersStore
@@ -26,6 +27,8 @@ data class ServerRow(
 class MediaUploadSettingsViewModel @Inject constructor(
     private val blossomServersStore: BlossomServersStore,
 ) : ViewModel() {
+    internal val pendingEdits = PendingEdits(viewModelScope)
+
 
     val servers: StateFlow<List<ServerRow>> = combine(
         blossomServersStore.configuredServers,
@@ -56,23 +59,23 @@ class MediaUploadSettingsViewModel @Inject constructor(
     }
 
     fun selectServer(url: String) {
-        viewModelScope.launch { blossomServersStore.setSelected(url) }
+        pendingEdits.launch { blossomServersStore.setSelected(url) }
     }
 
     fun addServer(url: String) {
-        viewModelScope.launch { blossomServersStore.addServer(url) }
+        pendingEdits.launch { blossomServersStore.addServer(url) }
     }
 
     fun removeServer(url: String) {
-        viewModelScope.launch { blossomServersStore.removeServer(url) }
+        pendingEdits.launch { blossomServersStore.removeServer(url) }
     }
 
     fun setImageUploadTier(tier: AttachmentQuality) {
-        viewModelScope.launch { blossomServersStore.setImageUploadTier(tier) }
+        pendingEdits.launch { blossomServersStore.setImageUploadTier(tier) }
     }
 
     fun setVideoQuality(quality: VideoTranscoder.Quality) {
-        viewModelScope.launch { blossomServersStore.setVideoQuality(quality) }
+        pendingEdits.launch { blossomServersStore.setVideoQuality(quality) }
     }
 
     private fun extractDisplayName(url: String): String =

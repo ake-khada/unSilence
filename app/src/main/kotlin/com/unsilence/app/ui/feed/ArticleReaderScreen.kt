@@ -46,6 +46,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
@@ -62,21 +63,19 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.compose.ui.window.Dialog
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.FlowPreview
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.sample
 import kotlinx.coroutines.withContext
-import androidx.compose.ui.window.DialogProperties
 import androidx.hilt.navigation.compose.hiltViewModel
 import coil3.compose.SubcomposeAsyncImage
 import com.unsilence.app.ui.common.rememberFullWidthImageRequest
 import com.unsilence.app.ui.compose.ArticleCommentTarget
-import com.unsilence.app.ui.compose.ComposeScreen
 import com.unsilence.app.ui.markdown.MarkdownContent
 import com.unsilence.app.ui.shared.CardRole
+import com.unsilence.app.ui.shared.ResumedEffect
 import com.unsilence.app.ui.shared.EventEngagementSnapshot
 import com.unsilence.app.ui.shared.FeedDivider
 import com.unsilence.app.ui.shared.LikelySpamClusterCard
@@ -110,10 +109,13 @@ import kotlinx.serialization.json.jsonPrimitive
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun ArticleReaderScreen(
+    entryId: String,
     row: FeedRow,
     model: EventModel,
     focusedCommentId: String? = null,
     onDismiss: () -> Unit,
+    onComment: (ArticleCommentTarget) -> Unit,
+    onReply: (String) -> Unit,
     onNoteClick: (String) -> Unit = {},
     onReact: () -> Unit = {},
     onReactLongPress: () -> Unit = {},
@@ -164,21 +166,10 @@ fun ArticleReaderScreen(
         if (words == 0) null else ((words + 199) / 200)
     }
 
-    // Tapping any hashtag (inline body span or topic chip) leaves the article for
-    // that tag's feed — close the reader first, else the destination opens hidden
-    // behind this Dialog and the tap looks dead.
-    val onHashtagTap: (String) -> Unit = remember(onHashtagClick, onDismiss) {
-        { tag -> onHashtagClick(tag); onDismiss() }
-    }
-
-    // Profile/thread navigation must close the reader first — otherwise the
-    // destination opens BEHIND this Dialog and the tap looks dead.
-    val onAuthorTap: (String) -> Unit = remember(onDismiss, onAuthorClick) {
-        { pubkey -> onDismiss(); onAuthorClick(pubkey) }
-    }
-    val onNoteTap: (String) -> Unit = remember(onDismiss, onNoteClick) {
-        { id -> onDismiss(); onNoteClick(id) }
-    }
+    // Navigation retains the reader beneath its child, including reading position.
+    val onHashtagTap = onHashtagClick
+    val onAuthorTap = onAuthorClick
+    val onNoteTap = onNoteClick
 
     // ── Comments (NIP-22 kind-1111 + legacy kind-1 by a-coordinate) ──────────
     // Dedicated VM owns the comment machinery + display providers; comment ACTIONS
@@ -192,12 +183,13 @@ fun ArticleReaderScreen(
             protectedEventIds = setOfNotNull(focusedCommentId),
         )
     }
-    val commentsState by commentsFlow.collectAsStateWithLifecycle(ArticleCommentsState())
+    val observedComments by commentsFlow.collectAsStateWithLifecycle<ArticleCommentsState?>(initialValue = null)
+    val commentsState = observedComments ?: ArticleCommentsState()
     val comments = commentsState.rows
     val depthComments = commentsState.depthRows
     val wotLookup = rememberCardWotLookup(articleReaderVm.wotLookups)
     val feedWotDisplayMode by articleReaderVm.feedWotDisplayMode.collectAsStateWithLifecycle()
-    var revealedSpamClusters by remember(articleCoord) { mutableStateOf(emptySet<String>()) }
+    var revealedSpamClusters by rememberSaveable(articleCoord) { mutableStateOf(emptySet<String>()) }
     val commentItems = remember(depthComments, revealedSpamClusters) {
         replyListItems(depthComments, revealedSpamClusters)
     }
@@ -206,18 +198,18 @@ fun ArticleReaderScreen(
             .filterNot { it.muted || it.spamClusterId != null }
             .map { it.row }
     }
-    LaunchedEffect(articleCoord) {
+    ResumedEffect(articleCoord) {
         if (articleCoord != null) {
             articleReaderVm.fetchComments(articleCoord, model.engagementId, model.pubkey, row.relayUrl)
         }
     }
-    LaunchedEffect(comments, commentsState.mutedIds, commentRows) {
+    ResumedEffect(comments, commentsState.mutedIds, commentRows) {
         articleReaderVm.hydrateEngagement(commentRows)
         if (articleCoord != null) {
             articleReaderVm.fetchCommentReplies(comments.map { it.id }, model.pubkey, model.engagementId, row.relayUrl)
         }
     }
-    LaunchedEffect(model.pubkey, comments, commentsState.mutedIds) {
+    ResumedEffect(model.pubkey, comments, commentsState.mutedIds) {
         articleReaderVm.requestWotHydration(
             buildSet {
                 add(model.pubkey)
@@ -230,19 +222,15 @@ fun ArticleReaderScreen(
             }
         )
     }
-    // Article-comment compose (NIP-22). Hosted locally as an overlay so no callback
-    // threading through the 5 reader call sites; reader stays behind the compose.
-    var commentTarget by remember { mutableStateOf<ArticleCommentTarget?>(null) }
-    var legacyReplyToEventId by remember { mutableStateOf<String?>(null) }
     val articleRelayHint = row.relayUrl.takeIf { it.isNotBlank() }
     val openArticleComment: () -> Unit = {
         if (articleCoord != null) {
-            commentTarget = ArticleCommentTarget(
+            onComment(ArticleCommentTarget(
                 articleId = model.engagementId,
                 articleCoord = articleCoord,
                 articlePubkey = model.pubkey,
                 articleRelayHint = articleRelayHint,
-            )
+            ))
         } else onNoteTap(model.navigateId)
     }
 
@@ -312,9 +300,9 @@ fun ArticleReaderScreen(
     val reactionCount = articleStats.reactionCount
     val zapTotalSats  = articleStats.zapTotalSats
 
-    var drawerOpen by remember { mutableStateOf(false) }
+    var drawerOpen by rememberSaveable { mutableStateOf(false) }
     val listState = rememberLazyListState()
-    var didScrollToFocusedComment by remember(articleCoord, focusedCommentId) {
+    var didScrollToFocusedComment by rememberSaveable(articleCoord, focusedCommentId) {
         mutableStateOf(false)
     }
     LaunchedEffect(focusedCommentId, commentItems) {
@@ -331,7 +319,7 @@ fun ArticleReaderScreen(
     }
     val cardWidthPx = LocalWindowInfo.current.containerSize.width
     val commentVideoScope = rememberVideoPlaybackScope(
-        ownerId = "article-comments-${model.engagementId}",
+        ownerId = "article-comments-$entryId",
         holder = commentActionsVm.sharedPlayerHolder,
         events = commentRows,
         listState = listState,
@@ -350,6 +338,8 @@ fun ArticleReaderScreen(
         onAuthorTap,
         onHashtagTap,
         onQuote,
+        onComment,
+        onReply,
         articleCoord,
         articleRelayHint,
         model.engagementId,
@@ -360,7 +350,7 @@ fun ArticleReaderScreen(
                 onNoteClick = onNoteTap,
                 onComment = { comment, _ ->
                     if (comment.kind == 1111 && articleCoord != null) {
-                        commentTarget = ArticleCommentTarget(
+                        onComment(ArticleCommentTarget(
                             articleId = model.engagementId,
                             articleCoord = articleCoord,
                             articlePubkey = model.pubkey,
@@ -369,9 +359,9 @@ fun ArticleReaderScreen(
                             parentKind = comment.kind,
                             parentPubkey = comment.pubkey,
                             parentRelayHint = comment.relayUrl.takeIf { it.isNotBlank() },
-                        )
+                        ))
                     } else {
-                        legacyReplyToEventId = comment.id
+                        onReply(comment.id)
                     }
                 },
                 onAuthorClick = onAuthorTap,
@@ -407,15 +397,15 @@ fun ArticleReaderScreen(
     }
 
     val engagementRetryRevision by commentActionsVm.engagementRetryRevision.collectAsStateWithLifecycle()
-    LaunchedEffect(engagementRetryRevision) {
-        if (engagementRetryRevision == 0L) return@LaunchedEffect
+    ResumedEffect(engagementRetryRevision) {
+        if (engagementRetryRevision == 0L) return@ResumedEffect
         val visibleIds = listState.layoutInfo.visibleItemsInfo.mapNotNullTo(HashSet()) { it.key as? String }
         articleReaderVm.hydrateEngagement(commentRows.filter { it.id in visibleIds })
     }
 
     @OptIn(FlowPreview::class)
-    LaunchedEffect(commentRows, cardWidthPx) {
-        if (commentRows.isEmpty()) return@LaunchedEffect
+    ResumedEffect(commentRows, cardWidthPx) {
+        if (commentRows.isEmpty()) return@ResumedEffect
         val rowIndexById = commentRows.withIndex().associate { it.value.id to it.index }
         commentActionsVm.warmCardWindow(
             rows = commentRows,
@@ -441,359 +431,337 @@ fun ArticleReaderScreen(
         }
     }
 
-    Dialog(
-        onDismissRequest = onDismiss,
-        properties       = DialogProperties(
-            usePlatformDefaultWidth = false,
-            decorFitsSystemWindows  = false,
-        ),
+    // Same edge-to-edge viewport as other navigation entries.
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(Black),
     ) {
-        // Edge-to-edge like the feed/profile: decorFitsSystemWindows=false lets the
-        // dialog draw into the system-bar areas, so the black background/content
-        // continues behind the gesture pill (no peek-through of the screen behind).
-        // Top gets statusBarsPadding; the gesture pill simply overlays the bottom —
-        // no navigation-bar padding anywhere.
-        Box(
-            modifier = Modifier
-                .fillMaxSize()
-                .background(Black),
-        ) {
-            Column(modifier = Modifier.fillMaxSize().statusBarsPadding()) {
-                // ── Pinned top bar (Close / Share stay reachable) ──────────────
-                Row(
-                    modifier          = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 4.dp, vertical = 4.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    IconButton(onClick = onDismiss) {
-                        Icon(
-                            imageVector        = Icons.Filled.Close,
-                            contentDescription = "Close",
-                            tint               = Color.White,
-                            modifier           = Modifier.size(22.dp),
-                        )
-                    }
-                    Spacer(Modifier.weight(1f))
-                    // Share lives here — EventActionBar (below) has no Share slot.
-                    IconButton(onClick = {
-                        val sendIntent = Intent(Intent.ACTION_SEND).apply {
-                            putExtra(Intent.EXTRA_TEXT, "https://njump.me/${model.navigateId}")
-                            type = "text/plain"
-                        }
-                        context.startActivity(Intent.createChooser(sendIntent, null))
-                    }) {
-                        Icon(
-                            imageVector        = Icons.Filled.Share,
-                            contentDescription = "Share",
-                            tint               = Color.White,
-                            modifier           = Modifier.size(22.dp),
-                        )
-                    }
+        Column(modifier = Modifier.fillMaxSize().statusBarsPadding()) {
+            // ── Pinned top bar (Close / Share stay reachable) ──────────────
+            Row(
+                modifier          = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 4.dp, vertical = 4.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                IconButton(onClick = onDismiss) {
+                    Icon(
+                        imageVector        = Icons.Filled.Close,
+                        contentDescription = "Close",
+                        tint               = Color.White,
+                        modifier           = Modifier.size(22.dp),
+                    )
                 }
-                HorizontalDivider(color = MaterialTheme.colorScheme.surfaceVariant)
-
-                // ── Article + engagement in ONE LazyColumn: the action bar is now
-                //    inline (non-sticky) and the drawer expands DOWNWARD in the scroll
-                //    flow. Comments will append as further items below (phase 3b). ──
-                LazyColumn(
-                    state    = listState,
-                    modifier = Modifier
-                        .weight(1f)
-                        .fillMaxWidth(),
-                ) {
-                    item(key = "article") {
-                        Column(modifier = Modifier.fillMaxWidth()) {
-                            // ── Author header (effective author, live profile) ──
-                            // AuthorHeader applies its own padding — pass it bare.
-                            AuthorHeader(
-                                pubkey        = model.pubkey,
-                                picture       = authorProfile?.picture?.takeIf { it.isNotBlank() }
-                                    ?: if (isRepost) null else row.authorPicture,
-                                displayName   = authorLabel,
-                                nip05         = authorProfile?.nip05 ?: if (isRepost) null else row.authorNip05,
-                                createdAt     = model.createdAt,
-                                onAuthorClick = onAuthorTap,
-                                onNoteClick   = {},
-                                lookupProfile = lookupProfile,
-                                wotLookup = wotLookup,
-                                feedWotDisplayMode = feedWotDisplayMode,
-                                repostSourcePubkey = if (isRepost) model.sourcePubkey else null,
-                                repostSourceProfile = sourceProfile,
-                            )
-
-                            // ── Banner image — full image at natural aspect (no crop) ──
-                            if (!image.isNullOrBlank()) {
-                                SubcomposeAsyncImage(
-                                    model              = rememberFullWidthImageRequest(image, aspectRatio = 16f / 9f),
-                                    contentDescription = null,
-                                    contentScale       = ContentScale.FillWidth,
-                                    modifier           = Modifier
-                                        .fillMaxWidth()
-                                        .clip(RoundedCornerShape(
-                                            bottomStart = Sizing.mediaCornerRadius,
-                                            bottomEnd   = Sizing.mediaCornerRadius,
-                                        )),
-                                )
-                            }
-
-                            // ── Title + reading time (centered; equal gap banner/body) ──
-                            if (!title.isNullOrBlank()) {
-                                Column(
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .padding(horizontal = Spacing.medium)
-                                        .padding(vertical = Spacing.large),
-                                    horizontalAlignment = Alignment.CenterHorizontally,
-                                ) {
-                                    Text(
-                                        text       = title,
-                                        color      = Color.White,
-                                        fontWeight = FontWeight.Bold,
-                                        style = AppTextStyles.title,
-                                        textAlign  = TextAlign.Center,
-                                        modifier   = Modifier.fillMaxWidth(),
-                                    )
-                                    if (readingMinutes != null) {
-                                        Text(
-                                            text     = "$readingMinutes min read",
-                                            color    = TextSecondary,
-                                            style = AppTextStyles.caption,
-                                            modifier = Modifier.padding(top = Spacing.small),
-                                        )
-                                    }
-                                }
-                            }
-
-                            // ── Body (native markdown; selectable, tappable spans) ──
-                            val doc = document
-                            if (doc != null) {
-                                SelectionContainer(
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .padding(horizontal = Spacing.medium)
-                                        .padding(bottom = Spacing.xl),
-                                ) {
-                                    MarkdownContent(
-                                        document             = doc,
-                                        onHashtagClick       = onHashtagTap,
-                                        suppressLeadingTitle = title,
-                                    )
-                                }
-                            } else {
-                                // Off-main parse in flight (only the first open of a big,
-                                // uncached article — usually sub-frame). Quiet spinner.
-                                Box(
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .heightIn(min = 160.dp)
-                                        .padding(bottom = Spacing.xl),
-                                    contentAlignment = Alignment.Center,
-                                ) {
-                                    CircularProgressIndicator(
-                                        color       = MaterialTheme.colorScheme.primary,
-                                        strokeWidth = 2.dp,
-                                        modifier    = Modifier.size(28.dp),
-                                    )
-                                }
-                            }
-
-                            // ── Topic hashtags (`t` tags) — one scrollable chip row
-                            //    with edge fades (mirrors the relay category rail). ──
-                            if (hashtags.isNotEmpty()) {
-                                val tagListState = rememberLazyListState()
-                                Box(modifier = Modifier.padding(bottom = Spacing.xl)) {
-                                    LazyRow(
-                                        state                 = tagListState,
-                                        contentPadding        = PaddingValues(horizontal = Spacing.medium),
-                                        horizontalArrangement = Arrangement.spacedBy(Spacing.small),
-                                    ) {
-                                        items(hashtags) { tag ->
-                                            Text(
-                                                text     = "#$tag",
-                                                color    = BrandDeep,
-                                                style = AppTextStyles.footnote,
-                                                modifier = Modifier
-                                                    .clip(RoundedCornerShape(50))
-                                                    .background(Surface2)
-                                                    .clickable { onHashtagTap(tag) }
-                                                    .padding(horizontal = Spacing.medium, vertical = Spacing.small),
-                                            )
-                                        }
-                                    }
-                                    if (tagListState.canScrollBackward) {
-                                        Box(
-                                            modifier = Modifier
-                                                .matchParentSize()
-                                                .background(Brush.horizontalGradient(0f to Black, 0.14f to Color.Transparent)),
-                                        )
-                                    }
-                                    if (tagListState.canScrollForward) {
-                                        Box(
-                                            modifier = Modifier
-                                                .matchParentSize()
-                                                .background(Brush.horizontalGradient(0.86f to Color.Transparent, 1f to Black)),
-                                        )
-                                    }
-                                }
-                            }
-
-                            // ── Inline engagement bar (non-sticky) + downward drawer ──
-                            // Mirrors EventCard: bar, then the drawer expands BELOW it in
-                            // the scroll flow (no height cap / inner scroll — the
-                            // LazyColumn scrolls; comments will sit under this in 3b).
-                            HorizontalDivider(color = MaterialTheme.colorScheme.surfaceVariant)
-                            EventActionBar(
-                                noteId           = model.navigateId,
-                                zapTargetId      = model.engagementId,
-                                replyCount       = replyCount,
-                                repostCount      = repostCount,
-                                reactionCount    = reactionCount,
-                                zapTotalSats     = zapTotalSats,
-                                hasReacted       = hasReacted,
-                                hasReposted      = hasReposted,
-                                hasZapped        = hasZapped,
-                                isNwcConfigured  = isNwcConfigured,
-                                isZapLoading     = isZapLoading,
-                                extraZapSats     = extraZapSats,
-                                zapFlash         = zapFlash,
-                                drawerOpen       = drawerOpen,
-                                onChevronTap     = { drawerOpen = !drawerOpen },
-                                onNoteClick      = { onNoteTap(model.navigateId) },
-                                onComment        = openArticleComment,
-                                onReact          = onReact,
-                                onReactLongPress = onReactLongPress,
-                                pinnedEmojis     = pinnedEmojis,
-                                onReactWithEmoji = onReactWithEmoji,
-                                onRepost         = onRepost,
-                                onQuote          = onQuote,
-                                onZap            = onZap,
-                                onSaveNwcUri     = onSaveNwcUri,
-                                modifier         = Modifier.padding(top = Spacing.small),
-                            )
-                            androidx.compose.animation.AnimatedVisibility(
-                                visible = drawerOpen,
-                                enter   = androidx.compose.animation.expandVertically(),
-                                exit    = androidx.compose.animation.shrinkVertically(),
-                            ) {
-                                Box(modifier = Modifier.bringIntoViewRequester(drawerReveal)) {
-                                    EngagementDrawer(
-                                        eventId               = model.engagementId,
-                                        statsFlow             = statsFlow,
-                                        zapDetailsForEvent    = zapDetailsForEvent,
-                                        repostPubkeysForEvent = repostPubkeysForEvent,
-                                        reactionsForEvent     = reactionsForEvent,
-                                        profileFlow           = profileFlow,
-                                        lookupProfile         = lookupProfile,
-                                        onProfileTap          = onAuthorTap,
-                                    )
-                                }
-                            }
-                        }
+                Spacer(Modifier.weight(1f))
+                // Share lives here — EventActionBar (below) has no Share slot.
+                IconButton(onClick = {
+                    val sendIntent = Intent(Intent.ACTION_SEND).apply {
+                        putExtra(Intent.EXTRA_TEXT, "https://njump.me/${model.navigateId}")
+                        type = "text/plain"
                     }
+                    context.startActivity(Intent.createChooser(sendIntent, null))
+                }) {
+                    Icon(
+                        imageVector        = Icons.Filled.Share,
+                        contentDescription = "Share",
+                        tint               = Color.White,
+                        modifier           = Modifier.size(22.dp),
+                    )
+                }
+            }
+            HorizontalDivider(color = MaterialTheme.colorScheme.surfaceVariant)
 
-                    // ── Comments (NIP-22 1111 + legacy kind-1, oldest-first) ──
-                    if (depthComments.isNotEmpty()) {
-                        item(key = "comments-header") {
-                            HorizontalDivider(color = MaterialTheme.colorScheme.surfaceVariant)
-                            Text(
-                                text     = "${comments.size} ${if (comments.size == 1) "comment" else "comments"}",
-                                color    = TextSecondary,
-                                style = AppTextStyles.footnote,
+            // ── Article + engagement in ONE LazyColumn: the action bar is now
+            //    inline (non-sticky) and the drawer expands DOWNWARD in the scroll
+            //    flow. Comments will append as further items below (phase 3b). ──
+            ArticleViewport(
+                ready = document != null && observedComments != null,
+                modifier = Modifier.weight(1f).fillMaxWidth(),
+            ) {
+            LazyColumn(
+                state    = listState,
+                modifier = Modifier
+                    .weight(1f)
+                    .fillMaxWidth(),
+            ) {
+                item(key = "article") {
+                    Column(modifier = Modifier.fillMaxWidth()) {
+                        // ── Author header (effective author, live profile) ──
+                        // AuthorHeader applies its own padding — pass it bare.
+                        AuthorHeader(
+                            pubkey        = model.pubkey,
+                            picture       = authorProfile?.picture?.takeIf { it.isNotBlank() }
+                                ?: if (isRepost) null else row.authorPicture,
+                            displayName   = authorLabel,
+                            nip05         = authorProfile?.nip05 ?: if (isRepost) null else row.authorNip05,
+                            createdAt     = model.createdAt,
+                            onAuthorClick = onAuthorTap,
+                            onNoteClick   = {},
+                            lookupProfile = lookupProfile,
+                            wotLookup = wotLookup,
+                            feedWotDisplayMode = feedWotDisplayMode,
+                            repostSourcePubkey = if (isRepost) model.sourcePubkey else null,
+                            repostSourceProfile = sourceProfile,
+                        )
+
+                        // ── Banner image — full image at natural aspect (no crop) ──
+                        if (!image.isNullOrBlank()) {
+                            SubcomposeAsyncImage(
+                                model              = rememberFullWidthImageRequest(image, aspectRatio = 16f / 9f),
+                                contentDescription = null,
+                                contentScale       = ContentScale.FillWidth,
+                                modifier           = Modifier
+                                    .fillMaxWidth()
+                                    .clip(RoundedCornerShape(
+                                        bottomStart = Sizing.mediaCornerRadius,
+                                        bottomEnd   = Sizing.mediaCornerRadius,
+                                    )),
+                            )
+                        }
+
+                        // ── Title + reading time (centered; equal gap banner/body) ──
+                        if (!title.isNullOrBlank()) {
+                            Column(
                                 modifier = Modifier
                                     .fillMaxWidth()
-                                    .padding(horizontal = Spacing.medium, vertical = Spacing.small),
-                            )
-                        }
-                        items(commentItems, key = { it.key }) { commentItem ->
-                            val depth = when (commentItem) {
-                                is ReplyListItem.Reply -> commentItem.depthRow.depth
-                                is ReplyListItem.SpamCluster -> commentItem.depth
+                                    .padding(horizontal = Spacing.medium)
+                                    .padding(vertical = Spacing.large),
+                                horizontalAlignment = Alignment.CenterHorizontally,
+                            ) {
+                                Text(
+                                    text       = title,
+                                    color      = Color.White,
+                                    fontWeight = FontWeight.Bold,
+                                    style = AppTextStyles.title,
+                                    textAlign  = TextAlign.Center,
+                                    modifier   = Modifier.fillMaxWidth(),
+                                )
+                                if (readingMinutes != null) {
+                                    Text(
+                                        text     = "$readingMinutes min read",
+                                        color    = TextSecondary,
+                                        style = AppTextStyles.caption,
+                                        modifier = Modifier.padding(top = Spacing.small),
+                                    )
+                                }
                             }
-                            val guideColor = Color.White.copy(alpha = 0.10f)
+                        }
+
+                        // ── Body (native markdown; selectable, tappable spans) ──
+                        val doc = document
+                        if (doc != null) {
+                            SelectionContainer(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = Spacing.medium)
+                                    .padding(bottom = Spacing.xl),
+                            ) {
+                                MarkdownContent(
+                                    document             = doc,
+                                    onHashtagClick       = onHashtagTap,
+                                    suppressLeadingTitle = title,
+                                )
+                            }
+                        } else {
+                            // Off-main parse in flight (only the first open of a big,
+                            // uncached article — usually sub-frame). Quiet spinner.
                             Box(
                                 modifier = Modifier
                                     .fillMaxWidth()
-                                    .drawBehind {
-                                        for (d in 1..depth) {
-                                            val x = (d * 12).dp.toPx()
-                                            drawLine(guideColor, Offset(x, 0f), Offset(x, size.height), 1.dp.toPx())
-                                        }
-                                    }
-                                    .padding(start = (depth * 12).dp),
+                                    .heightIn(min = 160.dp)
+                                    .padding(bottom = Spacing.xl),
+                                contentAlignment = Alignment.Center,
                             ) {
-                                when (commentItem) {
-                                    is ReplyListItem.SpamCluster -> LikelySpamClusterCard(
-                                        replyCount = commentItem.replyCount,
-                                        revealed = commentItem.revealed,
-                                        onToggle = {
-                                            revealedSpamClusters =
-                                                if (commentItem.clusterId in revealedSpamClusters) {
-                                                    revealedSpamClusters - commentItem.clusterId
-                                                } else {
-                                                    revealedSpamClusters + commentItem.clusterId
-                                                }
-                                        },
-                                        modifier = Modifier.padding(
-                                            horizontal = Spacing.medium,
-                                            vertical = Spacing.small,
-                                        ),
-                                    )
+                                CircularProgressIndicator(
+                                    color       = MaterialTheme.colorScheme.primary,
+                                    strokeWidth = 2.dp,
+                                    modifier    = Modifier.size(28.dp),
+                                )
+                            }
+                        }
 
-                                    is ReplyListItem.Reply -> {
-                                        val dc = commentItem.depthRow
-                                        val comment = dc.row
-                                        if (dc.muted) {
-                                            MutedContentHiddenCard(
-                                                modifier = Modifier.padding(
-                                                    horizontal = Spacing.medium,
-                                                    vertical = Spacing.small,
-                                                ),
-                                            )
-                                        } else {
-                                            val cModel = remember(comment.id) {
-                                                commentActionsVm.getEventModel(comment.id) ?: comment.toEventModel()
-                                            }
-                                            EventCard(
-                                                model = cModel,
-                                                row = comment,
-                                                role = CardRole.Reply,
-                                                engagement = EventEngagementSnapshot(
-                                                    isNwcConfigured = isNwcConfigured,
-                                                ),
-                                                host = commentCardHost.withRelayHints(
-                                                    listOf(comment.relayUrl) + comment.relaysSeen,
-                                                ),
-                                                presentation = EventCardPresentation(
-                                                    focused = comment.id == focusedCommentId,
-                                                ),
-                                            )
-                                        }
+                        // ── Topic hashtags (`t` tags) — one scrollable chip row
+                        //    with edge fades (mirrors the relay category rail). ──
+                        if (hashtags.isNotEmpty()) {
+                            val tagListState = rememberLazyListState()
+                            Box(modifier = Modifier.padding(bottom = Spacing.xl)) {
+                                LazyRow(
+                                    state                 = tagListState,
+                                    contentPadding        = PaddingValues(horizontal = Spacing.medium),
+                                    horizontalArrangement = Arrangement.spacedBy(Spacing.small),
+                                ) {
+                                    items(hashtags) { tag ->
+                                        Text(
+                                            text     = "#$tag",
+                                            color    = BrandDeep,
+                                            style = AppTextStyles.footnote,
+                                            modifier = Modifier
+                                                .clip(RoundedCornerShape(50))
+                                                .background(Surface2)
+                                                .clickable { onHashtagTap(tag) }
+                                                .padding(horizontal = Spacing.medium, vertical = Spacing.small),
+                                        )
                                     }
                                 }
+                                if (tagListState.canScrollBackward) {
+                                    Box(
+                                        modifier = Modifier
+                                            .matchParentSize()
+                                            .background(Brush.horizontalGradient(0f to Black, 0.14f to Color.Transparent)),
+                                    )
+                                }
+                                if (tagListState.canScrollForward) {
+                                    Box(
+                                        modifier = Modifier
+                                            .matchParentSize()
+                                            .background(Brush.horizontalGradient(0.86f to Color.Transparent, 1f to Black)),
+                                    )
+                                }
                             }
-                            FeedDivider()
+                        }
+
+                        // ── Inline engagement bar (non-sticky) + downward drawer ──
+                        // Mirrors EventCard: bar, then the drawer expands BELOW it in
+                        // the scroll flow (no height cap / inner scroll — the
+                        // LazyColumn scrolls; comments will sit under this in 3b).
+                        HorizontalDivider(color = MaterialTheme.colorScheme.surfaceVariant)
+                        EventActionBar(
+                            noteId           = model.navigateId,
+                            zapTargetId      = model.engagementId,
+                            replyCount       = replyCount,
+                            repostCount      = repostCount,
+                            reactionCount    = reactionCount,
+                            zapTotalSats     = zapTotalSats,
+                            hasReacted       = hasReacted,
+                            hasReposted      = hasReposted,
+                            hasZapped        = hasZapped,
+                            isNwcConfigured  = isNwcConfigured,
+                            isZapLoading     = isZapLoading,
+                            extraZapSats     = extraZapSats,
+                            zapFlash         = zapFlash,
+                            drawerOpen       = drawerOpen,
+                            onChevronTap     = { drawerOpen = !drawerOpen },
+                            onNoteClick      = { onNoteTap(model.navigateId) },
+                            onComment        = openArticleComment,
+                            onReact          = onReact,
+                            onReactLongPress = onReactLongPress,
+                            pinnedEmojis     = pinnedEmojis,
+                            onReactWithEmoji = onReactWithEmoji,
+                            onRepost         = onRepost,
+                            onQuote          = onQuote,
+                            onZap            = onZap,
+                            onSaveNwcUri     = onSaveNwcUri,
+                            modifier         = Modifier.padding(top = Spacing.small),
+                        )
+                        androidx.compose.animation.AnimatedVisibility(
+                            visible = drawerOpen,
+                            enter   = androidx.compose.animation.expandVertically(),
+                            exit    = androidx.compose.animation.shrinkVertically(),
+                        ) {
+                            Box(modifier = Modifier.bringIntoViewRequester(drawerReveal)) {
+                                EngagementDrawer(
+                                    eventId               = model.engagementId,
+                                    statsFlow             = statsFlow,
+                                    zapDetailsForEvent    = zapDetailsForEvent,
+                                    repostPubkeysForEvent = repostPubkeysForEvent,
+                                    reactionsForEvent     = reactionsForEvent,
+                                    profileFlow           = profileFlow,
+                                    lookupProfile         = lookupProfile,
+                                    onProfileTap          = onAuthorTap,
+                                )
+                            }
                         }
                     }
                 }
-            }
 
-            // ── Article-comment compose overlay (NIP-22 kind-1111) ──
-            // Full-screen overlay above the reader; reader stays behind.
-            commentTarget?.let { target ->
-                ComposeScreen(
-                    articleCommentTarget = target,
-                    onDismiss            = { commentTarget = null },
-                )
+                // ── Comments (NIP-22 1111 + legacy kind-1, oldest-first) ──
+                if (depthComments.isNotEmpty()) {
+                    item(key = "comments-header") {
+                        HorizontalDivider(color = MaterialTheme.colorScheme.surfaceVariant)
+                        Text(
+                            text     = "${comments.size} ${if (comments.size == 1) "comment" else "comments"}",
+                            color    = TextSecondary,
+                            style = AppTextStyles.footnote,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = Spacing.medium, vertical = Spacing.small),
+                        )
+                    }
+                    items(commentItems, key = { it.key }) { commentItem ->
+                        val depth = when (commentItem) {
+                            is ReplyListItem.Reply -> commentItem.depthRow.depth
+                            is ReplyListItem.SpamCluster -> commentItem.depth
+                        }
+                        val guideColor = Color.White.copy(alpha = 0.10f)
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .drawBehind {
+                                    for (d in 1..depth) {
+                                        val x = (d * 12).dp.toPx()
+                                        drawLine(guideColor, Offset(x, 0f), Offset(x, size.height), 1.dp.toPx())
+                                    }
+                                }
+                                .padding(start = (depth * 12).dp),
+                        ) {
+                            when (commentItem) {
+                                is ReplyListItem.SpamCluster -> LikelySpamClusterCard(
+                                    replyCount = commentItem.replyCount,
+                                    revealed = commentItem.revealed,
+                                    onToggle = {
+                                        revealedSpamClusters =
+                                            if (commentItem.clusterId in revealedSpamClusters) {
+                                                revealedSpamClusters - commentItem.clusterId
+                                            } else {
+                                                revealedSpamClusters + commentItem.clusterId
+                                            }
+                                    },
+                                    modifier = Modifier.padding(
+                                        horizontal = Spacing.medium,
+                                        vertical = Spacing.small,
+                                    ),
+                                )
+
+                                is ReplyListItem.Reply -> {
+                                    val dc = commentItem.depthRow
+                                    val comment = dc.row
+                                    if (dc.muted) {
+                                        MutedContentHiddenCard(
+                                            modifier = Modifier.padding(
+                                                horizontal = Spacing.medium,
+                                                vertical = Spacing.small,
+                                            ),
+                                        )
+                                    } else {
+                                        val cModel = remember(comment.id) {
+                                            commentActionsVm.getEventModel(comment.id) ?: comment.toEventModel()
+                                        }
+                                        EventCard(
+                                            model = cModel,
+                                            row = comment,
+                                            role = CardRole.Reply,
+                                            engagement = EventEngagementSnapshot(
+                                                isNwcConfigured = isNwcConfigured,
+                                            ),
+                                            host = commentCardHost.withRelayHints(
+                                                listOf(comment.relayUrl) + comment.relaysSeen,
+                                            ),
+                                            presentation = EventCardPresentation(
+                                                focused = comment.id == focusedCommentId,
+                                            ),
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                        FeedDivider()
+                    }
+                }
             }
-            // Legacy kind-1 comment → normal kind-1 reply, opened above the reader.
-            legacyReplyToEventId?.let { id ->
-                ComposeScreen(
-                    replyToEventId = id,
-                    onDismiss      = { legacyReplyToEventId = null },
-                )
             }
         }
+
     }
 
     if (commentVideoScope.showFullscreenVideo) {

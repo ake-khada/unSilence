@@ -6,6 +6,7 @@ package com.unsilence.app.ui.compose
  * comment carries the parent comment's id/kind/pubkey. The article is ALWAYS the
  * root scope (uppercase A/K/P), per NIP-22.
  */
+@kotlinx.serialization.Serializable
 data class ArticleCommentTarget(
     val articleId: String?,            // article event id (null for boosted/embedded absent from MES)
     val articleCoord: String,          // 30023:<pubkey>:<d>

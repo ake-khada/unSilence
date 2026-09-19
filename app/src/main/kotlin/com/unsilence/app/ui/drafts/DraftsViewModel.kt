@@ -26,6 +26,19 @@ class DraftsViewModel @Inject constructor(
             .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
     } ?: MutableStateFlow(emptyList())
 
+    // A resumed editor owns one opening snapshot. Saving/deleting the durable
+    // draft must not replace its input while another destination covers it.
+    private var resumeSnapshot: Pair<String, Draft?>? = null
+
+    suspend fun resolveForResume(key: String): Draft? {
+        resumeSnapshot?.takeIf { it.first == key }?.let { return it.second }
+        draftStore.awaitLoaded()
+        val draft = pubkeyHex?.takeIf { it == keyManager.getPublicKeyHex() }
+            ?.let { draftStore.draft(it, key) }
+        resumeSnapshot = key to draft
+        return draft
+    }
+
     fun delete(draft: Draft) {
         pubkeyHex?.let { draftStore.delete(it, draft.key) }
     }

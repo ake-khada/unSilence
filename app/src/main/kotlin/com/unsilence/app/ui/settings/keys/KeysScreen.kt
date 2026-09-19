@@ -99,11 +99,12 @@ private val AuthenticatorFlags =
 @Composable
 fun KeysScreen(
     onDismiss: () -> Unit,
+    navigationOwnsBack: Boolean = false,
     viewModel: KeysViewModel = hiltViewModel(
         key = "keys-${LocalAppSessionKey.current}",
     ),
 ) {
-    BackHandler(onBack = onDismiss)
+    BackHandler(enabled = !navigationOwnsBack, onBack = onDismiss)
 
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current

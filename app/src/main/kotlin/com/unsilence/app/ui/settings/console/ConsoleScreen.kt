@@ -79,11 +79,12 @@ import com.unsilence.app.ui.theme.Warn
 @Composable
 fun ConsoleScreen(
     onDismiss: () -> Unit,
+    navigationOwnsBack: Boolean = false,
     viewModel: ConsoleViewModel = hiltViewModel(
         key = "console-${LocalAppSessionKey.current}",
     ),
 ) {
-    BackHandler(onBack = onDismiss)
+    BackHandler(enabled = !navigationOwnsBack, onBack = onDismiss)
     val state by viewModel.uiState.collectAsStateWithLifecycle()
     val context = LocalContext.current
     var copied by remember { mutableStateOf(false) }

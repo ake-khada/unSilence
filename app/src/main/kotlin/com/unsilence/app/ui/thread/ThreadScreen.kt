@@ -26,7 +26,6 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import com.unsilence.app.ui.shared.rememberCardWotLookup
-import com.unsilence.app.ui.shared.rememberArticleSelection
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -48,7 +47,6 @@ import com.unsilence.app.ui.common.IdentIcon
 import com.unsilence.app.ui.common.LocalAppSessionKey
 import com.unsilence.app.ui.common.LocalShowSnackbar
 import com.unsilence.app.ui.common.ShimmerNoteCard
-import com.unsilence.app.ui.feed.ArticleReaderScreen
 import com.unsilence.app.ui.feed.EventCard
 import com.unsilence.app.ui.feed.EventCardActions
 import com.unsilence.app.ui.feed.EventCardPresentation
@@ -77,6 +75,7 @@ import kotlinx.coroutines.flow.sample
 
 @Composable
 fun ThreadScreen(
+    onArticleClick: (FeedRow, String?) -> Unit,
     eventId: String,
     relayHints: List<String> = emptyList(),
     openArticleOnLoad: Boolean = false,
@@ -111,7 +110,6 @@ fun ThreadScreen(
     val zapFlash        by actionsViewModel.zapFlashState.collectAsStateWithLifecycle()
     val isNwcConfigured = actionsViewModel.isNwcConfigured
     val showSnackbar = LocalShowSnackbar.current
-    var articleRow by rememberArticleSelection(actionsViewModel)
     var actionsRow by remember { mutableStateOf<FeedRow?>(null) }
 
     // ── Emoji reaction picker state ─────────────────────────────────────────
@@ -130,11 +128,11 @@ fun ThreadScreen(
     }
 
     var autoArticleHandled by rememberSaveable(eventId) { mutableStateOf(false) }
-    LaunchedEffect(openArticleOnLoad, state.focusedNote?.id) {
+    ResumedEffect(openArticleOnLoad, state.focusedNote?.id) {
         val focused = state.focusedNote
         if (openArticleOnLoad && !autoArticleHandled && focused?.kind == 30023) {
             autoArticleHandled = true
-            articleRow = focused
+            onArticleClick(focused, state.focusedReplyId)
         }
     }
 
@@ -177,6 +175,8 @@ fun ThreadScreen(
         onComment,
         onAuthorClick,
         onHashtagClick,
+        onArticleClick,
+        state.focusedReplyId,
         onQuote,
     ) {
         actionsViewModel.eventCardHost(
@@ -186,7 +186,7 @@ fun ThreadScreen(
                 onAuthorClick = onAuthorClick,
                 onHashtagClick = onHashtagClick,
                 onQuote = onQuote,
-                onArticleClick = { articleRow = it },
+                onArticleClick = { onArticleClick(it, state.focusedReplyId) },
                 onReactLongPress = { id, pubkey ->
                     emojiReactTarget = id to pubkey
                     showFullEmojiPicker = true
@@ -425,46 +425,6 @@ fun ThreadScreen(
         }
     }
 
-    articleRow?.let { row ->
-        // Effective engagement target (kind-6/16 reposts → original event).
-        val model = remember(row.id) {
-            actionsViewModel.getEventModel(row.id) ?: row.toEventModel()
-        }
-        ArticleReaderScreen(
-            row             = row,
-            model           = model,
-            focusedCommentId = state.focusedReplyId,
-            onDismiss       = { articleRow = null },
-            onQuote         = onQuote,
-            onReact         = { actionsViewModel.react(model.engagementId, model.pubkey) },
-            onReactLongPress = {
-                emojiReactTarget = model.engagementId to model.pubkey
-                showFullEmojiPicker = true
-            },
-            pinnedEmojis    = pinnedEmojis,
-            onReactWithEmoji = { emoji ->
-                actionsViewModel.react(model.engagementId, model.pubkey, ":${emoji.shortcode}:", emoji.url)
-            },
-            onRepost        = { actionsViewModel.repost(model.engagementId, model.pubkey, row.relayUrl) },
-            onZap           = { req -> actionsViewModel.zap(model.engagementId, model.pubkey, row.relayUrl, req) },
-            onSaveNwcUri    = { uri -> actionsViewModel.saveNwcUri(uri) },
-            hasReacted      = row.engagementId in reactedIds,
-            hasReposted     = row.engagementId in repostedIds,
-            hasZapped       = row.engagementId in zappedIds,
-            isNwcConfigured = isNwcConfigured,
-            isZapLoading    = model.engagementId in zapLoadingIds,
-            extraZapSats    = optimisticSats[model.engagementId] ?: 0L,
-            zapFlash        = zapFlash,
-            onAuthorClick   = onAuthorClick,
-            onHashtagClick  = onHashtagClick,
-            lookupProfile   = actionsViewModel::lookupProfile,
-            profileFlow     = viewModel::profileFlow,
-            statsFlow       = viewModel::statsFlow,
-            zapDetailsForEvent    = viewModel::zapDetailsForEvent,
-            repostPubkeysForEvent = viewModel::repostPubkeysForEvent,
-            reactionsForEvent     = viewModel::reactionsForEvent,
-        )
-    }
 
     // ── Fullscreen video dialog ────────────────────────────────────────────
     if (videoScope.showFullscreenVideo) {

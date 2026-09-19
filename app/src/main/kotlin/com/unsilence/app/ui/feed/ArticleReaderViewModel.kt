@@ -5,6 +5,8 @@ import com.unsilence.app.ui.shared.CardDataFlow
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.unsilence.app.data.auth.KeyManager
+import com.unsilence.app.data.init.InitGate
+import com.unsilence.app.data.model.EventModel
 import com.unsilence.app.data.memory.EventStats
 import com.unsilence.app.data.memory.FeedRow
 import com.unsilence.app.data.memory.MemoryEventStore
@@ -29,10 +31,11 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
-import kotlinx.coroutines.launch
+import kotlinx.coroutines.CancellationException
 import javax.inject.Inject
 
 data class ArticleCommentsState(
@@ -40,6 +43,8 @@ data class ArticleCommentsState(
     val mutedIds: Set<String> = emptySet(),
     val depthRows: List<ModeratedReplyRow> = emptyList(),
 )
+
+internal data class ArticleContent(val row: FeedRow, val model: EventModel)
 
 /**
  * Owns the article reader's COMMENT machinery: fetch comments by the article's
@@ -59,7 +64,30 @@ class ArticleReaderViewModel @Inject constructor(
     private val cardHydrator: CardHydrator,
     private val timelineCardData: TimelineCardData,
     private val wotHydrationCoalescer: WotHydrationCoalescer,
+    private val initGate: InitGate,
 ) : ViewModel() {
+
+    val snapshotReady: Boolean get() = initGate.snapshotReady
+
+    internal fun cachedArticle(eventId: String): ArticleContent? {
+        val row = memoryEventStore.feedRowsByIds(setOf(eventId)).firstOrNull() ?: return null
+        val model = memoryEventStore.getEventModel(eventId)?.takeIf { it.article != null } ?: return null
+        return ArticleContent(row, model)
+    }
+
+    internal fun articleFlow(eventId: String): Flow<ArticleContent?> =
+        memoryEventStore.eventEntityFlow(eventId).map {
+            // Parsing remains on Default; only trusted MES payloads can become a reader.
+            memoryEventStore.getOrParseEventModel(eventId)
+            cachedArticle(eventId)
+        }.flowOn(Dispatchers.Default)
+
+    suspend fun restoreArticle(eventId: String, relayHints: List<String>) {
+        initGate.awaitSnapshot()
+        if (memoryEventStore.getNostrEvent(eventId) == null) {
+            relayPool.fetchEventById(eventId, relayHints)
+        }
+    }
 
     /** NIP-36 sensitive-content display mode (shared with feed). */
     val sensitiveContentMode: StateFlow<com.unsilence.app.data.memory.SensitiveContentMode> =
@@ -73,7 +101,7 @@ class ArticleReaderViewModel @Inject constructor(
 
     val feedWotDisplayMode: StateFlow<FeedWotDisplayMode> =
         relayPreferencesStore.feedWotDisplayModeFlow()
-            .stateIn(viewModelScope, SharingStarted.Eagerly, FeedWotDisplayMode.NUMBERS)
+            .stateIn(viewModelScope, SharingStarted.WhileSubscribed(0), FeedWotDisplayMode.NUMBERS)
 
     /**
      * Comments for an article coordinate (oldest-first), with muted rows retained as placeholders.
@@ -123,7 +151,7 @@ class ArticleReaderViewModel @Inject constructor(
      */
     @Volatile private var lastCommentCoord: String? = null
 
-    fun fetchComments(coord: String, articleId: String, authorPubkey: String, fallbackRelayUrl: String?) {
+    suspend fun fetchComments(coord: String, articleId: String, authorPubkey: String, fallbackRelayUrl: String?) {
         if (coord.isBlank()) return
         // New article → reset the reply-fetch dedupe so a prior failed child fetch
         // retries on reopen.
@@ -134,9 +162,7 @@ class ArticleReaderViewModel @Inject constructor(
         // Ensure MES knows id⇄coord in every entry point (quote/boost/search), so
         // replyCount merges #A comments + stats invalidations target the article id.
         if (articleId.isNotBlank()) memoryEventStore.registerArticleCoord(articleId, coord)
-        viewModelScope.launch {
-            relayPool.fetchArticleComments(articleRelays(authorPubkey, articleId, fallbackRelayUrl), coord)
-        }
+        relayPool.fetchArticleComments(articleRelays(authorPubkey, articleId, fallbackRelayUrl), coord)
     }
 
     /** Already-fetched comment ids (dedupe so the replies fetch can't loop). */
@@ -144,11 +170,14 @@ class ArticleReaderViewModel @Inject constructor(
 
     /** Staged fetch of replies-to-comments — descendants that carry no #a/#A tag
      *  and so aren't returned by fetchComments. Driven by the comment list. */
-    fun fetchCommentReplies(parentIds: List<String>, author: String, articleId: String, fallbackRelayUrl: String?) {
+    suspend fun fetchCommentReplies(parentIds: List<String>, author: String, articleId: String, fallbackRelayUrl: String?) {
         val novel = parentIds.filter { fetchedReplyParents.add(it) }
         if (novel.isEmpty()) return
-        viewModelScope.launch {
+        try {
             relayPool.fetchCommentReplies(articleRelays(author, articleId, fallbackRelayUrl), novel)
+        } catch (cancelled: CancellationException) {
+            fetchedReplyParents.removeAll(novel.toSet())
+            throw cancelled
         }
     }
 

@@ -33,7 +33,6 @@ import androidx.compose.material3.Text
 import com.unsilence.app.ui.shared.ResumedEffect
 import androidx.compose.runtime.Composable
 import com.unsilence.app.ui.shared.rememberCardWotLookup
-import com.unsilence.app.ui.shared.rememberArticleSelection
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
@@ -65,6 +64,7 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.sp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.lifecycle.compose.LifecycleResumeEffect
 import coil3.compose.AsyncImage
 import com.unsilence.app.ui.common.rememberAvatarImageRequest
 import com.unsilence.app.ui.common.rememberSizedImageRequest
@@ -78,7 +78,6 @@ import com.unsilence.app.ui.common.LocalNip05VerificationController
 import com.unsilence.app.ui.common.LocalShowSnackbar
 import com.unsilence.app.ui.common.ShimmerNoteCard
 import com.unsilence.app.ui.common.tabSwipe
-import com.unsilence.app.ui.feed.ArticleReaderScreen
 import com.unsilence.app.ui.feed.FullScreenVideoDialog
 import com.unsilence.app.ui.feed.NoteActionsViewModel
 import com.unsilence.app.ui.feed.NostrRichText
@@ -116,9 +115,11 @@ private val PROFILE_AVATAR_SIZE = 85.dp
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ProfileScreen(
+    onArticleClick: (FeedRow) -> Unit,
     scrollToTopTrigger: Int = 0,
     staticBottomPadding: Dp = 0.dp,
-    onLogout: () -> Unit = {},
+    onOpenSettings: () -> Unit,
+    onEditProfile: () -> Unit,
     onBack: () -> Unit = {},
     onNoteClick: (String) -> Unit = {},
     onComment: (String) -> Unit = {},
@@ -127,7 +128,6 @@ fun ProfileScreen(
     onConnectionsClick: (ConnectionsTab) -> Unit = {},
     onRelaysClick: () -> Unit = {},
     onHashtagClick: (String) -> Unit = {},
-    onBrowseRelay: (url: String, label: String) -> Unit = { _, _ -> },
     viewModel: ProfileViewModel = hiltViewModel(
         key = "profile-${LocalAppSessionKey.current}",
     ),
@@ -135,7 +135,11 @@ fun ProfileScreen(
         key = "note-actions-${LocalAppSessionKey.current}",
     ),
 ) {
-    LaunchedEffect(viewModel) { viewModel.refreshFollowingCount() }
+    LifecycleResumeEffect(viewModel) {
+        viewModel.setScreenActive(true)
+        onPauseOrDispose { viewModel.setScreenActive(false) }
+    }
+    ResumedEffect(viewModel) { viewModel.refreshFollowingCount() }
     val nip05Verifier = LocalNip05VerificationController.current
     LaunchedEffect(nip05Verifier, viewModel.pubkeyHex) {
         viewModel.pubkeyHex?.let(nip05Verifier::markProfileOpened)
@@ -164,9 +168,6 @@ fun ProfileScreen(
     val clipboard        = LocalClipboardManager.current
     val showSnackbar     = LocalShowSnackbar.current
 
-    var showEditProfile by rememberSaveable { mutableStateOf(false) }
-    var showSettings    by rememberSaveable { mutableStateOf(false) }
-    var articleRow by rememberArticleSelection(actionsViewModel)
     var actionsRow      by remember { mutableStateOf<FeedRow?>(null) }
     var showWotBreakdown by remember { mutableStateOf(false) }
 
@@ -247,6 +248,7 @@ fun ProfileScreen(
         onComment,
         interceptedAuthorClick,
         onHashtagClick,
+        onArticleClick,
         onQuote,
     ) {
         actionsViewModel.eventCardHost(
@@ -256,7 +258,7 @@ fun ProfileScreen(
                 onAuthorClick = interceptedAuthorClick,
                 onHashtagClick = onHashtagClick,
                 onQuote = onQuote,
-                onArticleClick = { articleRow = it },
+                onArticleClick = onArticleClick,
                 onReactLongPress = { id, pk ->
                     emojiReactTarget = id to pk
                     showFullEmojiPicker = true
@@ -628,7 +630,7 @@ fun ProfileScreen(
                 horizontalArrangement = Arrangement.SpaceBetween,
             ) {
                 // In-context edit entry — matches the Settings gear (white, 22dp).
-                IconButton(onClick = { showEditProfile = true }) {
+                IconButton(onClick = onEditProfile) {
                     Icon(
                         imageVector        = Icons.Filled.Edit,
                         contentDescription = "Edit profile",
@@ -636,7 +638,7 @@ fun ProfileScreen(
                         modifier           = Modifier.size(22.dp),
                     )
                 }
-                IconButton(onClick = { showSettings = true }) {
+                IconButton(onClick = onOpenSettings) {
                     Icon(
                         imageVector        = Icons.Filled.Settings,
                         contentDescription = "Settings",
@@ -649,21 +651,6 @@ fun ProfileScreen(
     }
 
     // ── Overlays ──────────────────────────────────────────────────────────────
-    if (showSettings) {
-        SettingsScreen(
-            onDismiss = { showSettings = false },
-            onLogout  = onLogout,
-            onEditProfile = { showEditProfile = true },
-            onOpenProfile = onAuthorClick,
-            onBrowseRelay = onBrowseRelay,
-        )
-    }
-    if (showEditProfile) {
-        EditProfileScreen(
-            viewModel = viewModel,
-            onDismiss = { showEditProfile = false },
-        )
-    }
     PostActionsHost(
         row = actionsRow,
         profileFlow = viewModel::profileFlow,
@@ -676,44 +663,6 @@ fun ProfileScreen(
         onDismiss = { actionsRow = null },
         showModerationActions = false,
     )
-    articleRow?.let { row ->
-        // Effective engagement target (kind-6/16 reposts → original event).
-        val model = remember(row.id) {
-            actionsViewModel.getEventModel(row.id) ?: row.toEventModel()
-        }
-        ArticleReaderScreen(
-            row             = row,
-            model           = model,
-            onDismiss       = { articleRow = null },
-            onReact         = { actionsViewModel.react(model.engagementId, model.pubkey) },
-            onReactLongPress = {
-                emojiReactTarget = model.engagementId to model.pubkey
-                showFullEmojiPicker = true
-            },
-            pinnedEmojis    = pinnedEmojis,
-            onReactWithEmoji = { emoji ->
-                actionsViewModel.react(model.engagementId, model.pubkey, ":${emoji.shortcode}:", emoji.url)
-            },
-            onRepost        = { actionsViewModel.repost(model.engagementId, model.pubkey, row.relayUrl) },
-            onZap           = { req -> actionsViewModel.zap(model.engagementId, model.pubkey, row.relayUrl, req) },
-            onSaveNwcUri    = { uri -> actionsViewModel.saveNwcUri(uri) },
-            hasReacted      = row.engagementId in reactedIds,
-            hasReposted     = row.engagementId in repostedIds,
-            hasZapped       = row.engagementId in zappedIds,
-            isNwcConfigured = isNwcConfigured,
-            isZapLoading    = model.engagementId in zapLoadingIds,
-            extraZapSats    = optimisticSats[model.engagementId] ?: 0L,
-            zapFlash        = zapFlash,
-            onAuthorClick   = interceptedAuthorClick,
-            onHashtagClick  = onHashtagClick,
-            lookupProfile   = actionsViewModel::lookupProfile,
-            profileFlow     = viewModel::profileFlow,
-            statsFlow       = viewModel::statsFlow,
-            zapDetailsForEvent    = viewModel::zapDetailsForEvent,
-            repostPubkeysForEvent = viewModel::repostPubkeysForEvent,
-            reactionsForEvent     = viewModel::reactionsForEvent,
-        )
-    }
 
     if (videoScope.showFullscreenVideo) {
         FullScreenVideoDialog(
