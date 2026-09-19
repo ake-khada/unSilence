@@ -168,7 +168,8 @@ private val OWN_PROFILE_CONTENT_KINDS = PROFILE_NOTE_REPLY_EVENT_KIND_SET + 3002
 private val NOTIFICATION_KINDS = setOf(1, 6, 7, 1018, 9735, 16, 1111)
 // Kind-5 keeps only tombstones plus a separate, bounded owner history for snapshots.
 private val DERIVED_ONLY_KINDS = setOf(5, 30166, 30382)
-private val COUNTED_NIP22_PARENT_KINDS = setOf(21, 22, 34235, 34236, 1111)
+// Some clients use kind-1111 comments on ordinary notes too; threads and counts share this gate.
+private val COUNTED_NIP22_PARENT_KINDS = setOf(1, 21, 22, 34235, 34236, 1111)
 
 /** Live-memory caps. Snapshot persistence has separate, lower bounds. */
 internal val CONTENT_EVENT_KIND_CAPS = mapOf(
