@@ -4265,7 +4265,7 @@ class MemoryEventStore @Inject constructor(
      * The source of truth for coordinate-rooted comments and descendants.
      * NIP-22 kind-1111 (uppercase `A`, filtered to kind 1111 so stale legacy
      * coord-index entries can't leak) + genuine kind-1 replies to the article event
-     * (idsByReplyTarget, excluding quote-posts).
+     * (idsByReplyTarget, excluding quote-only posts without a reply edge).
      */
     private fun articleCommentMembership(coord: String): ConversationMembership {
         val articleId = articleIdByCoord[coord]
