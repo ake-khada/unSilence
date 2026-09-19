@@ -7,8 +7,10 @@ internal const val ARTICLE_COMMENT_PAGE_SIZE = 200
 /** A bounded set of locally held replies, not a claim that relay history is complete. */
 internal data class ConversationMembership(val ids: Set<String>, val truncated: Boolean)
 
+// Callers select parsed reply edges or NIP-22 coordinate membership, never q
+// citations. A citation must not veto an independently established reply edge.
 internal fun isConversationReply(event: NostrEvent): Boolean =
-    event.kind == 1111 || (event.kind == 1 && event.tags.none { it.size >= 2 && it[0] == "q" })
+    event.kind == 1 || event.kind == 1111
 
 /**
  * One cycle-safe traversal for event and coordinate roots. Callers choose the

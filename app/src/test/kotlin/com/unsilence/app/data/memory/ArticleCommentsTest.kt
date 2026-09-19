@@ -127,8 +127,7 @@ sig = "sig", relayUrl = "wss://r.example",
     @Test
     fun `kind-1 quoting the article (q tag) is NOT indexed as a comment`() = runTest {
         insertArticle()
-        // A reply elsewhere that quotes the article: has `a` to the coord but also a
-        // `q` quote tag → must not be attributed as a comment on the article.
+        // An article reference without a reply edge must not become a comment.
         store.insert(event(id = "quoter", kind = 1, tags = listOf(listOf("a", coord), listOf("q", "article-1"))))
         assertEquals(0, store.replyCount("article-1"))
         assertEquals(emptyList<String>(), store.articleCommentsFlow(coord).first().map { it.id })
@@ -183,7 +182,7 @@ sig = "sig", relayUrl = "wss://r.example",
     }
 
     @Test
-    fun `a quote reply to a comment is excluded from descendants`() = runTest {
+    fun `a reply to a comment remains a descendant when it also cites another event`() = runTest {
         insertArticle()
         store.insert(
             NostrEvent(
@@ -195,7 +194,7 @@ sig = "sig", relayUrl = "wss://r.example",
                 firstSeenAt = System.currentTimeMillis(), relaysSeen = mutableSetOf("wss://r.example"),
             ),
         )
-        // A quote post replying to the comment → has a q tag → excluded.
+        // The q citation is independent of the existing reply edge to the comment.
         store.insert(
             NostrEvent(
                 id = "quote-child", pubkey = "d".repeat(64), kind = 1, content = "quoting",
@@ -206,7 +205,8 @@ sig = "sig", relayUrl = "wss://r.example",
                 firstSeenAt = System.currentTimeMillis(), relaysSeen = mutableSetOf("wss://r.example"),
             ),
         )
-        assertEquals(listOf("comment"), store.articleCommentsFlow(coord).first().map { it.id })
+        assertEquals(listOf("comment", "quote-child"), store.articleCommentsFlow(coord).first().map { it.id })
+        assertEquals(2, store.replyCount("article-1"))
     }
 
     @Test

@@ -2,20 +2,34 @@
 
 Canonical list of unresolved work only.
 
-Last reconciled: **2026-09-19**, navigation completion committed in `655a683e`
-on baseline `5a871f59`. This is not fresh runtime
+Last reconciled: **2026-09-19**, owner-accepted reply fixes on `bd5d728f`,
+following navigation completion `655a683e`. This is not fresh runtime
 verification of every carried product/security item. Active completion plan and
 the owner's single-midpoint human-validation override:
 [AUDIT_WORKPLAN.md](AUDIT_WORKPLAN.md).
 
-**Installed release:** navigation-completion candidate based on `5a871f59`,
+**Installed release:** combined reply fixes on `bd5d728f`, built before committing,
 updated in place on 2026-09-19; certificate and phone APK hash verified
-(`a0380fce…22490b5`). Its app/test source matches `655a683e`; the APK was built
-before committing, not rebuilt from the commit.
+(`a012d280…d0c6af4`). Exact-HEAD `bd5d728f` (`281f7a7d…1f2cffb`) is archived
+for rollback. Owner accepted the combined changes: “Validated. Commit with clear
+designatioon.” The APK has not been rebuilt from the resulting commits.
 No uninstall/data clear; app ID and first-install time unchanged, signed-in feed
-renders. Debug and test helpers are installed alongside it for validation.
+and thread rendering observed. Debug and test helpers remain installed alongside it.
 The previous exact-HEAD APK remains available for rollback.
-[Current installation and validation evidence](.toolchains/nav-completion-5a871f59.CyBHuY/VALIDATION_SUMMARY.md).
+[Current installation evidence](.toolchains/reply-notifications-bd5d728f.ijbbev/plaza-fix/STATUS.md).
+
+**Reply consistency resolved:** kind-1111 replies to ordinary notes (`d788820f`)
+and kind-1 replies containing independent quote citations now use the same
+thread/count membership as ordinary replies. Quote-only/mention-only posts and
+engagement remain excluded. Both reported signed events pass isolated checks;
+17 new regressions plus the existing suites pass. Full gate: **1,832 JVM tests,
+9 Python tests**, lint 0 errors/118 warnings, signed minified release and benchmark
+compilation. Device screenshots show PLAZA below the correct parent with its
+App Data reference preserved, and bulletbill22's parent profile card count 1.
+Owner accepted; captured session has zero app-PID fatal/OOM and app ANR markers.
+This is general device acceptance, not a timed gesture-script or performance
+comparison. Closed reply fixes are removed from the open product list below.
+[Owner validation](.toolchains/reply-notifications-bd5d728f.ijbbev/plaza-fix/owner-validation.809Vbt/SUMMARY.md).
 
 **Committed navigation follow-through (`655a683e`):** settings/editors/drafts/relay sets/articles moved
 to Nav3 entries; account-session store ownership added; own-profile timeline
@@ -496,6 +510,14 @@ this is now a runtime-choice + routing feature, not an untangling job.
   chips before results.
 
 ## P2 - Protocol and social expansion
+
+### Highlights and application references — proposed, not implemented
+
+- Evaluate explicit NIP-84 kind-9802 highlight rendering with source/context,
+  attribution and optional comment handling. Reassess after the reply fix.
+- The notification's “App Data” chip identifies a referenced kind-30078 address,
+  not necessarily the enclosing reply kind. NIP-78 data needs an application
+  schema; do not turn arbitrary application payloads into generic public notes.
 
 ### Relay sets and directory
 

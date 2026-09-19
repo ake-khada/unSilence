@@ -68,17 +68,19 @@ class ConversationMembershipTest {
     }
 
     @Test
-    fun `quotes and their otherwise unrooted subtrees are excluded at every depth`() = runTest {
+    fun `reply citations stay in the graph but quote-only subtrees and engagement do not`() = runTest {
         val store = store()
         val quote = listOf(listOf("q", "somewhere-else"))
         store.insertBatch(listOf(
             event("A"), event("B", "A"), event("direct-quote", "A", tags = quote),
             event("nested-quote", "B", tags = quote), event("quote-child", "nested-quote"),
+            event("quote-only", tags = listOf(listOf("q", "A"))), event("unrelated-child", "quote-only"),
             event("repost", "B", kind = 16), event("reaction", "B", kind = 7),
         ))
-        assertEquals(setOf("B"), store.conversationMembership("A").ids)
-        assertEquals(listOf("A", "B"), store.threadFlow("A").first().map { it.id })
-        assertEquals(1, store.replyCount("A"))
+        val replies = setOf("B", "direct-quote", "nested-quote", "quote-child")
+        assertEquals(replies, store.conversationMembership("A").ids)
+        assertEquals(replies + "A", store.threadFlow("A").first().map { it.id }.toSet())
+        assertEquals(4, store.replyCount("A"))
     }
 
     @Test
@@ -231,7 +233,7 @@ class ConversationMembershipTest {
     }
 
     @Test
-    fun `kind-1111 quoting text remains a comment unlike kind-1 quote posts`() = runTest {
+    fun `kind-1111 quoting text remains a comment`() = runTest {
         val store = store()
         val coord = "30023:author:slug"
         store.insert(event("article", kind = 30023, tags = listOf(listOf("d", "slug"))))
