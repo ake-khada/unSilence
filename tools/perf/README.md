@@ -34,8 +34,9 @@ python3 -m unittest discover -s tools/perf/tests -v
 
 ## Capture boundary
 
-Device preparation and every human gesture window follow
-`VALIDATION_PROTOCOL.md`. In particular:
+Use the [development validation guidance](../../DEVELOPMENT.md#validation).
+Device preparation and every human gesture window must follow a predeclared
+procedure. In particular:
 
 - Build and install release in place.
 - Force-stop/start and wait for bootstrap.
@@ -54,6 +55,9 @@ For each run, preserve:
 - UID network counters before and after;
 - display mode, battery state, and thermal status;
 - commit, APK hash, PID, device, workload, and any deviation.
+
+Store this raw evidence only in an ignored local directory; device and host
+details are not public repository documentation.
 
 The frame analyzer intentionally does not turn CPU, network, or battery
 counters into a verdict. Those signals need workload-specific denominators and

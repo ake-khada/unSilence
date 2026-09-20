@@ -1,0 +1,19 @@
+title = "Public source secret scanning"
+
+[extend]
+useDefault = true
+
+[[rules]]
+id = "nostr-private-key"
+description = "Encoded Nostr private key"
+regex = '''\bnsec1[023456789acdefghjklmnpqrstuvwxyz]{58}\b'''
+keywords = ["nsec1"]
+
+[[rules]]
+id = "generic-api-key"
+[[rules.allowlists]]
+description = "Parser character range, not a credential"
+condition = "AND"
+paths = ['''^app/src/main/kotlin/com/unsilence/app/data/model/PaymentTarget\.kt$''']
+regexTarget = "line"
+regexes = ['''^\s*private const val BECH32_TOKEN_CHARS = "02-9ac-hj-np-zAC-HJ-NP-Z"\s*$''']

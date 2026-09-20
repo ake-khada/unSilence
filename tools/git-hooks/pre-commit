@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+set -euo pipefail
+cd -- "$(git rev-parse --show-toplevel)"
+./dev -- python3 tools/privacy/check_public_tree.py --index-only --commit-identities
+if [[ ! -x .toolchains/gitleaks/gitleaks ]]; then
+    printf '%s\n' 'Missing secret scanner. Run ./dev setup before committing.' >&2
+    exit 1
+fi
+exec .toolchains/gitleaks/gitleaks git --staged --redact=100 --no-banner --no-color

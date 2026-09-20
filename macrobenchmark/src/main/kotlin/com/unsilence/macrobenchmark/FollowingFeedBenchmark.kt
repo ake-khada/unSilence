@@ -27,7 +27,7 @@ private const val FINAL_REST_MS = 5_000L
  * Repeatable diagnostic counterpart to the human F-01 workload.
  *
  * This benchmark is useful for regression traces and repeatability, but it does
- * not replace the final human gesture checkpoint in VALIDATION_PROTOCOL.md.
+ * not replace final human validation; see DEVELOPMENT.md for the capture boundary.
  */
 @LargeTest
 @RunWith(AndroidJUnit4::class)

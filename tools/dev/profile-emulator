@@ -23,7 +23,7 @@ case "${1:-start}" in
         ;;
     start)
         if [[ ! -r /dev/kvm || ! -w /dev/kvm ]]; then
-            printf '%s\n' 'Host KVM access is required. Run outside the command sandbox with approval.' >&2
+            printf '%s\n' 'Host KVM access is required. Check your device permissions.' >&2
             exit 1
         fi
         if [[ ! -f "$profile_avd_dir/$profile_name.ini" ]]; then

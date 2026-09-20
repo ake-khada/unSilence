@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+set -euo pipefail
+message_path="$1"
+if [[ "$message_path" != /* ]]; then
+    message_path="$PWD/$message_path"
+fi
+cd -- "$(git rev-parse --show-toplevel)"
+exec ./dev -- python3 tools/privacy/check_public_tree.py --message "$message_path"

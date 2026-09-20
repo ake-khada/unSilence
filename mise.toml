@@ -12,6 +12,7 @@ java21 = "temurin-21.0.12+8.0.LTS"
 python = "3.14.7"
 android_cli = "19.0"
 perfetto = "v58.2"
+gitleaks = "8.30.1"
 
 [env]
 JAVA21_HOME = "{{config_root}}/.toolchains/jdk21"
@@ -44,7 +45,15 @@ run = "./gradlew lintDebug"
 
 [tasks.check]
 description = "Run the full local build gate without a phone"
-run = ["./gradlew testDebugUnitTest lintDebug assembleRelease :macrobenchmark:assembleBenchmark --continue", "python3 -m unittest discover -s tools/perf/tests -v"]
+run = ["python3 tools/privacy/check_public_tree.py", "python3 -m unittest discover -s tools/privacy/tests -v", "./gradlew testDebugUnitTest lintDebug assembleRelease :macrobenchmark:assembleBenchmark --continue", "python3 -m unittest discover -s tools/perf/tests -v"]
+
+[tasks.privacy]
+description = "Check staged and publishable working files for private metadata"
+run = "python3 tools/privacy/check_public_tree.py"
+
+[tasks."privacy:secrets"]
+description = "Scan all local Git history for secrets, with redacted output"
+run = ".toolchains/gitleaks/gitleaks git --log-opts='--all --full-history' --redact=100 --no-banner --no-color"
 
 [tasks.devices]
 description = "List connected Android devices (USB debugging required)"

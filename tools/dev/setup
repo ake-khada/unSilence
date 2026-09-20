@@ -17,6 +17,7 @@ java21_version="$(mise config get --file mise.toml vars.java21)"
 python_version="$(mise config get --file mise.toml vars.python)"
 android_cli_version="$(mise config get --file mise.toml vars.android_cli)"
 perfetto_version="$(mise config get --file mise.toml vars.perfetto)"
+gitleaks_version="$(mise config get --file mise.toml vars.gitleaks)"
 
 # install-into lets mise download and verify tools without placing them in $HOME.
 # Never replace an existing tool tree implicitly; version upgrades are explicit.
@@ -28,6 +29,9 @@ if [[ ! -x .toolchains/jdk21/bin/java ]]; then
 fi
 if [[ ! -x .toolchains/python/bin/python3 ]]; then
     mise install-into "python@$python_version" "$project_dir/.toolchains/python"
+fi
+if [[ ! -x .toolchains/gitleaks/gitleaks ]]; then
+    mise install-into "gitleaks@$gitleaks_version" "$project_dir/.toolchains/gitleaks"
 fi
 if [[ ! -x .toolchains/android-sdk/cmdline-tools/$android_cli_version/bin/sdkmanager ]]; then
     mise install-into "android-sdk@$android_cli_version" "$project_dir/.toolchains/android-sdk"
