@@ -17,6 +17,7 @@ import com.unsilence.app.data.relay.WotHydrationCoalescer
 import com.unsilence.app.data.relay.wotLookupSnapshot
 import com.unsilence.app.data.repository.NotificationRepository
 import com.unsilence.app.data.repository.UserRepository
+import com.unsilence.app.data.settings.SettingsStore
 import com.unsilence.app.ui.feed.EventReferenceTarget
 import com.unsilence.app.ui.shared.TimelineCardData
 import dagger.hilt.android.lifecycle.HiltViewModel
@@ -26,6 +27,7 @@ import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.map
@@ -36,13 +38,21 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import javax.inject.Inject
+import java.io.IOException
 
 data class NotificationsUiState(
     val items: List<NotificationRow> = emptyList(),
     val loading: Boolean = true,
 )
 
-enum class NotifFilter { Following, Global }
+enum class NotifFilter {
+    Following, Global;
+
+    fun next(): NotifFilter = when (this) {
+        Following -> Global
+        Global -> Following
+    }
+}
 
 @OptIn(ExperimentalCoroutinesApi::class)
 @HiltViewModel
@@ -54,10 +64,18 @@ class NotificationsViewModel @Inject constructor(
     private val wotHydrationCoalescer: WotHydrationCoalescer,
     private val timelineCardData: TimelineCardData,
     private val notifications: NotificationRepository,
+    private val settingsStore: SettingsStore,
 ) : ViewModel() {
 
     private val _filter = MutableStateFlow(NotifFilter.Global)
     val filter: StateFlow<NotifFilter> = _filter.asStateFlow()
+    val showFilterHint = settingsStore.notificationFilterHintDismissed
+        .map { dismissed -> !dismissed }
+        .catch { error ->
+            if (error !is IOException) throw error
+            emit(false)
+        }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(0), false)
     private val _wotSubjects = MutableStateFlow<Set<String>>(emptySet())
     private val previewWotSubjects = MutableStateFlow<Set<String>>(emptySet())
     val wotLookups: StateFlow<Map<String, WotLookup>> =
@@ -148,7 +166,14 @@ class NotificationsViewModel @Inject constructor(
         viewModelScope.launch { notifications.markSeen(owner, timestamp) }
     }
 
-    fun setFilter(filter: NotifFilter) {
-        _filter.value = filter
+    fun toggleFilter() {
+        _filter.update { it.next() }
+        viewModelScope.launch {
+            try {
+                settingsStore.dismissNotificationFilterHint()
+            } catch (_: IOException) {
+                // Filtering still works if the local hint preference cannot be saved.
+            }
+        }
     }
 }

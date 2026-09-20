@@ -4,7 +4,6 @@ import com.unsilence.app.ui.theme.AppTextStyles
 import android.os.Bundle
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.LinearEasing
@@ -13,7 +12,6 @@ import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
-import androidx.compose.animation.core.snap
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -27,8 +25,6 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
-import androidx.compose.foundation.gestures.awaitEachGesture
-import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
@@ -49,10 +45,6 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.layout.widthIn
-import androidx.compose.foundation.pager.PageSize
-import androidx.compose.foundation.pager.VerticalPager
-import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.selection.selectable
@@ -63,14 +55,11 @@ import androidx.compose.material.icons.automirrored.filled.FormatAlignLeft
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
-import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.GridView
 import androidx.compose.material.icons.filled.Photo
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.SmartDisplay
 import androidx.compose.material.icons.outlined.EditNote
-import androidx.compose.material.icons.outlined.GppBad
-import androidx.compose.material.icons.outlined.GppGood
 import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material.icons.outlined.Home
 import androidx.compose.material.icons.outlined.Notifications
@@ -91,7 +80,6 @@ import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.State
-import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import com.unsilence.app.ui.shared.ResumedEffect
@@ -99,7 +87,6 @@ import com.unsilence.app.ui.shared.FeedDividerBrush
 import androidx.compose.runtime.snapshotFlow
 import kotlinx.coroutines.flow.collectLatest
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
@@ -115,14 +102,11 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
 import androidx.compose.ui.input.nestedscroll.NestedScrollSource
 import androidx.compose.ui.input.nestedscroll.nestedScroll
-import androidx.compose.ui.input.pointer.pointerInput
-import androidx.compose.ui.input.pointer.positionChange
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.contentDescription
@@ -132,7 +116,6 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.compose.ui.util.lerp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import coil3.compose.AsyncImage
@@ -154,7 +137,6 @@ import com.unsilence.app.ui.feed.FilterIconKind
 import com.unsilence.app.ui.feed.filterIconKind
 import com.unsilence.app.ui.feed.isImmersiveVideoMode
 import com.unsilence.app.ui.feed.NoteActionsViewModel
-import com.unsilence.app.ui.notifications.NotifFilter
 import com.unsilence.app.ui.notifications.NotificationsScreen
 import com.unsilence.app.ui.notifications.NotificationsViewModel
 import com.unsilence.app.ui.onboarding.StartYourGraphScreen
@@ -186,9 +168,7 @@ import com.unsilence.app.ui.theme.Sizing
 import com.unsilence.app.ui.theme.Spacing
 import com.unsilence.app.ui.theme.Surface1
 import com.unsilence.app.ui.theme.TextSecondary
-import com.unsilence.app.ui.theme.Zap
 import com.unsilence.app.ui.thread.ThreadScreen
-import kotlin.math.absoluteValue
 import kotlinx.coroutines.launch
 
 private val NavUnselected = Text3
@@ -355,7 +335,7 @@ fun AppNavigation(
     val immersiveVideoMode = selectedTab == 0 && currentFilter.isImmersiveVideoMode()
     val topBarShown    = splashDone && barsVisible && selectedTab != 1 && selectedTab != 3 && !immersiveVideoMode
     val bottomBarShown = splashDone && barsVisible && !immersiveVideoMode
-    val activeTopBarHeight = if (selectedTab == 0) Sizing.feedTopBarHeight else Sizing.topBarHeight
+    val activeTopBarHeight = if (selectedTab == 0 || selectedTab == 2) Sizing.feedTopBarHeight else Sizing.topBarHeight
 
     val topBarOffset by animateDpAsState(
         targetValue   = if (topBarShown) 0.dp else -(activeTopBarHeight + statusBarHeight + 8.dp),
@@ -503,26 +483,14 @@ fun AppNavigation(
                         contentAlignment = Alignment.Center,
                     ) {
                         if (selectedTab == 2) {
-                            // Notification header keeps its established 52dp geometry.
-                            Box(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .padding(horizontal = Spacing.medium),
-                            ) {
-                                LogoMark(
-                                    sizeDp = Spacing.xxl,
-                                    static = false,
-                                    modifier = Modifier
-                                        .align(Alignment.CenterStart)
-                                        .offset(x = (-8).dp),
-                                )
-                                // Center: notification filter carousel
-                                NotifFilterCarousel(
-                                    current = requireNotNull(notifViewModel).filter.collectAsStateWithLifecycle().value,
-                                    onChanged = { requireNotNull(notifViewModel).setFilter(it) },
-                                    modifier = Modifier.align(Alignment.Center),
-                                )
-                            }
+                            val notifications = requireNotNull(notifViewModel)
+                            NotificationHeader(
+                                current = notifications.filter.collectAsStateWithLifecycle().value,
+                                showHint = notifications.showFilterHint.collectAsStateWithLifecycle().value &&
+                                    topBarShown && navigator.backStack.size == 1,
+                                motionEnabled = headerMotionEnabled,
+                                onToggle = notifications::toggleFilter,
+                            )
                         } else {
                             UnifiedFeedHeader(
                                 feedType = feedType,
@@ -531,9 +499,9 @@ fun AppNavigation(
                                 pullFraction = pullRefreshFraction,
                                 isRefreshing = isFeedRefreshing,
                                 motionEnabled = headerMotionEnabled,
+                                sourceExpanded = showFeedSheet,
                                 onLogoClick = { scrollToTopTrigger++ },
                                 onSourceClick = { showFeedSheet = true },
-                                onLensToggle = feedViewModel::setGlobalFeedLens,
                                 onFilterClick = { showFilter = true },
                             )
                         }
@@ -838,6 +806,8 @@ fun AppNavigation(
                 val relayManagementVm: RelayManagementViewModel = hiltViewModel(key = "relay-sheet-$sessionKey")
                 FeedSelectorSheet(
                     feedType        = feedType,
+                    globalFeedLens  = globalFeedLens,
+                    onGlobalLensChanged = feedViewModel::setGlobalFeedLens,
                     userSets        = userSets,
                     pinnedRelays    = pinnedRelays,
                     viewModel       = relayManagementVm,
@@ -886,58 +856,26 @@ private fun UnifiedFeedHeader(
     pullFraction: State<Float>,
     isRefreshing: Boolean,
     motionEnabled: Boolean,
+    sourceExpanded: Boolean,
     onLogoClick: () -> Unit,
     onSourceClick: () -> Unit,
-    onLensToggle: (GlobalFeedLens) -> Unit,
     onFilterClick: () -> Unit,
 ) {
     val elements = feedHeaderElements(feedType, lens, filter)
-    val targetLensAccent = when (elements.lens) {
-        GlobalFeedLens.TRUSTED -> Mint
-        GlobalFeedLens.RAW -> Zap
-        null -> Brand
-    }
-    var previousLens by remember { mutableStateOf(elements.lens) }
-    val lensAnimationSpec = remember(elements.lens, motionEnabled) {
-        if (shouldAnimateLensTransition(previousLens, elements.lens, motionEnabled)) {
-            tween<Color>(durationMillis = LENS_TINT_TRANSITION_MS)
-        } else {
-            snap<Color>()
-        }
-    }
-    SideEffect { previousLens = elements.lens }
-    val lensAccent by animateColorAsState(
-        targetValue = targetLensAccent,
-        animationSpec = lensAnimationSpec,
-        label = "feedLensAccent",
-    )
     val barHeightScale = rememberPullBarHeightScale(
         pullFraction = pullFraction,
         isRefreshing = isRefreshing,
         motionEnabled = motionEnabled,
     )
 
-    Box(
-        modifier = Modifier
-            .fillMaxWidth()
-            .height(Sizing.feedTopBarHeight),
-        contentAlignment = Alignment.Center,
-    ) {
-        FeedHeaderHairline(
-            accent = lensAccent,
-            isRefreshing = isRefreshing,
-            motionEnabled = motionEnabled,
-        )
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = Spacing.large),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
+    HeaderFrame(
+        accent = Brand,
+        isRefreshing = isRefreshing,
+        motionEnabled = motionEnabled,
+        start = {
             LogoMark(
                 sizeDp = Spacing.xxl,
-                firstBarColor = lensAccent,
+                firstBarColor = Brand,
                 barHeightScale = { barHeightScale.value },
                 static = !motionEnabled,
                 modifier = Modifier
@@ -948,29 +886,25 @@ private fun UnifiedFeedHeader(
                         onClick = onLogoClick,
                     ),
             )
+        },
+        center = {
             FeedSourcePill(
                 label = elements.sourceLabel,
                 onClick = onSourceClick,
+                lens = elements.lens,
+                expanded = sourceExpanded,
+                motionEnabled = motionEnabled,
             )
-            elements.lens?.let { activeLens ->
-                FeedTrustChip(
-                    lens = activeLens,
-                    onClick = {
-                        onLensToggle(
-                            if (activeLens == GlobalFeedLens.TRUSTED) GlobalFeedLens.RAW
-                            else GlobalFeedLens.TRUSTED,
-                        )
-                    },
-                )
-            }
+        },
+        end = {
             FeedFormatAction(
                 activeShowTypes = elements.activeShowTypes,
                 contentDescription = elements.formatContentDescription,
                 filterActive = filter.isNonDefault,
                 onClick = onFilterClick,
             )
-        }
-    }
+        },
+    )
 }
 
 @Composable
@@ -1000,7 +934,7 @@ private fun rememberPullBarHeightScale(
 }
 
 @Composable
-private fun FeedHeaderHairline(
+internal fun FeedHeaderHairline(
     accent: Color,
     isRefreshing: Boolean,
     motionEnabled: Boolean,
@@ -1069,91 +1003,6 @@ private fun FeedHeaderHairline(
 }
 
 @Composable
-private fun FeedSourcePill(
-    label: String,
-    onClick: () -> Unit,
-) {
-    Row(
-        modifier = Modifier
-            .height(32.dp)
-            .widthIn(max = 118.dp)
-            .clip(RoundedCornerShape(16.dp))
-            .background(Surface1)
-            .border(1.dp, Color.White.copy(alpha = 0.10f), RoundedCornerShape(16.dp))
-            .semantics { contentDescription = "Feed source: $label. Tap to change" }
-            .clickable(
-                interactionSource = remember { MutableInteractionSource() },
-                indication = androidx.compose.foundation.LocalIndication.current,
-                onClick = onClick,
-            )
-            .padding(start = 10.dp, end = 7.dp),
-        horizontalArrangement = Arrangement.spacedBy(Spacing.micro),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Text(
-            text = label,
-            color = Color.White,
-            style = AppTextStyles.bodySmall,
-            fontWeight = FontWeight.SemiBold,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-            modifier = Modifier.weight(1f, fill = false),
-        )
-        Icon(
-            imageVector = Icons.Filled.ExpandMore,
-            contentDescription = null,
-            tint = TextSecondary,
-            modifier = Modifier.size(16.dp),
-        )
-    }
-}
-
-@Composable
-private fun FeedTrustChip(
-    lens: GlobalFeedLens,
-    onClick: () -> Unit,
-) {
-    val trusted = lens == GlobalFeedLens.TRUSTED
-    val accent = if (trusted) Mint else Zap
-    val description = if (trusted) {
-        "Trusted lens — tap for raw"
-    } else {
-        "Raw feed — tap for trusted"
-    }
-    Row(
-        modifier = Modifier
-            .height(32.dp)
-            .clip(RoundedCornerShape(16.dp))
-            .background(accent.copy(alpha = 0.12f))
-            .border(1.dp, accent.copy(alpha = 0.45f), RoundedCornerShape(16.dp))
-            .semantics { contentDescription = description }
-            .clickable(
-                interactionSource = remember { MutableInteractionSource() },
-                indication = androidx.compose.foundation.LocalIndication.current,
-                onClick = onClick,
-            )
-            .padding(horizontal = if (trusted) 7.dp else 9.dp),
-        horizontalArrangement = Arrangement.spacedBy(Spacing.micro),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Icon(
-            imageVector = if (trusted) Icons.Outlined.GppGood else Icons.Outlined.GppBad,
-            contentDescription = null,
-            tint = accent,
-            modifier = Modifier.size(17.dp),
-        )
-        if (!trusted) {
-            Text(
-                text = "Raw",
-                color = accent,
-                style = AppTextStyles.footnote,
-                fontWeight = FontWeight.SemiBold,
-            )
-        }
-    }
-}
-
-@Composable
 private fun FeedFormatAction(
     activeShowTypes: List<ShowType>,
     contentDescription: String?,
@@ -1205,115 +1054,14 @@ private fun FeedFormatAction(
     }
 }
 
-// ── Notification filter carousel (revolver only, no tap-to-open) ─────────
-
-@OptIn(ExperimentalFoundationApi::class)
-@Composable
-private fun NotifFilterCarousel(
-    current: NotifFilter,
-    onChanged: (NotifFilter) -> Unit,
-    modifier: Modifier = Modifier,
-) {
-    val items = NotifFilter.entries
-    val realCount = items.size
-    val virtualCount = realCount * 10_000
-    val middleBase = (virtualCount / 2 / realCount) * realCount
-    val initialPage = middleBase + items.indexOf(current)
-
-    val pagerState = rememberPagerState(initialPage = initialPage) { virtualCount }
-    val coroutineScope = rememberCoroutineScope()
-
-    val selectedNow by rememberUpdatedState(current)
-    val onChangedNow by rememberUpdatedState(onChanged)
-    val haptic = LocalHapticFeedback.current
-
-    LaunchedEffect(current) {
-        val targetReal = items.indexOf(current)
-        val currentReal = pagerState.currentPage.mod(realCount)
-        if (targetReal != currentReal) {
-            pagerState.animateScrollToPage(pagerState.currentPage + (targetReal - currentReal))
-        }
-    }
-
-    val pageHeightDp = 26.dp
-
-    Box(
-        modifier = modifier
-            .height(pageHeightDp * 1.7f)
-            .widthIn(min = 80.dp, max = 150.dp)
-            .clip(RoundedCornerShape(10.dp))
-            .pointerInput(pagerState, haptic) {
-                awaitEachGesture {
-                    val down = awaitFirstDown(requireUnconsumed = false)
-                    val startingSelection = selectedNow
-                    down.consume()
-                    do {
-                        val event = awaitPointerEvent()
-                        val change = event.changes.firstOrNull() ?: break
-                        if (change.pressed) {
-                            val dragY = change.positionChange().y
-                            change.consume()
-                            pagerState.dispatchRawDelta(-dragY)
-                        } else {
-                            break
-                        }
-                    } while (true)
-                    coroutineScope.launch {
-                        pagerState.animateScrollToPage(pagerState.currentPage)
-                        val settled = items[pagerState.settledPage.mod(realCount)]
-                        if (settled != selectedNow) onChangedNow(settled)
-                        if (settled != startingSelection) {
-                            haptic.performHapticFeedback(HapticFeedbackType.SegmentTick)
-                        }
-                    }
-                }
-            },
-        contentAlignment = Alignment.Center,
-    ) {
-        VerticalPager(
-            state = pagerState,
-            pageSize = PageSize.Fixed(pageHeightDp),
-            beyondViewportPageCount = 1,
-            userScrollEnabled = false,
-            modifier = Modifier
-                .height(pageHeightDp * 1.7f)
-                .fillMaxWidth(),
-        ) { page ->
-            val realIdx = page.mod(realCount)
-
-            Box(
-                modifier = Modifier
-                    .height(pageHeightDp)
-                    .fillMaxWidth()
-                    .graphicsLayer {
-                        val pageOffset = ((pagerState.currentPage - page) +
-                            pagerState.currentPageOffsetFraction).absoluteValue
-                        alpha = lerp(1f, 0.12f, pageOffset.coerceIn(0f, 1f))
-                        val scale = lerp(1f, 0.65f, pageOffset.coerceIn(0f, 1f))
-                        scaleX = scale
-                        scaleY = scale
-                    },
-                contentAlignment = Alignment.Center,
-            ) {
-                Text(
-                    text = items[realIdx].name,
-                    color = Color.White,
-                    style = AppTextStyles.body,
-                    fontWeight = FontWeight.SemiBold,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
-            }
-        }
-    }
-}
-
 // ── Feed selector bottom sheet ────────────────────────────────────────────
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
 private fun FeedSelectorSheet(
     feedType: FeedType,
+    globalFeedLens: GlobalFeedLens,
+    onGlobalLensChanged: (GlobalFeedLens) -> Unit,
     userSets: List<RelaySet>,
     pinnedRelays: List<FeedType.SingleRelay>,
     viewModel: RelayManagementViewModel,
@@ -1394,7 +1142,12 @@ private fun FeedSelectorSheet(
             // ── Core feeds ──
             SectionLabel("Feeds")
             SheetItem("Following", FeedType.Following)
-            SheetItem("Global", FeedType.Global)
+            GlobalFeedSelectorRow(
+                selected = isSelected(FeedType.Global),
+                lens = globalFeedLens,
+                onSelect = { onFeedChanged(FeedType.Global) },
+                onLensChanged = onGlobalLensChanged,
+            )
 
             // ── Pinned relays ──
             val visiblePinned = pinnedRelays

@@ -16,7 +16,7 @@ internal data class FeedHeaderElements(
     val lens: GlobalFeedLens?,
     val activeShowTypes: List<ShowType>,
 ) {
-    val showTrustChip: Boolean
+    val showTrustIndicator: Boolean
         get() = lens != null
 
     val showFormatChip: Boolean

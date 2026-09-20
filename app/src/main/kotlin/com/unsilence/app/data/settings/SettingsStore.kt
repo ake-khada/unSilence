@@ -3,6 +3,7 @@ package com.unsilence.app.data.settings
 import android.content.Context
 import androidx.datastore.core.DataStore
 import androidx.datastore.preferences.core.Preferences
+import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.stringSetPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
@@ -11,6 +12,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import javax.inject.Inject
@@ -19,11 +21,22 @@ import javax.inject.Singleton
 private val Context.settingsPrefs: DataStore<Preferences> by preferencesDataStore(name = "settings_prefs")
 
 @Singleton
-class SettingsStore @Inject constructor(
-    @ApplicationContext private val context: Context,
+class SettingsStore internal constructor(
+    private val dataStore: DataStore<Preferences>,
 ) {
-    private val dataStore get() = context.settingsPrefs
+    @Inject
+    constructor(@ApplicationContext context: Context) : this(context.settingsPrefs)
+
     private val editMutex = Mutex()
+
+    // Interaction education is installation-wide, not tied to a Nostr account.
+    val notificationFilterHintDismissed = dataStore.data.map {
+        it[NOTIFICATION_FILTER_HINT_DISMISSED] ?: false
+    }
+
+    suspend fun dismissNotificationFilterHint() {
+        dataStore.edit { it[NOTIFICATION_FILTER_HINT_DISMISSED] = true }
+    }
 
     private val _activeOwner = MutableStateFlow<String?>(null)
     private val _pinnedEmojiShortcodes = MutableStateFlow<Set<String>>(emptySet())
@@ -55,3 +68,5 @@ class SettingsStore @Inject constructor(
     private fun pinnedEmojiKey(owner: String) =
         stringSetPreferencesKey("${owner}_pinned_emoji_shortcodes")
 }
+
+private val NOTIFICATION_FILTER_HINT_DISMISSED = booleanPreferencesKey("notification_filter_hint_dismissed")

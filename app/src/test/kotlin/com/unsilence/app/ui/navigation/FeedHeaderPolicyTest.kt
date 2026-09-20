@@ -63,11 +63,11 @@ class FeedHeaderPolicyTest {
             FeedFilter(),
         )
 
-        assertTrue(trusted.showTrustChip)
+        assertTrue(trusted.showTrustIndicator)
         assertEquals(GlobalFeedLens.TRUSTED, trusted.lens)
         assertEquals(GlobalFeedLens.RAW, raw.lens)
-        assertFalse(following.showTrustChip)
-        assertFalse(relay.showTrustChip)
+        assertFalse(following.showTrustIndicator)
+        assertFalse(relay.showTrustIndicator)
         assertEquals("Following", following.sourceLabel)
         assertEquals("nos.lol", relay.sourceLabel)
     }
@@ -107,7 +107,7 @@ class FeedHeaderPolicyTest {
         )
 
         assertEquals("A very long relay set name", elements.sourceLabel)
-        assertFalse(elements.showTrustChip)
+        assertFalse(elements.showTrustIndicator)
         assertTrue(elements.showFormatChip)
         assertEquals("Articles filter", elements.formatContentDescription)
     }
