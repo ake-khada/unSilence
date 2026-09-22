@@ -1,6 +1,8 @@
 package com.unsilence.app.data.relay
 
+import com.unsilence.app.data.auth.MuteKeyProvider
 import com.unsilence.app.data.memory.FeedRow
+import com.unsilence.app.data.memory.MemoryEventStore
 import com.unsilence.app.data.memory.UserEntity
 import com.unsilence.app.data.memory.WotAssertionEntity
 import com.unsilence.app.data.memory.WotLookup
@@ -9,10 +11,13 @@ import com.unsilence.app.data.model.EventModel
 import com.unsilence.app.data.model.MediaManifest
 import com.unsilence.app.data.model.Segment
 import com.unsilence.app.data.model.ThreadRefs
+import com.vitorpamplona.quartz.nip01Core.relay.normalizer.NormalizedRelayUrl
+import com.vitorpamplona.quartz.nip19Bech32.entities.NEvent
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -459,12 +464,87 @@ class WotSurfacePolicyTest {
             "quote" to model(id = "quote", pubkey = resolvedQuoteAuthor),
         )
 
-        for (parseMissing in listOf(true, false)) {
+        assertEquals(
+            setOf(rowAuthor, parentAuthor, quoteHintAuthor, resolvedQuoteAuthor, addressAuthor),
+            wotSubjectsForFeedRows(listOf(row)) { models[it] },
+        )
+    }
+
+    @Test
+    fun `repeated cold trust discovery never parses note article or comment bodies`() {
+        val store = MemoryEventStore(object : MuteKeyProvider {}, stubTimelineServiceProvider())
+        val author = hex("a")
+        val quoteAuthor = hex("b")
+        val reference = NEvent.create(hex("c"), quoteAuthor, null, null as NormalizedRelayUrl?)
+        val events = listOf(1, 30023, 1111).mapIndexed { index, kind ->
+            EventDto(
+                id = index.toString(16).padStart(64, '0'), pubkey = author, kind = kind,
+                content = "nostr:$reference\n" + "Synthetic long body. ".repeat(2_000),
+                createdAt = 1, tags = emptyList(), sig = "0".repeat(128),
+            ).toNostrEvent("wss://relay.example")
+        }
+        store.insertBatch(events)
+        val rows = store.feedRowsByIds(events.map { it.id }.toSet())
+        assertEquals(3, rows.size)
+        repeat(30) {
+            assertEquals(setOf(author), wotSubjectsForFeedRows(rows, store::getEventModel))
+            events.forEach { event -> assertNull(store.getEventModel(event.id)) }
+        }
+
+        // Only warm the selected row. Subsequent subject discovery sees its
+        // quote author without parsing the remaining offscreen rows.
+        val warmed = requireNotNull(store.getOrParseEventModel(events.first().id))
+        assertTrue(warmed.segments.any { it is Segment.QuoteEvent && it.author == quoteAuthor })
+        repeat(30) {
+            assertEquals(setOf(author, quoteAuthor), wotSubjectsForFeedRows(rows, store::getEventModel))
+            assertSame(warmed, store.getOrParseEventModel(events.first().id))
+            events.drop(1).forEach { event -> assertNull(store.getEventModel(event.id)) }
+        }
+    }
+
+    @Test
+    fun `late cached root and quote resolution adds trusted source authors`() {
+        val row = feedRow("reply", hex("a"), replyToId = "parent").copy(rootId = "root")
+        val models = mutableMapOf(
+            "reply" to model("reply", hex("a")),
+            "parent" to model("parent", hex("b")),
+        )
+        assertEquals(setOf(hex("a"), hex("b")), wotSubjectsForFeedRows(listOf(row), models::get))
+        models["root"] = model("root", hex("c"), listOf(
+            Segment.QuoteEvent(eventId = "quote", hints = emptyList(), author = null),
+        ))
+        models["quote"] = model("quote", hex("d")).copy(sourcePubkey = hex("e"))
+        assertEquals(
+            setOf(hex("a"), hex("b"), hex("c"), hex("d"), hex("e")),
+            wotSubjectsForFeedRows(listOf(row), models::get),
+        )
+    }
+
+    @Test
+    fun `both repost kinds use cached trusted identities never raw embedded author`() {
+        val reposter = hex("a")
+        val verifiedAuthor = hex("b")
+        val rawAuthor = hex("c")
+        for (kind in listOf(6, 16)) {
+            val row = feedRow("repost", reposter).copy(
+                kind = kind,
+                content = """{"pubkey":"$rawAuthor","kind":1,"content":"unverified"}""",
+            )
+            assertEquals(setOf(reposter), wotSubjectsForFeedRows(listOf(row)) { null })
+            val trusted = model("repost", verifiedAuthor).copy(kind = kind, sourcePubkey = reposter)
             assertEquals(
-                setOf(rowAuthor, parentAuthor, quoteHintAuthor, resolvedQuoteAuthor, addressAuthor),
-                wotSubjectsForFeedRows(listOf(row), parseMissingModels = parseMissing) { models[it] },
+                setOf(reposter, verifiedAuthor),
+                wotSubjectsForFeedRows(listOf(row)) { trusted },
             )
         }
+    }
+
+    @Test
+    fun `missing models still normalize and deduplicate row authors`() {
+        val rows = listOf(
+            feedRow("a", hex("A")), feedRow("b", hex("a")), feedRow("c", "invalid"),
+        )
+        assertEquals(setOf(hex("a")), wotSubjectsForFeedRows(rows) { null })
     }
 
     private fun user(

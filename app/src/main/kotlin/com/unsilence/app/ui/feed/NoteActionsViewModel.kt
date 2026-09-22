@@ -334,8 +334,7 @@ class NoteActionsViewModel @Inject constructor(
                 wotHydrationCoalescer.requestHydration(
                     wotSubjectsForFeedRows(
                         boundedRows,
-                        parseMissingModels = false,
-                        modelProvider = memoryEventStore::getEventModel,
+                        cachedModelProvider = memoryEventStore::getEventModel,
                     )
                 )
                 cardHydrator.warmUpcomingAssets(

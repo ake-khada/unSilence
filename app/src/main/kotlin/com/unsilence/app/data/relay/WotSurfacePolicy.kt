@@ -3,7 +3,6 @@ package com.unsilence.app.data.relay
 import com.unsilence.app.data.memory.FeedRow
 import com.unsilence.app.data.memory.UserEntity
 import com.unsilence.app.data.memory.WotLookup
-import com.unsilence.app.data.memory.toEventModel
 import com.unsilence.app.data.model.EventModel
 import com.unsilence.app.data.model.Segment
 
@@ -329,12 +328,14 @@ internal fun wotLookupSnapshot(
         .distinct()
         .associateWith(lookup)
 
+/**
+ * Trust discovery must never parse a body on a cache miss. Viewport warmers fill
+ * the shared trusted-model cache off Main within their existing row budgets;
+ * visible embedded-card callbacks supply subjects that resolve later.
+ */
 internal fun wotSubjectsForFeedRows(
     rows: Collection<FeedRow>,
-    // Whole-result projections must not parse offscreen bodies just to find badges.
-    // Their visible-card callbacks supply quote subjects once a model is available.
-    parseMissingModels: Boolean = true,
-    modelProvider: ((String) -> EventModel?)? = null,
+    cachedModelProvider: (String) -> EventModel?,
 ): Set<String> {
     val subjects = LinkedHashSet<String>()
     fun addModelSubjects(model: EventModel) {
@@ -344,7 +345,7 @@ internal fun wotSubjectsForFeedRows(
             when (segment) {
                 is Segment.QuoteEvent -> {
                     normalizeWotPubkey(segment.author)?.let(subjects::add)
-                    modelProvider?.invoke(segment.eventId)?.let { quoted ->
+                    cachedModelProvider(segment.eventId)?.let { quoted ->
                         normalizeWotPubkey(quoted.pubkey)?.let(subjects::add)
                         normalizeWotPubkey(quoted.sourcePubkey)?.let(subjects::add)
                     }
@@ -358,16 +359,13 @@ internal fun wotSubjectsForFeedRows(
         normalizeWotPubkey(row.pubkey)?.let(subjects::add)
         val replyToId = row.replyToId
         if (!replyToId.isNullOrBlank()) {
-            modelProvider?.invoke(replyToId)?.let(::addModelSubjects)
+            cachedModelProvider(replyToId)?.let(::addModelSubjects)
         }
         val rootId = row.rootId
         if (!rootId.isNullOrBlank() && rootId != replyToId) {
-            modelProvider?.invoke(rootId)?.let(::addModelSubjects)
+            cachedModelProvider(rootId)?.let(::addModelSubjects)
         }
-        val model = modelProvider?.invoke(row.id) ?: if (parseMissingModels) {
-            runCatching { row.toEventModel() }.getOrNull()
-        } else null
-        if (model != null) addModelSubjects(model)
+        cachedModelProvider(row.id)?.let(::addModelSubjects)
     }
     return subjects
 }

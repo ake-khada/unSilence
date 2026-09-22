@@ -70,8 +70,8 @@ internal fun Flow<SearchResultsBundle>.projectSearchResults(
     }.toMap()
     val subjects = buildSet {
         addAll(people.map { it.pubkey })
-        addAll(wotSubjectsForFeedRows(notes, parseMissingModels = false, modelProvider = cachedModelProvider))
-        addAll(wotSubjectsForFeedRows(tags, parseMissingModels = false, modelProvider = cachedModelProvider))
+        addAll(wotSubjectsForFeedRows(notes, cachedModelProvider = cachedModelProvider))
+        addAll(wotSubjectsForFeedRows(tags, cachedModelProvider = cachedModelProvider))
     }
     SearchResultProjection(notes, tags, people, risks, subjects)
 }.flowOn(Dispatchers.Default).buffer(Channel.CONFLATED)

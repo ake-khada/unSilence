@@ -308,7 +308,7 @@ class ProfileViewModel @Inject constructor(
                 addAll(
                     wotSubjectsForFeedRows(
                         posts.subList(dataFirst, dataLast + 1),
-                        modelProvider = memoryEventStore::getEventModel,
+                        cachedModelProvider = memoryEventStore::getEventModel,
                     )
                 )
             }

@@ -49,6 +49,7 @@ import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
@@ -177,7 +178,17 @@ class ThreadViewModel @Inject constructor(
     // until clearThread; navigation explicitly supplies its resumed lifecycle.
     private val screenActive = MutableStateFlow(false)
 
-    fun setScreenActive(active: Boolean) { screenActive.value = active }
+    fun setScreenActive(active: Boolean) {
+        screenActive.value = active
+        if (active) wotHydrationCoalescer.requestHydration(_wotSubjects.value)
+    }
+
+    /** Include authors of visible quotes/parents that resolved after the row batch. */
+    fun requestWotHydration(pubkeys: Collection<String>) {
+        if (pubkeys.isEmpty()) return
+        _wotSubjects.update { current -> current + pubkeys }
+        if (screenActive.value) wotHydrationCoalescer.requestHydration(pubkeys)
+    }
     @Volatile private var articleCommentRelays: List<String> = emptyList()
     private val fetchedArticleCoords = ConcurrentHashMap.newKeySet<String>()
     private val fetchedReplyDescendants = ConcurrentHashMap.newKeySet<String>()
@@ -285,7 +296,7 @@ class ThreadViewModel @Inject constructor(
                     )
                     val subjects = wotSubjectsForFeedRows(
                         listOfNotNull(focused) + flatList.filterNot { it.muted }.map { it.row },
-                        modelProvider = memoryEventStore::getEventModel,
+                        cachedModelProvider = memoryEventStore::getEventModel,
                     )
                     _wotSubjects.value = subjects
                     wotHydrationCoalescer.requestHydration(subjects)

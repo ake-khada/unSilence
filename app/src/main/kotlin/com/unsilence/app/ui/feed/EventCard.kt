@@ -141,6 +141,11 @@ fun EventCard(
         }
     }
 
+    // A cold trust-discovery pass only knows the row author. Report the trusted
+    // display/source identities once rendered, including resolved reposts.
+    LaunchedEffect(model.pubkey, model.sourcePubkey) {
+        surface.onWotSubjectsVisible(setOf(model.pubkey, model.sourcePubkey))
+    }
     val authorProfile = collectProfileAsState(model.pubkey, surface.profileFlow)
     // Self-reposts reuse the same resolved author, too.
     val liveSourceProfile = if (model.repost != null && model.sourcePubkey == model.pubkey) {

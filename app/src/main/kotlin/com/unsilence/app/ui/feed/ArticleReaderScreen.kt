@@ -216,7 +216,7 @@ fun ArticleReaderScreen(
                 addAll(
                     wotSubjectsForFeedRows(
                         comments.filterNot { it.id in commentsState.mutedIds },
-                        modelProvider = commentActionsVm::getEventModel,
+                        cachedModelProvider = commentActionsVm::getCachedEventModel,
                     )
                 )
             }

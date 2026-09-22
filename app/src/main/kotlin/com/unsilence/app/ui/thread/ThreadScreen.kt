@@ -203,8 +203,7 @@ fun ThreadScreen(
             sensitiveMode = sensitiveMode,
             wotLookup = wotLookup,
             feedWotDisplayMode = feedWotDisplayMode,
-            // The ThreadViewModel hydrates the complete visible row set as one batch.
-            onWotSubjectsVisible = {},
+            onWotSubjectsVisible = viewModel::requestWotHydration,
             pollActions = pollActions,
         )
     }

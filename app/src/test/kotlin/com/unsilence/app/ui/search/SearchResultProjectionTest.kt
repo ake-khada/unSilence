@@ -69,7 +69,7 @@ class SearchResultProjectionTest {
             // The actual shared cache path used by the bounded card warmer.
             val cached = store.getOrParseEventModel(article.id)
             assertSame(cached, store.getOrParseEventModel(article.id))
-            assertTrue(wotSubjectsForFeedRows(rows).contains(quotedAuthor)) // fixture really contains a quote
+            assertTrue(wotSubjectsForFeedRows(rows, store::getEventModel).contains(quotedAuthor))
             updates.send(bundle)
             assertEquals(setOf(author, quotedAuthor), awaitItem().wotSubjects)
             assertSame(cached, store.getEventModel(article.id))

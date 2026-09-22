@@ -715,7 +715,7 @@ class FeedViewModel @Inject constructor(
     }
 
     private fun requestVisibleWotHydration(rows: List<FeedRow>) {
-        val subjects = wotSubjectsForFeedRows(rows, modelProvider = memoryEventStore::getEventModel)
+        val subjects = wotSubjectsForFeedRows(rows, cachedModelProvider = memoryEventStore::getEventModel)
         _wotSubjects.value = subjects
         wotHydrationCoalescer.requestHydration(subjects)
     }
