@@ -49,7 +49,9 @@ import com.vitorpamplona.quartz.nip25Reactions.ReactionEvent
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -320,10 +322,22 @@ class NoteActionsViewModel @Inject constructor(
                 if (warmStart < safeFirst) addAll(rows.subList(warmStart, safeFirst))
                 if (visibleEnd < warmEnd) addAll(rows.subList(visibleEnd, warmEnd))
             }
-            wotHydrationCoalescer.requestHydration(
-                wotSubjectsForFeedRows(warmRows, modelProvider = memoryEventStore::getEventModel)
-            )
             viewModelScope.launch(Dispatchers.Default) {
+                // Search (and other non-feed surfaces) reaches this from Main.
+                // Fill the shared trusted-model cache once, within the existing
+                // asset budget, instead of reparsing uncached bodies on Main.
+                val boundedRows = warmRows.take(maxRows.coerceAtLeast(0))
+                for (row in boundedRows) {
+                    currentCoroutineContext().ensureActive()
+                    memoryEventStore.getOrParseEventModel(row.id)
+                }
+                wotHydrationCoalescer.requestHydration(
+                    wotSubjectsForFeedRows(
+                        boundedRows,
+                        parseMissingModels = false,
+                        modelProvider = memoryEventStore::getEventModel,
+                    )
+                )
                 cardHydrator.warmUpcomingAssets(
                     events = warmRows,
                     cardWidthPx = cardWidthPx,

@@ -12,6 +12,8 @@ import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.isImeVisible
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -43,6 +45,7 @@ import com.unsilence.app.ui.shared.rememberCardWotLookup
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -123,6 +126,7 @@ private val WOT_SEARCH_SIGNAL_WIDTH = 48.dp
 private const val SEARCH_TAB_SWIPE_THRESHOLD_PX = 120f
 
 @Composable
+@OptIn(ExperimentalLayoutApi::class)
 fun SearchScreen(
     onArticleClick: (FeedRow) -> Unit,
     staticBottomPadding: Dp = 0.dp,
@@ -178,6 +182,21 @@ fun SearchScreen(
     val focusRequester = remember { FocusRequester() }
     val keyboardController = LocalSoftwareKeyboardController.current
     val focusManager = LocalFocusManager.current
+    val keyboardDismissal = remember(keyboardController) { SearchKeyboardDismissal() }
+    val imeVisible = WindowInsets.isImeVisible
+    SideEffect { keyboardDismissal.updateVisibility(imeVisible) }
+    val dismissKeyboardOnScroll = remember(keyboardController, keyboardDismissal) {
+        object : NestedScrollConnection {
+            override fun onPreScroll(available: Offset, source: NestedScrollSource): Offset {
+                if (keyboardDismissal.onScroll(
+                        userInput = source == NestedScrollSource.UserInput,
+                        verticalMovement = available.y != 0f,
+                    )
+                ) keyboardController?.hide()
+                return Offset.Zero
+            }
+        }
+    }
 
     // Tapping a result navigates away from search — drop IME focus first so the
     // keyboard doesn't linger over the destination (profile / note / article).
@@ -277,7 +296,8 @@ fun SearchScreen(
     val engagementRetryRevision by actionsViewModel.engagementRetryRevision.collectAsStateWithLifecycle()
     @OptIn(FlowPreview::class)
     LaunchedEffect(activeEventResults, peopleBelowEntity, state.entityTarget, selectedTab, cardWidthPx, engagementRetryRevision) {
-        if (activeEventResults.isEmpty()) return@LaunchedEffect
+        // People has its own list state: the retained note viewport is not visible.
+        if (selectedTab == 1 || activeEventResults.isEmpty()) return@LaunchedEffect
         fun entityOffset(): Int = when {
             selectedTab == 0 && state.entityTarget != null -> 1
             selectedTab == 2 && state.entityTarget is DeepLinkTarget.Note -> 1
@@ -468,14 +488,7 @@ fun SearchScreen(
                 onPrevious = { selectedTab = (selectedTab - 1).coerceAtLeast(0) },
                 onNext = { selectedTab = (selectedTab + 1).coerceAtMost(TAB_LABELS.lastIndex) },
             )
-            .nestedScroll(remember {
-                object : NestedScrollConnection {
-                    override fun onPreScroll(available: Offset, source: NestedScrollSource): Offset {
-                        keyboardController?.hide()
-                        return Offset.Zero
-                    }
-                }
-            })
+            .nestedScroll(dismissKeyboardOnScroll)
         ) {
             when {
                 !state.hasSearched -> {

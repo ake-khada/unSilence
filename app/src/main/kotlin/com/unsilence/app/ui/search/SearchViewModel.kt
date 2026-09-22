@@ -33,14 +33,11 @@ import com.unsilence.app.data.relay.WOT_ASSERTION_CHUNK_SIZE
 import com.unsilence.app.data.relay.WOT_FETCH_TIMEOUT_MS
 import com.unsilence.app.data.relay.WOT_HYDRATION_WINDOW_MS
 import com.unsilence.app.data.relay.WotHydrationCoalescer
-import com.unsilence.app.data.relay.detectImpersonationRisk
 import com.unsilence.app.data.relay.formatFollowerCount
 import com.unsilence.app.data.relay.isProtectedWotLookup
 import com.unsilence.app.data.relay.protectedProfileFor
 import com.unsilence.app.data.relay.reconciledFollowerCount
-import com.unsilence.app.data.relay.sortPeopleForSearch
 import com.unsilence.app.data.relay.wotLookupSnapshot
-import com.unsilence.app.data.relay.wotSubjectsForFeedRows
 import com.unsilence.app.data.relay.wotVerifiedFollowers
 import com.unsilence.app.data.repository.UserRepository
 import com.unsilence.app.ui.shared.TimelineCardData
@@ -55,6 +52,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.conflate
 import kotlinx.coroutines.flow.debounce
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.drop
@@ -62,11 +60,11 @@ import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.flowOf
+import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.onStart
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicLong
@@ -79,7 +77,6 @@ private const val TRENDING_WOT_CHUNK_COUNT =
 // WoT chunks run sequentially: coalescing + every possible pool chunk + scheduling margin.
 private const val TRENDING_WOT_MEASUREMENT_TIMEOUT_MS =
     WOT_HYDRATION_WINDOW_MS + WOT_FETCH_TIMEOUT_MS * TRENDING_WOT_CHUNK_COUNT + 1_500L
-private const val SEARCH_PEOPLE_RESULT_LIMIT = 50
 
 data class SearchUiState(
     val query: String           = "",
@@ -105,16 +102,6 @@ private data class TrendingProjection(
     val users: List<UserEntity>,
     val refreshAuthorSet: Set<String>?,
     val wotLookups: Map<String, WotLookup>,
-)
-
-private data class SearchResultsBundle(
-    val localNotes: List<FeedRow>,
-    val tagNotes: List<FeedRow>,
-    val relayNotes: List<FeedRow>,
-    val people: List<UserEntity>,
-    val muteList: MuteList? = null,
-    val hashtagCap: Int? = null,
-    val followedPubkeys: Set<String>? = null,
 )
 
 private data class SearchSafetyBundle(
@@ -166,7 +153,8 @@ class SearchViewModel @Inject constructor(
     val wotLookups: StateFlow<Map<String, WotLookup>> =
         combine(_wotSubjects, memoryEventStore.wotSignalFlow) { subjects, _ ->
             wotLookupSnapshot(subjects, memoryEventStore::wotFor)
-        }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyMap())
+        }.flowOn(Dispatchers.Default)
+            .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyMap())
 
     val feedWotDisplayMode: StateFlow<FeedWotDisplayMode> =
         relayPreferencesStore.feedWotDisplayModeFlow()
@@ -452,7 +440,7 @@ class SearchViewModel @Inject constructor(
                             else memoryEventStore.feedSignalFlow.map {
                                 memoryEventStore.feedRowsByIds(ids)
                             }.distinctUntilChanged()
-                        }
+                        }.conflate().flowOn(Dispatchers.Default)
 
                     // Combine local MES results with relay-returned results + people search.
                     val localNotesFlow = if (explicitHashtagTag != null) {
@@ -494,68 +482,33 @@ class SearchViewModel @Inject constructor(
                             hashtagCap = safety.hashtagCap,
                             followedPubkeys = safety.followedPubkeys,
                         )
-                    }.collect { results ->
-                        val localNotes = filterSearchNoteRows(
-                            results.localNotes,
-                            results.muteList,
-                            results.hashtagCap,
-                            memoryEventStore::getNostrEvent,
-                        )
-                        val relayNotes = filterSearchNoteRows(
-                            results.relayNotes,
-                            results.muteList,
-                            results.hashtagCap,
-                            memoryEventStore::getNostrEvent,
-                        )
-                        val people = filterSearchPeople(results.people, results.muteList)
-                        val mergedNotes = (localNotes + relayNotes)
-                            .distinctBy { it.id }
-                            .sortedByDescending { it.createdAt }
-                        val tagRelayNotes = if (explicitHashtagTag != null) relayNotes else emptyList()
-                        val localTagNotes = filterSearchNoteRows(
-                            results.tagNotes,
-                            results.muteList,
-                            results.hashtagCap,
-                            memoryEventStore::getNostrEvent,
-                        )
-                        val tagResults = (localTagNotes + tagRelayNotes)
-                            .distinctBy { it.id }
-                            .sortedByDescending { it.createdAt }
-                        val sortedPeople = withContext(Dispatchers.Default) {
-                            sortPeopleForSearch(
-                                users = people,
-                                query = query,
-                                followedPubkeys = results.followedPubkeys,
-                                limit = SEARCH_PEOPLE_RESULT_LIMIT,
-                                lookup = memoryEventStore::wotFor,
-                            )
-                        }
-                        val protectedProfiles = buildProtectedProfiles(ownPubkey)
-                        val impersonationRisks = sortedPeople.mapNotNull { user ->
-                            detectImpersonationRisk(
-                                candidate = user,
-                                lookup = memoryEventStore.wotFor(user.pubkey),
-                                protectedProfiles = protectedProfiles,
-                            )?.let { user.pubkey to it }
-                        }.toMap()
+                    }.projectSearchResults(
+                        query = query,
+                        explicitHashtag = explicitHashtagTag != null,
+                        eventProvider = memoryEventStore::getNostrEvent,
+                        cachedModelProvider = memoryEventStore::getEventModel,
+                        wotLookup = memoryEventStore::wotFor,
+                        protectedProfiles = { buildProtectedProfiles(ownPubkey) },
+                    ).collect { projection ->
+                        // Background work may finish while a new query is being debounced
+                        // or after navigation cleared this screen. Never publish stale work.
+                        if (currentSearchToken.get() != token || _queryFlow.value != query) return@collect
                         val wotSubjects = buildSet {
                             (_entityTarget.value as? DeepLinkTarget.Profile)?.pubkey?.let(::add)
-                            addAll(sortedPeople.map { it.pubkey })
-                            addAll(wotSubjectsForFeedRows(mergedNotes, modelProvider = memoryEventStore::getEventModel))
-                            addAll(wotSubjectsForFeedRows(tagResults, modelProvider = memoryEventStore::getEventModel))
+                            addAll(projection.wotSubjects)
                         }
                         _wotSubjects.value = wotSubjects
                         wotHydrationCoalescer.requestHydration(wotSubjects)
-                        val hasResults = _entityTarget.value != null || mergedNotes.isNotEmpty() ||
-                            sortedPeople.isNotEmpty() || tagResults.isNotEmpty()
+                        val hasResults = _entityTarget.value != null || projection.notes.isNotEmpty() ||
+                            projection.people.isNotEmpty() || projection.tags.isNotEmpty()
                         val elapsed = System.currentTimeMillis() - searchStart
                         val doneLoading = hasResults || elapsed > 3_000
                         _uiState.update {
                             it.copy(
-                                noteResults   = mergedNotes,
-                                tagResults    = tagResults,
-                                peopleResults = sortedPeople,
-                                impersonationRisks = impersonationRisks,
+                                noteResults   = projection.notes,
+                                tagResults    = projection.tags,
+                                peopleResults = projection.people,
+                                impersonationRisks = projection.impersonationRisks,
                                 loading       = !doneLoading,
                             )
                         }

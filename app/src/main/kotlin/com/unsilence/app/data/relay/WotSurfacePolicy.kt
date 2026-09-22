@@ -331,6 +331,9 @@ internal fun wotLookupSnapshot(
 
 internal fun wotSubjectsForFeedRows(
     rows: Collection<FeedRow>,
+    // Whole-result projections must not parse offscreen bodies just to find badges.
+    // Their visible-card callbacks supply quote subjects once a model is available.
+    parseMissingModels: Boolean = true,
     modelProvider: ((String) -> EventModel?)? = null,
 ): Set<String> {
     val subjects = LinkedHashSet<String>()
@@ -361,7 +364,9 @@ internal fun wotSubjectsForFeedRows(
         if (!rootId.isNullOrBlank() && rootId != replyToId) {
             modelProvider?.invoke(rootId)?.let(::addModelSubjects)
         }
-        val model = modelProvider?.invoke(row.id) ?: runCatching { row.toEventModel() }.getOrNull()
+        val model = modelProvider?.invoke(row.id) ?: if (parseMissingModels) {
+            runCatching { row.toEventModel() }.getOrNull()
+        } else null
         if (model != null) addModelSubjects(model)
     }
     return subjects

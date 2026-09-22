@@ -459,10 +459,12 @@ class WotSurfacePolicyTest {
             "quote" to model(id = "quote", pubkey = resolvedQuoteAuthor),
         )
 
-        assertEquals(
-            setOf(rowAuthor, parentAuthor, quoteHintAuthor, resolvedQuoteAuthor, addressAuthor),
-            wotSubjectsForFeedRows(listOf(row)) { models[it] },
-        )
+        for (parseMissing in listOf(true, false)) {
+            assertEquals(
+                setOf(rowAuthor, parentAuthor, quoteHintAuthor, resolvedQuoteAuthor, addressAuthor),
+                wotSubjectsForFeedRows(listOf(row), parseMissingModels = parseMissing) { models[it] },
+            )
+        }
     }
 
     private fun user(
