@@ -2,6 +2,10 @@ package com.unsilence.app.data.wallet
 
 import android.content.SharedPreferences
 import android.content.ContextWrapper
+import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.test.UnconfinedTestDispatcher
+import kotlinx.coroutines.test.runTest
 import okhttp3.OkHttpClient
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -15,6 +19,7 @@ private const val KEY_RELAY = "wallet_relay"
 private const val KEY_SECRET = "wallet_secret"
 private const val KEY_OWNER = "owner_pubkey"
 
+@OptIn(ExperimentalCoroutinesApi::class)
 class NwcManagerOwnerFenceTest {
     private val ownerA = "a".repeat(64)
     private val ownerB = "b".repeat(64)
@@ -98,6 +103,114 @@ class NwcManagerOwnerFenceTest {
         nwc.resetIfOwnerChanged(ownerA.uppercase())
 
         assertTrue(nwc.isConfigured)
+    }
+
+    @Test
+    fun `saved wallet is available to the first observer without refresh`() {
+        val prefs = FakeSharedPreferences()
+        seedCredentials(prefs)
+        val nwc = manager(prefs)
+
+        assertEquals(NwcWalletState(true, "relay.getalby.com"), nwc.walletState.value)
+    }
+
+    @Test
+    fun `existing action and settings observers both see connect and disconnect without navigation`() = runTest {
+        val nwc = manager(FakeSharedPreferences())
+        val actions = mutableListOf<NwcWalletState>()
+        val settings = mutableListOf<NwcWalletState>()
+        backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) {
+            nwc.walletState.collect { actions.add(it) }
+        }
+        backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) {
+            nwc.walletState.collect { settings.add(it) }
+        }
+
+        // This is the same parsed-persistence path used by save(uri) in settings.
+        nwc.persistConnection(NwcConnection("c".repeat(64), "wss://wallet.example/v1", "d".repeat(64)))
+        assertTrue(nwc.isConfigured)
+        nwc.clear()
+
+        val expected = listOf(
+            NwcWalletState(false, null),
+            NwcWalletState(true, "wallet.example"),
+            NwcWalletState(false, null),
+        )
+        assertEquals(expected, actions)
+        assertEquals(expected, settings)
+        assertNull(nwc.connection())
+    }
+
+    @Test
+    fun `connecting before first observer publishes current saved state`() {
+        val nwc = manager(FakeSharedPreferences())
+
+        nwc.persistConnection(NwcConnection("c".repeat(64), "wss://wallet.example/v1", "d".repeat(64)))
+
+        assertEquals(NwcWalletState(true, "wallet.example"), nwc.walletState.value)
+    }
+
+    @Test
+    fun `wallet replacement updates label without a disconnected intermediate state`() = runTest {
+        val prefs = FakeSharedPreferences()
+        seedCredentials(prefs)
+        val nwc = manager(prefs)
+        val states = mutableListOf<NwcWalletState>()
+        backgroundScope.launch(UnconfinedTestDispatcher(testScheduler)) {
+            nwc.walletState.collect { states.add(it) }
+        }
+
+        nwc.persistConnection(NwcConnection("e".repeat(64), "wss://replacement.example/v1", "f".repeat(64)))
+
+        assertEquals(listOf(
+            NwcWalletState(true, "relay.getalby.com"),
+            NwcWalletState(true, "replacement.example"),
+        ), states)
+        assertEquals("e".repeat(64), nwc.connection()?.walletPubkey)
+    }
+
+    @Test
+    fun `owner change immediately invalidates observed wallet configuration`() {
+        val prefs = FakeSharedPreferences()
+        seedCredentials(prefs)
+        val nwc = manager(prefs)
+        val state = nwc.walletState
+        nwc.resetIfOwnerChanged(ownerA)
+        assertTrue(state.value.isConfigured)
+
+        nwc.resetIfOwnerChanged(ownerB)
+
+        assertEquals(NwcWalletState(false, null), state.value)
+        assertEquals(ownerB, prefs.getString(KEY_OWNER, null))
+    }
+
+    @Test
+    fun `same owner and background socket retirement keep observed configuration`() {
+        val prefs = FakeSharedPreferences()
+        seedCredentials(prefs)
+        val nwc = manager(prefs)
+        val state = nwc.walletState
+
+        nwc.resetIfOwnerChanged(ownerA)
+        nwc.resetIfOwnerChanged(ownerA.uppercase())
+        nwc.suspendForBackground()
+
+        assertEquals(NwcWalletState(true, "relay.getalby.com"), state.value)
+        assertNotNull(nwc.connection())
+    }
+
+    @Test
+    fun `invalid connection attempt preserves observed and saved configuration`() {
+        val prefs = FakeSharedPreferences()
+        seedCredentials(prefs)
+        val nwc = manager(prefs)
+        val state = nwc.walletState
+        val originalConnection = nwc.connection()
+
+        assertFalse(nwc.save(""))
+
+        assertEquals(NwcWalletState(true, "relay.getalby.com"), state.value)
+        assertEquals(originalConnection, nwc.connection())
     }
 }
 

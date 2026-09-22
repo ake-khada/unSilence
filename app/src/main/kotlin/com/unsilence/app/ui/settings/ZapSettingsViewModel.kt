@@ -22,9 +22,7 @@ class ZapSettingsViewModel @Inject constructor(
 
     val preferences: StateFlow<ZapPreferences> = zapPreferencesStore.state
 
-    val walletConnected: Boolean get() = nwcManager.isConfigured
-    val walletLabel: String? get() = nwcManager.connection()?.relayUrl
-        ?.removePrefix("wss://")?.substringBefore("/")
+    val walletState = nwcManager.walletState
 
     private val _balanceSats = MutableStateFlow<Long?>(null)
     val balanceSats: StateFlow<Long?> = _balanceSats.asStateFlow()

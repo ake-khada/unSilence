@@ -767,10 +767,7 @@ fun AppNavigation(
                     navigationOwnsBack = true,
                 )
                 AppDestination.ZapSettings -> com.unsilence.app.ui.settings.ZapSettingsScreen(
-                    onDismiss = {
-                        navigator.pop()
-                        noteActionsVm.refreshNwcConfigured()
-                    },
+                    onDismiss = navigator::pop,
                     navigationOwnsBack = true,
                 )
                 AppDestination.StartGraph -> {

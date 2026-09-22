@@ -23,6 +23,9 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.TimeoutCancellationException
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -67,6 +70,12 @@ data class NwcConnection(
     val secret: String,          // client private key hex (32 bytes = 64 chars)
 )
 
+/** Saved wallet configuration for UI observation; never contains the NWC secret. */
+data class NwcWalletState(
+    val isConfigured: Boolean,
+    val relayLabel: String?,
+)
+
 /**
  * Manages the Nostr Wallet Connect (NIP-47) connection.
  *
@@ -109,6 +118,22 @@ class NwcManager @Inject constructor(
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
+    // Serialize persistence and notification, including background account-owner resets.
+    // Both lazy delegates are accessed only under this lock (lock before lazy initialization).
+    private val configurationLock = Any()
+    private val _walletState by lazy { MutableStateFlow(readWalletState()) }
+    private val walletStateView by lazy { _walletState.asStateFlow() }
+
+    /** Configuration is independent of whether the payment socket is currently open. */
+    val walletState: StateFlow<NwcWalletState>
+        get() = synchronized(configurationLock) { walletStateView }
+
+    private fun readWalletState() = NwcWalletState(
+        isConfigured = isConfigured,
+        relayLabel = prefs.getString(KEY_RELAY, null)
+            ?.removePrefix("wss://")?.substringBefore("/"),
+    )
+
     val isConfigured: Boolean
         get() = prefs.contains(KEY_PUBKEY)
 
@@ -118,6 +143,12 @@ class NwcManager @Inject constructor(
      */
     fun save(uri: String): Boolean {
         val conn = parseUri(uri.trim()) ?: return false
+        persistConnection(conn)
+        return true
+    }
+
+    /** Persist the parsed connection and publish its non-secret UI state together. */
+    internal fun persistConnection(conn: NwcConnection) = synchronized(configurationLock) {
         closePaymentSession("wallet changed")
         prefs.edit()
             .putString(KEY_PUBKEY, conn.walletPubkey)
@@ -125,15 +156,18 @@ class NwcManager @Inject constructor(
             .putString(KEY_SECRET, conn.secret)
             .apply()
         lastBalance = null
+        _walletState.value = readWalletState()
         Log.d(TAG, "Saved NWC connection to ${conn.relayUrl}")
-        return true
+        Unit
     }
 
-    fun clear() {
+    fun clear() = synchronized(configurationLock) {
         closePaymentSession("wallet cleared")
         prefs.edit().clear().apply()
         lastBalance = null
+        _walletState.value = readWalletState()
         Log.d(TAG, "NWC connection cleared")
+        Unit
     }
 
     /** Retire the persistent payment socket before Android suspends networking. */
@@ -146,7 +180,7 @@ class NwcManager @Inject constructor(
      * bootstrap. Normal logout clears NWC credentials; this catches credentials
      * that survive only because that teardown was intentionally skipped.
      */
-    fun resetIfOwnerChanged(ownerPubkeyHex: String) {
+    fun resetIfOwnerChanged(ownerPubkeyHex: String) = synchronized(configurationLock) {
         val owner = ownerPubkeyHex.lowercase()
         val stampedOwner = prefs.getString(KEY_OWNER, null)?.lowercase()
         if (stampedOwner != null && stampedOwner != owner) {

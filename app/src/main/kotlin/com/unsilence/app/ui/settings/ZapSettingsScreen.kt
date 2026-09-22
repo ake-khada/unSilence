@@ -76,6 +76,7 @@ fun ZapSettingsScreen(
     rememberWriteAwareDismiss(vm.pendingEdits, navigationOwnsBack, onDismiss)
     val showSnackbar = LocalShowSnackbar.current
     val state by vm.preferences.collectAsStateWithLifecycle()
+    val wallet by vm.walletState.collectAsStateWithLifecycle()
     val balanceSats by vm.balanceSats.collectAsStateWithLifecycle()
     var showConnectWallet by remember { mutableStateOf(false) }
     var showConfirmDisconnect by remember { mutableStateOf(false) }
@@ -108,8 +109,8 @@ fun ZapSettingsScreen(
 
         SectionLabel("Wallet")
         WalletCard(
-            connected = vm.walletConnected,
-            label = vm.walletLabel,
+            connected = wallet.isConfigured,
+            label = wallet.relayLabel,
             balanceSats = balanceSats,
             onConnect = { showConnectWallet = true },
             onDisconnect = { showConfirmDisconnect = true },

@@ -135,13 +135,15 @@ class NoteActionsViewModel @Inject constructor(
         viewModelScope.launch { settingsStore.initialize() }
     }
 
-    /**
-     * True if a nostr+walletconnect:// URI has been saved.
-     * mutableStateOf so the UI recomposes immediately after the user connects their wallet —
-     * no restart needed for the zap button to become active.
-     */
-    var isNwcConfigured by mutableStateOf(nwcManager.isConfigured)
+    /** Shared wallet changes update every action surface, independently of navigation callbacks. */
+    var isNwcConfigured by mutableStateOf(nwcManager.walletState.value.isConfigured)
         private set
+
+    init {
+        viewModelScope.launch {
+            nwcManager.walletState.collect { isNwcConfigured = it.isConfigured }
+        }
+    }
 
     /** MES sidecar cache lookup — pre-computed at EventProcessor insert time. */
     fun getVideoRenderModels(eventId: String) = memoryEventStore.getVideoRenderModels(eventId)
@@ -858,15 +860,8 @@ class NoteActionsViewModel @Inject constructor(
         job.invokeOnCompletion { optimisticClearJobs.remove(eventId, job) }
     }
 
-    /** Re-read NWC configured state from storage. Call after external changes (e.g. ZapSettingsScreen). */
-    fun refreshNwcConfigured() { isNwcConfigured = nwcManager.isConfigured }
-
     /** Parse and persist a nostr+walletconnect:// URI. Returns true on success. */
-    fun saveNwcUri(uri: String): Boolean {
-        val saved = nwcManager.save(uri)
-        if (saved) isNwcConfigured = true   // triggers recomposition; zap button activates immediately
-        return saved
-    }
+    fun saveNwcUri(uri: String): Boolean = nwcManager.save(uri)
 
     // ── Lookups for NoteCard embedded content (mentions, quoted posts) ────────
 
