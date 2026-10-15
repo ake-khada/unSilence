@@ -28,6 +28,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Block
 import androidx.compose.material.icons.filled.ContentCopy
+import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Star
@@ -42,6 +43,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.LaunchedEffect
@@ -60,10 +62,12 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.lifecycle.compose.LifecycleResumeEffect
 import com.unsilence.app.data.relay.Nip11Source
 import com.unsilence.app.data.relay.Reachability
 import com.unsilence.app.data.memory.RelayConfig
 import com.unsilence.app.data.relay.EyesAlliance
+import com.unsilence.app.data.relay.CountryStatus
 import com.unsilence.app.data.relay.RelayDirectory
 import com.unsilence.app.data.relay.RelayDirectoryEntry
 import com.unsilence.app.data.relay.normalizeRelayUrl
@@ -364,48 +368,72 @@ private fun PolicyRows(e: RelayDirectoryEntry) {
             val ver = e.version?.takeIf { it.isNotBlank() && !sw.contains(it, ignoreCase = true) }
             PolicyRow("Software", listOfNotNull(sw, ver).joinToString(" "), TextSecondary)
         }
-        // Trust (kind-30385) — only when scored. Restores the trust surface lost with the old
-        // health sheet. Tier: ≥70 mint, ≥40 zap, else like.
-        e.trustScore?.let { score -> PolicyRow("Trust", "$score/100", trustTierColor(score)) }
-        // Hosted-in (server IP geolocation) — only when known; never fabricated.
-        e.countryCode?.let { cc -> HostedInRow(cc) }
+        MonitorLocationRow(e)
     }
 }
 
-private fun trustTierColor(score: Int): Color = when {
-    score >= 70 -> Mint
-    score >= 40 -> Zap
-    else -> Like
-}
-
-/** "Hosted in" — SERVER IP geolocation (datacenter), NOT legal jurisdiction. Anycast / CDN-
- *  fronted relays (e.g. Cloudflare) can geolocate to an edge POP unrelated to the operator, so
- *  the label is deliberately "Hosted in", never "Jurisdiction". The mint/zap tint is the
- *  at-a-glance surveillance-alliance signal; the wording keeps us honest about what it proves. */
+/** Optional endpoint observation, never a privacy verdict or operator jurisdiction. */
 @Composable
-private fun HostedInRow(countryCode: String) {
-    val flag = remember(countryCode) { RelayDirectory.flagEmoji(countryCode) }
-    val name = remember(countryCode) {
-        java.util.Locale("", countryCode).getDisplayCountry(java.util.Locale.ENGLISH).ifBlank { countryCode }
+internal fun MonitorLocationRow(entry: RelayDirectoryEntry) {
+    var showInfo by remember(entry.url) { mutableStateOf(false) }
+    var nowSeconds by remember(entry) { mutableLongStateOf(System.currentTimeMillis() / 1000L) }
+    LifecycleResumeEffect(entry) {
+        nowSeconds = System.currentTimeMillis() / 1000L
+        onPauseOrDispose { }
     }
-    val (eyesLabel, eyesColor) = when (RelayDirectory.eyesAlliance(countryCode)) {
-        EyesAlliance.FIVE -> "Five Eyes" to Zap
-        EyesAlliance.NINE -> "Nine Eyes" to Zap
-        EyesAlliance.FOURTEEN -> "14 Eyes" to Zap
-        EyesAlliance.NONE -> "outside 14 Eyes" to Mint
+    val code = RelayDirectory.normalizeCountryCode(entry.countryCode)
+    val country = remember(code) {
+        code?.let { java.util.Locale("", it).getDisplayCountry(java.util.Locale.ENGLISH) } ?: "Unknown"
     }
-    Row(
-        modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp),
-        verticalAlignment = Alignment.CenterVertically,
+    val status = RelayDirectory.countryStatus(entry, nowSeconds)
+    val qualification = when (status) {
+        CountryStatus.UNKNOWN -> "unverified"
+        CountryStatus.STALE -> "older report"
+        CountryStatus.CONFLICTING -> "monitors disagree"
+        CountryStatus.REPORTED -> when (RelayDirectory.eyesAlliance(code)) {
+            EyesAlliance.FIVE -> "Five Eyes"
+            EyesAlliance.NINE -> "Nine Eyes"
+            EyesAlliance.FOURTEEN -> "14 Eyes"
+            EyesAlliance.NONE -> "outside 14 Eyes"
+            EyesAlliance.UNKNOWN -> "unknown"
+        }
+    }
+    Column(
+        modifier = Modifier.fillMaxWidth().clickable(onClickLabel = "About relay location") {
+            nowSeconds = System.currentTimeMillis() / 1000L
+            showInfo = true
+        }.padding(vertical = 8.dp),
     ) {
-        Text("Hosted in", color = TextSecondary, style = AppTextStyles.bodySmall, modifier = Modifier.weight(1f))
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text("Monitor-reported location", color = TextSecondary, style = AppTextStyles.bodySmall, modifier = Modifier.weight(1f))
+            Icon(Icons.Default.Info, contentDescription = null, tint = TextSecondary, modifier = Modifier.size(16.dp))
+        }
         Text(
-            buildString { flag?.let { append("$it ") }; append(name) },
-            color = Color.White, style = AppTextStyles.bodySmall, fontWeight = FontWeight.Medium,
-            maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.widthIn(max = 150.dp),
+            "$country · $qualification",
+            color = TextSecondary, style = AppTextStyles.bodySmall,
         )
-        Text(" · ", color = TextSecondary, style = AppTextStyles.bodySmall)
-        Text(eyesLabel, color = eyesColor, style = AppTextStyles.bodySmall, fontWeight = FontWeight.Medium, maxLines = 1)
+    }
+    if (showInfo) {
+        AlertDialog(
+            onDismissRequest = { showInfo = false },
+            title = { Text("About relay location") },
+            text = {
+                Column(modifier = Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    Text("A monitor's IP-location estimate may identify a hosting or CDN endpoint, not the operator or its legal jurisdiction. Outside 14 Eyes is not a privacy guarantee.")
+                    Text("Location: $country · $qualification")
+                    entry.countryMonitorPubkey?.let { Text("Reporting monitor: $it") }
+                    if (entry.countryObservedAt > 0) {
+                        val observed = runCatching { java.time.Instant.ofEpochSecond(entry.countryObservedAt).toString() }.getOrDefault("Unknown")
+                        Text("Observed: $observed")
+                    }
+                    Text("The discovery filter includes only sourced reports from the last 24 hours without conflicting countries. Location never controls automatic relay connections.")
+                }
+            },
+            confirmButton = { TextButton(onClick = { showInfo = false }) { Text("Close") } },
+            containerColor = Surface1,
+            titleContentColor = Color.White,
+            textContentColor = TextSecondary,
+        )
     }
 }
 

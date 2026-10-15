@@ -2420,7 +2420,7 @@ class RelayPool @Inject constructor(
      *                                src-profiles-, search-, older-, relay-ecosystem-,
      *                                thread-event-, thread-replies-, thread-reactions-,
      *                                thread-zaps-, user-posts-, user-longform-,
-     *                                user-engagement-, hint-event-, trust-scores-,
+     *                                user-engagement-, hint-event-,
      *                                engagement-
      *  PERSISTENT (keep open):       feed-, follows-, notifs-
      */
@@ -3554,101 +3554,6 @@ class RelayPool @Inject constructor(
         }
     }
 
-    /**
-     * Fetch kind 30385 (Trusted Relay Assertions) using paginated multi-relay fetch.
-     *
-     * 1. Resolve provider's write relays from kind-10002
-     * 2. Paginated fetch on each write relay (concurrent)
-     * 3. Log coverage metrics
-     */
-    /**
-     * Fetch kind 30385 (trust scores) for specific relay URLs only.
-     * Uses #d filter so the relay returns only the requested entries.
-     * Each relay URL is a d-tag in kind 30385 replaceable events.
-     */
-    suspend fun fetchTrustScores(providerPubkeyHex: String, relayUrls: List<String>): Boolean {
-        if (relayUrls.isEmpty()) return false
-
-        // Normalize relay URLs for consistent #d matching with trust score d-tags
-        val normalizedUrls = relayUrls.mapNotNull { normalizeRelayUrl(it) }.distinct()
-        if (normalizedUrls.isEmpty()) return false
-
-        // Resolve provider's write relays to know where to fetch from
-        fetchRelayLists(listOf(providerPubkeyHex))
-        val mes = memoryEventStore.get()
-        val writeRelays = withTimeoutOrNull(5_000L) {
-            var relays = mes.writeRelaysFor(providerPubkeyHex)
-            while (relays.isEmpty()) {
-                delay(200)
-                relays = mes.writeRelaysFor(providerPubkeyHex)
-            }
-            relays
-        } ?: emptyList()
-
-        val sourceUrls = if (writeRelays.isNotEmpty()) {
-            writeRelays.mapNotNull { normalizeRelayUrl(it) }
-        } else {
-            Log.w(TAG, "Trust score provider 10002 not found — using fallback relays")
-            listOf("wss://nos.lol", "wss://relay.damus.io")
-        }
-
-        // #d filter: request only the relay URLs we care about (normalized)
-        val filter = buildJsonObject {
-            put("kinds", buildJsonArray { add(JsonPrimitive(30385)) })
-            put("authors", buildJsonArray { add(JsonPrimitive(providerPubkeyHex)) })
-            put("#d", buildJsonArray { normalizedUrls.forEach { add(JsonPrimitive(it)) } })
-        }
-        Log.d(TAG, "Trust score REQ: ${normalizedUrls.size} relays from ${sourceUrls.size} sources")
-
-        // Try each source relay until we get results
-        var fetched = 0
-        var completed = false
-        for (url in sourceUrls) {
-            val conn = getOrCreateConnection(url) ?: continue
-            try {
-                val subId = "trust-${url.hashCode().toUInt()}-${System.nanoTime()}"
-                val pageState = PageState()
-                _activePages[subId] = pageState
-
-                val req = buildJsonArray {
-                    add(JsonPrimitive("REQ"))
-                    add(JsonPrimitive(subId))
-                    add(filter)
-                }.toString()
-
-                if (!conn.send(req)) {
-                    _activePages.remove(subId)
-                    continue
-                }
-
-                // With #d filter, result set is small — 15s is plenty
-                val eosed = withTimeoutOrNull(15_000) { pageState.eoseReceived.await() } != null
-                if (eosed) completed = true
-                val count = pageState.eventCount.get()
-
-                conn.send(buildJsonArray {
-                    add(JsonPrimitive("CLOSE"))
-                    add(JsonPrimitive(subId))
-                }.toString())
-                _activePages.remove(subId)
-
-                fetched += count
-                Log.d(TAG, "Trust scores from $url: $count events")
-
-                // If we got a good response, no need to try more sources
-                if (count > 0) break
-            } catch (e: Exception) {
-                currentCoroutineContext().ensureActive()
-                Log.w(TAG, "Trust fetch failed on $url: ${e.message}")
-            }
-        }
-
-        val mesCount = mes.getTrustScores().size
-        Log.d(TAG, "Trust scores: $mesCount in MES ($fetched fetched for ${normalizedUrls.size} requested)")
-        // A real EOSE with zero events is still a successful, authoritative
-        // fetch for the requested #d set and should advance the staleness gate.
-        return completed
-    }
 
     /**
      * Fetch kind 30166 (NIP-66 relay monitors) from relay.nostr.watch.
@@ -3783,7 +3688,6 @@ class RelayPool @Inject constructor(
             // on the fetch), so the progressive re-publishes below stay cheap.
             val mes = memoryEventStore.get()
             val ownPk = keyManager.getPublicKeyHex()
-            val trust = mes.getTrustScores()
             val popularity = computeDirectoryPopularity(mes)
             val followsUsing = computeDirectoryFollowsUsing(mes, ownPk)
             // The user's OWN configured relays (r/w, search, favorites, set members) —
@@ -3816,10 +3720,10 @@ class RelayPool @Inject constructor(
                     val perMonitorNewest = entries.groupBy { it.monitorPubkeys.firstOrNull() }
                         .values.map { grp -> grp.maxBy { it.monitorLastSeenAt } }
                     val merged = RelayDirectory.mergeMonitorEntries(perMonitorNewest)
-                    enrichDirectoryEntry(merged, trust[merged.url]?.score, popularity[merged.url] ?: 0, followsUsing[merged.url] ?: 0)
+                    enrichDirectoryEntry(merged, popularity[merged.url] ?: 0, followsUsing[merged.url] ?: 0)
                 }.toMutableMap()
                 for (u in configured) {
-                    if (u !in built) built[u] = enrichDirectoryEntry(RelayDirectoryEntry(url = u), trust[u]?.score, popularity[u] ?: 0, followsUsing[u] ?: 0)
+                    if (u !in built) built[u] = enrichDirectoryEntry(RelayDirectoryEntry(url = u), popularity[u] ?: 0, followsUsing[u] ?: 0)
                 }
                 val bounded = RelayDirectory.enforceBound(built, ownRelays)
                 relayDirectory.clear()
@@ -3907,7 +3811,7 @@ class RelayPool @Inject constructor(
         return counts
     }
 
-    private fun enrichDirectoryEntry(merged: RelayDirectoryEntry, trustScore: Int?, popularity: Int, followsUsing: Int): RelayDirectoryEntry {
+    private fun enrichDirectoryEntry(merged: RelayDirectoryEntry, popularity: Int, followsUsing: Int): RelayDirectoryEntry {
         val caps = relayCapabilitiesStore.get(merged.url)
         // Device-empirical evidence is the trump card (A5); monitor data only adds positive signal.
         val reach = RelayDirectory.computeReachability(
@@ -3921,7 +3825,6 @@ class RelayPool @Inject constructor(
             monitorRttMs = merged.monitorRttMs,
         )
         return merged.copy(
-            trustScore = trustScore,
             popularity = popularity,
             followsUsing = followsUsing,
             ourLastReason = caps?.lastReason?.takeIf { it.isNotBlank() },
@@ -3981,7 +3884,7 @@ class RelayPool @Inject constructor(
         relayDirectory[u] = detail
         Log.w(TAG, "DETAIL: $u src=${detail.nip11Source} rtt=${rtt}ms reach=${detail.reachability} " +
             "nips=${detail.supportedNips.size} pop=${detail.popularity} follow=${detail.followsUsing} " +
-            "geo=${detail.countryCode} trust=${detail.trustScore}")
+            "geo=${detail.countryCode}")
         return detail
     }
 

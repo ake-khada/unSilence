@@ -1,6 +1,6 @@
 package com.unsilence.app.data.relay
 
-import com.unsilence.app.data.memory.RelayTrustScoreEntity
+import com.unsilence.app.data.memory.RelayMonitorEntity
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -111,32 +111,32 @@ class OutboxRelayResolverTest {
     }
 
     @Test
-    fun `resolveFollowing skips low-trust relays`() {
-        metadata.setWriteRelays("a".repeat(64), listOf("wss://lowtrust.example", "wss://ok.example"))
-        metadata.setTrustScore("wss://lowtrust.example", 10)
-        metadata.setTrustScore("wss://ok.example", 80)
+    fun `resolveFollowing does not exclude slow relays`() {
+        metadata.setWriteRelays("a".repeat(64), listOf("wss://slow.example", "wss://ok.example"))
+        metadata.setRtt("wss://slow.example", 2000)
+        metadata.setRtt("wss://ok.example", 80)
 
         val result = resolver.resolveFollowing(
             authors = setOf("a".repeat(64)),
             fallbackRelays = listOf("wss://global.example"),
             blockedRelays = emptySet(),
-            config = defaultConfig.copy(minTrustScore = 30),
+            config = defaultConfig,
         )
 
         val allUrls = result.flatMap { it.urls }.toSet()
         assertTrue(allUrls.contains("wss://ok.example"))
-        assertFalse(allUrls.contains("wss://lowtrust.example"))
+        assertTrue(allUrls.contains("wss://slow.example"))
     }
 
     @Test
-    fun `resolveFollowing keeps unknown-trust relays`() {
+    fun `resolveFollowing keeps unmonitored relays`() {
         metadata.setWriteRelays("a".repeat(64), listOf("wss://unknown.example"))
 
         val result = resolver.resolveFollowing(
             authors = setOf("a".repeat(64)),
             fallbackRelays = listOf("wss://global.example"),
             blockedRelays = emptySet(),
-            config = defaultConfig.copy(minTrustScore = 30),
+            config = defaultConfig,
         )
 
         val allUrls = result.flatMap { it.urls }.toSet()
@@ -268,6 +268,36 @@ class OutboxRelayResolverTest {
     // ── resolveGlobal ────────────────────────────────────────────────────
 
     @Test
+    fun `following caps and fast tiers use stable latency ordering`() {
+        val urls = listOf("wss://slow.example", "wss://b.example", "wss://a.example",
+            "wss://fast.example", "wss://invalid-rtt.example", "wss://z.example")
+        metadata.setRtt("wss://slow.example", 1000)
+        metadata.setRtt("wss://fast.example", 20)
+        metadata.setRtt("wss://invalid-rtt.example", -1)
+        fun resolve(order: List<String>): List<SubRequest> {
+            metadata.setWriteRelays("author", order)
+            return resolver.resolveFollowing(setOf("author"), emptyList(), emptySet(), defaultConfig)
+        }
+        val result = resolve(urls)
+        assertEquals(result, resolve(urls.reversed()))
+        // Selection/tiering uses latency; emitted requests retain their stable URL ordering.
+        assertEquals(listOf("wss://a.example", "wss://b.example", "wss://fast.example", "wss://invalid-rtt.example"),
+            result.flatMap { it.urls })
+        assertEquals(listOf(SubTier.FAST, SubTier.FAST, SubTier.FAST, SubTier.SLOW), result.map { it.tier })
+    }
+
+    @Test
+    fun `coverage wins over latency and blocked fallbacks stay excluded`() {
+        metadata.setWriteRelays("a", listOf("wss://shared.example", "wss://fast.example"))
+        metadata.setWriteRelays("b", listOf("wss://shared.example"))
+        metadata.setRtt("wss://shared.example", 2000)
+        metadata.setRtt("wss://fast.example", 10)
+        assertEquals(setOf("wss://shared.example"), resolver.selectOutboxRelays(
+            setOf("b", "a"), emptySet(), maxRelays = 1))
+        assertTrue(resolver.resolveEngagementRelays("missing", emptyList(), GLOBAL_RELAY_URLS.toSet()).isEmpty())
+    }
+
+    @Test
     fun `resolveGlobal returns single SubRequest with read relays`() {
         val result = resolver.resolveGlobal(
             readRelays = listOf("wss://a.example", "wss://b.example"),
@@ -377,27 +407,23 @@ class OutboxRelayResolverTest {
 
 class FakeMetadata : RelayMetadataSource {
     private val writeRelays = HashMap<String, List<String>>()
-    private val trustScores = HashMap<String, RelayTrustScoreEntity>()
+    private val monitors = HashMap<String, RelayMonitorEntity>()
 
     fun setWriteRelays(pubkey: String, relays: List<String>) {
         writeRelays[pubkey] = relays
     }
 
-    fun setTrustScore(url: String, score: Int) {
-        trustScores[url] = RelayTrustScoreEntity(
+    fun setRtt(url: String, rtt: Int) {
+        monitors[url] = RelayMonitorEntity(
             relayUrl = url,
-            score = score,
-            reliability = score,
-            quality = score,
-            accessibility = score,
-            confidence = "test",
-            observations = 100,
+            rttRead = rtt,
+            monitorPubkey = "monitor",
+            createdAt = 1L,
         )
     }
 
     override fun writeRelaysFor(pubkey: String): List<String> =
         writeRelays[pubkey] ?: emptyList()
 
-    override fun getTrustScores(): Map<String, RelayTrustScoreEntity> =
-        trustScores
+    override fun getRelayMonitors(): Map<String, RelayMonitorEntity> = monitors.toMap()
 }

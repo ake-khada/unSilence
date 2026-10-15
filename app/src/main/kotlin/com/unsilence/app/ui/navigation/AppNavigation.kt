@@ -162,7 +162,6 @@ import com.unsilence.app.domain.model.ShowType
 import com.unsilence.app.ui.theme.Black
 import com.unsilence.app.ui.theme.Brand
 import com.unsilence.app.ui.theme.BrandDeep
-import com.unsilence.app.ui.theme.Mint
 import com.unsilence.app.ui.theme.Text3
 import com.unsilence.app.ui.theme.Sizing
 import com.unsilence.app.ui.theme.Spacing
@@ -1152,13 +1151,7 @@ private fun FeedSelectorSheet(
                 SectionLabel("Favorites")
                 for (relay in visiblePinned) {
                     val selected = isSelected(relay)
-                    val healthScore = (relayHealth[relay.url] ?: normalizeRelayUrl(relay.url)?.let { relayHealth[it] })?.score
-                    val dotColor = when {
-                        healthScore == null -> Text3
-                        healthScore >= 70   -> Mint
-                        healthScore >= 40   -> com.unsilence.app.ui.theme.Zap
-                        else                -> com.unsilence.app.ui.theme.Like
-                    }
+                    val latencyMs = (relayHealth[relay.url] ?: normalizeRelayUrl(relay.url)?.let { relayHealth[it] })?.ping
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
@@ -1169,9 +1162,7 @@ private fun FeedSelectorSheet(
                             .padding(horizontal = 16.dp, vertical = 13.dp),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
-                        Canvas(modifier = Modifier.size(8.dp)) {
-                            drawCircle(color = dotColor)
-                        }
+                        com.unsilence.app.ui.relays.RelayLatencyDot(latencyMs, modifier = Modifier.size(8.dp))
                         Spacer(Modifier.width(14.dp))
                         Text(
                             text       = relay.displayLabel,

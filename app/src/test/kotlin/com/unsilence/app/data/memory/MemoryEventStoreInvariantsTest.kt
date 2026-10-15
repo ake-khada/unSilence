@@ -10,7 +10,6 @@ package com.unsilence.app.data.memory
 
 import app.cash.turbine.test
 import com.unsilence.app.data.DEFAULT_WOT_PROVIDER_PUBKEY
-import com.unsilence.app.data.TRUST_SCORE_PROVIDER_PUBKEY
 import com.unsilence.app.data.auth.MuteKeyProvider
 import com.unsilence.app.data.relay.FakeReconnectSource
 import com.unsilence.app.data.relay.FakeRelayCapabilitiesStore
@@ -508,7 +507,7 @@ class MemoryEventStoreInvariantsTest {
     }
 
     @Test
-    fun `kind 30385 relay trust is accepted only from pinned provider`() {
+    fun `retired relay reputation is rejected regardless of provider`() {
         val tags = listOf(
             listOf("d", "wss://relay.example.com"),
             listOf("score", "90"),
@@ -530,20 +529,86 @@ class MemoryEventStoreInvariantsTest {
                 )
             )
         )
-        assertTrue(store.getTrustScores().isEmpty())
+        assertNull(store.getRelayHealth("wss://relay.example.com"))
 
-        assertTrue(
+        assertFalse(
             store.insert(
                 event(
                     id = "trust-right-provider",
-                    pubkey = TRUST_SCORE_PROVIDER_PUBKEY,
+                    pubkey = "a".repeat(64),
                     kind = 30385,
                     createdAt = 1_001,
                     tags = tags,
                 )
             )
         )
-        assertEquals(90, store.getTrustScores()["wss://relay.example.com"]?.score)
+        val retired = event(id = "retired-raw", kind = 30385, tags = tags)
+        store.insertBatch(listOf(retired))
+        store.insertFromSnapshot(retired)
+        assertNull(store.getNostrEvent(retired.id))
+        assertNull(store.snapshotSize().eventsByKind[30385])
+        assertNull(store.getRelayHealth("wss://relay.example.com"))
+    }
+
+    @Test
+    fun `legacy text score rows are discarded without losing monitor data`() = runTest {
+        store.restoreSnapshotFrom(StringReader("""
+            SNAPSHOT_V2
+            ---RELAY_HEALTH---
+            trust|wss://retired.example|90|91|92|93|high|10|open|US|yes|1000
+            monitor|wss://kept.example|42|43|44|monitor|1000|clearnet|||1,11
+        """.trimIndent()).buffered())
+        assertNull(store.getRelayHealth("wss://retired.example"))
+        assertEquals(42, store.getRelayHealth("wss://kept.example")?.ping)
+        val saved = StringWriter()
+        saved.buffered().use { store.saveSnapshotTo(it) }
+        assertFalse(saved.toString().lineSequence().any { it.startsWith("trust|") })
+    }
+
+    @Test
+    fun `binary legacy score records preserve monitor and tail fields`() = runTest {
+        store.insert(event(id = "kept-note"))
+        store.insert(event(id = "kept-monitor", kind = 30166, pubkey = "monitor", createdAt = 1000,
+            tags = listOf(listOf("d", "wss://kept.example"), listOf("rtt-open", "42"))))
+        store.putRelayIdentity("wss://kept.example", "Kept", "https://kept.example/icon.png", 2000)
+        for (version in 16..19) {
+            val buffer = ByteArrayOutputStream()
+            val sizes = DataOutputStream(buffer).use { store.copySnapshotForTest(it, version) }
+            val bytes = buffer.toByteArray()
+            val offset = sizes.headerBytes + sizes.followsBytes + sizes.eventsBytes + sizes.aggregatesBytes
+            DataInputStream(ByteArrayInputStream(bytes, offset, bytes.size - offset)).use {
+                assertEquals("new snapshots retain an empty compatibility slot", 0, it.readInt())
+            }
+            val oldScores = ByteArrayOutputStream().also { legacy ->
+                DataOutputStream(legacy).use { out ->
+                    fun string(value: String) {
+                        val utf8 = value.toByteArray(Charsets.UTF_8)
+                        out.writeInt(utf8.size); out.write(utf8)
+                    }
+                    out.writeInt(2)
+                    repeat(2) { row ->
+                        string("wss://retired-$row.example")
+                        repeat(4) { out.writeInt(90) }
+                        string("high"); out.writeInt(10)
+                        repeat(3) {
+                            out.writeBoolean(row == 0)
+                            if (row == 0) string("legacy")
+                        }
+                        out.writeLong(1000)
+                    }
+                }
+            }.toByteArray()
+            val legacyBytes = bytes.copyOfRange(0, offset) + oldScores +
+                bytes.copyOfRange(offset + Int.SIZE_BYTES, bytes.size)
+            val restored = MemoryEventStore(object : MuteKeyProvider {},
+                com.unsilence.app.data.relay.stubTimelineServiceProvider())
+            DataInputStream(ByteArrayInputStream(legacyBytes)).use { restored.restoreSnapshotBinary(it) }
+            assertNotNull("V$version preserves content", restored.getNostrEvent("kept-note"))
+            assertEquals(42, restored.getRelayHealth("wss://kept.example")?.ping)
+            assertEquals("Kept", restored.getRelayHealth("wss://kept.example")?.identity?.name)
+            assertNull(restored.getRelayHealth("wss://retired-0.example"))
+            assertEquals(setOf("wss://kept.example"), restored.relayHealthFlow().first().keys)
+        }
     }
 
     // ── Kind 6 repost stats ─────────────────────────────────────────────────

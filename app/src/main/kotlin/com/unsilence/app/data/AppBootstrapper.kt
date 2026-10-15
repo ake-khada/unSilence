@@ -550,25 +550,8 @@ class AppBootstrapper @Inject constructor(
         relayCapabilitiesStore.setIntegralRelays(integralUrls)
         relayPool.setIntegralRelays(integralUrls)
 
-        // Fetch trust scores + relay monitors concurrently, targeted to user's relays only.
-        // Snapshot-persisted so data is available immediately on next restart.
+        // Refresh optional monitor and user WoT metadata independently.
         val maintenanceStalenessMs = 12L * 60 * 60 * 1000 // 12 hours
-        val lastTrustUrls = relayPreferencesStore.lastTrustRelayUrls()
-        val trustAge = System.currentTimeMillis() - relayPreferencesStore.lastTrustFetchAt()
-        val hasTrustScores = memoryEventStore.getTrustScores().isNotEmpty()
-        val trustJob = if (hasTrustScores && trustAge < maintenanceStalenessMs && lastTrustUrls == userRelayUrls) {
-            Log.d(TAG, "Phase3: trust scores fresh for unchanged relay set; skipping fetch")
-            null
-        } else {
-            scope.launch {
-                val ok = relayPool.fetchTrustScores(TRUST_SCORE_PROVIDER_PUBKEY, userRelayUrls.toList())
-                if (ok) {
-                    relayPreferencesStore.setLastTrustFetch(System.currentTimeMillis(), userRelayUrls)
-                } else {
-                    Log.w(TAG, "Phase3: trust fetch failed — not advancing 12h gate")
-                }
-            }
-        }
 
         val wotPrefs = relayPreferencesStore.wotProviderPrefsSuspending()
         val wotTargets = ((memoryEventStore.getFollows(pubkeyHex) ?: emptySet()) + pubkeyHex)
@@ -641,7 +624,6 @@ class AppBootstrapper @Inject constructor(
                 }
             }
         }
-        trustJob?.join()
         wotJob.join()
         monitorJob?.join()
 

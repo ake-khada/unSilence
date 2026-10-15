@@ -37,7 +37,6 @@ object SubscriptionRules {
         "user-engagement-",
         "engagement-",
         "batch-events-",
-        "trust-scores-",
         "prefetch-",
         "mute-",
         "own-eng-",

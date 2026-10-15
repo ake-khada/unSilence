@@ -1,5 +1,8 @@
 package com.unsilence.app.ui.relays
 
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
+
 import com.unsilence.app.ui.theme.AppTextStyles
 import com.unsilence.app.ui.shared.rememberWriteAwareDismiss
 import androidx.compose.animation.AnimatedVisibility
@@ -621,7 +624,7 @@ private fun SimpleRelayRow(
                 .padding(horizontal = Spacing.medium, vertical = 8.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            HealthDot(testedMs ?: health?.ping)
+            RelayLatencyDot(testedMs ?: health?.ping, deviceTest = testedMs != null)
             Spacer(Modifier.width(8.dp))
             Text(
                 text     = displayUrl(url),
@@ -657,7 +660,7 @@ private fun ReadWriteRelayRow(
                 .padding(horizontal = Spacing.medium, vertical = 8.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            HealthDot(testedMs ?: health?.ping)
+            RelayLatencyDot(testedMs ?: health?.ping, deviceTest = testedMs != null)
             Spacer(Modifier.width(8.dp))
             Text(
                 text     = displayUrl(relay.url),
@@ -706,7 +709,7 @@ private fun FavoriteRelayRow(
             .padding(horizontal = Spacing.medium, vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        HealthDot(testedMs ?: health?.ping)
+        RelayLatencyDot(testedMs ?: health?.ping, deviceTest = testedMs != null)
         Spacer(Modifier.width(8.dp))
         Text(
             text = displayUrl(url),
@@ -853,6 +856,12 @@ private fun RelayHealthSummary(
                 .padding(horizontal = 6.dp, vertical = 3.dp),
         )
     }
+    Text(
+        "Monitor latency estimates · Test measures from this device",
+        color = Text3,
+        style = AppTextStyles.caption,
+        modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
+    )
 }
 
 @Composable
@@ -868,9 +877,8 @@ private fun SummarySeg(color: Color, text: String) {
 private val HealthGray   = Text3
 
 // §02/§03 latency tiers: mint <150 (fast) · zap 150–500 (slow) · like >500 or offline.
-// ms == null → no data (neutral "—"); ms < 0 → tested-and-offline. Trust score is NO LONGER
-// a list signal (amendment b) — the dot is the ONE coherent latency signal. Shared with the
-// §05 detail page (RelayDetailScreen) for the verdict row + stats strip.
+// ms == null → no data (neutral "—"); ms < 0 → test got no response.
+// Shared by the feed picker, relay lists and detail page; never a reputation score.
 internal fun latencyTier(ms: Int?): Color = when {
     ms == null -> HealthGray
     ms < 0     -> Like
@@ -887,10 +895,16 @@ private fun latencyLabel(ms: Int?): String = when {
 }
 
 @Composable
-private fun HealthDot(latencyMs: Int?) {
-    Canvas(modifier = Modifier.size(10.dp)) {
+internal fun RelayLatencyDot(latencyMs: Int?, deviceTest: Boolean = false, modifier: Modifier = Modifier.size(10.dp)) {
+    Canvas(modifier = modifier.semantics { contentDescription = relayLatencyDescription(latencyMs, deviceTest) }) {
         drawCircle(color = latencyTier(latencyMs))
     }
+}
+
+internal fun relayLatencyDescription(ms: Int?, deviceTest: Boolean): String = when {
+    ms == null -> "Latency unknown; connection status unknown"
+    ms < 0 -> if (deviceTest) "Device test: no response" else "Monitor latency unavailable"
+    else -> "${if (deviceTest) "Device test" else "Monitor estimate"}: $ms milliseconds"
 }
 
 /** Disclosure chevron — the row opens the §05 relay detail page. Replaces the old ⓘ

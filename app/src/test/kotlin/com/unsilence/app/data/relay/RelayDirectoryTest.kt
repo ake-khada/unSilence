@@ -172,10 +172,10 @@ class RelayDirectoryTest {
     @Test
     fun `reachable unknown relay outranks DNS-blocked famous relay`() {
         val reachable = RelayDirectory.computeDirectoryScore(
-            Reachability.REACHABLE, trustScore = null, monitorRttMs = null, popularity = 0,
+            Reachability.REACHABLE, monitorRttMs = null, popularity = 0,
         )
         val blockedFamous = RelayDirectory.computeDirectoryScore(
-            Reachability.DNS_BLOCKED, trustScore = 100, monitorRttMs = 50, popularity = 500,
+            Reachability.DNS_BLOCKED, monitorRttMs = 50, popularity = 500,
         )
         assertTrue("reachable ($reachable) must beat blocked-famous ($blockedFamous)", reachable > blockedFamous)
     }
@@ -235,10 +235,95 @@ class RelayDirectoryTest {
         assertEquals(EyesAlliance.FOURTEEN, RelayDirectory.eyesAlliance("DE"))
         assertEquals(EyesAlliance.NONE, RelayDirectory.eyesAlliance("JP"))
         assertEquals(EyesAlliance.NONE, RelayDirectory.eyesAlliance("BR"))
-        assertEquals(EyesAlliance.NONE, RelayDirectory.eyesAlliance(null))
+        assertEquals(EyesAlliance.UNKNOWN, RelayDirectory.eyesAlliance(null))
+        assertEquals(EyesAlliance.UNKNOWN, RelayDirectory.eyesAlliance("ZZ"))
+        assertEquals(EyesAlliance.UNKNOWN, RelayDirectory.eyesAlliance("XX"))
+        assertEquals(EyesAlliance.UNKNOWN, RelayDirectory.eyesAlliance("USA"))
     }
 
     // ── flagEmoji (pure) ───────────────────────────────────────────────────────
+
+    @Test
+    fun `invalid country tags cannot become an outside-alliance report`() {
+        for (invalid in listOf("ZZ", "XX", "USA", "840", "", "U1")) {
+            val entry = RelayDirectory.parseMonitorEvent(
+                listOf(listOf("d", "wss://r.example"), listOf("l", invalid, "countryCode")),
+                "", "monitor", 1000,
+            )!!
+            assertNull(entry.countryCode)
+            assertNull(entry.countryMonitorPubkey)
+            assertEquals(CountryStatus.UNKNOWN, RelayDirectory.countryStatus(entry, 1001))
+            assertFalse(RelayDirectory.isReportedOutsideFourteenEyes(entry, 1001))
+        }
+    }
+
+    @Test
+    fun `country parsing normalizes UK alias and preserves reporting provenance`() {
+        val entry = RelayDirectory.parseMonitorEvent(
+            listOf(listOf("d", "wss://r.example"), listOf("l", "uk", "countryCode")),
+            "", "monitor", 1000,
+        )!!
+        assertEquals("GB", entry.countryCode)
+        assertEquals("monitor", entry.countryMonitorPubkey)
+        assertEquals(1000L, entry.countryObservedAt)
+        assertEquals(CountryStatus.REPORTED, RelayDirectory.countryStatus(entry, 1001))
+        assertFalse(RelayDirectory.isReportedOutsideFourteenEyes(entry, 1001))
+    }
+
+    @Test
+    fun `outside facet requires fresh sourced unambiguous location`() {
+        val e = RelayDirectoryEntry("wss://r.example", countryCode = "JP",
+            countryObservedAt = 1000, countryMonitorPubkey = "monitor")
+        assertTrue(RelayDirectory.isReportedOutsideFourteenEyes(e, 1000 + RelayDirectory.COUNTRY_MAX_AGE_SECONDS))
+        val now = 1001L
+        for (unqualified in listOf(
+            e.copy(countryMonitorPubkey = null), e.copy(countryObservedAt = 0),
+            e.copy(countryObservedAt = now + 1), e.copy(countryObservedAt = Long.MAX_VALUE),
+            e.copy(countryConflicting = true), e.copy(countryCode = "ZZ"),
+        )) assertFalse(RelayDirectory.isReportedOutsideFourteenEyes(unqualified, now))
+        val expired = 1001 + RelayDirectory.COUNTRY_MAX_AGE_SECONDS
+        assertEquals(CountryStatus.STALE, RelayDirectory.countryStatus(e, expired))
+        assertFalse(RelayDirectory.isReportedOutsideFourteenEyes(e, expired))
+    }
+
+    @Test
+    fun `new liveness cannot freshen old geography and device identity cannot replace its source`() {
+        val old = RelayDirectoryEntry("wss://r.example", countryCode = "JP",
+            countryObservedAt = 1000, countryMonitorPubkey = "geo-monitor", monitorLastSeenAt = 1000)
+        val now = 1001 + RelayDirectory.COUNTRY_MAX_AGE_SECONDS
+        val live = RelayDirectoryEntry("wss://r.example", monitorLastSeenAt = now)
+        val merged = RelayDirectory.mergeMonitorEntries(listOf(old, live))
+        assertEquals(now, merged.monitorLastSeenAt)
+        assertEquals(CountryStatus.STALE, RelayDirectory.countryStatus(merged, now))
+        val overlaid = RelayDirectory.overlayDeviceNip11(merged, DeviceNip11Doc(name = "Device name"))
+        assertEquals(Nip11Source.DEVICE, overlaid.nip11Source)
+        assertEquals("geo-monitor", overlaid.countryMonitorPubkey)
+        assertEquals(1000L, overlaid.countryObservedAt)
+        assertFalse(RelayDirectory.isReportedOutsideFourteenEyes(overlaid, now))
+    }
+
+    @Test
+    fun `conflicting monitor countries are not treated as outside and merge is deterministic`() {
+        val a = RelayDirectoryEntry("wss://r.example", countryCode = "JP",
+            countryObservedAt = 1000, countryMonitorPubkey = "a", monitorLastSeenAt = 1000)
+        val b = a.copy(countryCode = "US", countryMonitorPubkey = "b")
+        val merged = RelayDirectory.mergeMonitorEntries(listOf(a, b))
+        val reversed = RelayDirectory.mergeMonitorEntries(listOf(b, a))
+        assertEquals(merged.countryCode, reversed.countryCode)
+        assertEquals(merged.countryMonitorPubkey, reversed.countryMonitorPubkey)
+        assertEquals(CountryStatus.CONFLICTING, RelayDirectory.countryStatus(merged, 1001))
+        assertFalse(RelayDirectory.isReportedOutsideFourteenEyes(merged, 1001))
+    }
+
+    @Test
+    fun `conflicting country tags within a report remain qualified`() {
+        val e = RelayDirectory.parseMonitorEvent(
+            listOf(listOf("d", "wss://r.example"), listOf("l", "JP", "countryCode"), listOf("l", "US", "countryCode")),
+            "", "monitor", 1000,
+        )!!
+        assertEquals(CountryStatus.CONFLICTING, RelayDirectory.countryStatus(e, 1001))
+        assertFalse(RelayDirectory.isReportedOutsideFourteenEyes(e, 1001))
+    }
 
     @Test
     fun `flagEmoji builds regional-indicator pair and rejects bad input`() {
@@ -253,14 +338,21 @@ class RelayDirectoryTest {
 
     @Test
     fun `merge - newest monitor geo wins, falls back when newest lacks it`() {
-        val older = RelayDirectoryEntry(url = "wss://r.example", monitorLastSeenAt = 10, countryCode = "US", geohash = "aaa")
-        val newer = RelayDirectoryEntry(url = "wss://r.example", monitorLastSeenAt = 30, countryCode = "DE", geohash = "bbb")
+        val older = RelayDirectoryEntry(url = "wss://r.example", monitorLastSeenAt = 10, countryCode = "US", countryObservedAt = 10, countryMonitorPubkey = "m1", geohash = "aaa")
+        val newer = RelayDirectoryEntry(url = "wss://r.example", monitorLastSeenAt = 30, countryCode = "DE", countryObservedAt = 30, countryMonitorPubkey = "m2", geohash = "bbb")
         val merged = RelayDirectory.mergeMonitorEntries(listOf(older, newer))
         assertEquals("DE", merged.countryCode)
         assertEquals("bbb", merged.geohash)
+        assertTrue(merged.countryConflicting)
+        assertEquals(30L, merged.countryObservedAt)
+        assertEquals("m2", merged.countryMonitorPubkey)
         val newestNoGeo = RelayDirectoryEntry(url = "wss://r.example", monitorLastSeenAt = 40)
         val merged2 = RelayDirectory.mergeMonitorEntries(listOf(older, newestNoGeo))
         assertEquals("US", merged2.countryCode)   // fallback to the only entry that has it
+        assertEquals(10L, merged2.countryObservedAt)
+        assertEquals("m1", merged2.countryMonitorPubkey)
+        assertEquals(40L, merged2.monitorLastSeenAt)
+        assertFalse(merged2.countryConflicting)
     }
 
     @Test

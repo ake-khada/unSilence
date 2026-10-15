@@ -110,7 +110,7 @@ class MesMetricsLogger @Inject constructor(
             "caches: videoThumb=${vtEntries} (~${String.format("%.1f", vtMb)}mb) " +
                 "imgDim=${idcEntries} " +
                 "follows=${s.followsEntries} followerCount=${s.followerCountEntries} " +
-                "relayLists=${s.relayListEntries} trustScores=${s.trustScoreEntries} " +
+                "relayLists=${s.relayListEntries} " +
                 "monitors=${s.relayMonitorEntries} identities=${s.relayIdentityEntries} " +
                 "relaySets=${s.relaySetEntries}",
         )

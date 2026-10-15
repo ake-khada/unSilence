@@ -327,25 +327,6 @@ data class FeedRow(
 )
 
 /**
- * Relay trust score (kind 30385). Plain data class.
- * Populated by MES handleTrustScore() from kind-30385 events fetched via
- * RelayPool.fetchTrustScores(). UI renders colored dots in Relay Settings.
- */
-data class RelayTrustScoreEntity(
-    val relayUrl: String,
-    val score: Int,
-    val reliability: Int,
-    val quality: Int,
-    val accessibility: Int,
-    val confidence: String,
-    val observations: Int,
-    val policy: String? = null,
-    val countryCode: String? = null,
-    val operatorVerified: String? = null,
-    val updatedAt: Long = 0L,
-)
-
-/**
  * Relay liveness monitor (kind 30166 / NIP-66). Populated by MES
  * handleRelayMonitor() from events fetched via RelayPool.fetchRelayMonitors().
  * Source: wss://relay.nostr.watch — operational health, RTT, NIP support.
@@ -373,16 +354,14 @@ data class RelayIdentityEntity(
 )
 
 /**
- * Combined relay facts: trust quality (kind 30385), operational liveness (kind 30166),
+ * Combined relay facts: operational observations (kind 30166),
  * and device-authoritative NIP-11 identity. Keyed by normalized relay URL.
  */
 data class RelayHealthInfo(
     val relayUrl: String,
-    val trustScore: RelayTrustScoreEntity? = null,
     val monitor: RelayMonitorEntity? = null,
     val identity: RelayIdentityEntity? = null,
 ) {
-    val score: Int? get() = trustScore?.score
     val ping: Int? get() = monitor?.rttOpen ?: monitor?.rttRead
     val iconUrl: String? get() = identity?.iconUrl ?: monitor?.iconUrl
 }

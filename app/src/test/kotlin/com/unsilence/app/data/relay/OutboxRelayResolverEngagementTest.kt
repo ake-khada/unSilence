@@ -1,6 +1,5 @@
 package com.unsilence.app.data.relay
 
-import com.unsilence.app.data.memory.RelayTrustScoreEntity
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Before
@@ -128,25 +127,24 @@ class OutboxRelayResolverEngagementTest {
     }
 
     @Test
-    fun `orders author write relays by trust score`() {
+    fun `orders author write relays by optional latency`() {
         val author = hex(8)
         metadata.setWriteRelays(author, listOf(
-            "wss://low-trust.example",
-            "wss://high-trust.example",
-            "wss://mid-trust.example",
+            "wss://slow.example",
+            "wss://fast.example",
+            "wss://unknown.example",
         ))
-        metadata.setTrustScore("wss://low-trust.example", 20)
-        metadata.setTrustScore("wss://high-trust.example", 90)
-        metadata.setTrustScore("wss://mid-trust.example", 50)
+        metadata.setRtt("wss://slow.example", 900)
+        metadata.setRtt("wss://fast.example", 90)
 
         val result = resolver.resolveEngagementRelays(
             authorPubkey = author,
             ownReadRelays = emptyList(),
         )
 
-        assertEquals("wss://high-trust.example", result[0])
-        assertEquals("wss://mid-trust.example", result[1])
-        assertEquals("wss://low-trust.example", result[2])
+        assertEquals("wss://fast.example", result[0])
+        assertEquals("wss://unknown.example", result[1])
+        assertEquals("wss://slow.example", result[2])
     }
 
     @Test

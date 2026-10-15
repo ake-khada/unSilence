@@ -43,6 +43,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
@@ -61,7 +62,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import com.unsilence.app.data.relay.EyesAlliance
+import androidx.lifecycle.compose.LifecycleResumeEffect
 import com.unsilence.app.data.relay.Reachability
 import com.unsilence.app.data.relay.RelayDirectory
 import com.unsilence.app.data.relay.RelayDirectoryEntry
@@ -113,6 +114,12 @@ fun RelayDiscoveryScreen(
     val facets = DiscoveryFacet.entries
     val pagerState = rememberPagerState(pageCount = { facets.size })
     val scope = rememberCoroutineScope()
+    // Re-evaluate freshness after backgrounding, without a timer or a metadata fetch.
+    var resumedAt by remember { mutableLongStateOf(System.currentTimeMillis() / 1000L) }
+    LifecycleResumeEffect(Unit) {
+        resumedAt = System.currentTimeMillis() / 1000L
+        onPauseOrDispose { }
+    }
 
     // Membership — drives the per-card Add → Added flip. A relay counts as "added" if it's in
     // any of the user's configured lists.
@@ -158,10 +165,11 @@ fun RelayDiscoveryScreen(
                 }
                 else -> HorizontalPager(state = pagerState, modifier = Modifier.weight(1f).fillMaxWidth()) { page ->
                     val pageFacet = facets[page]
-                    val pageRanked = remember(directory, query, pageFacet) {
+                    val pageRanked = remember(directory, query, pageFacet, resumedAt, pagerState.currentPage) {
+                        val nowSeconds = System.currentTimeMillis() / 1000L
                         directory.values.asSequence()
                             .filter { matchesQuery(it, query) }
-                            .filter { matchesFacet(it, pageFacet) }
+                            .filter { matchesFacet(it, pageFacet, nowSeconds) }
                             .sortedByDescending { score(it) }   // reachability-weighted: works-from-here wins
                             .toList()
                     }
@@ -436,7 +444,7 @@ private fun NoMatches(message: String) {
 private const val SECTION_CAP = 8
 
 private fun score(e: RelayDirectoryEntry): Int =
-    RelayDirectory.computeDirectoryScore(e.reachability, e.trustScore, e.monitorRttMs, e.popularity)
+    RelayDirectory.computeDirectoryScore(e.reachability, e.monitorRttMs, e.popularity)
 
 private fun matchesQuery(e: RelayDirectoryEntry, query: String): Boolean {
     val q = query.trim().lowercase()
@@ -447,15 +455,15 @@ private fun matchesQuery(e: RelayDirectoryEntry, query: String): Boolean {
         e.software?.lowercase()?.contains(q) == true
 }
 
-private fun matchesFacet(e: RelayDirectoryEntry, facet: DiscoveryFacet): Boolean = when (facet) {
+internal fun matchesFacet(e: RelayDirectoryEntry, facet: DiscoveryFacet, nowSeconds: Long): Boolean = when (facet) {
     DiscoveryFacet.ALL -> true
     DiscoveryFacet.FAST -> (e.ourRttMs ?: e.monitorRttMs)?.let { it in 0..149 } == true
     DiscoveryFacet.FREE -> !e.payment
     DiscoveryFacet.PAID -> e.payment
     DiscoveryFacet.SEARCH -> e.supportedNips.contains(50)
     DiscoveryFacet.MEDIA -> e.supportedNips.contains(96)
-    // Unknown geo is EXCLUDED, never assumed outside — no fabrication.
-    DiscoveryFacet.OUTSIDE_14 -> e.countryCode != null && RelayDirectory.eyesAlliance(e.countryCode) == EyesAlliance.NONE
+    // Only recent, sourced, unambiguous observations qualify. Never affects routing.
+    DiscoveryFacet.OUTSIDE_14 -> RelayDirectory.isReportedOutsideFourteenEyes(e, nowSeconds)
 }
 
 private fun latencyLabel(ms: Int?): String? = when {

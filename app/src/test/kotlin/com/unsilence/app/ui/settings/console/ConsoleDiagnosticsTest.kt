@@ -122,7 +122,7 @@ class ConsoleDiagnosticsTest {
             ConsoleDiagnosticsBundle(
                 relaySummary = "2 connected · 0 connecting · 1 inactive · 790 catalogued for discovery",
                 storeSummary = "100 events · 1.0 MB",
-                gatesSummary = "trust 1h · monitors 2h · WoT 3h · 4/5 scored",
+                gatesSummary = "monitors 2h · WoT 3h · 4/5 scored",
                 logs = listOf(parseLogcatLine("07-09 11:22:33.444 123 456 D RelayPool: connected")),
             ),
         )

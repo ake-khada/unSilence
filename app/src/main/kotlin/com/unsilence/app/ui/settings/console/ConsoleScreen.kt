@@ -473,7 +473,6 @@ private fun relayMeta(row: ConsoleRelayRow): List<String> = buildList {
     row.directory?.let { entry ->
         add(entry.reachability.label())
         entry.monitorRttMs?.let { add("${it}ms") }
-        entry.trustScore?.let { add("trust $it") }
     }
 }.distinct()
 

@@ -1069,7 +1069,7 @@ class CardHydrator @Inject constructor(
      *
      * Query budgets remain batched; a relay's limit is not per-post completeness.
      *
-     * Relay targeting: post author's NIP-65 write relays (top 4 by trust+RTT) +
+     * Relay targeting: post author's NIP-65 write relays (top 4 by optional RTT) +
      * user's read relays (top 2) as secondary catch-net. Reactors fan their
      * kind-7/9735 broadcasts to the post author's write relays — that's where
      * engagement propagates. GLOBAL fallback when neither kind-10002 is known.

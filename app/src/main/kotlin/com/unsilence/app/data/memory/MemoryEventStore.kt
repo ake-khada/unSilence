@@ -4,7 +4,6 @@ import android.util.Log
 // FeedRow, EventEntity, UserEntity are in the same package (data.memory.Models)
 import com.unsilence.app.data.DEFAULT_WOT_PROVIDER_PUBKEY
 import com.unsilence.app.data.DEFAULT_WOT_RELAY
-import com.unsilence.app.data.TRUST_SCORE_PROVIDER_PUBKEY
 import com.unsilence.app.data.network.NIP05_CACHE_CAP
 import com.unsilence.app.data.network.NIP05_CACHE_RECORD_MAX_BYTES
 import com.unsilence.app.data.network.Nip05VerificationCacheEntry
@@ -939,8 +938,6 @@ class MemoryEventStore @Inject constructor(
     // Key: pubkey → ordered list of server URLs (replaceable event, last-write-wins)
     private val blossomServersByPubkey = ConcurrentHashMap<String, List<String>>()
 
-    // ─── Trust scores (kind 30385) ────────────────────────────────────────────
-    private val trustScoresByUrl = ConcurrentHashMap<String, RelayTrustScoreEntity>()
 
     // ─── NIP-85 user-level WoT assertions (kind 30382) ───────────────────────
     private val wotBySubject = ConcurrentHashMap<String, WotAssertionEntity>()
@@ -1104,7 +1101,6 @@ class MemoryEventStore @Inject constructor(
     private val _muteListSignal = MutableStateFlow(0L)
     private val _relayConfigSignal = MutableStateFlow(0L)
     private val _relaySetSignal = MutableStateFlow(0L)
-    private val _trustScoreSignal = MutableStateFlow(0L)
     private val _wotSignal = MutableStateFlow(0L)
     private val _relayMonitorSignal = MutableStateFlow(0L)
     private val _relayIdentitySignal = MutableStateFlow(0L)
@@ -1133,7 +1129,7 @@ class MemoryEventStore @Inject constructor(
     private val feedRowPutsSinceTrimCheck = java.util.concurrent.atomic.AtomicInteger(0)
 
     // ─── Signal-bump coalescing ───────────────────────────────────────────
-    // Kind handlers (handleRelayList, handleRelayMonitor, handleTrustScore,
+    // Kind handlers (handleRelayList, handleRelayMonitor,
     // ...) each bump their own signal. During a cold-start burst (244
     // kind-10002, 1000+ kind-30166) per-event bumps drive downstream Flow
     // re-emits — each allocating a fresh HashMap snapshot — and trigger
@@ -1149,7 +1145,6 @@ class MemoryEventStore @Inject constructor(
         var follows = false
         var action = false
         var relayConfig = false
-        var trustScore = false
         var wot = false
         var relayMonitor = false
         var relaySet = false
@@ -1166,7 +1161,6 @@ class MemoryEventStore @Inject constructor(
         if (d.follows) _followsSignal.value = now
         if (d.action) _actionSignal.value = now
         if (d.relayConfig) _relayConfigSignal.value = now
-        if (d.trustScore) _trustScoreSignal.value = now
         if (d.wot) _wotSignal.value = now
         if (d.relayMonitor) _relayMonitorSignal.value = now
         if (d.relaySet) _relaySetSignal.value = now
@@ -1316,7 +1310,7 @@ class MemoryEventStore @Inject constructor(
      * Instead of N signal bumps for N events, bumps each dirty signal type
      * exactly once at the end. Returns the number of novel events inserted.
      *
-     * Kind handlers (handleRelayList, handleRelayMonitor, handleTrustScore,
+     * Kind handlers (handleRelayList, handleRelayMonitor,
      * ...) populate the same [InsertDirty] accumulator instead of bumping
      * directly, so a 1000-event control-plane burst produces one bump per
      * affected signal — not 1000.
@@ -1398,7 +1392,7 @@ class MemoryEventStore @Inject constructor(
      * check eviction — callers are responsible for those.
      *
      * [dirty] is the accumulator for deferred signal bumps. Kind handlers
-     * that would normally bump _relayConfigSignal / _trustScoreSignal /
+     * that would normally bump _relayConfigSignal /
      * _relayMonitorSignal / _relaySetSignal set the corresponding flag
      * here instead. The caller (insert / insertBatch) flushes once at end.
      */
@@ -1420,7 +1414,8 @@ class MemoryEventStore @Inject constructor(
     /** Caller holds [muteStateLock] for kind-10000 so publish snapshots cannot
      * observe the raw event index before its materialized mute state is ready. */
     private fun insertCoreUnlocked(event: NostrEvent, dirty: InsertDirty): Boolean {
-        if (event.kind == 30385 && !isTrustScoreProvider(event.pubkey)) return false
+        // Retired relay reputation must not enter raw indexes, even if unsolicited.
+        if (event.kind == 30385) return false
         if (event.kind in DERIVED_ONLY_KINDS) {
             return insertDerivedOnly(event, dirty)
         }
@@ -1514,7 +1509,6 @@ class MemoryEventStore @Inject constructor(
             10030 -> handleUserEmojiList(event, dirty)
             30030 -> handleEmojiSet(event, dirty)
             30166 -> handleRelayMonitor(event, dirty)
-            30385 -> handleTrustScore(event, dirty)
         }
 
         return true
@@ -2690,9 +2684,6 @@ class MemoryEventStore @Inject constructor(
         return changed
     }
 
-    private fun isTrustScoreProvider(pubkey: String): Boolean =
-        normalizeHexPubkey(pubkey) == TRUST_SCORE_PROVIDER_PUBKEY
-
     private fun normalizeHexPubkey(pubkey: String?): String? {
         val normalized = pubkey?.trim()?.lowercase() ?: return null
         if (normalized.length != 64) return null
@@ -2710,44 +2701,6 @@ class MemoryEventStore @Inject constructor(
             wotBySubject.remove(subject)
             wotQueriedSubjects.remove(subject)
         }
-    }
-
-    // ─── Kind 30385: Trusted Relay Assertions ─────────────────────────────
-
-    private fun handleTrustScore(event: NostrEvent, dirty: InsertDirty? = null) {
-        if (!isTrustScoreProvider(event.pubkey)) return
-
-        fun tag(name: String): String? = event.tags.firstOrNull {
-            it.size >= 2 && it[0] == name
-        }?.get(1)
-
-        val rawUrl = tag("d") ?: return
-        val relayUrl = normalizeRelayUrl(rawUrl) ?: return
-        val score = tag("score")?.toIntOrNull() ?: return
-        val reliability = tag("reliability")?.toIntOrNull() ?: return
-        val quality = tag("quality")?.toIntOrNull() ?: return
-        val accessibility = tag("accessibility")?.toIntOrNull() ?: return
-        val confidence = tag("confidence") ?: return
-        val observations = tag("observations")?.toIntOrNull() ?: 0
-
-        trustScoresByUrl.compute(relayUrl) { _, existing ->
-            if (existing != null && existing.updatedAt >= event.createdAt) existing
-            else RelayTrustScoreEntity(
-                relayUrl = relayUrl,
-                score = score,
-                reliability = reliability,
-                quality = quality,
-                accessibility = accessibility,
-                confidence = confidence,
-                observations = observations,
-                policy = tag("policy"),
-                countryCode = tag("country_code"),
-                operatorVerified = tag("operator_verified"),
-                updatedAt = event.createdAt,
-            )
-        }
-        if (dirty != null) dirty.trustScore = true
-        else _trustScoreSignal.value = System.nanoTime()
     }
 
     // ─── Kind 10063: Blossom server list (NIP-B7 / BUD-03) ────────────────
@@ -5120,15 +5073,6 @@ class MemoryEventStore @Inject constructor(
         relayListsByPubkey[pubkey]?.write
             ?: profileDerivedLookupRelaysByPubkey[pubkey].orEmpty()
 
-    /** Write relays sorted by trust score (descending). Unknown relays get score 50 (middle rank). */
-    fun writeRelaysForRanked(pubkey: String): List<String> {
-        val relays = writeRelaysFor(pubkey)
-        if (relays.size <= 1) return relays
-        return relays.sortedByDescending { url ->
-            trustScoresByUrl[url]?.score ?: 50
-        }
-    }
-
     fun readRelaysFor(pubkey: String): List<String> =
         relayListsByPubkey[pubkey]?.read ?: emptyList()
 
@@ -5200,17 +5144,6 @@ class MemoryEventStore @Inject constructor(
     fun favoriteRelayConfigsFlow(pubkey: String): Flow<List<FavoriteEntry>> =
         _relayConfigSignal
             .map { getFavoriteRelayConfigs(pubkey) }
-            .distinctUntilChanged()
-            .flowOn(Dispatchers.Default)
-
-    // ─── Trust score query APIs ───────────────────────────────────────────
-
-    override fun getTrustScores(): Map<String, RelayTrustScoreEntity> =
-        HashMap(trustScoresByUrl)
-
-    fun trustScoresFlow(): Flow<Map<String, RelayTrustScoreEntity>> =
-        _trustScoreSignal
-            .map { getTrustScores() }
             .distinctUntilChanged()
             .flowOn(Dispatchers.Default)
 
@@ -5362,7 +5295,7 @@ class MemoryEventStore @Inject constructor(
         return true
     }
 
-    // ─── Combined relay health (trust + monitor + device identity) ───────
+    // ─── Combined relay health (monitor + device identity) ──────────────
 
     /**
      * Look up health info for a relay URL, trying both raw and normalized forms.
@@ -5371,42 +5304,21 @@ class MemoryEventStore @Inject constructor(
      */
     fun getRelayHealth(url: String): RelayHealthInfo? {
         val normalized = normalizeRelayUrl(url) ?: return null
-        val score = trustScoresByUrl[normalized]
         val monitor = relayMonitorsByUrl[normalized]
         val identity = relayIdentitiesByUrl[normalized]
-        if (score == null && monitor == null && identity == null) return null
+        if (monitor == null && identity == null) return null
         return RelayHealthInfo(
             relayUrl = normalized,
-            trustScore = score,
             monitor = monitor,
             identity = identity,
         )
     }
 
     fun relayHealthFlow(): Flow<Map<String, RelayHealthInfo>> =
-        combine(_trustScoreSignal, _relayMonitorSignal, _relayIdentitySignal) { _, _, _ ->
+        combine(_relayMonitorSignal, _relayIdentitySignal) { _, _ ->
             val result = mutableMapOf<String, RelayHealthInfo>()
-            for ((url, score) in trustScoresByUrl) {
-                result[url] = RelayHealthInfo(
-                    relayUrl = url,
-                    trustScore = score,
-                    monitor = relayMonitorsByUrl[url],
-                    identity = relayIdentitiesByUrl[url],
-                )
-            }
             for ((url, monitor) in relayMonitorsByUrl) {
-                val existing = result[url]
-                if (existing != null) {
-                    if (existing.monitor == null) {
-                        result[url] = existing.copy(monitor = monitor)
-                    }
-                } else {
-                    result[url] = RelayHealthInfo(
-                        relayUrl = url,
-                        monitor = monitor,
-                        identity = relayIdentitiesByUrl[url],
-                    )
-                }
+                result[url] = RelayHealthInfo(url, monitor, relayIdentitiesByUrl[url])
             }
             for ((url, identity) in relayIdentitiesByUrl) {
                 val existing = result[url]
@@ -6003,7 +5915,6 @@ class MemoryEventStore @Inject constructor(
             eventModelEntries = eventModelsByEventId.size,
             feedRowCacheEntries = feedRowCache.size,
             relayListEntries = relayListsByPubkey.size,
-            trustScoreEntries = trustScoresByUrl.size,
             relayMonitorEntries = relayMonitorsByUrl.size,
             relayIdentityEntries = relayIdentitiesByUrl.size,
             relaySetEntries = relaySetsByCoordinate.size,
@@ -6143,10 +6054,6 @@ class MemoryEventStore @Inject constructor(
         // Write relay health section
         writer.write("---RELAY_HEALTH---")
         writer.newLine()
-        for ((url, ts) in trustScoresByUrl) {
-            writer.write("trust|$url|${ts.score}|${ts.reliability}|${ts.quality}|${ts.accessibility}|${ts.confidence}|${ts.observations}|${ts.policy ?: ""}|${ts.countryCode ?: ""}|${ts.operatorVerified ?: ""}|${ts.updatedAt}")
-            writer.newLine()
-        }
         for ((url, m) in relayMonitorsByUrl) {
             writer.write("monitor|$url|${m.rttOpen ?: ""}|${m.rttRead ?: ""}|${m.rttWrite ?: ""}|${m.monitorPubkey}|${m.createdAt}|${m.network ?: ""}|${m.geohash ?: ""}|${m.iconUrl ?: ""}|${m.supportedNips.joinToString(",")}")
             writer.newLine()
@@ -6211,7 +6118,6 @@ class MemoryEventStore @Inject constructor(
         _profileSignal.value = now
         _statsSignal.value = now
         _followsSignal.value = now
-        _trustScoreSignal.value = now
         _relayMonitorSignal.value = now
         // Own NIP-51 config (favorites kind-10012, relay sets kind-30002) is
         // materialized into favoritesByPubkey/relaySetsByCoordinate during the
@@ -6441,20 +6347,9 @@ class MemoryEventStore @Inject constructor(
         }
 
         val relayHealthBytes = writer.section { d ->
-            // Same concurrent-modification hazard as aggregates above.
-            // Snapshot before count + iterate.
-            val trustScores = trustScoresByUrl.toMap()
-            d.writeInt(trustScores.size)
-            for ((url, ts) in trustScores) {
-                d.writeStr(url)
-                d.writeInt(ts.score); d.writeInt(ts.reliability)
-                d.writeInt(ts.quality); d.writeInt(ts.accessibility)
-                d.writeStr(ts.confidence); d.writeInt(ts.observations)
-                d.writeStrOrNull(ts.policy)
-                d.writeStrOrNull(ts.countryCode)
-                d.writeStrOrNull(ts.operatorVerified)
-                d.writeLong(ts.updatedAt)
-            }
+            // Keep the retired score count slot for existing snapshot readers.
+            d.writeInt(0)
+            // Snapshot before count + iterate to avoid concurrent modification.
             val monitors = relayMonitorsByUrl.toMap()
             d.writeInt(monitors.size)
             for ((url, m) in monitors) {
@@ -6811,22 +6706,13 @@ class MemoryEventStore @Inject constructor(
         val trustN = input.readInt()
         if (trustN < 0 || trustN > 100_000) throw IOException("Invalid trust count: $trustN")
         for (i in 0 until trustN) {
-            val url = input.readStr()
-            val score = input.readInt(); val reliability = input.readInt()
-            val quality = input.readInt(); val accessibility = input.readInt()
-            val confidence = input.readStr(); val observations = input.readInt()
-            val policy = input.readStrOrNull()
-            val countryCode = input.readStrOrNull()
-            val operatorVerified = input.readStrOrNull()
-            val updatedAt = input.readLong()
-            trustScoresByUrl[url] = RelayTrustScoreEntity(
-                relayUrl = url,
-                score = score, reliability = reliability,
-                quality = quality, accessibility = accessibility,
-                confidence = confidence, observations = observations,
-                policy = policy, countryCode = countryCode,
-                operatorVerified = operatorVerified, updatedAt = updatedAt,
-            )
+            // Consume old records without restoring reputation or shifting later sections.
+            input.readStr() // url
+            repeat(4) { input.readInt() } // score, reliability, quality, accessibility
+            input.readStr() // confidence
+            input.readInt() // observations
+            repeat(3) { input.readStrOrNull() } // policy, country, operator verification
+            input.readLong() // updatedAt
         }
         val monitorN = input.readInt()
         if (monitorN < 0 || monitorN > 100_000) throw IOException("Invalid monitor count: $monitorN")
@@ -6970,7 +6856,6 @@ class MemoryEventStore @Inject constructor(
         _statsSignal.value = now
         _followsSignal.value = now
         _actionSignal.value = now
-        _trustScoreSignal.value = now
         _relayMonitorSignal.value = now
         _relayIdentitySignal.value = now
         _emojiSetSignal.value = now
@@ -7290,6 +7175,7 @@ class MemoryEventStore @Inject constructor(
     }
 
     private fun insertFromSnapshotUnlocked(event: NostrEvent) {
+        if (event.kind == 30385) return // Retired raw reputation records from old snapshots.
         val nowSec = System.currentTimeMillis() / 1000L
         if (event.createdAt > nowSec + MAX_FUTURE_DRIFT_SECONDS) return
         if (event.kind in DERIVED_ONLY_KINDS) {
@@ -7379,21 +7265,7 @@ class MemoryEventStore @Inject constructor(
         if (parts.size < 2) return
         when (parts[0]) {
             "trust" -> {
-                if (parts.size < 12) return
-                val url = parts[1]
-                trustScoresByUrl[url] = RelayTrustScoreEntity(
-                    relayUrl = url,
-                    score = parts[2].toIntOrNull() ?: return,
-                    reliability = parts[3].toIntOrNull() ?: return,
-                    quality = parts[4].toIntOrNull() ?: return,
-                    accessibility = parts[5].toIntOrNull() ?: return,
-                    confidence = parts[6],
-                    observations = parts[7].toIntOrNull() ?: 0,
-                    policy = parts[8].ifEmpty { null },
-                    countryCode = parts[9].ifEmpty { null },
-                    operatorVerified = parts[10].ifEmpty { null },
-                    updatedAt = parts[11].toLongOrNull() ?: 0L,
-                )
+                // Legacy reputation row: intentionally discarded.
             }
             "monitor" -> {
                 if (parts.size < 11) return
@@ -7566,7 +7438,6 @@ class MemoryEventStore @Inject constructor(
         relaySetsByCoordinate.clear()
         deletedRelaySetTombstones.clear()
         blossomServersByPubkey.clear()
-        trustScoresByUrl.clear()
         synchronized(wotProviderLock) {
             clearWotAssertionsLocked()
             ownWotProviderRegistry = null
@@ -7587,7 +7458,6 @@ class MemoryEventStore @Inject constructor(
         _actionSignal.value++
         _relayConfigSignal.value++
         _relaySetSignal.value++
-        _trustScoreSignal.value++
         _wotSignal.value++
         _relayMonitorSignal.value++
         _statsInvalidations.tryEmit(StatsInvalidation.Broadcast)
@@ -7675,7 +7545,6 @@ class MemoryEventStore @Inject constructor(
         emojiSetsByCoordinate.clear()
         userEmojiListByPubkey.clear()
         emojiKindCreatedAt.clear()
-        trustScoresByUrl.clear()
         synchronized(wotProviderLock) {
             clearWotAssertionsLocked()
             ownWotProviderRegistry = null
@@ -7686,7 +7555,6 @@ class MemoryEventStore @Inject constructor(
         relayIdentitiesByUrl.clear()
         _relaySetSignal.value = 0L
         _emojiSetSignal.value = 0L
-        _trustScoreSignal.value = 0L
         _wotSignal.value = 0L
         _relayMonitorSignal.value = 0L
         _relayIdentitySignal.value = 0L

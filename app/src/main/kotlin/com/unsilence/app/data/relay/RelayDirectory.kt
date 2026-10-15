@@ -8,7 +8,7 @@ import kotlinx.serialization.json.jsonObject
 
 /**
  * Relay Directory (Phase 1, data layer). A bounded in-memory index merging NIP-66
- * monitor data (kind-30166), kind-30385 trust, our empirical reachability
+ * monitor data (kind-30166), our empirical reachability
  * ([RelayCapabilitiesStore]), and follow-circle popularity (kind-10002). No UI here.
  *
  * Design note: NOT persisted to snapshot in v1 — rebuilt lazily via
@@ -38,7 +38,6 @@ data class RelayDirectoryEntry(
     val restrictedWrites: Boolean = false,           // NIP-11 limitation.restricted_writes
     val monitorRttMs: Int? = null,                   // from 30166 rtt-* (median across monitors at merge)
     val monitorLastSeenAt: Long = 0L,                // newest 30166 createdAt; eviction key
-    val trustScore: Int? = null,                     // 30385 if present
     val ourRttMs: Int? = null,                       // reserved — no per-relay device RTT today (RelayCapabilities has none)
     val ourLastReason: String? = null,               // RelayCapabilities.lastReason
     val reachability: Reachability = Reachability.UNKNOWN,
@@ -58,14 +57,40 @@ data class RelayDirectoryEntry(
     val contact: String? = null,                     // NIP-11 `contact`
     // Geo (monitor-sourced, NIP-32 labels): SERVER IP geolocation, never legal jurisdiction.
     val countryCode: String? = null,                 // ISO-3166 alpha-2 (uppercased)
+    val countryObservedAt: Long = 0L,               // timestamp of this country, NOT newest liveness
+    val countryMonitorPubkey: String? = null,        // source of this country, NOT NIP-11 source
+    val countryConflicting: Boolean = false,
     val geohash: String? = null,                     // most-precise monitor geohash
 )
 
 /** Surveillance-alliance tier of a hosting country (nested: FIVE ⊂ NINE ⊂ FOURTEEN). NONE =
  *  outside the 14 Eyes. Membership returned is the INNERMOST alliance the country belongs to. */
-enum class EyesAlliance { NONE, FIVE, NINE, FOURTEEN }
+enum class EyesAlliance { UNKNOWN, NONE, FIVE, NINE, FOURTEEN }
+
+enum class CountryStatus { UNKNOWN, REPORTED, STALE, CONFLICTING }
 
 object RelayDirectory {
+    // Geographic observations are optional, not a connection policy. A day without an
+    // observation is too old for an affirmative discovery-filter result; still show its date.
+    const val COUNTRY_MAX_AGE_SECONDS = 24L * 60 * 60
+    private val countryCodes = java.util.Locale.getISOCountries().toSet()
+
+    fun normalizeCountryCode(value: String?): String? {
+        val code = value?.uppercase(java.util.Locale.ROOT) ?: return null
+        return (if (code == "UK") "GB" else code).takeIf { it in countryCodes }
+    }
+
+    fun countryStatus(entry: RelayDirectoryEntry, nowSeconds: Long): CountryStatus = when {
+        normalizeCountryCode(entry.countryCode) == null || entry.countryMonitorPubkey.isNullOrBlank() ||
+            entry.countryObservedAt <= 0 || entry.countryObservedAt > nowSeconds -> CountryStatus.UNKNOWN
+        entry.countryConflicting -> CountryStatus.CONFLICTING
+        nowSeconds - entry.countryObservedAt > COUNTRY_MAX_AGE_SECONDS -> CountryStatus.STALE
+        else -> CountryStatus.REPORTED
+    }
+
+    fun isReportedOutsideFourteenEyes(entry: RelayDirectoryEntry, nowSeconds: Long): Boolean =
+        countryStatus(entry, nowSeconds) == CountryStatus.REPORTED &&
+            eyesAlliance(entry.countryCode) == EyesAlliance.NONE
 
     /**
      * Parse one kind-30166 event (tags + embedded NIP-11 content) into a monitor-sourced
@@ -151,9 +176,10 @@ object RelayDirectory {
         // Geo (NIP-32 label pairs). The "countryCode" namespace carries three forms
         // (alpha-2 / alpha-3 / numeric) — take the ISO alpha-2. The `g` tags are a geohash
         // precision ladder (longest first); keep the most precise. Absent → null, never throws.
-        val countryCode = tags
-            .firstOrNull { it.size >= 3 && it[0] == "l" && it[2] == "countryCode" && it[1].matches(COUNTRY_ALPHA2) }
-            ?.get(1)?.uppercase()
+        val countries = tags.asSequence()
+            .filter { it.size >= 3 && it[0] == "l" && it[2] == "countryCode" }
+            .mapNotNull { normalizeCountryCode(it[1]) }.distinct().take(2).toList()
+        val countryCode = countries.firstOrNull()
         val geohash = tags.firstOrNull { it.size >= 2 && it[0] == "g" }?.get(1)?.takeIf { it.isNotBlank() }
 
         return RelayDirectoryEntry(
@@ -173,6 +199,9 @@ object RelayDirectory {
             nip11Source = Nip11Source.MONITOR,
             monitorPubkeys = setOf(monitorPubkey),
             countryCode = countryCode,
+            countryObservedAt = if (countryCode != null) createdAt else 0L,
+            countryMonitorPubkey = monitorPubkey.takeIf { countryCode != null },
+            countryConflicting = countries.size > 1,
             geohash = geohash,
         )
     }
@@ -195,6 +224,11 @@ object RelayDirectory {
             ?: entries.firstOrNull { it.description != null }
             ?: entries.first()
         val newest = entries.maxBy { it.monitorLastSeenAt }
+        val located = entries.filter { normalizeCountryCode(it.countryCode) != null }
+        val country = located.sortedWith(
+            compareByDescending<RelayDirectoryEntry> { it.countryObservedAt }
+                .thenBy { it.countryMonitorPubkey.orEmpty() }.thenBy { it.countryCode },
+        ).firstOrNull()
         return richest.copy(
             supportedNips = entries.flatMap { it.supportedNips }.toSet(),
             monitorPubkeys = entries.flatMap { it.monitorPubkeys }.toSet(),
@@ -204,31 +238,32 @@ object RelayDirectory {
             auth = entries.any { it.auth },
             payment = entries.any { it.payment },
             restrictedWrites = entries.any { it.restrictedWrites },
-            // Geo: newest monitor's reading wins; fall back to any monitor that has it.
-            countryCode = newest.countryCode ?: entries.firstOrNull { it.countryCode != null }?.countryCode,
+            // Country keeps its own source/date even when newer liveness has no geography.
+            countryCode = country?.countryCode,
+            countryObservedAt = country?.countryObservedAt ?: 0L,
+            countryMonitorPubkey = country?.countryMonitorPubkey,
+            countryConflicting = located.any { it.countryConflicting } ||
+                located.map { normalizeCountryCode(it.countryCode) }.distinct().size > 1,
             geohash = newest.geohash ?: entries.firstOrNull { it.geohash != null }?.geohash,
         )
     }
 
     /** Surveillance-alliance tier of a hosting country — pure, unit-tested. Returns the
      *  INNERMOST alliance the country belongs to (FIVE ⊂ NINE ⊂ FOURTEEN); UK accepted as an
-     *  alias for the ISO alpha-2 GB. Unknown/absent → NONE. */
-    fun eyesAlliance(countryCode: String?): EyesAlliance = when (countryCode?.uppercase()) {
-        "US", "GB", "UK", "CA", "AU", "NZ" -> EyesAlliance.FIVE
+     *  alias for the ISO alpha-2 GB. Unknown/absent is never assumed outside. */
+    fun eyesAlliance(countryCode: String?): EyesAlliance = when (normalizeCountryCode(countryCode)) {
+        null -> EyesAlliance.UNKNOWN
+        "US", "GB", "CA", "AU", "NZ" -> EyesAlliance.FIVE
         "DK", "FR", "NL", "NO" -> EyesAlliance.NINE
         "DE", "BE", "IT", "SE", "ES" -> EyesAlliance.FOURTEEN
         else -> EyesAlliance.NONE
     }
 
-    /** ISO alpha-2 → regional-indicator flag emoji. Bad input (not exactly 2 ASCII letters) →
-     *  null. Pure, unit-tested. */
+    /** Valid ISO alpha-2 → regional-indicator flag emoji. Unknown codes return null. */
     fun flagEmoji(countryCode: String?): String? {
-        val cc = countryCode?.uppercase() ?: return null
-        if (cc.length != 2 || cc.any { it !in 'A'..'Z' }) return null
+        val cc = normalizeCountryCode(countryCode) ?: return null
         return cc.map { String(Character.toChars(0x1F1E6 + (it - 'A'))) }.joinToString("")
     }
-
-    private val COUNTRY_ALPHA2 = Regex("^[A-Za-z]{2}$")
 
     /**
      * Overlay a device-fetched NIP-11 doc onto a monitor-sourced base entry — the PERSPECTIVE
@@ -282,13 +317,12 @@ object RelayDirectory {
     }
 
     /**
-     * Directory ranking score — pure. Reachability dominates (10k bands), then trust, then
+     * Directory ranking score — pure. Reachability dominates (10k bands), then
      * monitor RTT, then popularity. "Reachable-for-you beats globally-famous" by construction:
-     * a REACHABLE unknown relay (≥10000) outranks a DNS_BLOCKED famous one (≤3500).
+     * a REACHABLE unknown relay (≥10000) outranks a DNS_BLOCKED famous one (≤1500).
      */
     fun computeDirectoryScore(
         reachability: Reachability,
-        trustScore: Int?,
         monitorRttMs: Int?,
         popularity: Int,
     ): Int {
@@ -300,10 +334,9 @@ object RelayDirectory {
             Reachability.DNS_BLOCKED -> 0
             Reachability.DEAD -> -10_000
         }
-        val trust = (trustScore ?: 0).coerceIn(0, 100) * 20          // 0..2000
         val rtt = monitorRttMs?.let { ((2_000 - it).coerceIn(0, 2_000)) / 2 } ?: 0  // faster → higher, 0..1000
         val pop = popularity.coerceAtMost(500)                       // 0..500
-        return reach + trust + rtt + pop
+        return reach + rtt + pop
     }
 
     /**

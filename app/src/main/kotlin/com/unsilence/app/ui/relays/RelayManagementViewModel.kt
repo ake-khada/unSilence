@@ -126,7 +126,7 @@ class RelayManagementViewModel @Inject constructor(
         return relaySet
     }
 
-    /** Combined relay health (trust score + monitor) keyed by URL. */
+    /** Monitor observations and device NIP-11 identity keyed by URL. */
     val relayHealth: Flow<Map<String, RelayHealthInfo>> =
         memoryEventStore.relayHealthFlow()
 

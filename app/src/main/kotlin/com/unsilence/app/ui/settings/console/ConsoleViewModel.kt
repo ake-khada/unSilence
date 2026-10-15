@@ -64,7 +64,6 @@ data class ConsoleRelayRow(
 }
 
 data class ConsoleGateState(
-    val lastTrustFetchAt: Long = 0L,
     val lastMonitorFetchAt: Long = 0L,
     val lastWotFetchAt: Long = 0L,
     val wotTargetsHash: String = "",
@@ -72,8 +71,7 @@ data class ConsoleGateState(
     val nowMs: Long = System.currentTimeMillis(),
 ) {
     fun format(): String =
-        "trust ${formatConsoleAge(lastTrustFetchAt, nowMs)} · " +
-            "monitors ${formatConsoleAge(lastMonitorFetchAt, nowMs)} · " +
+        "monitors ${formatConsoleAge(lastMonitorFetchAt, nowMs)} · " +
             "WoT ${formatConsoleAge(lastWotFetchAt, nowMs)} · " +
             "${coverage.scored}/${coverage.total} scored"
 }
@@ -150,7 +148,6 @@ class ConsoleViewModel @Inject constructor(
                     store = memoryEventStore.snapshotSize(),
                     snapshotAgeSeconds = snapshotScheduler.getSnapshotAgeSeconds(),
                     gates = ConsoleGateState(
-                        lastTrustFetchAt = relayPreferencesStore.lastTrustFetchAt(),
                         lastMonitorFetchAt = relayPreferencesStore.lastMonitorFetchAt(),
                         lastWotFetchAt = relayPreferencesStore.lastWotFetchAt(),
                         wotTargetsHash = relayPreferencesStore.lastWotTargetsHash(),
