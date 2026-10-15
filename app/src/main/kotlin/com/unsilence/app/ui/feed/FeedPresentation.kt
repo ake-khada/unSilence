@@ -3,6 +3,8 @@ package com.unsilence.app.ui.feed
 import com.unsilence.app.data.memory.FeedRow
 import com.unsilence.app.data.memory.NostrEvent
 import com.unsilence.app.domain.model.FeedFilter
+import kotlinx.serialization.Serializable
+import kotlinx.serialization.json.Json
 
 /** Seed identity travels with the events, never in an independently collected loading flag. */
 internal data class FeedTimeline(
@@ -14,10 +16,19 @@ internal data class FeedTimeline(
         source == type && this.filter == filter
 }
 
+@Serializable
 internal data class FeedSelection(
     val source: SavedFeedSource,
     val filter: FeedFilter,
     val contentFilter: Int,
+)
+
+/** Labels and Set iteration order are not feed identity. Save only selection metadata. */
+internal fun FeedSelection.scrollRestorationScope(): String = Json.encodeToString(
+    copy(
+        source = source.copy(label = ""),
+        filter = filter.copy(showTypes = filter.showTypes.sortedBy { it.ordinal }.toSet()),
+    ),
 )
 
 internal val SavedFeedSession.selection: FeedSelection

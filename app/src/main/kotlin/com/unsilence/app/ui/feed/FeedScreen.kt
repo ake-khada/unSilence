@@ -174,6 +174,10 @@ fun FeedScreen(
     val listState = rememberFeedScrollState(
         feedEvents,
         restorationReady = presentation.restorationReady,
+        restorationScope = remember(presentation.selection) {
+            presentation.selection?.scrollRestorationScope()
+        },
+        scrollToTopTrigger = scrollToTopTrigger,
     )
     val scrollScope = rememberCoroutineScope()
     val cardWidthPx = LocalWindowInfo.current.containerSize.width

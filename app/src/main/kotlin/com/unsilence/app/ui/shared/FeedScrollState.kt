@@ -3,8 +3,12 @@ package com.unsilence.app.ui.shared
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.saveable.listSaver
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -65,6 +69,8 @@ private class FeedScrollHolder(val list: LazyListState, var pending: FeedScrollA
 internal fun rememberFeedScrollState(
     rows: List<FeedRow>,
     restorationReady: Boolean = true,
+    restorationScope: String? = null,
+    scrollToTopTrigger: Int = 0,
 ): LazyListState {
     val currentRows = rememberUpdatedState(rows)
     val saver = remember(currentRows) {
@@ -94,13 +100,33 @@ internal fun rememberFeedScrollState(
         )
     }
     val holder = rememberSaveable(saver = saver) { FeedScrollHolder(LazyListState()) }
+    var savedScope by rememberSaveable { mutableStateOf(restorationScope) }
+    var handledTopTrigger by rememberSaveable { mutableIntStateOf(scrollToTopTrigger) }
     LaunchedEffect(holder) {
         if (holder.pending != null) {
             snapshotFlow { holder.list.isScrollInProgress }.first { it }
             holder.pending = null
         }
     }
-    LaunchedEffect(holder, rows, restorationReady) {
+    LaunchedEffect(holder, rows, restorationReady, restorationScope, scrollToTopTrigger) {
+        // Intent may arrive while the list is empty, when a no-op scroll does not
+        // produce an observable isScrollInProgress change. Fence it explicitly.
+        if (handledTopTrigger != scrollToTopTrigger) {
+            handledTopTrigger = scrollToTopTrigger
+            if (holder.pending != null) {
+                holder.pending = null
+                // LazyListState also retains an initial index while empty; a
+                // no-op animation cannot clear that internal pending position.
+                holder.list.requestScrollToItem(0)
+            }
+        }
+        if (restorationScope != null) {
+            if (savedScope != null && savedScope != restorationScope && holder.pending != null) {
+                holder.pending = null
+                holder.list.requestScrollToItem(0)
+            }
+            savedScope = restorationScope
+        }
         val anchor = holder.pending ?: return@LaunchedEffect
         if (holder.list.isScrollInProgress) {
             // A deliberate new gesture wins over a delayed restore.

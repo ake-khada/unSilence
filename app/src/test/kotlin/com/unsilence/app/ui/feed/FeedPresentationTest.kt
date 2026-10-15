@@ -1,10 +1,27 @@
 package com.unsilence.app.ui.feed
 
 import com.unsilence.app.domain.model.FeedFilter
+import com.unsilence.app.domain.model.ShowType
 import org.junit.Assert.*
 import org.junit.Test
 
 class FeedPresentationTest {
+    @Test fun `scroll scope distinguishes source filter and content tab but not label or set order`() {
+        val selection = FeedSelection(
+            SavedFeedSource("relay", "wss://relay.example", "Label"),
+            FeedFilter(showTypes = linkedSetOf(ShowType.TEXT, ShowType.IMAGES)),
+            FeedContentFilter.NOTES_ONLY.value,
+        )
+        val scope = selection.scrollRestorationScope()
+        assertEquals(scope, selection.copy(source = selection.source.copy(label = "Renamed")).scrollRestorationScope())
+        assertEquals(scope, selection.copy(filter = selection.filter.copy(
+            showTypes = linkedSetOf(ShowType.IMAGES, ShowType.TEXT),
+        )).scrollRestorationScope())
+        assertNotEquals(scope, selection.copy(source = FeedType.Following.savedSource()).scrollRestorationScope())
+        assertNotEquals(scope, selection.copy(filter = selection.filter.copy(sinceHours = 24)).scrollRestorationScope())
+        assertNotEquals(scope, selection.copy(contentFilter = FeedContentFilter.REPLIES_ONLY.value).scrollRestorationScope())
+    }
+
     private val saved = SavedFeedSession(
         owner = "alice", source = FeedType.Global.savedSource(),
         isAtTop = false, eventIds = listOf("first", "reading", "last"),

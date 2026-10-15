@@ -36,6 +36,8 @@ class FeedReturnAnchorTest {
     private val rows = mutableStateOf(original)
     private val visible = mutableStateOf(true)
     private val ready = mutableStateOf(true)
+    private val restorationScope = mutableStateOf<String?>("source-a")
+    private val topTrigger = mutableStateOf(0)
     private lateinit var list: LazyListState
     private lateinit var scope: CoroutineScope
 
@@ -116,13 +118,56 @@ class FeedReturnAnchorTest {
         assertAnchor("note-20", expectedOffset)
     }
 
+    @Test fun explicitTopWhileLoadingDoesNotReplayOldAnchorWhenRowsArrive() {
+        start()
+        coverAndReturn(emptyList(), settled = false)
+        compose.runOnIdle { topTrigger.value++; scope.launch { list.animateScrollToItem(0) } }
+        compose.waitForIdle()
+        compose.runOnIdle { rows.value = original; ready.value = true }
+        assertAnchor("note-0", 0)
+    }
+
+    @Test fun sourceChangeWhileLoadingDoesNotRestoreThePreviousSourceAnchor() {
+        start()
+        coverAndReturn(emptyList(), settled = false)
+        val loadingList = list
+        compose.runOnIdle { restorationScope.value = "source-b" }
+        compose.waitForIdle()
+        compose.runOnIdle { rows.value = original; ready.value = true }
+        assertAnchor("note-0", 0)
+        compose.runOnIdle { assertSame(loadingList, list) }
+    }
+
+    @Test fun sourceChangeOnFirstRestoredFrameRejectsSavedScope() {
+        start()
+        compose.runOnIdle { visible.value = false }
+        compose.waitForIdle()
+        compose.runOnIdle { restorationScope.value = "source-b"; visible.value = true }
+        assertAnchor("note-0", 0)
+    }
+
+    @Test fun unknownScopeDuringLoadingDoesNotEraseTheSavedScope() {
+        val restoration = start()
+        compose.runOnIdle { visible.value = false }
+        compose.waitForIdle()
+        compose.runOnIdle {
+            restorationScope.value = null; rows.value = emptyList(); ready.value = false; visible.value = true
+        }
+        compose.waitForIdle()
+        restoration.emulateSavedInstanceStateRestore()
+        compose.runOnIdle { restorationScope.value = "source-a"; rows.value = original; ready.value = true }
+        assertAnchor("note-20", 23)
+    }
+
     private fun start(): StateRestorationTester {
         val restoration = StateRestorationTester(compose)
         restoration.setContent {
             UnsilenceTheme {
                 val saved = rememberSaveableStateHolder()
                 if (visible.value) saved.SaveableStateProvider("feed-entry") {
-                    val state = rememberFeedScrollState(rows.value, ready.value)
+                    val state = rememberFeedScrollState(
+                        rows.value, ready.value, restorationScope.value, topTrigger.value,
+                    )
                     val compositionScope = rememberCoroutineScope()
                     SideEffect { list = state; scope = compositionScope }
                     LazyColumn(Modifier.fillMaxSize(), state = state) {
