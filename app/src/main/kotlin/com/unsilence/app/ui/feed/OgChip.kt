@@ -172,6 +172,7 @@ internal fun OgPreviewCard(
         MinimalLinkCard(
             url = url,
             onClick = { runCatching { uriHandler.openUri(url) } },
+            modifier = modifier,
         )
     }
     // else: showMinimalFallback=false and OG empty → render nothing (URL already inline)

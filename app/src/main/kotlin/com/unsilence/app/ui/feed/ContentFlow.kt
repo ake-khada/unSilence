@@ -29,7 +29,6 @@ import com.unsilence.app.data.model.PaymentTarget
 import com.unsilence.app.data.model.Segment
 import com.unsilence.app.data.model.shouldRenderAsCard
 import com.unsilence.app.ui.shared.CardRole
-import com.unsilence.app.ui.theme.AppType
 import com.unsilence.app.ui.theme.Spacing
 import com.unsilence.app.ui.theme.Surface2
 import com.unsilence.app.ui.theme.TextSecondary
@@ -46,8 +45,8 @@ private const val COLLAPSED_CARD_CHROME_DP = 104f
  * Image or video runs separated only by blank text collapse into one media
  * carousel; consecutive Text/MentionPubkey/Link runs become one InlineText
  * (URLs render as inline cyan clickable text).
- * After each text run, OG preview cards render for links in that run (up to
- * [MAX_OG_CARDS] total per note).
+ * Standalone links become preview blocks at their source position; sentence
+ * links stay inline with a preview after the run (up to [MAX_OG_CARDS] per note).
  *
  * [nestDepth] controls quote nesting. The first two quote levels render full
  * content, the third is compact text, and deeper content becomes a terminal
@@ -103,6 +102,7 @@ internal fun ContentFlow(
         Column {
             var i = 0
             var ogCardsRendered = 0
+            var remainingLines = maxLines
             segmentLoop@ while (i < model.segments.size) {
                 val current = model.segments[i]
                 if (current.isInlineContent(knownLightningAddress)) {
@@ -112,89 +112,66 @@ internal fun ContentFlow(
                     var j = i
                     while (j < model.segments.size &&
                         model.segments[j].isInlineContent(knownLightningAddress)) j++
-                    val run = model.segments.subList(i, j).map(Segment::asInlineContent)
-
-                    // Pick the link(s) in this run that will become an OG
-                    // preview card, and HIDE them from the inline text.
-                    // Showing the URL inline AND as the OG card duplicates
-                    // information — Amethyst, Damus, Jumble all elide the
-                    // URL when a preview is rendered. The OG card itself
-                    // displays the title + thumbnail; if the OG fetch
-                    // returns nothing useful, MinimalLinkCard's favicon +
-                    // hostname covers the case so the user always sees
-                    // some affordance for the link.
-                    val ogToRender = mutableListOf<Segment.Link>()
-                    val runForInline = mutableListOf<Segment>()
-                    val availableSlots = MAX_OG_CARDS - ogCardsRendered
-                    for (seg in run) {
-                        if (seg is Segment.Link && ogToRender.size < availableSlots) {
-                            ogToRender.add(seg)
-                        } else {
-                            runForInline.add(seg)
+                    val allowPreview = ogCardsRendered < MAX_OG_CARDS
+                    val blocks = remember(model.segments, i, j, allowPreview, knownLightningAddress) {
+                        planInlineRun(model.segments.subList(i, j).map(Segment::asInlineContent), allowPreview)
+                    }
+                    for (block in blocks) {
+                        if (remainingLines == 0) {
+                            hasTextOverflow = true
+                            break@segmentLoop
                         }
-                    }
-
-                    // Strip blank-line padding at media boundaries so text
-                    // sits tight against adjacent images/videos. The \n\n
-                    // separators in the content string create visible gaps
-                    // without this trim.
-                    trimTextRunEdges(runForInline)
-
-                    // A run may be link-only (e.g. a bare-URL note): runForInline
-                    // is empty but ogToRender still holds the link. Skip only the
-                    // inline text in that case — the OG card loop below MUST still
-                    // run, otherwise the note renders completely blank (no URL, no
-                    // preview). Do NOT `continue` here.
-                    if (runForInline.isNotEmpty()) hasTextOverflow = InlineText(
-                        segments      = runForInline,
-                        kind          = model.effectiveKind,
-                        lookupProfile = lookupProfile,
-                        onAuthorClick = actions.onAuthorClick,
-                        onHashtagClick = actions.onHashtagClick,
-                        onTextClick   = { actions.onNoteClick(navigateId) },
-                        customEmojis  = model.customEmojis,
-                        maxLines      = maxLines,
-                        overflow      = overflow,
-                        overflowWidthPx = textWidthPx.takeIf { !isEmbedded && !expanded },
-                        modifier      = Modifier
-                            .fillMaxWidth()
-                            .padding(horizontal = hPad)
-                            .padding(bottom = Spacing.small),
-                    )
-
-                    // Once a top-level text run exceeds the collapsed viewport
-                    // budget, stop rendering the remaining source-order content
-                    // (OG cards, images, later text) until expanded. Otherwise a
-                    // long post can still exceed the screen because the capped
-                    // text is followed by a link preview or media card.
-                    if (!isEmbedded && !expanded && hasTextOverflow) {
-                        break@segmentLoop
-                    }
-
-                    // Render OG preview cards for the links we removed from
-                    // inline text. showMinimalFallback=true so a failed OG
-                    // fetch still produces a card (favicon + hostname).
-                    for (link in ogToRender) {
-                        OgPreviewCard(
-                            url               = link.url,
-                            fetchOgMetadata   = services.fetchOgMetadata,
-                            hasCachedOgMetadata = services.hasCachedOgMetadata,
-                            imageDimensionCache = services.imageDimensionCache,
-                            onDirectImageClick = if (isEmbedded) {
-                                { actions.onNoteClick(navigateId) }
-                            } else null,
-                            showMinimalFallback = true,
-                            modifier          = Modifier
-                                .padding(horizontal = hPad)
-                                .padding(bottom = Spacing.small),
-                        )
-                        ogCardsRendered++
+                        when (block) {
+                            is InlineRunBlock.Text -> {
+                                val layout = InlineText(
+                                    segments      = block.segments,
+                                    kind          = model.effectiveKind,
+                                    lookupProfile = lookupProfile,
+                                    onAuthorClick = actions.onAuthorClick,
+                                    onHashtagClick = actions.onHashtagClick,
+                                    onTextClick   = { actions.onNoteClick(navigateId) },
+                                    customEmojis  = model.customEmojis,
+                                    maxLines      = remainingLines,
+                                    overflow      = overflow,
+                                    overflowWidthPx = textWidthPx.takeIf { maxLines != Int.MAX_VALUE },
+                                    modifier      = Modifier
+                                        .fillMaxWidth()
+                                        .padding(horizontal = hPad)
+                                        .padding(bottom = Spacing.small),
+                                )
+                                remainingLines = (remainingLines - layout.lineCount).coerceAtLeast(0)
+                                hasTextOverflow = layout.hasOverflow
+                                // Exact preflight keeps hidden media/quotes out of
+                                // composition from frame one, including split runs.
+                                if (hasTextOverflow) break@segmentLoop
+                            }
+                            is InlineRunBlock.Preview -> {
+                                OgPreviewCard(
+                                    url               = block.url,
+                                    fetchOgMetadata   = services.fetchOgMetadata,
+                                    hasCachedOgMetadata = services.hasCachedOgMetadata,
+                                    imageDimensionCache = services.imageDimensionCache,
+                                    onDirectImageClick = if (isEmbedded) {
+                                        { actions.onNoteClick(navigateId) }
+                                    } else null,
+                                    showMinimalFallback = true,
+                                    modifier          = Modifier
+                                        .padding(horizontal = hPad)
+                                        .padding(bottom = Spacing.small),
+                                )
+                                ogCardsRendered++
+                            }
+                        }
                     }
 
                     i = j
                     continue@segmentLoop
                 }
 
+                if (remainingLines == 0) {
+                    hasTextOverflow = true
+                    break@segmentLoop
+                }
                 when (current) {
                     is Segment.Payment -> {
                         PaymentTargetCard(
@@ -328,7 +305,7 @@ internal fun ContentFlow(
                         // (drawBehind matches the text height automatically, so the rail
                         // grows with the quote without an IntrinsicSize measure pass).
                         val railColor = TextSecondary.copy(alpha = 0.5f)
-                        hasTextOverflow = InlineText(
+                        val layout = InlineText(
                             segments      = seg.segments,
                             kind          = model.effectiveKind,
                             lookupProfile = lookupProfile,
@@ -336,11 +313,11 @@ internal fun ContentFlow(
                             onHashtagClick = actions.onHashtagClick,
                             onTextClick   = { actions.onNoteClick(navigateId) },
                             customEmojis  = model.customEmojis,
-                            maxLines      = maxLines,
+                            maxLines      = remainingLines,
                             overflow      = overflow,
                             textColor     = TextSecondary,
                             overflowWidthPx = (textWidthPx - with(density) { Spacing.small.roundToPx() })
-                                .takeIf { !isEmbedded && !expanded },
+                                .takeIf { maxLines != Int.MAX_VALUE },
                             modifier      = Modifier
                                 .fillMaxWidth()
                                 .padding(horizontal = hPad)
@@ -348,7 +325,9 @@ internal fun ContentFlow(
                                 .drawBehind { drawRect(color = railColor, size = Size(3.dp.toPx(), size.height)) }
                                 .padding(start = Spacing.small),
                         )
-                        if (!isEmbedded && !expanded && hasTextOverflow) break@segmentLoop
+                        remainingLines = (remainingLines - layout.lineCount).coerceAtLeast(0)
+                        hasTextOverflow = layout.hasOverflow
+                        if (hasTextOverflow) break@segmentLoop
                         i++
                     }
                     // These variants always take the inline-content branch above;
@@ -402,30 +381,4 @@ private fun Segment.isInlineContent(knownLightningAddress: String?): Boolean = w
 private fun Segment.asInlineContent(): Segment = when (this) {
     is Segment.Payment -> Segment.Text(target.displayValue)
     else -> this
-}
-
-/**
- * Trims leading blank lines from the first Text segment and trailing blank
- * lines from the last Text segment in a run. Removes segments that become
- * empty after trimming. This keeps text tight against adjacent media
- * (images, videos) without the paragraph-level gaps that \n\n separators
- * create in the content string.
- */
-private fun trimTextRunEdges(run: MutableList<Segment>) {
-    // Trim leading newlines from first Text
-    while (run.isNotEmpty() && run.first() is Segment.Text) {
-        val first = run.first() as Segment.Text
-        val trimmed = first.text.trimStart('\n')
-        if (trimmed.isEmpty()) { run.removeAt(0); continue }
-        if (trimmed != first.text) run[0] = Segment.Text(trimmed)
-        break
-    }
-    // Trim trailing newlines from last Text
-    while (run.isNotEmpty() && run.last() is Segment.Text) {
-        val last = run.last() as Segment.Text
-        val trimmed = last.text.trimEnd('\n')
-        if (trimmed.isEmpty()) { run.removeAt(run.lastIndex); continue }
-        if (trimmed != last.text) run[run.lastIndex] = Segment.Text(trimmed)
-        break
-    }
 }

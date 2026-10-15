@@ -36,6 +36,9 @@ import kotlinx.coroutines.coroutineScope
  *  mention still renders and remains tappable; unresolved names use npub. */
 private const val MAX_INLINE_MENTION_PREFETCH = 8
 
+/** Exact preflight result, shared by every text block in a collapsed card. */
+internal data class InlineTextLayout(val lineCount: Int = 0, val hasOverflow: Boolean = false)
+
 /**
  * Renders pre-parsed segments as rich text with inline @mention links,
  * clickable URLs, and tappable #hashtag pills.
@@ -64,14 +67,14 @@ internal fun InlineText(
     textAlign: TextAlign? = null,
     overflowWidthPx: Int? = null,
     textColor: Color? = null, // null = default onSurface; blockquotes pass TextSecondary
-): Boolean {
+): InlineTextLayout {
     // Extract text-renderable segments only
     val textSegments = remember(segments) {
         segments.filter { it is Segment.Text || it is Segment.MentionPubkey || it is Segment.Link || it is Segment.Hashtag }
     }
 
     // No text content at all — skip rendering
-    if (textSegments.isEmpty()) return false
+    if (textSegments.isEmpty()) return InlineTextLayout()
 
     // Extract unique mention pubkeys for batch resolution
     val mentionPubkeys = remember(textSegments) {
@@ -193,12 +196,12 @@ private fun MeasuredInlineText(
     overflowWidthPx: Int?,
     modifier: Modifier,
     inlineContent: Map<String, InlineTextContent> = emptyMap(),
-): Boolean {
+): InlineTextLayout {
     val baseStyle = MaterialTheme.typography.bodyLarge
     val style = remember(baseStyle, textAlign) {
         baseStyle.copy(textAlign = textAlign ?: TextAlign.Unspecified)
     }
-    val hasOverflow = if (overflowWidthPx != null && maxLines != Int.MAX_VALUE) {
+    val measured = if (overflowWidthPx != null && maxLines != Int.MAX_VALUE) {
         val measurer = rememberTextMeasurer(cacheSize = 1)
         val placeholders = remember(text, inlineContent) {
             inlineEmojiPlaceholders(text, inlineContent.mapValues { it.value.placeholder })
@@ -210,8 +213,8 @@ private fun MeasuredInlineText(
             overflow = overflow,
             placeholders = placeholders,
             constraints = Constraints(maxWidth = overflowWidthPx.coerceAtLeast(0)),
-        ).hasVisualOverflow
-    } else false
+        )
+    } else null
     Text(
         text = text,
         inlineContent = inlineContent,
@@ -221,7 +224,7 @@ private fun MeasuredInlineText(
         overflow = overflow,
         modifier = modifier,
     )
-    return hasOverflow
+    return InlineTextLayout(measured?.lineCount ?: 0, measured?.hasVisualOverflow ?: false)
 }
 
 private const val INLINE_EMOJI_MEASURE_TAG = "unsilence.inlineEmoji"
