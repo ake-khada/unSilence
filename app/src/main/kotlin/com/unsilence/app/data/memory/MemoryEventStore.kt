@@ -814,9 +814,12 @@ class MemoryEventStore @Inject constructor(
     private val actorAccessedAt = ConcurrentHashMap<String, Long>()
 
     private data class DeletionTombstone(val pubkey: String, val createdAt: Long)
+    // Reuse the existing strings instead of concatenating a lookup key per note.
+    // This derived index is not serialized; snapshots retain signed deletions.
+    private data class EventTombstoneKey(val id: String, val pubkey: String)
     // Event targets may be unknown: isolate each deletion signer's claim until
     // the target arrives, so a non-author cannot overwrite the author's tombstone.
-    private val deletedEventTombstones = ConcurrentHashMap<String, DeletionTombstone>()
+    private val deletedEventTombstones = ConcurrentHashMap<EventTombstoneKey, DeletionTombstone>()
     // Address coordinates already contain the author, checked before insertion.
     private val deletedAddressableTombstones = ConcurrentHashMap<String, DeletionTombstone>()
     private val ownDeletionHistory = ConcurrentHashMap<String, NostrEvent>()
@@ -1868,8 +1871,13 @@ class MemoryEventStore @Inject constructor(
     }
 
     private fun isDeletedByTombstone(event: NostrEvent): Boolean {
-        val eventTombstone = deletedEventTombstones["${event.id}:${event.pubkey}"]
-        if (eventTombstone != null && eventTombstone.pubkey == event.pubkey) return true
+        // No need to allocate lookup keys on every candidate when an index is
+        // empty. Keep live lookups (not cached verdicts) once deletions arrive.
+        if (deletedEventTombstones.isNotEmpty()) {
+            val eventTombstone = deletedEventTombstones[EventTombstoneKey(event.id, event.pubkey)]
+            if (eventTombstone != null && eventTombstone.pubkey == event.pubkey) return true
+        }
+        if (deletedAddressableTombstones.isEmpty()) return false
         val coord = addressableCoordinate(event) ?: return false
         val addressableTombstone = deletedAddressableTombstones[coord]
         return addressableTombstone != null &&
@@ -1888,9 +1896,9 @@ class MemoryEventStore @Inject constructor(
      * Serialize insert-and-trim so concurrent writers cannot bypass the cap. Reads
      * remain lock-free, and the oldest-first scan runs only once per trim batch.
      */
-    private fun recordDeletionTombstone(
-        tombstones: ConcurrentHashMap<String, DeletionTombstone>,
-        key: String,
+    private fun <K : Any> recordDeletionTombstone(
+        tombstones: ConcurrentHashMap<K, DeletionTombstone>,
+        key: K,
         pubkey: String,
         createdAt: Long,
     ) = synchronized(tombstones) {
@@ -1902,7 +1910,7 @@ class MemoryEventStore @Inject constructor(
         trimDeletionTombstonesIfNeeded(tombstones)
     }
 
-    private fun trimDeletionTombstonesIfNeeded(tombstones: ConcurrentHashMap<String, DeletionTombstone>) {
+    private fun <K : Any> trimDeletionTombstonesIfNeeded(tombstones: ConcurrentHashMap<K, DeletionTombstone>) {
         if (tombstones.size <= DELETION_TOMBSTONE_CAP) return
         val oldest = tombstones.entries.sortedBy { it.value.createdAt }.take(DELETION_TOMBSTONE_TRIM)
         for (entry in oldest) tombstones.remove(entry.key, entry.value)
@@ -1936,11 +1944,11 @@ class MemoryEventStore @Inject constructor(
         if (eventId.length > 64 || eventId.isBlank()) return
         val existing = eventsById[eventId]
         if (existing == null) {
-            recordDeletionTombstone(deletedEventTombstones, "$eventId:$deletionPubkey", deletionPubkey, deletionCreatedAt)
+            recordDeletionTombstone(deletedEventTombstones, EventTombstoneKey(eventId, deletionPubkey), deletionPubkey, deletionCreatedAt)
             return
         }
         if (existing.kind == 5 || existing.pubkey != deletionPubkey) return
-        recordDeletionTombstone(deletedEventTombstones, "$eventId:$deletionPubkey", deletionPubkey, deletionCreatedAt)
+        recordDeletionTombstone(deletedEventTombstones, EventTombstoneKey(eventId, deletionPubkey), deletionPubkey, deletionCreatedAt)
         deleteStoredEvent(existing, dirty)
     }
 

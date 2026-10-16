@@ -21,6 +21,21 @@ import org.junit.Test
 
 class FeedFilterPolicyTest {
     @Test
+    fun `precomputed allowed kinds match default policy for every show type combination`() {
+        val types = ShowType.entries
+        for (mask in 0 until (1 shl types.size)) {
+            val filter = FeedFilter(showTypes = types.filterIndexed { index, _ -> mask and (1 shl index) != 0 }.toSet())
+            val kinds = filter.enabledKinds
+            for (kind in listOf(0, 1, 6, 16, 20, 21, 22, 1068, 30023, 34235, 34236)) {
+                for (content in listOf("text", "https://cdn.example/a.png", "https://cdn.example/a.mp4")) {
+                    assertEquals(matchesShowTypes(kind, content, null, filter),
+                        matchesShowTypes(kind, content, null, filter, enabledKinds = kinds))
+                }
+            }
+        }
+    }
+
+    @Test
     fun `classifies cached image segment before URL fallback`() {
         val model = modelWith(listOf(Segment.Image("https://cdn.example/image", null)))
 

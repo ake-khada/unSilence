@@ -9,7 +9,6 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.unsilence.app.data.auth.KeyManager
 import com.unsilence.app.data.init.InitGate
-import com.unsilence.app.data.memory.exceedsHashtagCap
 import com.unsilence.app.data.memory.FeedRow
 import com.unsilence.app.data.memory.isMuted
 import com.unsilence.app.data.memory.MemoryEventStore
@@ -321,6 +320,8 @@ class FeedViewModel @Inject constructor(
 
     /** Bounded row cache — retains rows across slice swaps so pull-refresh hits instead of re-synth. */
     private val feedRowCache = androidx.collection.LruCache<String, FeedRow>(FEED_ROW_CACHE_SIZE)
+    // One normal timeline plus one pending window. Weak entries retain no bodies.
+    private val moderationCache = FeedModerationCache(2 * TimelineMerge.EVENTS_CAP)
 
     val sensitiveContentMode: StateFlow<SensitiveContentMode> =
         relayPreferencesStore.sensitiveContentMode
@@ -466,14 +467,21 @@ class FeedViewModel @Inject constructor(
     ): List<NostrEvent> {
         val hideSensitive = safety.sensitiveMode == SensitiveContentMode.HIDE
         val nowSec = System.currentTimeMillis() / 1000L
-        return events.asSequence()
-            .filterNot { memoryEventStore.isDeleted(it) }
-            .filter { !isMuted(it, safety.muteList, memoryEventStore::getNostrEvent) }
-            .filter { !exceedsHashtagCap(it, safety.hashtagCap, memoryEventStore::getNostrEvent) }
-            .filter { matchesFeedFilterBeforeActivity(it, filter, nowSec) }
-            .filter { matchesContentFilter(it, cf) }
-            .filter { !hideSensitive || !it.hasContentWarning }
-            .toList()
+        val enabledKinds = filter.enabledKinds
+        val moderation = moderationCache.forPolicy(safety.muteList, safety.hashtagCap)
+        val targetResolver = memoryEventStore::getNostrEvent
+        return buildList {
+            for ((index, event) in events.withIndex()) {
+                // Pagination can exceed EVENTS_CAP. Check the older tail normally
+                // without letting a sequential scan evict the entire hot window.
+                if (memoryEventStore.isDeleted(event)) continue
+                if (moderation.excludes(event, targetResolver, cacheResult = index < TimelineMerge.EVENTS_CAP)) continue
+                if (!matchesFeedFilterBeforeActivity(event, filter, nowSec, enabledKinds)) continue
+                if (!matchesContentFilter(event, cf)) continue
+                if (hideSensitive && event.hasContentWarning) continue
+                add(event)
+            }
+        }
     }
 
     // -- Relay-metadata version (triggers resubscribe on kind-10002 arrival) ---
@@ -1263,6 +1271,7 @@ class FeedViewModel @Inject constructor(
 
     override fun onCleared() {
         super.onCleared()
+        moderationCache.clear()
         currentHandle?.close()
         currentHandle = null
         feedSubPersistentUrl?.let { relayPool.removePurpose(it, ConnectionPurpose.FEED_SUB) }
@@ -1287,8 +1296,9 @@ class FeedViewModel @Inject constructor(
         evt: NostrEvent,
         filter: FeedFilter,
         nowSec: Long,
+        enabledKinds: List<Int>,
     ): Boolean {
-        if (evt.kind !in filter.enabledKinds) return false
+        if (evt.kind !in enabledKinds) return false
         val specificShowFilter = ShowType.ALL !in filter.showTypes
         val model = if (
             (evt.kind == 1 && filter.needsMediaFilter) ||
@@ -1322,6 +1332,7 @@ class FeedViewModel @Inject constructor(
             model,
             filter,
             resolvedRepostTarget,
+            enabledKinds,
         )
         if (!matchesShowType) return false
         val since = filter.sinceHours?.let { hours -> nowSec - hours * 60L * 60L }

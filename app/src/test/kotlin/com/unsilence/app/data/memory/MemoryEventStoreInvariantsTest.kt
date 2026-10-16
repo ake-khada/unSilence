@@ -912,6 +912,29 @@ class MemoryEventStoreInvariantsTest {
     // ── NIP-09 deletion requests ───────────────────────────────────────────
 
     @Test
+    fun `empty deletion indexes become live for ids and retain author isolation`() {
+        val note = event(id = "late-note", pubkey = "alice")
+        assertFalse(store.isDeleted(note))
+        store.insert(event(id = "delete-late", pubkey = "alice", kind = 5, tags = listOf(listOf("e", note.id))))
+        assertTrue(store.isDeleted(note))
+        assertFalse(store.isDeleted(note.copy(pubkey = "bob")))
+        assertFalse(store.isDeleted(note.copy(id = "other-note")))
+    }
+
+    @Test
+    fun `empty address deletion index becomes live and keeps timestamp cutoff`() {
+        val article = event(id = "late-article", pubkey = "alice", kind = 30023,
+            createdAt = 100, tags = listOf(listOf("d", "slug")))
+        assertFalse(store.isDeleted(article))
+        store.insert(event(id = "delete-address", pubkey = "alice", kind = 5,
+            createdAt = 100, tags = listOf(listOf("a", "30023:alice:slug"))))
+        assertTrue(store.isDeleted(article))
+        assertFalse(store.isDeleted(article.copy(createdAt = 101)))
+        assertFalse(store.isDeleted(article.copy(pubkey = "bob")))
+        assertFalse(store.isDeleted(article.copy(tags = listOf(listOf("d", "other")))))
+    }
+
+    @Test
     fun `kind-5 deletion removes own reaction from counts and actor state`() = runTest {
         val targetId = "delete-reaction-target"
         store.insert(event(id = targetId, kind = 1, pubkey = "target-author"))

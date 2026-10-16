@@ -43,8 +43,9 @@ internal fun matchesShowTypes(
     model: EventModel?,
     filter: FeedFilter,
     resolvedRepostTarget: ResolvedRepostTarget? = null,
+    enabledKinds: List<Int> = filter.enabledKinds,
 ): Boolean {
-    if (kind !in filter.enabledKinds) return false
+    if (kind !in enabledKinds) return false
     if (ShowType.ALL in filter.showTypes) return true
 
     if (kind == 6 || kind == 16) {
