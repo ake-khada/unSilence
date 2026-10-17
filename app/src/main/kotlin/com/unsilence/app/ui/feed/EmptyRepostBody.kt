@@ -36,6 +36,9 @@ import com.unsilence.app.ui.theme.AppType
 import com.unsilence.app.ui.theme.Spacing
 import com.unsilence.app.ui.theme.SurfaceVariant
 import com.unsilence.app.ui.theme.TextSecondary
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.withContext
 
 private data class EmptyRepostState(
     val event: EventEntity? = null,
@@ -67,37 +70,48 @@ fun EmptyRepostBody(
         authorPubkey = targetAuthorPubkey,
         relayHints = relayHints,
     )
-    val state by produceState(EmptyRepostState(), reference) {
-        val ev = reference?.let { ref -> host.lookupEvent(ref) }
-        if (ev != null) {
-            val cachedModel = services.lookupModel(ev.id)
-            val model = cachedModel ?: runCatching {
-                ContentParser.parse(
-                    id = ev.id,
-                    pubkey = ev.pubkey,
-                    kind = ev.kind,
-                    content = ev.content,
-                    tagsJson = ev.tags,
-                    createdAt = ev.createdAt,
-                    relayUrl = ev.relayUrl,
-                    replyToId = ev.replyToId,
-                    rootId = ev.rootId,
-                    hasContentWarning = ev.hasContentWarning,
-                    contentWarningReason = ev.contentWarningReason,
-                )
-            }.getOrNull()
-            // A fetched id can itself be another reference-only repost. Follow
-            // only already-verified MES models, with the shared cycle/depth
-            // guard; otherwise show the stable unavailable state instead of a
-            // header followed by an inexplicably blank body.
-            val displayModel = model?.resolveDisplayModel(modelProvider = services.lookupModel)
+    val state by produceState(
+        EmptyRepostState(), reference, host.relayHints, services.observeReference,
+    ) {
+        value = EmptyRepostState()
+        if (reference == null) {
+            value = EmptyRepostState(loading = false, unresolved = true)
+            return@produceState
+        }
+        host.observeReference(reference).collectLatest { resolution ->
+            val ev = resolution.event
+            if (ev == null) {
+                value = EmptyRepostState(loading = resolution.loading, unresolved = !resolution.loading)
+                return@collectLatest
+            }
+            val displayModel = withContext(Dispatchers.Default) {
+                val cachedModel = services.lookupModel(ev.id)
+                val model = cachedModel ?: runCatching {
+                    ContentParser.parse(
+                        id = ev.id,
+                        pubkey = ev.pubkey,
+                        kind = ev.kind,
+                        content = ev.content,
+                        tagsJson = ev.tags,
+                        createdAt = ev.createdAt,
+                        relayUrl = ev.relayUrl,
+                        replyToId = ev.replyToId,
+                        rootId = ev.rootId,
+                        hasContentWarning = ev.hasContentWarning,
+                        contentWarningReason = ev.contentWarningReason,
+                    )
+                }.getOrNull()
+                // A fetched id can itself be another reference-only repost. Follow
+                // only already-verified MES models, with the shared cycle/depth
+                // guard; otherwise show the stable unavailable state instead of a
+                // header followed by an inexplicably blank body.
+                model?.resolveDisplayModel(modelProvider = services.lookupModel)
+            }
             value = if (displayModel != null) {
                 EmptyRepostState(event = ev, model = displayModel, loading = false)
             } else {
                 EmptyRepostState(loading = false, unresolved = true)
             }
-        } else {
-            value = EmptyRepostState(loading = false, unresolved = true)
         }
     }
 

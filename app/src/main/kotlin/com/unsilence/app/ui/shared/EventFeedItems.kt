@@ -177,11 +177,15 @@ private fun ThreadedReplyItem(
             sourceRelayHints = replyRow.relaysSeen,
         )
     }
-    val parentEvent by produceState<EventEntity?>(null, parentReference) {
+    val parentEvent by produceState<EventEntity?>(
+        null, parentReference, host.relayHints, host.services.observeReference,
+    ) {
+        value = null
         val reference = parentReference ?: return@produceState
-        value = host.lookupEvent(reference)
+        host.observeReference(reference).collect { value = it.event }
     }
     val parentAuthor by produceState<UserEntity?>(null, parentEvent?.pubkey) {
+        value = null
         val pk = parentEvent?.pubkey
         if (pk != null) {
             value = host.lookupProfile(

@@ -48,8 +48,11 @@ import com.unsilence.app.ui.theme.Spacing
 import com.unsilence.app.ui.theme.Surface1
 import com.unsilence.app.ui.theme.SurfaceVariant
 import com.unsilence.app.ui.theme.TextSecondary
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.withContext
 
-/** Single-phase embedded quote resolution data. */
+/** Live embedded resolution, including arrivals after a lookup miss. */
 private data class QuoteResolution(
     val event: EventEntity? = null,
     val author: UserEntity? = null,
@@ -92,43 +95,46 @@ internal fun QuoteCard(
         return
     }
 
-    val quoteData by produceState(QuoteResolution(), segment.eventId, segment.hints) {
-        val ev = host.lookupEvent(
-            EventReferenceTarget(
-                eventId = segment.eventId,
-                address = null,
-                authorPubkey = segment.author,
-                relayHints = segment.hints,
-            ),
-        )
-        if (ev == null) {
-            value = QuoteResolution(unresolved = true)
-            return@produceState
+    val quoteData by produceState(
+        QuoteResolution(), segment, host.relayHints, services.observeReference,
+    ) {
+        value = QuoteResolution()
+        host.observeReference(
+            EventReferenceTarget(segment.eventId, null, segment.author, segment.hints),
+        ).collectLatest { resolution ->
+            val ev = resolution.event
+            if (ev == null) {
+                value = QuoteResolution(unresolved = !resolution.loading)
+                return@collectLatest
+            }
+            val model = withContext(Dispatchers.Default) {
+                // Try cached EventModel first, fall back to on-the-fly parse
+                val cachedModel = services.lookupModel(ev.id)
+                val sourceModel = cachedModel ?: runCatching {
+                    ContentParser.parse(
+                        id = ev.id,
+                        pubkey = ev.pubkey,
+                        kind = ev.kind,
+                        content = ev.content,
+                        tagsJson = ev.tags,
+                        createdAt = ev.createdAt,
+                        relayUrl = ev.relayUrl,
+                        replyToId = ev.replyToId,
+                        rootId = ev.rootId,
+                        hasContentWarning = ev.hasContentWarning,
+                        contentWarningReason = ev.contentWarningReason,
+                    )
+                }.getOrNull()
+                // A quoted event may itself be a reference-only repost. Resolve only
+                // independently verified models already in MES; cycles/missing targets
+                // become the existing unavailable state, never blank protocol cards.
+                sourceModel?.resolveDisplayModel(modelProvider = services.lookupModel)
+            }
+            // A missing avatar must not delay verified content.
+            value = QuoteResolution(event = ev, model = model)
+            val author = host.lookupProfile(model?.pubkey ?: ev.pubkey)
+            value = QuoteResolution(ev, author, model)
         }
-        // Try cached EventModel first, fall back to on-the-fly parse
-        val cachedModel = services.lookupModel(ev.id)
-        val sourceModel = cachedModel ?: runCatching {
-            ContentParser.parse(
-                id = ev.id,
-                pubkey = ev.pubkey,
-                kind = ev.kind,
-                content = ev.content,
-                tagsJson = ev.tags,
-                createdAt = ev.createdAt,
-                relayUrl = ev.relayUrl,
-                replyToId = ev.replyToId,
-                rootId = ev.rootId,
-                hasContentWarning = ev.hasContentWarning,
-                contentWarningReason = ev.contentWarningReason,
-            )
-        }.getOrNull()
-        // A quoted event may itself be a reference-only repost. Resolve only
-        // independently verified models already in MES; cycles/missing targets
-        // become the existing unavailable state, never blank protocol cards.
-        val model = sourceModel?.resolveDisplayModel(modelProvider = services.lookupModel)
-        val auth = model?.pubkey?.let { host.lookupProfile(it) }
-            ?: host.lookupProfile(ev.pubkey)
-        value = QuoteResolution(ev, auth, model)
     }
 
     // NIP-36: the quoted TARGET's own content-warning (separate resolved event).
@@ -344,7 +350,7 @@ internal fun QuoteCard(
                 )
             }
         } else {
-            // Loading skeleton (bounded ≤5s by lookupEvent timeout)
+            // Initial lookup only; the bounded retry continues behind the placeholder.
             Column {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Box(Modifier.size(avatarSize).clip(CircleShape).background(Surface1))

@@ -169,6 +169,7 @@ class LinkPreviewLayoutTest {
             react = { _, _, _, _ -> }, repost = { _, _, _ -> }, zap = { _, _, _, _ -> },
             saveNwcUri = {}, isNwcConfigured = { false }, lookupProfile = { _, _ -> null },
             lookupEvent = { quoteLookups.incrementAndGet(); null }, lookupModel = { null },
+            observeReference = { quoteLookups.incrementAndGet(); kotlinx.coroutines.flow.flowOf(ReferenceState(loading = false)) },
             fetchOgMetadata = { url -> previewFetches.incrementAndGet(); metadata(url) },
             hasCachedOgMetadata = { true },
             articleRowFlow = { flowOf(null) }, ensureArticle = { _, _, _, _ -> },

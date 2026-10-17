@@ -53,6 +53,7 @@ class FeedGeometryTest {
             react = { _, _, _, _ -> }, repost = { _, _, _ -> }, zap = { _, _, _, _ -> },
             saveNwcUri = {}, isNwcConfigured = { false }, lookupProfile = { _, _ -> null },
             lookupEvent = { lookups.incrementAndGet(); null }, lookupModel = { null },
+            observeReference = { lookups.incrementAndGet(); kotlinx.coroutines.flow.flowOf(ReferenceState(loading = false)) },
             fetchOgMetadata = { null }, hasCachedOgMetadata = { false },
             articleRowFlow = { flowOf(null) }, ensureArticle = { _, _, _, _ -> },
             hydrateEngagement = {}, engagementRetryRevision = MutableStateFlow(0L),

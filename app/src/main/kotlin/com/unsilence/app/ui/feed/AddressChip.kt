@@ -19,9 +19,9 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -37,15 +37,11 @@ import com.unsilence.app.ui.theme.AppType
 import com.unsilence.app.ui.theme.Brand
 import com.unsilence.app.ui.theme.Spacing
 import com.unsilence.app.ui.theme.TextSecondary
-import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.launch
-import kotlinx.coroutines.withTimeoutOrNull
 
 private enum class AddressResolutionState { IDLE, RESOLVING, FAILED }
 
-/** One resolver phase is bounded at 8s; this margin includes processor settle
- *  while preventing later ladder phases from extending the chip's pending UI. */
+/** Stop pending navigation after nine seconds, independently of background recovery. */
 private const val ADDRESS_RESOLUTION_TIMEOUT_MS = 9_000L
 private const val ADDRESS_FAILURE_VISIBLE_MS = 1_800L
 
@@ -62,7 +58,6 @@ internal fun AddressChip(
     modifier: Modifier,
 ) {
     val lookupProfile: suspend (String) -> UserEntity? = { pubkey -> host.lookupProfile(pubkey) }
-    val coroutineScope = rememberCoroutineScope()
     val target = remember(segment.kind, segment.author, segment.dTag, segment.hints) {
         EventReferenceTarget(
             eventId = null,
@@ -74,7 +69,28 @@ internal fun AddressChip(
     var resolutionState by remember(target.lookupKey) {
         mutableStateOf(AddressResolutionState.IDLE)
     }
+    var requestRevision by remember(target.lookupKey) { mutableIntStateOf(0) }
+    var resolvedId by remember(target.lookupKey) { mutableStateOf<String?>(null) }
+    LaunchedEffect(target, requestRevision, host.relayHints, host.services.observeReference) {
+        if (requestRevision == 0) return@LaunchedEffect
+        host.observeReference(target).collect { resolution ->
+            resolvedId = resolution.event?.id
+            if (resolution.event != null) {
+                // Late recovery makes the next explicit tap ready; it must not
+                // navigate after the pending UI has timed out or been dismissed.
+                val open = resolutionState == AddressResolutionState.RESOLVING
+                resolutionState = AddressResolutionState.IDLE
+                if (open) host.actions.onNoteClick(resolution.event.id)
+            } else if (!resolution.loading && resolutionState == AddressResolutionState.RESOLVING) {
+                resolutionState = AddressResolutionState.FAILED
+            }
+        }
+    }
     LaunchedEffect(resolutionState) {
+        if (resolutionState == AddressResolutionState.RESOLVING) {
+            delay(ADDRESS_RESOLUTION_TIMEOUT_MS)
+            resolutionState = AddressResolutionState.FAILED
+        }
         if (resolutionState == AddressResolutionState.FAILED) {
             delay(ADDRESS_FAILURE_VISIBLE_MS)
             if (resolutionState == AddressResolutionState.FAILED) {
@@ -104,24 +120,12 @@ internal fun AddressChip(
             .clip(RoundedCornerShape(12.dp))
             .clickable {
                 if (resolutionState == AddressResolutionState.RESOLVING) return@clickable
-                resolutionState = AddressResolutionState.RESOLVING
-                coroutineScope.launch {
-                    val event = try {
-                        withTimeoutOrNull(ADDRESS_RESOLUTION_TIMEOUT_MS) {
-                            host.lookupEvent(target)
-                        }
-                    } catch (cancelled: CancellationException) {
-                        throw cancelled
-                    } catch (_: Exception) {
-                        null
-                    }
-                    if (event != null) {
-                        resolutionState = AddressResolutionState.IDLE
-                        host.actions.onNoteClick(event.id)
-                    } else {
-                        resolutionState = AddressResolutionState.FAILED
-                    }
+                resolvedId?.let {
+                    host.actions.onNoteClick(it)
+                    return@clickable
                 }
+                resolutionState = AddressResolutionState.RESOLVING
+                requestRevision++
             }
             .padding(horizontal = Spacing.medium, vertical = Spacing.small),
     ) {

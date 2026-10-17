@@ -64,10 +64,8 @@ import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.flow.first
-import kotlinx.coroutines.flow.mapNotNull
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.flowOn
-import kotlinx.coroutines.flow.merge
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -110,6 +108,7 @@ class NoteActionsViewModel @Inject constructor(
     private val relayPool: RelayPool,
     private val relayPreferencesStore: RelayPreferencesStore,
     private val profilePipeline: ProfilePipeline,
+    private val eventReferenceResolver: EventReferenceResolver,
     private val userRepository: UserRepository,
     private val memoryEventStore: MemoryEventStore,
     private val cardHydrator: CardHydrator,
@@ -865,10 +864,6 @@ class NoteActionsViewModel @Inject constructor(
 
     // ── Lookups for NoteCard embedded content (mentions, quoted posts) ────────
 
-    /** Event references currently being looked up (prevents concurrent relay requests).
-     *  Cleared after each lookup completes so evicted events can be re-fetched. */
-    private val fetchingQuoteIds = mutableSetOf<String>()
-
     /**
      * Look up a profile by pubkey. Returns immediately if cached; otherwise
      * triggers a relay fetch and waits up to 5 seconds for the profile to
@@ -928,181 +923,10 @@ class NoteActionsViewModel @Inject constructor(
      * phase selects the latest revision by coordinate.
      */
     suspend fun lookupEvent(target: EventReferenceTarget): EventEntity? =
-        memoryEventStore.retainRequestedEvent(target.eventId).use {
-            resolveEventReference(target)
-        }
+        eventReferenceResolver.lookup(target)
 
-    private suspend fun resolveEventReference(target: EventReferenceTarget): EventEntity? {
-        cachedReference(target)?.let { return it }
-        if (target.lookupKey.isBlank()) return null
-
-        // A restored comment may precede its parent's kind-10002. Start that fetch
-        // immediately; ProfilePipeline coalesces concurrent rows and TTL-caches success.
-        target.authorPubkey?.let { author ->
-            viewModelScope.launch(Dispatchers.IO) {
-                profilePipeline.fetchProfileRelayFacts(author)
-            }
-        }
-
-        val curatedFallback = run {
-            val ownPk = pubkeyHex.orEmpty()
-            memoryEventStore.readRelaysFor(ownPk)
-                .ifEmpty { GLOBAL_RELAY_URLS }
-        }
-
-        val shouldFetch = synchronized(fetchingQuoteIds) {
-            fetchingQuoteIds.add(target.lookupKey)
-        }
-        try {
-            if (shouldFetch) {
-                val id = target.eventId
-                val idSuppressed = id?.let(relayPool::isEventUnresolved) == true
-
-                val outboxRelays = target.authorPubkey
-                    ?.let(memoryEventStore::lookupWriteRelaysFor)
-                    .orEmpty()
-                val relayLadder = eventReferenceRelayLadder(
-                    target = target,
-                    browseRelayHints = relayPool.activeFeedRelayHints(),
-                    idFallbackRelays = outboxRelays + curatedFallback,
-                )
-                val idTargets = relayLadder.eventId
-                val idHintTargets = idTargets?.hints.orEmpty()
-
-                // Phase 1: wire hints/source relay. Completion now means EOSE/timeout,
-                // not merely that the coalescer dispatched the REQ.
-                if (id != null && !idSuppressed && idHintTargets.isNotEmpty()) {
-                    withContext(Dispatchers.IO) {
-                        relayPool.fetchEventById(id, idHintTargets)
-                    }
-                    cachedReference(target)?.let { return it }
-                }
-
-                // Phase 2: cached/discovered author outbox plus curated read relays.
-                val fallbackTargets = idTargets?.fallback.orEmpty()
-                if (id != null && !idSuppressed && fallbackTargets.isNotEmpty()) {
-                    withContext(Dispatchers.IO) {
-                        relayPool.fetchEventsByIdsFromTargets(
-                            eventIds = listOf(id),
-                            targetRelayUrls = fallbackTargets,
-                            bypassDedup = true,
-                            excludedRelayUrls = idHintTargets,
-                        )
-                    }
-                    cachedReference(target)?.let { return it }
-                }
-
-                // Phase 3: a stale/missing revision id cannot block an addressable
-                // parent or repost. Include late-arriving outbox facts on this read.
-                val addressLadder = target.address?.let { address ->
-                    eventReferenceRelayLadder(
-                        target = target,
-                        browseRelayHints = relayPool.activeFeedRelayHints(),
-                        idFallbackRelays = emptyList(),
-                        addressFallbackRelays =
-                            memoryEventStore.lookupWriteRelaysFor(address.authorPubkey) + curatedFallback,
-                    )
-                }
-                target.address?.let { address ->
-                    val addressTargets = addressLadder?.address
-                    val addressHintTargets = addressTargets?.hints.orEmpty()
-                    val addressFallbackTargets = addressTargets?.fallback.orEmpty()
-                    if (addressHintTargets.isNotEmpty()) {
-                        withContext(Dispatchers.IO) {
-                            relayPool.fetchAddressByCoord(
-                                rawRelayUrls = addressHintTargets,
-                                kind = address.kind,
-                                author = address.authorPubkey,
-                                dTag = address.dTag,
-                            )
-                        }
-                        cachedReference(target)?.let { return it }
-                    }
-                    if (addressFallbackTargets.isNotEmpty()) {
-                        withContext(Dispatchers.IO) {
-                            relayPool.fetchAddressByCoord(
-                                rawRelayUrls = addressFallbackTargets,
-                                kind = address.kind,
-                                author = address.authorPubkey,
-                                dTag = address.dTag,
-                            )
-                        }
-                    }
-                    cachedReference(target)?.let { return it }
-                }
-
-                // Final miss tier: the bridge is intentionally after every existing
-                // ID and coordinate phase. It is never part of curated/global traffic.
-                val bridgeIdTargets = relayLadder.eventIdBridgeFallback
-                if (id != null && bridgeIdTargets.isNotEmpty()) {
-                    withContext(Dispatchers.IO) {
-                        relayPool.fetchEventsByIdsFromBridgeOnMiss(
-                            eventIds = listOf(id),
-                            alreadyTriedRelayUrls = idTargets?.all.orEmpty(),
-                        )
-                    }
-                    cachedReference(target)?.let { return it }
-                }
-
-                target.address?.let { address ->
-                    val bridgeAddressTargets = addressLadder?.addressBridgeFallback.orEmpty()
-                    if (bridgeAddressTargets.isNotEmpty()) {
-                        withContext(Dispatchers.IO) {
-                            relayPool.fetchAddressByCoord(
-                                rawRelayUrls = bridgeAddressTargets,
-                                kind = address.kind,
-                                author = address.authorPubkey,
-                                dTag = address.dTag,
-                            )
-                        }
-                    }
-                    cachedReference(target)?.let { return it }
-                }
-            }
-
-            return awaitReference(target, timeoutMs = 8_000L)
-        } finally {
-            synchronized(fetchingQuoteIds) { fetchingQuoteIds.remove(target.lookupKey) }
-        }
-    }
-
-    private fun cachedReference(target: EventReferenceTarget): EventEntity? {
-        val resolved = target.eventId?.let(memoryEventStore::getEventEntity)
-            ?: target.address?.let { address ->
-                memoryEventStore.eventIdForAddress(
-                    address.kind,
-                    address.authorPubkey,
-                    address.dTag,
-                )?.let(memoryEventStore::getEventEntity)
-            }
-        resolved?.let { memoryEventStore.markTouched(it.id) }
-        return resolved
-    }
-
-    private suspend fun awaitReference(
-        target: EventReferenceTarget,
-        timeoutMs: Long,
-    ): EventEntity? {
-        cachedReference(target)?.let { return it }
-        val flows = buildList {
-            target.eventId?.let { id ->
-                add(memoryEventStore.eventEntityFlow(id).filterNotNull())
-            }
-            target.address?.let { address ->
-                add(
-                    memoryEventStore.eventIdForAddressFlow(
-                        address.kind,
-                        address.authorPubkey,
-                        address.dTag,
-                    ).mapNotNull { id -> id?.let(memoryEventStore::getEventEntity) }
-                )
-            }
-        }
-        if (flows.isEmpty()) return null
-        return withTimeoutOrNull(timeoutMs) {
-            merge(*flows.toTypedArray()).first()
-        }?.also { memoryEventStore.markTouched(it.id) }
-    }
+    fun observeReference(target: EventReferenceTarget): Flow<ReferenceState<EventEntity>> =
+        eventReferenceResolver.observe(target)
 
     suspend fun fetchOgMetadata(url: String): OgMetadata? =
         ogFetcher.fetch(url)

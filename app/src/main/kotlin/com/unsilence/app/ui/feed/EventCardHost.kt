@@ -49,6 +49,7 @@ data class EventCardServices(
     val isNwcConfigured: () -> Boolean,
     val lookupProfile: suspend (pubkey: String, relayHints: List<String>) -> UserEntity?,
     val lookupEvent: suspend (EventReferenceTarget) -> EventEntity?,
+    val observeReference: (EventReferenceTarget) -> Flow<ReferenceState<EventEntity>>,
     val lookupModel: (String) -> EventModel?,
     val fetchOgMetadata: suspend (String) -> OgMetadata?,
     val hasCachedOgMetadata: (String) -> Boolean,
@@ -106,6 +107,9 @@ data class EventCardHost(
             target.copy(relayHints = mergedRelayHints(target.relayHints)),
         )
 
+    fun observeReference(target: EventReferenceTarget): Flow<ReferenceState<EventEntity>> =
+        services.observeReference(target.copy(relayHints = mergedRelayHints(target.relayHints)))
+
     private fun mergedRelayHints(hints: List<String>): List<String> =
         (relayHints + hints).filter(String::isNotBlank).distinct()
 }
@@ -135,6 +139,7 @@ internal fun NoteActionsViewModel.eventCardServices(): EventCardServices = Event
         if (hints.isEmpty()) lookupProfile(pubkey) else lookupProfileWithHints(pubkey, hints)
     },
     lookupEvent = ::lookupEvent,
+    observeReference = ::observeReference,
     lookupModel = ::getEventModel,
     fetchOgMetadata = ::fetchOgMetadata,
     hasCachedOgMetadata = ::hasCachedOgMetadata,

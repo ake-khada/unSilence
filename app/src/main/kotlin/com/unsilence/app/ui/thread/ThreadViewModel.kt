@@ -20,9 +20,7 @@ import com.unsilence.app.data.memory.WotLookup
 import com.unsilence.app.data.memory.ZapDetail
 import com.unsilence.app.data.relay.FeedWotDisplayMode
 import com.unsilence.app.data.relay.WotHydrationCoalescer
-import com.unsilence.app.data.relay.bridgeFallbackRelayTargets
 import com.unsilence.app.data.relay.boundedSeenRelayHints
-import com.unsilence.app.data.relay.relayResolutionTargets
 import com.unsilence.app.data.relay.wotLookupSnapshot
 import com.unsilence.app.data.relay.wotSubjectsForFeedRows
 import com.unsilence.app.ui.shared.TimelineCardData
@@ -43,16 +41,13 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
-import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.map
-import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import kotlinx.coroutines.withTimeoutOrNull
 import javax.inject.Inject
 
 typealias DepthRow = ModeratedReplyRow
@@ -154,6 +149,7 @@ class ThreadViewModel @Inject constructor(
     private val wotHydrationCoalescer: WotHydrationCoalescer,
     private val relayPreferencesStore: com.unsilence.app.data.relay.RelayPreferencesStore,
     private val timelineCardData: TimelineCardData,
+    private val eventReferenceResolver: com.unsilence.app.ui.feed.EventReferenceResolver,
 ) : ViewModel() {
 
     /** NIP-36 sensitive-content display mode (shared with feed). */
@@ -482,13 +478,11 @@ class ThreadViewModel @Inject constructor(
 
             // Refine root in background — walk UP the reply chain fetching ancestors
             launch {
-                val trueRoot = withTimeoutOrNull(8_000) {
-                    resolveThreadRoot(
-                        startId = eventId,
-                        initialHints = effectiveHints,
-                        fallbackRelays = resolvedUrls,
-                    )
-                } ?: return@launch
+                val trueRoot = resolveThreadRoot(
+                    startId = eventId,
+                    initialHints = effectiveHints,
+                    fallbackRelays = resolvedUrls,
+                )
                 if (trueRoot != bestGuessRoot && eventIdFlow.value == bestGuessRoot) {
                     // Re-resolve relays for the true root's author — may differ
                     // from the tapped event's author.
@@ -520,64 +514,29 @@ class ThreadViewModel @Inject constructor(
         initialHints: List<String>,
         fallbackRelays: List<String>,
     ): String {
-        val visited = mutableSetOf<String>()
-        var currentId = startId
         var currentHints = initialHints
-        repeat(50) {                                       // hop cap — pathological guard
-            if (!visited.add(currentId)) return currentId   // cycle guard
-            val current = memoryEventStore.getEventEntity(currentId)
-                ?: fetchAncestor(currentId, currentHints, fallbackRelays)
-                ?: return currentId                        // unreachable — best-effort root
-            val parentId = current.replyToId ?: current.rootId
-            if (parentId == null || parentId == currentId) return currentId  // root
-            currentHints = nextAncestorRelayHints(
-                sourceRelaysSeen = memoryEventStore.getNostrEvent(currentId)?.relaysSeen.orEmpty(),
-                browseRelays = relayPool.activeFeedRelayHints(),
-                parentRelayHints = memoryEventStore.relayHintsForEvent(parentId),
-                initialHints = initialHints,
-            )
-            currentId = parentId
-        }
-        return currentId
-    }
-
-    private suspend fun fetchAncestor(
-        id: String,
-        hints: List<String>,
-        fallbackRelays: List<String>,
-    ): EventEntity? = memoryEventStore.retainRequestedEvent(id).use {
-        val targets = relayResolutionTargets(
-            seenRelays = hints,
-            browseRelays = relayPool.activeFeedRelayHints(),
-            fallbackRelays = fallbackRelays,
-        )
-        if (targets.hints.isNotEmpty()) {
-            withContext(Dispatchers.IO) { relayPool.fetchEventById(id, targets.hints) }
-        }
-        if (memoryEventStore.getEventEntity(id) == null && targets.fallback.isNotEmpty()) {
-            withContext(Dispatchers.IO) {
-                relayPool.fetchEventsByIdsFromTargets(
-                    eventIds = listOf(id),
-                    targetRelayUrls = targets.fallback,
-                    bypassDedup = true,
-                    excludedRelayUrls = targets.hints,
+        return walkThreadAncestors(
+            startId = startId,
+            lookup = { id ->
+                memoryEventStore.getEventEntity(id) ?: eventReferenceResolver.lookup(
+                    com.unsilence.app.ui.feed.EventReferenceTarget(
+                        eventId = id,
+                        address = null,
+                        authorPubkey = null,
+                        relayHints = currentHints,
+                    ),
+                    fallbackRelays = fallbackRelays,
                 )
-            }
-        }
-        if (memoryEventStore.getEventEntity(id) == null) {
-            val bridgeTargets = bridgeFallbackRelayTargets(targets.all)
-            if (bridgeTargets.isNotEmpty()) {
-                withContext(Dispatchers.IO) {
-                    relayPool.fetchEventsByIdsFromBridgeOnMiss(
-                        eventIds = listOf(id),
-                        alreadyTriedRelayUrls = targets.all,
-                    )
-                }
-            }
-        }
-        withTimeoutOrNull(3_000) {
-            memoryEventStore.eventEntityFlow(id).filterNotNull().first()
-        }
+            },
+            onParent = { currentId, parentId ->
+                currentHints = nextAncestorRelayHints(
+                    sourceRelaysSeen = memoryEventStore.getNostrEvent(currentId)?.relaysSeen.orEmpty(),
+                    browseRelays = relayPool.activeFeedRelayHints(),
+                    parentRelayHints = memoryEventStore.relayHintsForEvent(parentId),
+                    initialHints = initialHints,
+                )
+            },
+        )
     }
 
 }
