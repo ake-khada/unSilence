@@ -78,8 +78,8 @@ private const val SNAPSHOT_VERSION = "SNAPSHOT_V2"
 
 /** V3 binary snapshot magic — first 4 bytes of every V3 file. */
 internal val SNAPSHOT_BINARY_MAGIC = byteArrayOf(0x55, 0x53, 0x4E, 0x53) // "USNS"
-/** V13: event records carry a redundant tagsJson wire slot. V19 keeps that
- *  slot byte-compatible but discards it after restore; parsed tags are the
+/** V13: event records carry a redundant tagsJson wire slot. V19 writes that
+ *  slot empty and discards its legacy contents on restore; parsed tags are the
  *  sole in-memory representation.
  *  V14: a length-prefixed owner pubkey is stamped immediately after the 32-byte
  *  header. Restore rejects a snapshot whose owner differs from the current
@@ -6936,9 +6936,9 @@ class MemoryEventStore @Inject constructor(
             writeInt(tag.size)
             for (item in tag) writeStr(item)
         }
-        // V13+ wire slot retained for snapshot compatibility. The JSON is no
-        // longer kept in memory; serialize only at this persistence seam.
-        writeStr(tagsToJson(e.tags))
+        // Keep the V13+ length-prefixed slot, but omit the redundant JSON payload.
+        // The reader discards it and uses the binary tags above.
+        writeStr("")
         var flags = 0
         if (e.replyToId != null) flags = flags or 0x01
         if (e.rootId != null) flags = flags or 0x02

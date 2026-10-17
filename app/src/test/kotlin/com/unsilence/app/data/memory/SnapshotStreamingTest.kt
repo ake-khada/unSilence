@@ -17,6 +17,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
 import org.junit.rules.TemporaryFolder
+import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
 import java.io.DataInputStream
 import java.io.DataOutputStream
@@ -91,6 +92,109 @@ class SnapshotStreamingTest {
             assertEquals(4, sizes.timelinesBytes)
             assertEquals(8 + (if (version >= 18) 4 else 0) + (if (version >= 19) 4 else 0), sizes.tailBytes)
         }
+    }
+
+    @Test
+    fun `V16 through V19 write an empty legacy JSON slot and round trip binary tags`() = runTest {
+        for (version in 16..19) {
+            for (tags in listOf(emptyList(), snapshotTags)) {
+                val original = taggedEvent().copy(tags = tags)
+                val source = store().apply { insert(original) }
+                val file = temp.newFile()
+                val sizes = file.outputStream().use { source.saveSnapshotBinary(it, version) }
+                val bytes = file.readBytes()
+                assertEquals(version, ByteBuffer.wrap(bytes).getInt(4))
+                val eventsOffset = sizes.headerBytes + sizes.followsBytes
+                val expected = eventSection(original, legacyJson = "")
+                assertArrayEquals(
+                    "V$version event fields and empty compatibility slot",
+                    expected,
+                    bytes.copyOfRange(eventsOffset, eventsOffset + sizes.eventsBytes),
+                )
+                assertEquals(bytes.size, sizes.totalBytes)
+                assertRestoredEvent(bytes, original)
+            }
+        }
+    }
+
+    @Test
+    fun `legacy filled JSON slot restores binary tags and subsequent fields`() = runTest {
+        for (version in 16..19) {
+            val original = taggedEvent()
+            val file = temp.newFile()
+            val sizes = file.outputStream().use { store().saveSnapshotBinary(it, version) }
+            val empty = file.readBytes()
+            val eventsOffset = sizes.headerBytes + sizes.followsBytes
+            assertEquals(Int.SIZE_BYTES, sizes.eventsBytes)
+            // Independently encode the old event layout, not the production event writer.
+            val legacyEvents = eventSection(original, legacyJson = tagsToJson(original.tags))
+            val bytes = empty.copyOfRange(0, eventsOffset) + legacyEvents +
+                empty.copyOfRange(eventsOffset + sizes.eventsBytes, empty.size)
+            val header = ByteBuffer.wrap(bytes)
+            val addedBytes = legacyEvents.size - sizes.eventsBytes
+            for (field in listOf(16, 20, 28)) { // aggregates, relay health, timelines
+                header.putInt(field, header.getInt(field) + addedBytes)
+            }
+            header.putInt(24, 1) // declared event count
+            assertRestoredEvent(bytes, original)
+        }
+    }
+
+    private val snapshotTags = listOf(
+        emptyList(),
+        listOf(""),
+        listOf("e", "parent", "", "reply"),
+        listOf("e", "root", "wss://relay.example", "root"),
+        listOf("content-warning", "reason"),
+        listOf("opaque", "quotes \" and \\ slashes", "\u0000\t\r\n", "日本語 🌻"),
+    )
+
+    private fun taggedEvent() = event("tagged", "unchanged content 🌻").copy(
+        tags = snapshotTags,
+        replyToId = "parent",
+        rootId = "root",
+        hasContentWarning = true,
+        contentWarningReason = "reason",
+    )
+
+    /** Frozen event layout shared by V16–V19, including all four optional fields. */
+    private fun eventSection(event: NostrEvent, legacyJson: String): ByteArray =
+        ByteArrayOutputStream().also { bytes ->
+            DataOutputStream(bytes).use { out ->
+                fun string(value: String) {
+                    val encoded = value.toByteArray(Charsets.UTF_8)
+                    out.writeInt(encoded.size)
+                    out.write(encoded)
+                }
+                out.writeInt(1) // one event
+                out.writeLong(event.createdAt)
+                out.writeInt(event.kind)
+                listOf(event.id, event.pubkey, event.sig, event.content, event.relayUrl).forEach(::string)
+                out.writeInt(event.tags.size)
+                for (tag in event.tags) {
+                    out.writeInt(tag.size)
+                    tag.forEach(::string)
+                }
+                string(legacyJson)
+                out.writeByte(0x0f)
+                string(requireNotNull(event.replyToId))
+                string(requireNotNull(event.rootId))
+                string(requireNotNull(event.contentWarningReason))
+                out.writeLong(event.firstSeenAt)
+                out.writeInt(event.relaysSeen.size)
+                event.relaysSeen.forEach(::string)
+            }
+        }.toByteArray()
+
+    private suspend fun assertRestoredEvent(bytes: ByteArray, original: NostrEvent) {
+        val restored = store()
+        DataInputStream(ByteArrayInputStream(bytes)).use { input ->
+            restored.restoreSnapshotBinary(input)
+            assertEquals("All sections consumed", -1, input.read())
+        }
+        assertEquals(original, restored.getNostrEvent(original.id))
+        // UI entities still receive JSON built from the authoritative binary tags.
+        assertEquals(tagsToJson(original.tags), restored.getEventEntity(original.id)?.tags)
     }
 
     @Test
