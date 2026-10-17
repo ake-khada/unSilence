@@ -146,7 +146,7 @@ data class MesSizeSnapshot(
 data class MesEvictionSnapshot(
     val passes: Long,
     val evicted: Long,
-    /** Followed-author events; strongest bounded protection. */
+    /** Followed-author events. Active requested references rank above them. */
     val tier1: Long,
     /** Events referenced by a cached timeline. */
     val tier2: Long,
@@ -167,4 +167,6 @@ data class MesEvictionSnapshot(
     val anchoredProfileRefs: Long,
     /** Size of the most recent per-pass timeline-ref union. */
     val liveTimelineRefs: Long,
+    /** Active lookup targets evicted, normally zero with the production caps. */
+    val requested: Long = 0,
 )

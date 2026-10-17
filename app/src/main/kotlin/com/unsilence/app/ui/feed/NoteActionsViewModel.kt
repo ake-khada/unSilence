@@ -928,7 +928,9 @@ class NoteActionsViewModel @Inject constructor(
      * phase selects the latest revision by coordinate.
      */
     suspend fun lookupEvent(target: EventReferenceTarget): EventEntity? =
-        resolveEventReference(target)
+        memoryEventStore.retainRequestedEvent(target.eventId).use {
+            resolveEventReference(target)
+        }
 
     private suspend fun resolveEventReference(target: EventReferenceTarget): EventEntity? {
         cachedReference(target)?.let { return it }

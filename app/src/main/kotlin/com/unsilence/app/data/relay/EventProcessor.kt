@@ -43,6 +43,7 @@ private const val DEDUP_TRIM = 2_000
 // bounded window captures the duplicate crypto win without retaining the feed.
 private const val VERIFIED_CACHE_MAX = 1_024
 private const val VERIFIED_CACHE_TRIM = 256
+private val RECOVERABLE_CONTENT_KINDS = setOf(1, 6, 16, 20, 21, 22, 34235, 34236, 1068, 1111, 30023)
 
 /**
  * Parses raw relay wire messages and writes valid events to [MemoryEventStore].
@@ -112,9 +113,10 @@ class EventProcessor @Inject constructor(
     /**
      * Drain all channels and flush once. Tests call this after process()
      * to push events through the channel→flushBatch→MemoryEventStore path
-     * without needing the infinite drainer loops.
+     * without needing the infinite drainer loops. Returns the number dequeued
+     * before batch dedup, so tests can detect redundant enqueues too.
      */
-    internal fun drainForTest() {
+    internal fun drainForTest(): Int {
         val buffer = mutableListOf<NostrEvent>()
         while (true) {
             val event = hotChannel.tryReceive().getOrNull() ?: break
@@ -124,6 +126,7 @@ class EventProcessor @Inject constructor(
             val event = coldChannel.tryReceive().getOrNull() ?: break
             buffer.add(event)
         }
+        var dequeued = buffer.size
         if (buffer.isNotEmpty()) {
             flushBatch(buffer)
             buffer.clear()
@@ -134,9 +137,11 @@ class EventProcessor @Inject constructor(
             val event = controlChannel.tryReceive().getOrNull() ?: break
             buffer.add(event)
         }
+        dequeued += buffer.size
         if (buffer.isNotEmpty()) {
             flushControlBatch(buffer)
         }
+        return dequeued
     }
 
     /**
@@ -199,6 +204,17 @@ class EventProcessor @Inject constructor(
      */
     internal val seenIds = ConcurrentHashMap<String, Unit>(DEDUP_MAX + DEDUP_TRIM)
 
+    // Seen means verified before, not retained forever. Keep queue ownership
+    // separate so a missing payload can re-enter without duplicate enqueues.
+    private val pendingContent = ConcurrentHashMap<String, NostrEvent>()
+    internal val pendingContentCount: Int get() = pendingContent.size
+
+    private fun releasePendingContent(event: NostrEvent) {
+        pendingContent.computeIfPresent(event.id) { _, pending ->
+            if (pending === event) null else pending
+        }
+    }
+
     /**
      * Recently verified events shared with subscription delivery. A globally
      * deduplicated event may still be novel to a second subscription id, so its
@@ -259,6 +275,7 @@ class EventProcessor @Inject constructor(
         drainerJob = null
         seenIds.clear()
         verifiedEvents.clear()
+        pendingContent.clear()
         // Drain and discard any buffered events
         while (hotChannel.tryReceive().isSuccess) { /* discard */ }
         while (coldChannel.tryReceive().isSuccess) { /* discard */ }
@@ -299,7 +316,11 @@ class EventProcessor @Inject constructor(
             }
             // Kind-10040 is account-scoped control state and intentionally
             // re-enters MES: it can first arrive before the owner is established.
-            if (cached.kind != 10040 && seenIds.containsKey(eventId)) {
+            if (cached.kind != 10040 && seenIds.containsKey(eventId) &&
+                (cached.kind !in RECOVERABLE_CONTENT_KINDS ||
+                    memoryEventStore.getNostrEvent(eventId) != null ||
+                    pendingContent.containsKey(eventId))
+            ) {
                 memoryEventStore.addRelaySeen(eventId, relayUrl)
                 return
             }
@@ -425,7 +446,19 @@ class EventProcessor @Inject constructor(
 
         // 5 replays bounded deletion tombstones; 10040 retries owner discovery.
         // MES enforces deletion authorship and registry staleness on every pass.
-        if (nostrEvent.kind != 5 && nostrEvent.kind != 10040) {
+        if (nostrEvent.kind in RECOVERABLE_CONTENT_KINDS) {
+            if (pendingContent.putIfAbsent(nostrEvent.id, nostrEvent) != null) {
+                memoryEventStore.addRelaySeen(nostrEvent.id, nostrEvent.relayUrl)
+                return
+            }
+            seenIds[nostrEvent.id] = Unit
+            trimDedupCacheIfNeeded()
+            if (memoryEventStore.getNostrEvent(nostrEvent.id) != null) {
+                memoryEventStore.addRelaySeen(nostrEvent.id, nostrEvent.relayUrl)
+                releasePendingContent(nostrEvent)
+                return
+            }
+        } else if (nostrEvent.kind != 5 && nostrEvent.kind != 10040) {
             if (seenIds.putIfAbsent(nostrEvent.id, Unit) != null) {
                 memoryEventStore.addRelaySeen(nostrEvent.id, nostrEvent.relayUrl)
                 return
@@ -476,6 +509,7 @@ class EventProcessor @Inject constructor(
     private fun enqueue(channel: Channel<NostrEvent>, event: NostrEvent) {
         if (channel.trySend(event).isFailure) {
             seenIds.remove(event.id)
+            releasePendingContent(event)
             Log.w(TAG, "Enqueue failed: kind=${event.kind} id=${event.id.take(8)}; dedup released for retry")
         }
     }
@@ -602,7 +636,13 @@ class EventProcessor @Inject constructor(
 
         // Batch insert with coalesced signal bumps: ≤5 bumps instead of N.
         val eventList = events.values.toList()
-        memoryEventStore.insertBatch(eventList)
+        try {
+            memoryEventStore.insertBatch(eventList)
+        } finally {
+            // Release even rejected/deleted payloads. A later explicit fetch
+            // must retry normal admission, not be suppressed by historical dedup.
+            eventList.forEach(::releasePendingContent)
+        }
 
         // Pre-compute media metadata at insert time (sidecar caches).
         // ContentParser.parse is LAZY — deferred to first getOrParseEventModel() read.

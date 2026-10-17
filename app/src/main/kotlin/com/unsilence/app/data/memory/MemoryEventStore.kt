@@ -189,6 +189,7 @@ internal val CONTENT_EVENT_KIND_CAPS = mapOf(
 
 /** Bounded protection tiers. Every tier still converges to its kind cap. */
 internal enum class ContentEvictionTier(val number: Int) {
+    REQUESTED_REFERENCE(0),
     FOLLOWED_AUTHOR(1),
     TIMELINE_REFERENCED(2),
     ORDINARY(3),
@@ -213,12 +214,14 @@ internal data class ContentAdmissionVictim(
 internal class ContentAdmissionIndex {
     private class KindQueues {
         val tierById = HashMap<String, ContentEvictionTier>()
+        val requested = java.util.LinkedHashMap<String, Unit>(16, 0.75f, true)
         val followed = java.util.LinkedHashMap<String, Unit>(16, 0.75f, true)
         val timeline = java.util.LinkedHashMap<String, Unit>(16, 0.75f, true)
         val ordinary = java.util.LinkedHashMap<String, Unit>(16, 0.75f, true)
 
         fun queue(tier: ContentEvictionTier): java.util.LinkedHashMap<String, Unit> =
             when (tier) {
+                ContentEvictionTier.REQUESTED_REFERENCE -> requested
                 ContentEvictionTier.FOLLOWED_AUTHOR -> followed
                 ContentEvictionTier.TIMELINE_REFERENCED -> timeline
                 ContentEvictionTier.ORDINARY -> ordinary
@@ -319,6 +322,7 @@ internal class ContentAdmissionIndex {
             ContentEvictionTier.ORDINARY,
             ContentEvictionTier.TIMELINE_REFERENCED,
             ContentEvictionTier.FOLLOWED_AUTHOR,
+            ContentEvictionTier.REQUESTED_REFERENCE,
         )
     }
 }
@@ -335,6 +339,7 @@ internal fun selectContentEvictionCandidates(
     followedPubkeys: Set<String>,
     timelineReferencedIds: Set<String>,
     lastTouchedAt: Map<String, Long>,
+    requestedIds: Set<String> = emptySet(),
 ): List<ContentEvictionCandidate> {
     require(cap >= 0)
     val excess = entries.size - cap
@@ -343,6 +348,7 @@ internal fun selectContentEvictionCandidates(
     val materialized = entries.map { entry ->
         val author = authorsByEventId[entry.id]
         val tier = when {
+            entry.id in requestedIds -> ContentEvictionTier.REQUESTED_REFERENCE
             author != null && author in followedPubkeys -> ContentEvictionTier.FOLLOWED_AUTHOR
             entry.id in timelineReferencedIds -> ContentEvictionTier.TIMELINE_REFERENCED
             else -> ContentEvictionTier.ORDINARY
@@ -354,7 +360,7 @@ internal fun selectContentEvictionCandidates(
         )
     }
 
-    // Evict ordinary first, then timeline-backed, then followed-author;
+    // Evict ordinary, timeline-backed, followed-author, then active requests;
     // least-recently-touched first within each tier. ID is a stable final key.
     return materialized
         .sortedWith(
@@ -625,6 +631,30 @@ class MemoryEventStore @Inject constructor(
      */
     private val lastTouchedAt = ConcurrentHashMap<String, Long>()
     private val contentAdmissionIndex = ContentAdmissionIndex()
+    private val requestedEvents = RequestedEventRetention()
+
+    /** Caller owns the lease until lookup completes/cancels or its thread hides.
+     * At most 32 distinct targets receive priority; kind caps are unchanged. */
+    fun retainRequestedEvent(eventId: String?): AutoCloseable {
+        val lease = requestedEvents.acquire(eventId)
+        if (eventId == null) return lease
+        reclassifyRequestedEvent(eventId)
+        return AutoCloseable {
+            lease.close()
+            // Downgrades must be eager: a stale highest-priority queue entry
+            // might otherwise never be examined while lower tiers keep arriving.
+            reclassifyRequestedEvent(eventId)
+        }
+    }
+
+    private fun reclassifyRequestedEvent(id: String) {
+        val kind = eventsById[id]?.kind ?: return
+        val lock = contentMutationLocks[kind] ?: return
+        synchronized(lock) {
+            val event = eventsById[id] ?: return
+            contentAdmissionIndex.track(id, kind, contentAdmissionTier(event))
+        }
+    }
     /**
      * Admission and secondary indexing form one mutation transaction. Hot and
      * cold EventProcessor drainers run concurrently; without a per-kind lock,
@@ -863,6 +893,7 @@ class MemoryEventStore @Inject constructor(
     private val evictionPasses = AtomicLong(0)
     private val evictionEvicted = AtomicLong(0)
     private val evictionTier1 = AtomicLong(0)
+    private val evictionRequested = AtomicLong(0)
     private val evictionTier2 = AtomicLong(0)
     private val evictionTier3 = AtomicLong(0)
     private val evictionAdmissionReplaced = AtomicLong(0)
@@ -1209,6 +1240,7 @@ class MemoryEventStore @Inject constructor(
         if (event.id in profileAnchoredIds) return null
         val followed = owner?.let { followsByPubkey[it] }.orEmpty()
         return when {
+            requestedEvents.contains(event.id) -> ContentEvictionTier.REQUESTED_REFERENCE
             event.pubkey in followed -> ContentEvictionTier.FOLLOWED_AUTHOR
             timelineServiceProvider.get().isLiveReferenced(event.id) ->
                 ContentEvictionTier.TIMELINE_REFERENCED
@@ -3039,6 +3071,7 @@ class MemoryEventStore @Inject constructor(
         val followedPubkeysSnapshot =
             ownPubkeyAnchor?.let { followsByPubkey[it]?.toSet() }.orEmpty()
         val profileAnchoredIdsSnapshot = profileAnchoredIds.toSet()
+        val requestedIds = requestedEvents.snapshot()
         // One immutable union per pass. Never consult TimelineService from a
         // candidate comparator: its refs change as subscriptions deliver.
         val timelineReferencedIds = timelineServiceProvider.get().liveReferencedIds()
@@ -3099,8 +3132,8 @@ class MemoryEventStore @Inject constructor(
         }
 
         // Pass 2: for each kind over its cap, materialize all mutable policy
-        // inputs, then choose ordinary LRU first, timeline refs second, and
-        // followed-author content only when those pools are exhausted.
+        // inputs, then choose ordinary LRU first, timeline refs second,
+        // followed-author content next and active requests last.
         //
         // CRITICAL: snapshot lastTouchedAt values before sorting. The map is
         // concurrently mutated by the hot drainer (insertCore), CardHydrator
@@ -3124,12 +3157,14 @@ class MemoryEventStore @Inject constructor(
                 followedPubkeys = followedPubkeysSnapshot,
                 timelineReferencedIds = timelineReferencedIds,
                 lastTouchedAt = touchSnapshot,
+                requestedIds = requestedIds,
             )
         }
 
         val invalidatedReplyTargets = mutableSetOf<String>()
         val removedIds = HashSet<String>(toEvict.size)
         var evictedTier1 = 0
+        var evictedRequested = 0
         var evictedTier2 = 0
         var evictedTier3 = 0
         val evictedByKind = mutableMapOf<Int, Int>()
@@ -3140,6 +3175,7 @@ class MemoryEventStore @Inject constructor(
             ) ?: continue
             removedIds.add(event.id)
             when (candidate.tier) {
+                ContentEvictionTier.REQUESTED_REFERENCE -> evictedRequested++
                 ContentEvictionTier.FOLLOWED_AUTHOR -> evictedTier1++
                 ContentEvictionTier.TIMELINE_REFERENCED -> evictedTier2++
                 ContentEvictionTier.ORDINARY -> evictedTier3++
@@ -3150,6 +3186,7 @@ class MemoryEventStore @Inject constructor(
         publishEvictionInvalidations(invalidatedReplyTargets, removedIds)
 
         recordEvictionPass(
+            evictedRequested = evictedRequested,
             evictedTier1 = evictedTier1,
             evictedTier2 = evictedTier2,
             evictedTier3 = evictedTier3,
@@ -3163,7 +3200,7 @@ class MemoryEventStore @Inject constructor(
         Log.d(
             "MES",
             "Eviction: ${removedIds.size} removed " +
-                "tier1=$evictedTier1 tier2=$evictedTier2 tier3=$evictedTier3; " +
+                "requested=$evictedRequested tier1=$evictedTier1 tier2=$evictedTier2 tier3=$evictedTier3; " +
                 "byKind=${evictedByKind.toSortedMap()} " +
                 "anchored own=$anchoredOwn mentioned=$anchoredMentioned " +
                 "viewed=$anchoredViewed profileRefs=$anchoredProfileRefs " +
@@ -3279,6 +3316,7 @@ class MemoryEventStore @Inject constructor(
     }
 
     private fun recordEvictionPass(
+        evictedRequested: Int,
         evictedTier1: Int,
         evictedTier2: Int,
         evictedTier3: Int,
@@ -3290,7 +3328,8 @@ class MemoryEventStore @Inject constructor(
         liveTimelineRefs: Int,
     ) {
         evictionPasses.incrementAndGet()
-        evictionEvicted.addAndGet((evictedTier1 + evictedTier2 + evictedTier3).toLong())
+        evictionEvicted.addAndGet((evictedRequested + evictedTier1 + evictedTier2 + evictedTier3).toLong())
+        evictionRequested.addAndGet(evictedRequested.toLong())
         evictionTier1.addAndGet(evictedTier1.toLong())
         evictionTier2.addAndGet(evictedTier2.toLong())
         evictionTier3.addAndGet(evictedTier3.toLong())
@@ -3310,6 +3349,7 @@ class MemoryEventStore @Inject constructor(
         evictionAdmissionReplaced.incrementAndGet()
         evictionEvicted.incrementAndGet()
         when (tier) {
+            ContentEvictionTier.REQUESTED_REFERENCE -> evictionRequested.incrementAndGet()
             ContentEvictionTier.FOLLOWED_AUTHOR -> evictionTier1.incrementAndGet()
             ContentEvictionTier.TIMELINE_REFERENCED -> evictionTier2.incrementAndGet()
             ContentEvictionTier.ORDINARY -> evictionTier3.incrementAndGet()
@@ -3328,6 +3368,7 @@ class MemoryEventStore @Inject constructor(
         evictionPasses.set(0)
         evictionEvicted.set(0)
         evictionTier1.set(0)
+        evictionRequested.set(0)
         evictionTier2.set(0)
         evictionTier3.set(0)
         evictionAdmissionReplaced.set(0)
@@ -5948,6 +5989,7 @@ class MemoryEventStore @Inject constructor(
             passes = evictionPasses.getAndSet(0),
             evicted = evictionEvicted.getAndSet(0),
             tier1 = evictionTier1.getAndSet(0),
+            requested = evictionRequested.getAndSet(0),
             tier2 = evictionTier2.getAndSet(0),
             tier3 = evictionTier3.getAndSet(0),
             admissionReplaced = evictionAdmissionReplaced.getAndSet(0),
@@ -7428,6 +7470,9 @@ class MemoryEventStore @Inject constructor(
      * benefits from already-cached public Nostr data (events, profiles, stats).
      */
     fun clearUserState() {
+        val requestedIds = requestedEvents.snapshot()
+        requestedEvents.clear()
+        requestedIds.forEach(::reclassifyRequestedEvent)
         followsByPubkey.clear()
         followsCreatedAt.clear()
         ownContactListEvent = null
@@ -7472,6 +7517,7 @@ class MemoryEventStore @Inject constructor(
     }
 
     fun clear() {
+        requestedEvents.clear()
         // Metrics are account-scoped evidence. Carrying interval work or the
         // last pass's anchors across logout would corrupt the next session's
         // release probe even though the underlying store has been cleared.

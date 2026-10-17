@@ -7,6 +7,7 @@ import com.unsilence.app.data.memory.MAX_DELETION_TARGETS
 import com.unsilence.app.data.memory.MemoryEventStore
 import com.unsilence.app.data.memory.NostrEvent
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
@@ -15,9 +16,13 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.CyclicBarrier
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 
 /** Runs the production drainers; no synchronous substitute can expose their batch-boundary bugs. */
 @OptIn(ExperimentalCoroutinesApi::class)
@@ -25,6 +30,7 @@ class EventProcessorDrainerTest {
     private lateinit var store: MemoryEventStore
     private lateinit var processor: EventProcessor
     private val verificationCount = AtomicInteger()
+    @Volatile private var verificationBarrier: CyclicBarrier? = null
 
     private suspend fun TestScope.startProcessor() {
         store = MemoryEventStore(object : MuteKeyProvider {}, stubTimelineServiceProvider())
@@ -32,6 +38,7 @@ class EventProcessorDrainerTest {
         processor = EventProcessor(store, object : SignatureVerifier() {
             override fun verify(event: NostrEvent): Boolean {
                 verificationCount.incrementAndGet()
+                verificationBarrier?.await(10, TimeUnit.SECONDS)
                 return true
             }
         })
@@ -114,6 +121,169 @@ class EventProcessorDrainerTest {
         assertNull("Remote deletion payloads must not be retained", store.getNostrEvent(eventId(2)))
         assertNull(store.getNostrEvent(eventId(1)))
         assertTrue(store.feedRowsByIds(setOf(eventId(1))).isEmpty())
+    }
+
+    @Test
+    fun `evicted note refetch restores through the real drainer without another verification`() = runTest {
+        startProcessor()
+        processor.process(rawEvent(1), FIRST_RELAY)
+        runCurrent()
+        assertNotNull(store.getNostrEvent(eventId(1)))
+        store.trimToLast(0)
+        assertNull(store.getNostrEvent(eventId(1)))
+        assertTrue(processor.seenIds.containsKey(eventId(1)))
+        val verified = verificationCount.get()
+
+        repeat(20) { processor.process(rawEvent(1), SECOND_RELAY) }
+        assertEquals("Duplicate arrivals share one pending store delivery", 1, processor.pendingContentCount)
+        runCurrent()
+
+        assertNotNull(store.getNostrEvent(eventId(1)))
+        assertEquals(verified, verificationCount.get())
+        assertEquals(0, processor.pendingContentCount)
+        assertTrue(SECOND_RELAY in store.getNostrEvent(eventId(1))!!.relaysSeen)
+    }
+
+    @Test
+    fun `seen id without a verified cached payload can restore content too`() = runTest {
+        startProcessor()
+        // The verified cache is smaller than seenIds; model an expired object.
+        processor.seenIds[eventId(1)] = Unit
+        processor.process(rawEvent(1), SECOND_RELAY)
+        runCurrent()
+        assertEquals(1, verificationCount.get())
+        assertNotNull(store.getNostrEvent(eventId(1)))
+    }
+
+    @Test
+    fun `retained duplicate only adds relay provenance without enqueue or signal bump`() = runTest {
+        startProcessor()
+        processor.process(rawEvent(1), FIRST_RELAY)
+        runCurrent()
+        val original = store.getNostrEvent(eventId(1))!!
+        val signal = store.feedSignalFlow.value
+        val verified = verificationCount.get()
+
+        repeat(20) { processor.process(rawEvent(1), SECOND_RELAY) }
+
+        assertEquals("No queued copy can reach insertBatch", 0, processor.drainForTest())
+        assertEquals(0, processor.pendingContentCount)
+        assertEquals(verified, verificationCount.get())
+        assertSame(original, store.getNostrEvent(eventId(1)))
+        assertTrue(SECOND_RELAY in original.relaysSeen)
+        runCurrent()
+        assertEquals(signal, store.feedSignalFlow.value)
+    }
+
+    @Test
+    fun `simultaneous verified copies before first insert enqueue exactly once`() = runTest {
+        startProcessor()
+        val workers = 8
+        verificationBarrier = CyclicBarrier(workers)
+        val executor = Executors.newFixedThreadPool(workers)
+        try {
+            // All copies finish verification together on real concurrent threads.
+            // The test dispatcher holds the production drainers until we inspect
+            // the queue, so MES cannot mask a missing pending-content guard.
+            val arrivals = (1..workers).map { index ->
+                executor.submit {
+                    runBlocking { processor.process(rawEvent(1), "wss://relay-$index.example.com") }
+                }
+            }
+            arrivals.forEach { it.get(15, TimeUnit.SECONDS) }
+        } finally {
+            verificationBarrier = null
+            executor.shutdownNow()
+        }
+
+        assertEquals(workers, verificationCount.get())
+        assertNull(store.getNostrEvent(eventId(1)))
+        assertEquals(1, processor.pendingContentCount)
+        assertEquals("Count before flushBatch's own dedup", 1, processor.drainForTest())
+        assertEquals(0, processor.pendingContentCount)
+        assertEquals(workers, store.getNostrEvent(eventId(1))!!.relaysSeen.size)
+    }
+
+    @Test
+    fun `absent profiles reactions and derived monitors keep their original dedup`() = runTest {
+        startProcessor()
+        for (kind in listOf(0, 7, 30166)) {
+            val raw = rawEvent(kind + 1, kind = kind, tags = """[["d","$FIRST_RELAY"]]""")
+            val id = eventId(kind + 1)
+            processor.process(raw, FIRST_RELAY)
+            assertEquals(1, processor.drainForTest())
+            assertTrue(processor.seenIds.containsKey(id))
+            if (kind == 30166) {
+                assertNull("Monitor payloads are derived-only", store.getNostrEvent(id))
+                assertEquals(1, store.relayMonitorCount())
+            }
+            store.clear() // Payload absent, processor dedup intentionally intact.
+            val signals = listOf(store.feedSignalFlow.value, store.profileSignalFlow.value, store.statsSignalFlow.value)
+            val verified = verificationCount.get()
+
+            repeat(20) { processor.process(raw, SECOND_RELAY) }
+
+            assertEquals("Non-recoverable kind $kind must not re-enter ingestion", 0, processor.drainForTest())
+            assertEquals(verified, verificationCount.get())
+            assertEquals(0, processor.pendingContentCount)
+            assertNull(store.getNostrEvent(id))
+            assertEquals(signals, listOf(store.feedSignalFlow.value, store.profileSignalFlow.value, store.statsSignalFlow.value))
+            assertEquals(0, store.relayMonitorCount())
+
+            // Also exercise the later dedup gate after the verified object has
+            // expired but its historical seen-ID reservation remains.
+            val uncachedSeed = 50_000 + kind
+            processor.seenIds[eventId(uncachedSeed)] = Unit
+            processor.process(rawEvent(uncachedSeed, kind = kind), SECOND_RELAY)
+            assertEquals(0, processor.drainForTest())
+            assertEquals(verified + 1, verificationCount.get())
+        }
+    }
+
+    @Test
+    fun `requested reference can retry admission and survives sustained pressure at the same cap`() = runTest {
+        startProcessor()
+        store.ownPubkey = "owner"
+        val followed = "d".repeat(64)
+        store.updateFollows("owner", setOf(followed), createdAt = 1)
+        for (seed in 2..5001) {
+            store.insert(processor.parseAndVerify(rawEvent(seed, pubkey = followed), FIRST_RELAY)!!)
+        }
+        processor.process(rawEvent(1), FIRST_RELAY)
+        runCurrent()
+        assertNull("An ordinary incoming event loses to the full followed tier", store.getNostrEvent(eventId(1)))
+        assertTrue(store.snapshotEvictionMetrics().admissionRejected > 0)
+        assertEquals(0, processor.pendingContentCount)
+
+        store.retainRequestedEvent(eventId(1)).use {
+            processor.process(rawEvent(1), SECOND_RELAY)
+            runCurrent()
+            assertNotNull("An explicitly requested reference must be admitted", store.getNostrEvent(eventId(1)))
+            for (seed in 5002..5101) {
+                store.insert(processor.parseAndVerify(rawEvent(seed, pubkey = followed), FIRST_RELAY)!!)
+            }
+            assertNotNull(store.getNostrEvent(eventId(1)))
+            assertEquals("Requested targets still count against the cap", 5000, store.snapshotSize().eventsByKind[1])
+        }
+        store.insert(processor.parseAndVerify(rawEvent(5102, pubkey = followed), FIRST_RELAY)!!)
+        assertNull("Released target regains ordinary priority immediately", store.getNostrEvent(eventId(1)))
+    }
+
+    @Test
+    fun `requested deleted reference stays deleted on repeated delivery`() = runTest {
+        startProcessor()
+        processor.process(rawEvent(1), FIRST_RELAY)
+        runCurrent()
+        processor.process(deletion(2, targetSeed = 1), SECOND_RELAY)
+        runCurrent()
+        store.retainRequestedEvent(eventId(1)).use {
+            repeat(2) {
+                processor.process(rawEvent(1), FIRST_RELAY)
+                runCurrent()
+                assertNull(store.getNostrEvent(eventId(1)))
+                assertEquals(0, processor.pendingContentCount)
+            }
+        }
     }
 
     @Test

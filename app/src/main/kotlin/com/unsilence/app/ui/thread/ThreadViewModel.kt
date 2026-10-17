@@ -180,7 +180,24 @@ class ThreadViewModel @Inject constructor(
 
     fun setScreenActive(active: Boolean) {
         screenActive.value = active
+        retainRoot(eventIdFlow.value.takeIf { active })
         if (active) wotHydrationCoalescer.requestHydration(_wotSubjects.value)
+    }
+
+    private var retainedRootId: String? = null
+    private var rootRetention: AutoCloseable? = null
+
+    private fun retainRoot(id: String?) {
+        if (retainedRootId == id) return
+        val next = id?.let(memoryEventStore::retainRequestedEvent)
+        rootRetention?.close()
+        rootRetention = next
+        retainedRootId = id
+    }
+
+    override fun onCleared() {
+        retainRoot(null)
+        super.onCleared()
     }
 
     /** Include authors of visible quotes/parents that resolved after the row batch. */
@@ -355,6 +372,7 @@ class ThreadViewModel @Inject constructor(
     /** Wipe stale state so next open doesn't flash old content. */
     fun clearThread() {
         screenActive.value = false
+        retainRoot(null)
         loadJob?.cancel()
         loadJob = null
         eventIdFlow.value = null
@@ -373,6 +391,7 @@ class ThreadViewModel @Inject constructor(
      * coordinate-aware comments; anything else uses the standard #e thread fetch.
      */
     private suspend fun applyRoot(rootId: String, urls: List<String>) {
+        retainRoot(rootId.takeIf { screenActive.value })
         if (eventIdFlow.value != rootId) {
             fetchedArticleCoords.clear()
             fetchedReplyDescendants.clear()
@@ -396,12 +415,15 @@ class ThreadViewModel @Inject constructor(
     }
 
     fun loadThread(eventId: String, relayHints: List<String> = emptyList()) {
-        screenActive.value = true
+        setScreenActive(true)
         // A saved navigation entry is resumed, not loaded as a new visit. Preserve
         // its refined root and reply focus, and avoid another ancestor walk.
         if (tappedId == eventId && (eventIdFlow.value != null || loadJob?.isActive == true)) return
         loadJob?.cancel()
         tappedId = eventId
+        // Protect the cold entry before its first hinted lookup, not only after
+        // applyRoot. It will be replaced by the resolved conversation root.
+        retainRoot(eventId)
         loadJob = viewModelScope.launch {
             val ownPubkey = pubkeyHex ?: ""
             val ownReadRelays = memoryEventStore.readRelaysFor(ownPubkey)
@@ -446,7 +468,10 @@ class ThreadViewModel @Inject constructor(
             }
             val urls = (effectiveHints + resolvedUrls).distinct()
 
-            if (eventIdFlow.value == bestGuessRoot) return@launch
+            if (eventIdFlow.value == bestGuessRoot) {
+                retainRoot(bestGuessRoot.takeIf { screenActive.value })
+                return@launch
+            }
 
             // Clear stale state only after confirming this is a different thread.
             // Clearing before the same-root early return strands the drawer in Loading.
@@ -520,7 +545,7 @@ class ThreadViewModel @Inject constructor(
         id: String,
         hints: List<String>,
         fallbackRelays: List<String>,
-    ): EventEntity? {
+    ): EventEntity? = memoryEventStore.retainRequestedEvent(id).use {
         val targets = relayResolutionTargets(
             seenRelays = hints,
             browseRelays = relayPool.activeFeedRelayHints(),
@@ -550,7 +575,7 @@ class ThreadViewModel @Inject constructor(
                 }
             }
         }
-        return withTimeoutOrNull(3_000) {
+        withTimeoutOrNull(3_000) {
             memoryEventStore.eventEntityFlow(id).filterNotNull().first()
         }
     }

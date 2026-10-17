@@ -46,6 +46,46 @@ class ContentEvictionPolicyTest {
     )
 
     @Test
+    fun `active requested references outrank followed content during sweep but obey the cap`() {
+        val store = MemoryEventStore(object : MuteKeyProvider {}, stubTimelineServiceProvider())
+        store.ownPubkey = "owner"
+        store.updateFollows("owner", setOf("followed"), createdAt = 1L)
+        val leases = (1..3).map { index ->
+            store.retainRequestedEvent("requested-$index").also {
+                store.insert(event("requested-$index", "ordinary", index.toLong()))
+            }
+        }
+        try {
+            store.insert(event("followed", "followed", 4L))
+            store.evictOldContentEventsForTest(mapOf(1 to 3))
+            assertNull(store.getNostrEvent("followed"))
+            assertTrue((1..3).all { store.getNostrEvent("requested-$it") != null })
+
+            store.evictOldContentEventsForTest(mapOf(1 to 2))
+            assertEquals(2, store.snapshotSize().eventsByKind[1])
+            assertEquals(1L, store.snapshotEvictionMetrics().requested)
+        } finally {
+            leases.forEach { it.close() }
+        }
+    }
+
+    @Test
+    fun `clearing user state removes requested priority even with an outstanding caller`() {
+        val store = MemoryEventStore(object : MuteKeyProvider {}, stubTimelineServiceProvider())
+        // IDs also order the victim deterministically if both inserts share
+        // the same millisecond touch timestamp.
+        store.insert(event("a-old", "author", 1L))
+        store.insert(event("z-new", "author", 2L))
+        store.retainRequestedEvent("a-old").use {
+            store.clearUserState()
+            store.evictOldContentEventsForTest(mapOf(1 to 1))
+            assertNull(store.getNostrEvent("a-old"))
+            assertNotNull(store.getNostrEvent("z-new"))
+            assertEquals(0L, store.snapshotEvictionMetrics().requested)
+        }
+    }
+
+    @Test
     fun `followed author survives ordinary candidates past cap`() {
         val provider = stubTimelineServiceProvider()
         val store = MemoryEventStore(object : MuteKeyProvider {}, provider)

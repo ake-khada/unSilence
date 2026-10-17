@@ -130,6 +130,7 @@ class MesMetricsLogger @Inject constructor(
             TAG,
             "eviction: passes=${eviction.passes} evicted=${eviction.evicted} " +
                 "tier1=${eviction.tier1} tier2=${eviction.tier2} tier3=${eviction.tier3} " +
+                "requested=${eviction.requested} " +
                 "admitReplaced=${eviction.admissionReplaced} " +
                 "admitRejected=${eviction.admissionRejected} " +
                 "sweepEvicted=${eviction.evicted - eviction.admissionReplaced} " +
