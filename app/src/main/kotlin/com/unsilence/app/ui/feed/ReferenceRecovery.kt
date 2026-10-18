@@ -169,10 +169,10 @@ internal class ReferenceRecovery<K : Any, T : Any>(
         null
     }
 
-    fun observe(target: K): Flow<ReferenceState<T>> = channelFlow {
+    fun observe(target: K, displayValues: Flow<T?> = watch(target)): Flow<ReferenceState<T>> = channelFlow {
         val loading = MutableStateFlow(true)
         val observer = launch(start = CoroutineStart.UNDISPATCHED) {
-            combine(watch(target), loading) { event, pending ->
+            combine(displayValues, loading) { event, pending ->
                 ReferenceState(event, loading = event == null && pending)
             }.distinctUntilChanged().collect { send(it) }
         }

@@ -136,30 +136,103 @@ class FeedModerationCacheTest {
     }
 
     @Test
-    fun `reference reposts track target arrival replacement removal and nested resolution`() {
+    fun `reference repost exclusion survives target eviction until policy changes`() {
         for (kind in listOf(6, 16)) {
             val targets = mutableMapOf<String, NostrEvent>()
             val wrapper = repost(kind, "target").copy(content = "untrusted SPAM #one #two")
-            val policy = FeedModerationCache().forPolicy(emptyMutes.copy(words = setOf("spam")), 1)
+            val cache = FeedModerationCache()
+            val policy = cache.forPolicy(emptyMutes.copy(words = setOf("spam")), 1)
             val resolver: (String) -> NostrEvent? = targets::get
             assertFalse(policy.excludes(wrapper, resolver))
             targets["target"] = event("target", "SPAM")
             assertTrue(policy.excludes(wrapper, resolver))
-            targets["target"] = event("target", "#one #two")
+            targets.clear()
             assertTrue(policy.excludes(wrapper, resolver))
+            assertTrue(policy.excludes(wrapper.copy(), resolver))
+            assertTrue(policy.excludes(wrapper, resolver, cacheResult = false))
             targets["target"] = event("target", "clean")
+            assertTrue("Exclusion is one-way within this policy", policy.excludes(wrapper, resolver))
+            assertFalse(cache.forPolicy(emptyMutes, 1).excludes(wrapper, resolver))
+            targets["target"] = event("target", "#one #two")
+            assertTrue(cache.forPolicy(emptyMutes, 1).excludes(wrapper, resolver))
+            targets.clear()
+            assertTrue(cache.forPolicy(emptyMutes, 1).excludes(wrapper, resolver))
+            assertFalse("A new cap resets the exclusion", cache.forPolicy(emptyMutes, 2).excludes(wrapper, resolver))
+            targets["target"] = event("target", "#one #two")
+            assertFalse(cache.forPolicy(emptyMutes, 2).excludes(wrapper, resolver))
+        }
+    }
+
+    @Test
+    fun `nested and legacy reference exclusions remain sticky without trusting wrapper content`() {
+        for (kind in listOf(6, 16)) {
+            val targets = mutableMapOf<String, NostrEvent>()
+            val wrapper = repost(kind, "target").copy(content = "untrusted SPAM")
+            val policy = FeedModerationCache().forPolicy(emptyMutes.copy(words = setOf("spam")), null)
+            val resolver: (String) -> NostrEvent? = targets::get
             assertFalse(policy.excludes(wrapper, resolver))
             targets["target"] = repost(kind, "nested").copy(id = "target")
+            assertFalse(policy.excludes(wrapper, resolver))
             targets["nested"] = event("nested", "SPAM")
             assertTrue(policy.excludes(wrapper, resolver))
-            targets["nested"] = wrapper // cycle stays bounded, with existing policy
-            assertFalse(policy.excludes(wrapper, resolver))
             targets.clear()
-            assertFalse(policy.excludes(wrapper, resolver))
-            val legacyWrapper = wrapper.copy(repostInfo = null, rootId = "target")
+            assertTrue(policy.excludes(wrapper, resolver))
+            val legacyWrapper = wrapper.copy(id = "legacy", repostInfo = null, rootId = "target")
             assertFalse(policy.excludes(legacyWrapper, resolver))
             targets["target"] = event("target", "SPAM")
             assertTrue(policy.excludes(legacyWrapper, resolver))
+            targets.clear()
+            assertTrue(policy.excludes(legacyWrapper, resolver))
+            val cycleWrapper = wrapper.copy(id = "cycle")
+            targets["target"] = cycleWrapper
+            assertFalse("An unresolved cycle stays bounded", policy.excludes(cycleWrapper, resolver))
+        }
+    }
+
+    @Test
+    fun `reference exclusion memory is bounded and ordinary scans cannot flush it`() {
+        val cache = FeedModerationCache(2)
+        val policy = cache.forPolicy(emptyMutes.copy(words = setOf("spam")), null)
+        val wrappers = List(3) { repost(6, "target-$it").copy(id = "wrapper-$it") }
+        val muted: (String) -> NostrEvent? = { event(it, "spam") }
+        assertTrue(policy.excludes(wrappers[0], muted))
+        assertTrue(policy.excludes(wrappers[1], muted))
+        repeat(20) { assertFalse(policy.excludes(event("ordinary-$it"), noTarget)) }
+        assertTrue(policy.excludes(wrappers[0], noTarget))
+        assertTrue(policy.excludes(wrappers[2], muted))
+        assertFalse("The least-recent reference fact was evicted", policy.excludes(wrappers[1], noTarget))
+        assertTrue(policy.excludes(wrappers[0], noTarget))
+        assertTrue(policy.excludes(wrappers[2], noTarget))
+        repeat(20) {
+            assertTrue(policy.excludes(repost(16, "tail-$it").copy(id = "tail-wrapper-$it"), muted, cacheResult = false))
+        }
+        assertTrue("Uncached pagination does not flush hot facts", policy.excludes(wrappers[0], noTarget))
+        cache.clear()
+        assertFalse(cache.forPolicy(emptyMutes.copy(words = setOf("spam")), null).excludes(wrappers[0], noTarget))
+    }
+
+    @Test
+    fun `concurrent missing-target pass cannot reverse another pass exclusion`() {
+        val policy = FeedModerationCache().forPolicy(emptyMutes.copy(words = setOf("spam")), null)
+        val wrapper = repost(6, "target")
+        val entered = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        val executor = Executors.newSingleThreadExecutor()
+        try {
+            val stale = executor.submit<Boolean> {
+                policy.excludes(wrapper, {
+                    entered.countDown()
+                    check(release.await(5, TimeUnit.SECONDS))
+                    null
+                })
+            }
+            assertTrue(entered.await(5, TimeUnit.SECONDS))
+            assertTrue(policy.excludes(wrapper, { event(it, "spam") }))
+            release.countDown()
+            assertTrue(stale.get(5, TimeUnit.SECONDS))
+        } finally {
+            release.countDown()
+            executor.shutdownNow()
         }
     }
 

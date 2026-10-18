@@ -2,6 +2,8 @@ package com.unsilence.app.ui.feed
 
 import com.unsilence.app.data.memory.EventEntity
 import com.unsilence.app.data.memory.MemoryEventStore
+import com.unsilence.app.data.memory.NostrEvent
+import com.unsilence.app.data.memory.toEventEntity
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
@@ -49,7 +51,8 @@ internal class ReferenceResolution(
             return@flow
         }
         val request = Request(currentOwner(), target, emptyList())
-        emitAll(recovery.observe(request))
+        emitAll(recovery.observe(request, watchDisplay(request)))
+        checkOwner(request)
     }.flowOn(dispatcher)
 
     private fun checkOwner(request: Request) {
@@ -69,15 +72,33 @@ internal class ReferenceResolution(
     fun watch(request: Request): Flow<EventEntity?> =
         memoryEventStore.feedSignalFlow.map {
             checkOwner(request)
-            val target = request.target
-            target.eventId?.let(memoryEventStore::getNostrEvent)
-                ?: target.address?.let { address ->
-                    memoryEventStore.eventIdForAddress(address.kind, address.authorPubkey, address.dTag)
-                        ?.let(memoryEventStore::getNostrEvent)
-                }
+            storedEvent(request.target)
         // Do not serialize EventEntity tags or parse models on unrelated feed signals.
         }.distinctUntilChanged().map { event ->
-            event?.id?.let(memoryEventStore::getEventEntity)
+            event?.toEventEntity()
         }.flowOn(dispatcher)
+
+    private fun storedEvent(target: EventReferenceTarget): NostrEvent? =
+        target.eventId?.let(memoryEventStore::getNostrEvent)
+            ?: target.address?.let { address ->
+                memoryEventStore.eventIdForAddress(address.kind, address.authorPubkey, address.dTag)
+                    ?.let(memoryEventStore::getNostrEvent)
+            }
+
+    /**
+     * One payload per composed observer, never a global cache or retention lease.
+     * Cache pressure is not content revocation. Tombstones still revoke the
+     * retained payload, including deletions received after it left the store.
+     * Lookup/arrival races continue to use [watch], not this display snapshot.
+     */
+    private fun watchDisplay(request: Request): Flow<EventEntity?> = flow {
+        var retained: NostrEvent? = null
+        emitAll(memoryEventStore.feedSignalFlow.map {
+            checkOwner(request)
+            storedEvent(request.target)?.let { retained = it }
+            if (retained?.let(memoryEventStore::isDeleted) == true) retained = null
+            retained
+        }.distinctUntilChanged().map { it?.toEventEntity() })
+    }.flowOn(dispatcher)
 
 }

@@ -912,6 +912,39 @@ class MemoryEventStoreInvariantsTest {
     // ── NIP-09 deletion requests ───────────────────────────────────────────
 
     @Test
+    fun `new absent-id tombstone signals once but duplicate deletion does not`() {
+        val initial = store.feedSignalFlow.value
+        val deletion = event(id = "deletion", pubkey = "alice", kind = 5, createdAt = 100,
+            tags = listOf(listOf("e", "absent-target")))
+        store.insert(deletion)
+        val signalled = store.feedSignalFlow.value
+        assertNotEquals(initial, signalled)
+        store.insert(deletion.copy(id = "same-deletion-again"))
+        assertEquals(signalled, store.feedSignalFlow.value)
+        store.insert(deletion.copy(id = "older-deletion", createdAt = 99))
+        assertEquals(signalled, store.feedSignalFlow.value)
+        assertTrue(store.isDeleted(event(id = "absent-target", pubkey = "alice")))
+    }
+
+    @Test
+    fun `absent-coordinate deletion signals only valid new cutoff`() {
+        val initial = store.feedSignalFlow.value
+        val deletion = event(id = "deletion", pubkey = "alice", kind = 5, createdAt = 100,
+            tags = listOf(listOf("a", "30023:alice:slug")))
+        store.insert(deletion.copy(id = "foreign", pubkey = "bob"))
+        assertEquals(initial, store.feedSignalFlow.value)
+        store.insert(deletion)
+        val signalled = store.feedSignalFlow.value
+        assertNotEquals(initial, signalled)
+        store.insert(deletion.copy(id = "duplicate"))
+        assertEquals(signalled, store.feedSignalFlow.value)
+        store.insert(deletion.copy(id = "older", createdAt = 99))
+        assertEquals(signalled, store.feedSignalFlow.value)
+        store.insert(deletion.copy(id = "newer", createdAt = 101))
+        assertNotEquals(signalled, store.feedSignalFlow.value)
+    }
+
+    @Test
     fun `empty deletion indexes become live for ids and retain author isolation`() {
         val note = event(id = "late-note", pubkey = "alice")
         assertFalse(store.isDeleted(note))

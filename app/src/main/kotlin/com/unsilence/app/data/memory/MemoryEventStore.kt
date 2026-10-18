@@ -1935,11 +1935,13 @@ class MemoryEventStore @Inject constructor(
         createdAt: Long,
     ) = synchronized(tombstones) {
         val existing = tombstones[key]
+        val changed = existing == null || existing.createdAt < createdAt
         // Replaying an older deletion must not weaken a newer address cutoff.
-        if (existing == null || existing.createdAt < createdAt) {
+        if (changed) {
             tombstones[key] = DeletionTombstone(pubkey, createdAt)
         }
         trimDeletionTombstonesIfNeeded(tombstones)
+        changed
     }
 
     private fun <K : Any> trimDeletionTombstonesIfNeeded(tombstones: ConcurrentHashMap<K, DeletionTombstone>) {
@@ -1957,7 +1959,10 @@ class MemoryEventStore @Inject constructor(
         if (coordinate.length > MAX_DELETION_COORDINATE_CHARS) return
         val parts = coordinate.split(":", limit = 3)
         if (parts.size < 3 || parts[1] != deletionPubkey) return
-        recordDeletionTombstone(deletedAddressableTombstones, coordinate, deletionPubkey, deletionCreatedAt)
+        if (recordDeletionTombstone(deletedAddressableTombstones, coordinate, deletionPubkey, deletionCreatedAt)) {
+            // A visible reference can outlive its cached store payload.
+            dirty.feed = true
+        }
 
         val storedKey = "${parts[1]}:${parts[0]}:${parts[2]}"
         val storedId = replaceableByCoordinate[storedKey] ?: articleIdByCoord[coordinate] ?: return
@@ -1976,7 +1981,9 @@ class MemoryEventStore @Inject constructor(
         if (eventId.length > 64 || eventId.isBlank()) return
         val existing = eventsById[eventId]
         if (existing == null) {
-            recordDeletionTombstone(deletedEventTombstones, EventTombstoneKey(eventId, deletionPubkey), deletionPubkey, deletionCreatedAt)
+            if (recordDeletionTombstone(deletedEventTombstones, EventTombstoneKey(eventId, deletionPubkey), deletionPubkey, deletionCreatedAt)) {
+                dirty.feed = true
+            }
             return
         }
         if (existing.kind == 5 || existing.pubkey != deletionPubkey) return

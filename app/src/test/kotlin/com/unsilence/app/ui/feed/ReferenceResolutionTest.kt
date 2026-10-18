@@ -108,6 +108,103 @@ class ReferenceResolutionTest {
         job.cancelAndJoin()
     }
 
+    @Test fun `resolved display survives real admission pressure without refetching or reemitting`() = runTest {
+        val store = store()
+        var requests = 0
+        val resolver = ReferenceResolution(store, { "owner" }, { _, _ ->
+            requests++
+            store.insert(event("target"))
+            store.getEventEntity("target")
+        }, StandardTestDispatcher(testScheduler))
+        val states = mutableListOf<ReferenceState<com.unsilence.app.data.memory.EventEntity>>()
+        val job = backgroundScope.launch { resolver.observe(target("target")).collect { states += it } }
+        runCurrent()
+        val displayed = states.last().event!!
+        val count = states.size
+        store.insertBatch(List(com.unsilence.app.data.memory.CONTENT_EVENT_KIND_CAPS.getValue(1)) {
+            event("pressure-$it")
+        })
+        runCurrent()
+        assertNull("The lookup lease must not pin a loaded target", store.getNostrEvent("target"))
+        assertSame(displayed, states.last().event)
+        assertEquals(count, states.size)
+        assertEquals(1, requests)
+        store.insert(event("target"))
+        runCurrent()
+        assertEquals("Restoring the same target does not expand the card again", count, states.size)
+        assertEquals(1, requests)
+        job.cancelAndJoin()
+    }
+
+    @Test fun `deletion after eviction promptly revokes retained display but foreign deletion does not`() = runTest {
+        val store = store()
+        store.insert(event("target"))
+        val resolver = ReferenceResolution(store, { "owner" }, { _, _ -> error("No fetch expected") },
+            StandardTestDispatcher(testScheduler))
+        val states = mutableListOf<ReferenceState<com.unsilence.app.data.memory.EventEntity>>()
+        backgroundScope.launch { resolver.observe(target("target")).collect { states += it } }
+        runCurrent()
+        store.trimToLast(0)
+        assertNull(store.getNostrEvent("target"))
+        store.insert(event("foreign-delete", 5, listOf(listOf("e", "target"))).copy(pubkey = "other"))
+        runCurrent()
+        assertEquals("target", states.last().event?.id)
+        store.insert(event("delete", 5, listOf(listOf("e", "target"))))
+        runCurrent()
+        assertNull("No unrelated event is needed to publish the deletion", states.last().event)
+        assertFalse(states.last().loading)
+        store.insert(event("target"))
+        runCurrent()
+        assertNull(states.last().event)
+    }
+
+    @Test fun `retained address respects deletion cutoff and accepts newer revision`() = runTest {
+        val store = store()
+        val original = event("original", 30023, listOf(listOf("d", "article")))
+        store.insert(original)
+        val reference = EventReferenceTarget(null, EventAddressReference(30023, "author", "article"),
+            null, emptyList())
+        val resolver = ReferenceResolution(store, { "owner" }, { _, _ -> null },
+            StandardTestDispatcher(testScheduler))
+        val states = mutableListOf<ReferenceState<com.unsilence.app.data.memory.EventEntity>>()
+        backgroundScope.launch { resolver.observe(reference).collect { states += it } }
+        runCurrent()
+        assertEquals("original", states.last().event?.id)
+        store.evictOldContentEventsForTest(mapOf(30023 to 0))
+        assertNull(store.getNostrEvent("original"))
+        store.insert(event("old-delete", 5, listOf(listOf("a", "30023:author:article"))).copy(createdAt = 99))
+        runCurrent()
+        assertEquals("original", states.last().event?.id)
+        store.insert(event("delete", 5, listOf(listOf("a", "30023:author:article"))))
+        runCurrent()
+        assertNull(states.last().event)
+        store.insert(original.copy(id = "newer", createdAt = 101))
+        runCurrent()
+        assertEquals("newer", states.last().event?.id)
+    }
+
+    @Test fun `retained display is local to observer and fenced on account switch`() = runTest {
+        val store = store()
+        var owner = "old"
+        store.insert(event("target"))
+        val resolver = ReferenceResolution(store, { owner }, { _, _ -> null },
+            StandardTestDispatcher(testScheduler))
+        val oldStates = mutableListOf<ReferenceState<com.unsilence.app.data.memory.EventEntity>>()
+        val old = backgroundScope.launch { resolver.observe(target("target")).collect { oldStates += it } }
+        runCurrent()
+        store.trimToLast(0)
+        owner = "new"
+        store.insert(event("unrelated"))
+        runCurrent()
+        assertTrue(old.isCancelled)
+        val newStates = mutableListOf<ReferenceState<com.unsilence.app.data.memory.EventEntity>>()
+        backgroundScope.launch { resolver.observe(target("target")).collect { newStates += it } }
+        runCurrent()
+        advanceTimeBy(2_001); runCurrent()
+        assertTrue(newStates.isNotEmpty())
+        assertTrue("A new account cannot inherit an old display snapshot", newStates.all { it.event == null })
+    }
+
     @Test fun `slow optional discovery cannot delay a successful lookup`() = runTest {
         var cancelled = false
         val result = withReferenceDiscovery(

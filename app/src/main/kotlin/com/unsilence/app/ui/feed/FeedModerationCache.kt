@@ -49,16 +49,26 @@ internal class FeedModerationCache(private val maxEntries: Int = 1000) {
         }
 
         private val entries = LinkedHashMap<String, Entry>(16, 0.75f, true)
+        // IDs only: a verified target's eviction must not undo its exclusion.
+        // Bounded independently so ordinary-note scans cannot flush these facts.
+        private val excludedReferences = LinkedHashMap<String, Unit>(16, 0.75f, true)
 
         fun excludes(
             event: NostrEvent,
             targetResolver: (String) -> NostrEvent?,
             cacheResult: Boolean = true,
         ): Boolean {
-            // A fetched target may arrive, change or leave MES without replacing
-            // its wrapper. Keep both kinds of reference repost live on every pass.
-            val cacheable = cacheResult && ((event.kind != 6 && event.kind != 16) ||
-                event.repostInfo?.payload is RepostPayload.VerifiedEmbedded)
+            val referenceOnly = (event.kind == 6 || event.kind == 16) &&
+                event.repostInfo?.payload !is RepostPayload.VerifiedEmbedded
+            if (referenceOnly) {
+                synchronized(excludedReferences) {
+                    if (excludedReferences[event.id] != null) return true
+                }
+            }
+            // Unresolved/allowed references stay live so late verified targets
+            // can exclude them. Only a new policy (or bounded-cache eviction)
+            // can forget an exclusion; never cache an allowed missing target.
+            val cacheable = cacheResult && !referenceOnly
             if (cacheable) {
                 synchronized(entries) {
                     entries[event.id]?.let { if (it.event.get() === event) return it.excluded }
@@ -70,6 +80,21 @@ internal class FeedModerationCache(private val maxEntries: Int = 1000) {
             // one calculation, but never block each other's entire projection.
             val excluded = isMuted(event, muteList, targetResolver) ||
                 exceedsHashtagCap(event, hashtagCap, targetResolver)
+            if (referenceOnly) {
+                synchronized(excludedReferences) {
+                    if (excluded && cacheResult) {
+                        excludedReferences[event.id] = Unit
+                        if (excludedReferences.size > maxEntries) {
+                            val oldest = excludedReferences.entries.iterator()
+                            oldest.next()
+                            oldest.remove()
+                        }
+                    }
+                    // A concurrent pass may have resolved and excluded this
+                    // target while this pass saw a cache miss. Exclusion wins.
+                    return excluded || excludedReferences[event.id] != null
+                }
+            }
             if (cacheable) {
                 synchronized(entries) {
                     entries[event.id] = Entry(event, excluded)
