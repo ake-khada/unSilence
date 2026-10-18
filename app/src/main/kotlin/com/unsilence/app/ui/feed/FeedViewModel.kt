@@ -813,7 +813,8 @@ class FeedViewModel @Inject constructor(
         // resetView=true (user-initiated switch): null → TimelineMerge.merge handles
         //   dedup; no since filter rejects events the cache may have missed.
         // resetView=false (metaVer resub): head-since from current _events — relay
-        //   data newer than this merges on top, older is skipped (already displayed).
+        //   newer data follows the live-arrival path; recovered history still
+        //   merges in place without reseeding MES or moving the reading position.
         // Clamped to now — defense against poisoned future-dated events in snapshot.
         val since: Long? = if (resetView) null else _timeline.value.events.firstOrNull()?.createdAt
             ?.coerceAtMost(System.currentTimeMillis() / 1000L)
@@ -828,6 +829,10 @@ class FeedViewModel @Inject constructor(
                 handleBatch(batch, eosed, since)
             },
             onNew    = { event -> handleNew(event) },
+            seedHead = _timeline.value.events.firstOrNull()?.createdAt,
+            onHistory = { history ->
+                _timeline.update { it.copy(events = TimelineMerge.merge(it.events, history)) }
+            },
         )
         feedTrace { "setupSubscription: started subs=${subRequests.size} since=$since cached=${cachedEvents.size} events=${_timeline.value.events.size}" }
 
@@ -853,6 +858,10 @@ class FeedViewModel @Inject constructor(
             if (since == null) {
                 _timeline.update { it.copy(events = TimelineMerge.merge(it.events, batch)) }
             } else {
+                val history = batch.filter { it.createdAt < since }
+                if (history.isNotEmpty()) {
+                    _timeline.update { it.copy(events = TimelineMerge.merge(it.events, history)) }
+                }
                 val newer = batch.filter { it.createdAt >= since }
                 if (newer.isNotEmpty()) {
                     handleNewBatch(newer)
@@ -932,7 +941,7 @@ class FeedViewModel @Inject constructor(
             _isLoadingMore.value = true
             try {
                 val older = timelineService.fetchOlderTimeline(handle.timelineKey, until, 100)
-                if (older.isNotEmpty()) {
+                if (currentHandle === handle && older.isNotEmpty()) {
                     _timeline.update { it.copy(events = TimelineMerge.merge(it.events, older, capTail = false)) }
                 }
             } finally {

@@ -59,6 +59,17 @@ interface ReconnectSource {
     val onRelayReconnected: SharedFlow<String>
 }
 
+enum class RelayCompletionReason { Genuine, Closed, Watchdog, Skipped }
+
+/** Wire-page statistics, before cross-relay/lifetime deduplication. */
+data class RelayCompletion(
+    val url: String,
+    val reason: RelayCompletionReason,
+    val count: Int,
+    val oldest: Long?,
+    val newest: Long?,
+)
+
 @Singleton
 class Subscription @Inject constructor(
     private val transport: RelayTransport,
@@ -66,6 +77,16 @@ class Subscription @Inject constructor(
     private val reconnectSource: ReconnectSource,
     private val relayCapabilitiesStore: RelaySkipCheck,
 ) : ActiveSubsSource {
+    internal var elapsedRealtime: () -> Long = { android.os.SystemClock.elapsedRealtime() }
+    internal var watchdogDispatcher: kotlinx.coroutines.CoroutineDispatcher = Dispatchers.Default
+
+    private class RelayPage {
+        var count = 0
+        var oldest: Long? = null
+        var newest: Long? = null
+        @Volatile var reason: RelayCompletionReason? = null
+    }
+
     /** Active subscription state, keyed by subId. */
     private data class SubState(
         val urls: Set<String>,
@@ -73,8 +94,11 @@ class Subscription @Inject constructor(
         val requestClass: RelayRequestClass,
         val onevent: (NostrEvent) -> Unit,
         val oneose: (allEosed: Boolean) -> Unit,
-        val onReplayCycleStarted: () -> Unit,
+        val onReplayCycleStarted: (Set<String>) -> Unit,
         val onclose: (url: String, reason: String) -> Unit,
+        val onRelayCompletion: (RelayCompletion) -> Unit,
+        val replayable: Boolean,
+        val pages: ConcurrentHashMap<String, RelayPage> = ConcurrentHashMap(),
         val knownIds: MutableSet<String> = ConcurrentHashMap.newKeySet(),
         val eosedRelays: MutableSet<String> = ConcurrentHashMap.newKeySet(),
         val closedRelays: MutableSet<String> = ConcurrentHashMap.newKeySet(),
@@ -106,6 +130,21 @@ class Subscription @Inject constructor(
     private val reconnectScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private val lastReplayAt = ConcurrentHashMap<String, Long>()
     private val rateLimitSkipLogged: MutableSet<String> = ConcurrentHashMap.newKeySet()
+    private val replayEpochs = ConcurrentHashMap<String, AtomicLong>()
+    private val catchUpRequestCount = AtomicLong()
+
+    /** Accepted catch-up REQs per metrics interval, not event deliveries. */
+    internal fun snapshotCatchUpRequestCount(): Long = catchUpRequestCount.getAndSet(0)
+
+    internal fun replayEpoch(url: String): Long = replayEpochs[url]?.get() ?: 0L
+
+    internal fun canCatchUp(url: String): Boolean =
+        subs.values.any { it.replayable && !it.isPaused && url in it.urls } &&
+            canRequestHistory(url)
+
+    internal fun canRequestHistory(url: String): Boolean =
+        !transport.isRateLimited(url) && !transport.isAuthUnavailable(url) &&
+            !relayCapabilitiesStore.shouldSkipRequest(url, RelayRequestClass.GENERAL)
 
     init {
         // Replay persistent subs when a relay reconnects.
@@ -135,8 +174,11 @@ class Subscription @Inject constructor(
         filter: NostrFilter,
         onevent: (NostrEvent) -> Unit,
         oneose: (allEosed: Boolean) -> Unit = {},
-        onReplayCycleStarted: () -> Unit = {},
+        onReplayCycleStarted: (Set<String>) -> Unit = {},
         onclose: (url: String, reason: String) -> Unit = { _, _ -> },
+        onRelayCompletion: (RelayCompletion) -> Unit = {},
+        replayable: Boolean = true,
+        retryFailedSends: Boolean = true,
     ): Handle {
         ensureTapRegistered()
 
@@ -156,6 +198,8 @@ class Subscription @Inject constructor(
             oneose = oneose,
             onReplayCycleStarted = onReplayCycleStarted,
             onclose = onclose,
+            onRelayCompletion = onRelayCompletion,
+            replayable = replayable,
         )
         subs[subId] = state
         Log.d(TAG, "SUB-OPEN: $subId to ${urls.size} relays, filter=${filter.toJsonObject()}")
@@ -181,17 +225,19 @@ class Subscription @Inject constructor(
                 if (relayCapabilitiesStore.shouldSkipRequest(url, requestClass)) {
                     skippedCount++
                     Log.w(TAG, "SUB-SKIP: $subId skipping $url (cap store)")
-                    handleRelayEose(subId, url) // count as done so EOSE threshold isn't blocked
+                    handleRelayEose(subId, url, RelayCompletionReason.Skipped)
                     continue
                 }
                 if (transport.isAuthUnavailable(url)) {
                     skippedCount++
                     Log.w(TAG, "SUB-SKIP: $subId skipping $url (auth unavailable)")
-                    handleRelayEose(subId, url)
+                    handleRelayEose(subId, url, RelayCompletionReason.Skipped)
                     continue
                 }
                 if (!transport.sendToRelay(url, req)) {
                     failedUrls.add(url)
+                } else if (!replayable) {
+                    catchUpRequestCount.incrementAndGet()
                 }
             }
             if (skippedCount > 0) {
@@ -201,7 +247,7 @@ class Subscription @Inject constructor(
             // Retry failed sends — connections may still be establishing after
             // connectAndAwait returned (it waits for ANY 1, not all). Poll up
             // to 10s for remaining connections to come up.
-            if (failedUrls.isNotEmpty()) {
+            if (failedUrls.isNotEmpty() && retryFailedSends) {
                 Log.w(TAG, "subscribe $subId: ${failedUrls.size}/${urls.size} sends failed, retrying up to 10s")
                 val retryDeadline = System.currentTimeMillis() + 10_000L
                 val remaining = failedUrls.toMutableList()
@@ -214,7 +260,7 @@ class Subscription @Inject constructor(
                         val url = iter.next()
                         if (relayCapabilitiesStore.shouldSkipRequest(url, requestClass)) {
                             iter.remove()
-                            handleRelayEose(subId, url)
+                            handleRelayEose(subId, url, RelayCompletionReason.Skipped)
                         } else if (transport.sendToRelay(url, req)) {
                             iter.remove()
                         }
@@ -224,11 +270,14 @@ class Subscription @Inject constructor(
                     Log.w(TAG, "subscribe $subId: ${remaining.size} relays unreachable after retry")
                 }
                 for (url in remaining) {
-                    handleRelayEose(subId, url)
+                    handleRelayEose(subId, url, RelayCompletionReason.Skipped)
                 }
+            } else if (!retryFailedSends) {
+                for (url in failedUrls) handleRelayEose(subId, url, RelayCompletionReason.Skipped)
             }
-        } catch (e: kotlinx.coroutines.CancellationException) {
+        } catch (e: Exception) {
             subs.remove(subId)
+            for (url in urlSet) transport.sendToRelay(url, buildCloseJson(subId))
             throw e
         }
 
@@ -259,6 +308,10 @@ class Subscription @Inject constructor(
             for (url in state.urls) {
                 transport.sendToRelay(url, closeMsg)
             }
+            if (!state.replayable) {
+                subs.remove(subId, state)
+                watchdogScopes.remove(subId)?.cancel()
+            }
             count++
         }
         if (count > 0) Log.d(TAG, "pauseAll: paused $count subs")
@@ -272,17 +325,26 @@ class Subscription @Inject constructor(
      */
     fun resumeAll() {
         var count = 0
+        subs.values.filter { it.isPaused }.flatMap { it.urls }.toSet().forEach {
+            replayEpochs.computeIfAbsent(it) { AtomicLong() }.incrementAndGet()
+        }
         for ((subId, state) in subs) {
             if (!state.isPaused) continue
-            state.isPaused = false
+            try {
+                state.onReplayCycleStarted(state.urls)
+            } catch (t: Throwable) {
+                Log.w(TAG, "onReplayCycleStarted threw", t)
+            }
             state.eosedRelays.clear()
             state.closedRelays.clear()
+            state.pages.clear()
             state.lastEventAt = 0L
+            state.isPaused = false
             for (url in state.urls) {
                 if (!relayCapabilitiesStore.shouldSkipRequest(url, state.requestClass)) {
                     transport.sendToRelay(url, state.reqPayload)
                 } else {
-                    handleRelayEose(subId, url)
+                    handleRelayEose(subId, url, RelayCompletionReason.Skipped)
                 }
             }
             startEoseWatchdog(subId, state.urls)
@@ -309,6 +371,7 @@ class Subscription @Inject constructor(
 
         val matching = subs.entries.filter { (_, state) ->
             !state.isPaused &&
+                state.replayable &&
                 normalized in state.urls &&
                 !relayCapabilitiesStore.shouldSkipRequest(normalized, state.requestClass)
         }
@@ -317,6 +380,9 @@ class Subscription @Inject constructor(
             return
         }
         if (!claimReplayWindow(normalized, nowMs)) return
+        if (matching.any { (_, state) -> state.eosedRelays.size >= state.urls.size }) {
+            replayEpochs.computeIfAbsent(normalized) { AtomicLong() }.incrementAndGet()
+        }
 
         var count = 0
         for ((subId, state) in matching) {
@@ -324,20 +390,21 @@ class Subscription @Inject constructor(
             if (startsNewCycle) {
                 state.lastEventAt = 0L
                 try {
-                    state.onReplayCycleStarted()
+                    state.onReplayCycleStarted(setOf(normalized))
                 } catch (t: Throwable) {
                     Log.w(TAG, "onReplayCycleStarted threw for $normalized", t)
                 }
             }
             state.eosedRelays.remove(normalized)
             state.closedRelays.remove(normalized)
+            state.pages.remove(normalized)
             if (transport.sendToRelay(normalized, state.reqPayload)) {
                 startRelayEoseWatchdog(subId, normalized)
                 count++
             } else {
                 // Restore the completed state if the socket disappeared between
                 // the reconnect signal and replay dispatch.
-                handleRelayEose(subId, normalized)
+                handleRelayEose(subId, normalized, RelayCompletionReason.Skipped)
             }
         }
         Log.d(TAG, "resumeRelay $normalized: replayed $count sub(s)")
@@ -384,7 +451,7 @@ class Subscription @Inject constructor(
         when {
             raw.startsWith("[\"EOSE\"") -> {
                 val subId = extractSubId(raw) ?: return
-                if (handleRelayEose(subId, relayUrl)) {
+                if (handleRelayEose(subId, relayUrl, RelayCompletionReason.Genuine)) {
                     relayCapabilitiesStore.recordRequestSuccess(relayUrl)
                 }
             }
@@ -402,13 +469,22 @@ class Subscription @Inject constructor(
         val state = subs[subId] ?: return  // not our sub, or already closed
         if (state.isPaused) return  // drop in-flight events during lifecycle pause
 
-        if (event.id in state.knownIds) return
         // Reject future-dated events — prevents a poisoned since cursor. Signature
         // and id-hash validity are guaranteed by RelayTapMessage.VerifiedEvent.
         val nowSec = System.currentTimeMillis() / 1000L
         if (event.createdAt > nowSec + 60L) return
+        val url = event.relayUrl
+        if (url !in state.urls) return
+        val page = state.pages.computeIfAbsent(url) { RelayPage() }
+        if (page.reason != RelayCompletionReason.Genuine) synchronized(page) {
+            if (page.reason != RelayCompletionReason.Genuine) {
+                if (page.count < Int.MAX_VALUE) page.count++
+                page.oldest = minOf(page.oldest ?: event.createdAt, event.createdAt)
+                page.newest = maxOf(page.newest ?: event.createdAt, event.createdAt)
+            }
+        }
         if (!state.knownIds.add(event.id)) return
-        state.lastEventAt = android.os.SystemClock.elapsedRealtime()
+        state.lastEventAt = elapsedRealtime()
         try {
             state.onevent(event)
         } catch (t: Throwable) {
@@ -416,10 +492,24 @@ class Subscription @Inject constructor(
         }
     }
 
-    private fun handleRelayEose(subId: String, relayUrl: String): Boolean {
+    private fun handleRelayEose(subId: String, relayUrl: String, reason: RelayCompletionReason): Boolean {
         val state = subs[subId] ?: return false
         if (state.isPaused || relayUrl !in state.urls) return false
-        if (!state.eosedRelays.add(relayUrl)) return false  // already EOSE'd this relay
+        val page = state.pages.computeIfAbsent(relayUrl) { RelayPage() }
+        val completion = synchronized(page) {
+            // A late real EOSE may certify a watchdog-ended page, without
+            // firing the display/allEosed callback twice.
+            if (page.reason == RelayCompletionReason.Genuine ||
+                (page.reason != null && reason != RelayCompletionReason.Genuine)) return false
+            page.reason = reason
+            RelayCompletion(relayUrl, reason, page.count, page.oldest, page.newest)
+        }
+        try {
+            state.onRelayCompletion(completion)
+        } catch (t: Throwable) {
+            Log.w(TAG, "onRelayCompletion threw for sub=$subId", t)
+        }
+        if (!state.eosedRelays.add(relayUrl)) return reason == RelayCompletionReason.Genuine
         val allEosed = state.eosedRelays.size >= state.urls.size
         Log.d(TAG, "EOSE: $subId from $relayUrl (${state.eosedRelays.size}/${state.urls.size} allEosed=$allEosed events=${state.knownIds.size})")
         try {
@@ -441,7 +531,7 @@ class Subscription @Inject constructor(
         }
         // Treat as EOSE-equivalent so callers waiting on allEosed don't hang.
         if (!state.eosedRelays.contains(relayUrl)) {
-            handleRelayEose(subId, relayUrl)
+            handleRelayEose(subId, relayUrl, RelayCompletionReason.Closed)
         }
     }
 
@@ -471,7 +561,7 @@ class Subscription @Inject constructor(
      */
     private fun startEoseWatchdog(subId: String, urlSet: Set<String>) {
         watchdogScopes.remove(subId)?.cancel()
-        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        val scope = CoroutineScope(SupervisorJob() + watchdogDispatcher)
         watchdogScopes[subId] = scope
         for (url in urlSet) {
             startRelayEoseWatchdog(subId, url, scope)
@@ -485,12 +575,12 @@ class Subscription @Inject constructor(
     ) {
         val watchdogScope = scope ?: return
         watchdogScope.launch {
-            val deadline = android.os.SystemClock.elapsedRealtime() + EOSE_CEILING_MS
+            val deadline = elapsedRealtime() + EOSE_CEILING_MS
             while (true) {
                 val state = subs[subId] ?: return@launch
                 if (state.isPaused) return@launch
                 if (url in state.eosedRelays || url in state.closedRelays) return@launch
-                val now = android.os.SystemClock.elapsedRealtime()
+                val now = elapsedRealtime()
                 val quiesced = state.lastEventAt > 0L &&
                     now - state.lastEventAt >= EOSE_QUIESCENCE_MS
                 val ceilingHit = now >= deadline
@@ -500,7 +590,7 @@ class Subscription @Inject constructor(
                         "EOSE watchdog: synthesizing sub=$subId relay=$url " +
                             "(${if (quiesced) "quiescent" else "ceiling"})",
                     )
-                    handleRelayEose(subId, url)
+                    handleRelayEose(subId, url, RelayCompletionReason.Watchdog)
                     return@launch
                 }
                 delay(EOSE_POLL_MS)
@@ -536,6 +626,7 @@ class Subscription @Inject constructor(
     /** Test-only: drop all subs and unregister tap. */
     internal fun resetForTest() {
         subs.clear()
+        replayEpochs.clear()
         watchdogScopes.values.forEach { it.cancel() }
         watchdogScopes.clear()
         synchronized(tapLock) {

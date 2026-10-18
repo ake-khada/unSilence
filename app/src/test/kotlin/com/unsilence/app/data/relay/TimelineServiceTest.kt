@@ -195,7 +195,7 @@ class TimelineServiceTest {
             onEvents = { _, _ -> },
         )
         val secondReq = transport.sends.first { it.msg.startsWith("[\"REQ\"") }.msg
-        assertTrue("second REQ should contain since=101: $secondReq", secondReq.contains("\"since\":101"))
+        assertTrue("second REQ retains the confirmed boundary second: $secondReq", secondReq.contains("\"since\":100"))
     }
 
     @Test

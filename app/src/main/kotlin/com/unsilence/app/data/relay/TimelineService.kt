@@ -3,13 +3,19 @@ package com.unsilence.app.data.relay
 import android.util.Log
 import com.unsilence.app.data.memory.NostrEvent
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 import java.security.MessageDigest
 import java.util.Collections
 import java.util.concurrent.ConcurrentHashMap
@@ -49,6 +55,9 @@ private const val TIMELINE_ID_REPAIR_CAP = MAX_EVENT_IDS_PER_REQ
 
 /** At most two targeted REQs per page, including relay-hint rotation after a miss. */
 private const val TIMELINE_ID_REPAIR_REQUEST_CAP = 2
+private const val CATCH_UP_PAGES_PER_REPLAY = 3
+private const val CATCH_UP_PAGE_LIMIT = 300
+private const val CATCH_UP_COOLDOWN_MS = 1_000L
 
 /**
  * EOSE-aware multi-relay timeline subscription with persistent ref cache.
@@ -58,8 +67,8 @@ private const val TIMELINE_ID_REPAIR_REQUEST_CAP = 2
  * the lower-level Subscription primitive (P1) with:
  *
  *   1. Per-subscribe-call cache of TimelineRef (id, createdAt) — second
- *      subscribe to the same {urls, filter} hits the cache and injects
- *      since=head.createdAt+1 into the new REQ.
+ *      subscribe to the same {urls, filter} displays the cache, but derives
+ *      since only from confirmed per-relay coverage, never the newest row.
  *
  *   2. Pre-EOSE buffering — events arriving before EOSE are collected,
  *      sorted by compareEventsDesc, sliced to filter.limit. Single
@@ -75,8 +84,8 @@ private const val TIMELINE_ID_REPAIR_REQUEST_CAP = 2
  *
  * Threading: subscribeTimeline is suspend (IO). Mutations to per-call
  * state happen under per-state-object synchronized blocks. Timeline cache
- * itself is a ConcurrentHashMap; refs lists are immutable and replaced
- * atomically (copy-on-write).
+ * itself is a ConcurrentHashMap; refs and coverage are immutable snapshots.
+ * Missing-middle pages are bounded per relay and share two request slots.
  */
 @Singleton
 class TimelineService @Inject constructor(
@@ -89,6 +98,7 @@ class TimelineService @Inject constructor(
         val refs: List<TimelineRef>,
         val filter: NostrFilter,
         val urls: List<String>,
+        val coverage: Map<String, TimelineCoverage> = emptyMap(),
     )
 
     private val timelines = ConcurrentHashMap<String, Timeline>()
@@ -96,8 +106,232 @@ class TimelineService @Inject constructor(
     private val seqCounter = AtomicLong(0)
     private val payloadMismatchLoggedKeys = ConcurrentHashMap.newKeySet<String>()
     private val liveReferenceLock = Any()
+    private val timelineLock = Any()
     private val liveReferenceIdsByTimeline = HashMap<String, Set<String>>()
     private val liveReferenceCounts = HashMap<String, Int>()
+    private val catchUpSlots = Semaphore(2)
+    private val sessions = ConcurrentHashMap<String, CatchUpSession>()
+    private val manualCatchUpCursor = AtomicLong(0)
+    private val storeEpoch = AtomicLong(0)
+    private data class CatchUpBudget(val epoch: Long, var attempts: Int = 0, var lastAt: Long = 0)
+    private val catchUpBudgets = LinkedHashMap<String, CatchUpBudget>(16, 0.75f, true)
+
+    /** Share limits across author subsets and metadata-driven resubscriptions. */
+    private fun budget(url: String): CatchUpBudget {
+        val epoch = subscription.replayEpoch(url)
+        val old = catchUpBudgets[url]
+        if (old?.epoch == epoch) return old
+        if (old == null && catchUpBudgets.size >= 128) catchUpBudgets.remove(catchUpBudgets.keys.first())
+        return CatchUpBudget(epoch, lastAt = old?.lastAt ?: 0).also { catchUpBudgets[url] = it }
+    }
+
+    private fun automaticBudgetAvailable(url: String): Boolean = synchronized(catchUpBudgets) {
+        budget(url).attempts < CATCH_UP_PAGES_PER_REPLAY
+    }
+
+    /** Owned by a timeline handle, never by an account-independent scope. */
+    private inner class CatchUpSession(
+        val key: String,
+        val request: SubRequest,
+        val scope: CoroutineScope,
+        val seedHead: Long?,
+        val onHistory: (List<NostrEvent>) -> Unit,
+    ) {
+        private var generation = 0
+        private val jobs = HashMap<String, Job>()
+        private val lastAttempt = HashMap<String, Long>()
+        private val completions = HashMap<String, RelayCompletion>()
+        private var displayComplete = false
+        private var displayFloor: Long? = null
+
+        fun replay(urls: Set<String> = request.urls.toSet()) = synchronized(this) {
+            generation++
+            jobs.values.forEach { it.cancel() }
+            jobs.clear()
+            completions.clear()
+            displayComplete = false
+            synchronized(timelineLock) {
+                val old = timelines[key] ?: Timeline(emptyList(), request.filter, request.urls)
+                // With legacy/unknown coverage, catch up to the previous head,
+                // not through the entire seeded history. Existing holes below
+                // that head are not certified or repaired by this replay.
+                val previousHead = listOfNotNull(seedHead, old.refs.firstOrNull()?.createdAt)
+                    .maxOrNull()?.coerceAtMost(System.currentTimeMillis() / 1000L)
+                putTimeline(key, old.copy(urls = request.urls, coverage = request.urls.associateWith { url ->
+                    val previous = old.coverage[url] ?: TimelineCoverage()
+                    if (url in urls) previous.replay(previousHead) else previous
+                }))
+            }
+        }
+
+        fun completion(page: RelayCompletion) {
+            synchronized(this) {
+                if (sessions[key] !== this) return
+                completions[page.url] = page
+                if (!displayComplete) return
+            }
+            finish(displayFloor)
+        }
+
+        fun finish(commonFloor: Long?) {
+            val urls = synchronized(this) {
+                if (sessions[key] !== this) return
+                displayComplete = true
+                displayFloor = commonFloor
+                synchronized(timelineLock) {
+                    val old = timelines[key] ?: return
+                    val updated = old.coverage.toMutableMap()
+                    for ((url, page) in completions) {
+                        val coverage = updated[url] ?: continue
+                        val bounded = if (coverage.floor == null && coverage.head == null)
+                            coverage.copy(floor = commonFloor) else coverage
+                        updated[url] = bounded.completed(page, request.filter.limit, System.currentTimeMillis() / 1000)
+                    }
+                    putTimeline(key, old.copy(coverage = updated))
+                }
+                request.urls.also { completions.clear() }
+            }
+            urls.forEach { start(it, automatic = true) }
+        }
+
+        fun start(url: String, automatic: Boolean): Job? {
+            val job = synchronized(this) {
+                if (sessions[key] !== this) return null
+                jobs[url]?.takeIf { it.isActive }?.let { return it }
+                if (timelines[key]?.coverage?.get(url)?.pending != true) return null
+                if (automatic && !automaticBudgetAvailable(url)) return null
+                val epoch = generation
+                val job = scope.launch(start = CoroutineStart.LAZY) {
+                    do {
+                        if (!automatic && !subscription.canCatchUp(url)) {
+                            synchronized(this@CatchUpSession) { lastAttempt[url] = System.currentTimeMillis() }
+                            break
+                        }
+                        // Also bounds repeated manual scroll requests and synthetic
+                        // completion retries. The transport's longer cooldown wins.
+                        val wait = synchronized(catchUpBudgets) {
+                            CATCH_UP_COOLDOWN_MS - (System.currentTimeMillis() - budget(url).lastAt)
+                        }
+                        delay(maxOf(wait, if (automatic) CATCH_UP_COOLDOWN_MS else 0L))
+                        val page = catchUpSlots.withPermit {
+                            val before = synchronized(this@CatchUpSession) {
+                                if (generation != epoch || sessions[key] !== this@CatchUpSession) return@withPermit PageResult()
+                                val coverage = timelines[key]?.coverage?.get(url) ?: return@withPermit PageResult()
+                                if (!coverage.pending) return@withPermit PageResult()
+                                synchronized(catchUpBudgets) {
+                                    val budget = budget(url)
+                                    if (automatic && budget.attempts >= CATCH_UP_PAGES_PER_REPLAY) return@withPermit PageResult()
+                                    if (automatic) budget.attempts++
+                                    budget.lastAt = System.currentTimeMillis()
+                                }
+                                lastAttempt[url] = System.currentTimeMillis()
+                                coverage
+                            }
+                            if (!subscription.canCatchUp(url)) return@withPermit PageResult()
+                            fetchPage(url, before, epoch)
+                        }
+                        currentCoroutineContext().ensureActive()
+                        if (sessions[key] !== this@CatchUpSession) break
+                        if (page.events.isNotEmpty()) onHistory(page.events)
+                        if (!page.continuePaging) break
+                    } while (automatic)
+                }
+                jobs[url] = job
+                job
+            }
+            job.start()
+            return job
+        }
+
+        private suspend fun fetchPage(url: String, before: TimelineCoverage, epoch: Int): PageResult {
+            val pageEvents = Collections.synchronizedList(mutableListOf<NostrEvent>())
+            val completion = CompletableDeferred<RelayCompletion>()
+            val limit = minOf(request.filter.limit ?: CATCH_UP_PAGE_LIMIT, CATCH_UP_PAGE_LIMIT).coerceAtLeast(1)
+            var handle: Subscription.Handle? = null
+            val result = try {
+                withTimeoutOrNull(10_000) {
+                    handle = subscription.subscribe(
+                        urls = listOf(url),
+                        filter = request.filter.copy(
+                            since = before.floor ?: request.filter.since,
+                            until = before.until ?: request.filter.until,
+                            limit = limit,
+                        ),
+                        onevent = { pageEvents.add(it) },
+                        onRelayCompletion = { completion.complete(it) },
+                        replayable = false,
+                        retryFailedSends = false,
+                    )
+                    completion.await()
+                }
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (_: Exception) {
+                null // retain the window; a failed wait is not coverage
+            } finally {
+                handle?.close()
+            } ?: RelayCompletion(url, RelayCompletionReason.Watchdog, 0, null, null)
+            currentCoroutineContext().ensureActive()
+            val sorted = synchronized(pageEvents) { TimelineMerge.sort(pageEvents) }
+            synchronized(this) {
+                if (generation != epoch || sessions[key] !== this) return PageResult()
+                if (!subscription.canCatchUp(url)) return PageResult()
+                synchronized(timelineLock) {
+                    if (sessions[key] !== this) return PageResult()
+                    val old = timelines[key] ?: return PageResult()
+                    // A late genuine EOSE may have completed the original page.
+                    if (old.coverage[url] != before) return PageResult()
+                    val after = before.completed(result, limit, System.currentTimeMillis() / 1000)
+                    val existingIds = old.refs.mapTo(HashSet()) { it.id }
+                    val novel = sorted.filter { it.id !in existingIds }
+                    putTimeline(key, old.copy(
+                        refs = mergeRefs(old.refs, sorted.map { TimelineRef(it.id, it.createdAt) }),
+                        coverage = old.coverage + (url to after),
+                    ))
+                    // Retry synthetic completions in the same window. A genuine
+                    // saturated timestamp with no cursor progress cannot be paged
+                    // safely; keep it unresolved, without spinning.
+                    return PageResult(novel, after.pending &&
+                        (result.reason != RelayCompletionReason.Genuine || after.until != before.until))
+                }
+            }
+        }
+
+        fun scheduleManualPage() {
+            if (!synchronized(this) { displayComplete }) return
+            val running = synchronized(this) { jobs.values.filter { it.isActive } }
+            if (running.isNotEmpty()) {
+                return
+            }
+            val url = timelines[key]?.coverage?.entries
+                ?.filter { it.value.pending }
+                ?.minByOrNull { synchronized(this) { lastAttempt[it.key] ?: 0L } }?.key ?: return
+            // Owned by the handle and delivered through onHistory. Never join
+            // this job from load-more: its rows are above the reader's bottom.
+            start(url, automatic = false)
+        }
+    }
+
+    private data class PageResult(val events: List<NostrEvent> = emptyList(), val continuePaging: Boolean = false)
+
+    /** Ref-index merge only; all displayed event lists go through TimelineMerge. */
+    private fun mergeRefs(current: List<TimelineRef>, incoming: List<TimelineRef>): List<TimelineRef> {
+        if (incoming.isEmpty()) return current
+        val ids = current.mapTo(HashSet()) { it.id }
+        val order = compareByDescending<TimelineRef> { it.createdAt }.thenBy { it.id }
+        val novel = incoming.filter { ids.add(it.id) }.sortedWith(order)
+        if (novel.isEmpty()) return current
+        val merged = ArrayList<TimelineRef>(current.size + novel.size)
+        var i = 0
+        var j = 0
+        while (i < current.size && j < novel.size) {
+            if (order.compare(current[i], novel[j]) <= 0) merged.add(current[i++])
+            else merged.add(novel[j++])
+        }
+        while (i < current.size) merged.add(current[i++])
+        while (j < novel.size) merged.add(novel[j++])
+        return merged
+    }
 
     /**
      * Replace a timeline and its bounded reverse-reference index atomically.
@@ -153,6 +387,8 @@ class TimelineService @Inject constructor(
         onNew: (event: NostrEvent) -> Unit = {},
         onClose: ((url: String, reason: String) -> Unit)? = null,
         needSort: Boolean = true,
+        seedHead: Long? = null,
+        onHistory: ((List<NostrEvent>) -> Unit)? = null,
     ): TimelineHandle {
         val multiKey = generateMultiKey(subRequests)
         val perSubKeys = Collections.synchronizedList(mutableListOf<String>())
@@ -178,6 +414,17 @@ class TimelineService @Inject constructor(
         // the handle is returned right away, callbacks fire as EOSEs arrive.
         // The subScope is owned by the TimelineHandle; close() cancels it.
         val subScope = CoroutineScope(SupervisorJob() + subscribeDispatcher)
+        val catchUps = subRequests.map { request ->
+            val normalized = request.copy(urls = request.urls.mapNotNull(::normalizeRelayUrl).distinct())
+            val key = generateTimelineKey(request.urls, request.filter)
+            perSubKeys.add(key)
+            CatchUpSession(key, normalized, subScope, seedHead) { history ->
+                if (onHistory != null) onHistory(history) else onEvents(history, false)
+            }.also {
+                sessions[key] = it
+                it.replay()
+            }
+        }
 
         // ── Lazy outbox: defer SLOW-tier connects ────────────────────────
         // The resolver tags low-priority outbox write relays as SubTier.SLOW.
@@ -223,6 +470,20 @@ class TimelineService @Inject constructor(
                                     Log.w(TAG, "onEvents threw", t)
                                 }
                             }
+                            if (allEosed) {
+                                if (onHistory != null) {
+                                    // A busy relay's newest page can crowd a quiet
+                                    // relay out of the first-display merge. Those
+                                    // rows are still part of the covered history.
+                                    val displayedIds = merged.mapTo(HashSet()) { it.id }
+                                    val overflow = mergeTimelines(perSubTimelines.toList(), null)
+                                        .filter { it.id !in displayedIds }
+                                    if (overflow.isNotEmpty()) onHistory(overflow)
+                                }
+                                val floor = (perSubTimelines.mapNotNull { it.lastOrNull()?.createdAt } +
+                                    listOfNotNull(seedHead)).minOrNull()
+                                catchUps.forEach { it.finish(floor) }
+                            }
                         }
                     },
                     onReplayCycleStarted = {
@@ -240,8 +501,8 @@ class TimelineService @Inject constructor(
                     },
                     onClose = onClose,
                     needSort = needSort,
-                    outerKeysCollector = perSubKeys,
                     outerHandleCollector = multiHandles,
+                    catchUp = catchUps[index],
                 )
             }
         }
@@ -278,6 +539,7 @@ class TimelineService @Inject constructor(
                 if (closed) return
                 closed = true
                 subScope.cancel()
+                catchUps.forEach { sessions.remove(it.key, it) }
                 // Snapshot before iterating — subScope coroutines may still be
                 // adding to the synchronizedList concurrently.
                 val snapshot = synchronized(multiHandles) { ArrayList(multiHandles) }
@@ -295,11 +557,10 @@ class TimelineService @Inject constructor(
         onNew: (NostrEvent) -> Unit,
         onClose: ((String, String) -> Unit)?,
         needSort: Boolean,
-        outerKeysCollector: MutableList<String>,
         outerHandleCollector: MutableList<Subscription.Handle>,
+        catchUp: CatchUpSession,
     ) {
         val key = generateTimelineKey(subRequest.urls, subRequest.filter)
-        outerKeysCollector.add(key)
 
         // ── Cache lookup. Jumble client.service.ts:600-610 ──────────────────
         val cached: Timeline? = if (needSort) timelines[key] else null
@@ -320,10 +581,14 @@ class TimelineService @Inject constructor(
                     cachedEvents
                 }
                 onPerSubEvents(initialEmit, false)
-                since = (initialEmit[0].createdAt + 1)
-                    .coerceAtMost(System.currentTimeMillis() / 1000L)
                 Log.d(TAG, "cache emit capped: ${initialEmit.size}/${cachedEvents.size} for $key")
             }
+        }
+        // A row at the cache head proves only that this row arrived. Each relay
+        // must have a certified boundary before a delta query can skip history.
+        val heads = cached?.coverage?.values?.mapNotNull { it.head }.orEmpty()
+        if (heads.size == subRequest.urls.size && heads.isNotEmpty()) {
+            since = heads.minOrNull()?.coerceAtMost(System.currentTimeMillis() / 1000L)
         }
 
         // ── Per-sub state. All mutations under stateLock. ──────────────────
@@ -339,6 +604,7 @@ class TimelineService @Inject constructor(
             urls = subRequest.urls,
             filter = effectiveFilter,
             onevent = { evt ->
+                if (sessions[key] !== catchUp) return@subscribe
                 synchronized(stateLock) {
                     if (eosedAt == null) {
                         // Pre-EOSE: buffer
@@ -353,15 +619,18 @@ class TimelineService @Inject constructor(
                     }
                 }
             },
-            onReplayCycleStarted = {
+            onReplayCycleStarted = { urls ->
                 synchronized(stateLock) {
                     events.clear()
                     eosed = false
                     eosedAt = null
                 }
+                catchUp.replay(urls)
                 onReplayCycleStarted()
             },
+            onRelayCompletion = catchUp::completion,
             oneose = { allRelaysEosed ->
+                if (sessions[key] !== catchUp) return@subscribe
                 val toEmit: List<NostrEvent>
                 synchronized(stateLock) {
                     if (allRelaysEosed && !eosed) {
@@ -382,7 +651,7 @@ class TimelineService @Inject constructor(
                     val sliced = if (limit != null && sorted.size > limit) sorted.take(limit) else sorted
                     // Jumble line 666: events.concat(cachedEvents).slice(0, filter.limit)
                     // Append cached events not present in the new batch (older history)
-                    val combined = sliced + cachedEvents.filter { c -> sliced.none { it.id == c.id } }
+                    val combined = TimelineMerge.merge(sliced, cachedEvents, capTail = false)
                     toEmit = if (limit != null && combined.size > limit) combined.take(limit) else combined
                 }
                 onPerSubEvents(toEmit, allRelaysEosed)
@@ -398,23 +667,10 @@ class TimelineService @Inject constructor(
                     } else {
                         sortedFinal.map { TimelineRef(it.id, it.createdAt) }
                     }
-                    val existing = timelines[key]
-                    if (existing == null || existing.refs.isEmpty()) {
-                        // No cache yet — Jumble line 678
-                        putTimeline(key, Timeline(newRefs, subRequest.filter, subRequest.urls))
-                    } else {
-                        // Merge with existing — Jumble lines 687-703
-                        val firstExistingCreatedAt = existing.refs.first().createdAt
-                        val freshRefs = newRefs.filter { it.createdAt > firstExistingCreatedAt }
-                        if (limit != null && freshRefs.size >= limit) {
-                            // New refs fully replace old — Jumble line 694
-                            putTimeline(key, Timeline(freshRefs, subRequest.filter, subRequest.urls))
-                        } else {
-                            // Merge new + old — Jumble line 701
-                            putTimeline(
-                                key,
-                                Timeline(freshRefs + existing.refs, subRequest.filter, subRequest.urls),
-                            )
+                    synchronized(timelineLock) {
+                        if (sessions[key] === catchUp) {
+                            val existing = timelines[key] ?: Timeline(emptyList(), subRequest.filter, subRequest.urls)
+                            putTimeline(key, existing.copy(refs = mergeRefs(existing.refs, newRefs)))
                         }
                     }
                 }
@@ -422,6 +678,7 @@ class TimelineService @Inject constructor(
             onclose = onClose ?: { _, _ -> },
         )
 
+        catchUp.scope.coroutineContext[Job]?.invokeOnCompletion { handle.close() }
         outerHandleCollector.add(handle)
     }
 
@@ -430,25 +687,27 @@ class TimelineService @Inject constructor(
      * position. Mirrors Jumble client.service.ts:639-654.
      */
     private fun insertIntoTimelineRefs(key: String, evt: NostrEvent) {
-        val timeline = timelines[key] ?: return
-        val refs = timeline.refs
-        if (refs.isEmpty()) return
+        synchronized(timelineLock) {
+            val timeline = timelines[key] ?: return
+            val refs = timeline.refs
+            if (refs.isEmpty()) return
 
-        var idx = 0
-        while (idx < refs.size) {
-            val ref = refs[idx]
-            if (evt.createdAt > ref.createdAt) break
-            if (evt.createdAt == ref.createdAt) {
-                if (evt.id == ref.id) return  // already in cache
-                if (evt.id < ref.id) break
+            var idx = 0
+            while (idx < refs.size) {
+                val ref = refs[idx]
+                if (evt.createdAt > ref.createdAt) break
+                if (evt.createdAt == ref.createdAt) {
+                    if (evt.id == ref.id) return  // already in cache
+                    if (evt.id < ref.id) break
+                }
+                idx++
             }
-            idx++
-        }
-        if (idx >= refs.size) return  // older than tail — drop
+            if (idx >= refs.size) return  // older than tail — drop
 
-        val newRefs = refs.toMutableList()
-        newRefs.add(idx, TimelineRef(evt.id, evt.createdAt))
-        putTimeline(key, timeline.copy(refs = newRefs))
+            val newRefs = refs.toMutableList()
+            newRefs.add(idx, TimelineRef(evt.id, evt.createdAt))
+            putTimeline(key, timeline.copy(refs = newRefs))
+        }
     }
 
     /**
@@ -558,6 +817,17 @@ class TimelineService @Inject constructor(
         until: Long,
         limit: Int,
     ): List<NostrEvent> {
+        val epoch = storeEpoch.get()
+        val keys = snapshotTimelineKeys(timelineKey)
+        val pending = keys.filter { key -> timelines[key]?.coverage?.values?.any { it.pending } == true }
+        if (pending.isNotEmpty()) {
+            // Schedule one gap page per gesture, independent of the automatic
+            // budget and the older-page result. Neither slow nor successful gap
+            // work may consume the gesture instead of extending the bottom.
+            // Rotate keys so an unavailable first relay cannot starve the rest.
+            val key = pending[(manualCatchUpCursor.getAndIncrement() % pending.size).toInt()]
+            sessions[key]?.scheduleManualPage()
+        }
         // Resolve the known ref page before guessing a time window. Return only
         // the contiguous prefix so the next cursor cannot advance across a hole.
         var cachedPage = loadCachedTimelinePage(timelineKey, until, limit)
@@ -566,6 +836,7 @@ class TimelineService @Inject constructor(
             cachedPage = loadCachedTimelinePage(timelineKey, until, limit)
         }
         val cached = cachedPage.contiguousEvents
+        if (storeEpoch.get() != epoch) return emptyList()
         if (cached.isNotEmpty()) return cached
 
         // No usable cached prefix (no refs, or targeted repair failed): preserve
@@ -578,11 +849,10 @@ class TimelineService @Inject constructor(
         // with distinct filters (outbox per-relay author subsets) cannot
         // share a REQ without leaking authors to the wrong relays, so they
         // stay separate.
-        val keys = snapshotTimelineKeys(timelineKey)
         val allFetched = mutableListOf<NostrEvent>()
         val keyedTimelines = keys.mapNotNull { k -> timelines[k]?.let { k to it } }
         for ((filter, members) in keyedTimelines.groupBy { it.second.filter }) {
-            val unionUrls = members.flatMap { it.second.urls }.distinct()
+            val unionUrls = members.flatMap { it.second.urls }.distinct().filter(subscription::canRequestHistory)
             if (unionUrls.isEmpty()) continue
             val paginationFilter = filter.copy(
                 until = until,
@@ -603,8 +873,12 @@ class TimelineService @Inject constructor(
             } finally {
                 handle.close()
             }
+            if (storeEpoch.get() != epoch) return emptyList()
 
-            val sorted = events.sortedWith(compareEventsDesc)
+            // The relay's until is inclusive, while this API's cursor is
+            // exclusive (as in the cached path). Never return the boundary row
+            // or unrelated newer events, even if a relay ignores the filter.
+            val sorted = synchronized(events) { TimelineMerge.sort(events.filter { it.createdAt < until }) }
             allFetched.addAll(sorted)
 
             // Merge into timeline cache (append older refs). The union fetch
@@ -612,21 +886,16 @@ class TimelineService @Inject constructor(
             // of each key's urls, so each key's cache gets at least what its
             // own REQ would have returned.
             for ((k, _) in members) {
-                val existing = timelines[k] ?: continue
                 val newRefs = sorted.map { TimelineRef(it.id, it.createdAt) }
-                val existingIds = existing.refs.map { it.id }.toSet()
-                val deduped = newRefs.filter { it.id !in existingIds }
-                if (deduped.isNotEmpty()) {
-                    putTimeline(k, existing.copy(refs = existing.refs + deduped))
+                synchronized(timelineLock) {
+                    val existing = timelines[k]
+                    if (existing != null) putTimeline(k, existing.copy(refs = mergeRefs(existing.refs, newRefs)))
                 }
             }
         }
 
         // Combine cached + relay-fetched, dedup, sort DESC
-        val combined = (cached + allFetched)
-            .distinctBy { it.id }
-            .sortedWith(compareEventsDesc)
-            .take(limit)
+        val combined = TimelineMerge.merge(cached, TimelineMerge.sort(allFetched), capTail = false).take(limit)
         return combined
     }
 
@@ -654,7 +923,16 @@ class TimelineService @Inject constructor(
             } else {
                 tl.refs.subList(0, coveredSize).toList()
             }
-            result[key] = if (refs === tl.refs) tl else tl.copy(refs = refs)
+            // Snapshot payload selection can truncate even a completed range.
+            // A truncated prefix also loses the history below its last row.
+            // Treat that watermark as unknown rather than certifying omitted
+            // payloads. Unknown-head catch-up remains bounded at the newest
+            // seed/cache row; it does not reconstruct arbitrary older holes.
+            val head = if (refs.size == tl.refs.size) refs.firstOrNull()?.createdAt else null
+            val coverage = tl.coverage.mapValues { (_, value) ->
+                value.copy(head = if (head == null) null else value.head?.coerceAtMost(head))
+            }
+            result[key] = tl.copy(refs = refs, coverage = coverage)
         }
         return result
     }
@@ -683,21 +961,30 @@ class TimelineService @Inject constructor(
     internal fun restoreFromSnapshot(entries: Map<String, Timeline>) {
         for ((key, timeline) in entries) {
             val recomputed = generateTimelineKey(timeline.urls, timeline.filter)
-            if (recomputed != key) {
+            val legacyKey = sha256(timeline.urls.sorted().joinToString(",") + "|" + timeline.filter.toJsonObject()).take(16)
+            if (recomputed != key && legacyKey != key) {
                 Log.w(TAG, "timeline key mismatch persisted=${key.take(8)} recomputed=${recomputed.take(8)} — skipping")
                 continue
             }
-            putTimeline(key, timeline)
+            val urls = timeline.urls.mapNotNull(::normalizeRelayUrl).distinct()
+            val coverage = if (timeline.coverage.keys.all { it in urls }) timeline.coverage else emptyMap()
+            putTimeline(recomputed, timeline.copy(urls = urls, coverage = coverage))
         }
         Log.d(TAG, "restored ${timelines.size} timelines from snapshot")
     }
 
     fun clear() {
-        synchronized(liveReferenceLock) {
-            timelines.clear()
-            liveReferenceIdsByTimeline.clear()
-            liveReferenceCounts.clear()
+        storeEpoch.incrementAndGet()
+        sessions.values.map { it.scope }.distinct().forEach { it.cancel() }
+        synchronized(timelineLock) {
+            sessions.clear()
+            synchronized(liveReferenceLock) {
+                timelines.clear()
+                liveReferenceIdsByTimeline.clear()
+                liveReferenceCounts.clear()
+            }
         }
+        synchronized(catchUpBudgets) { catchUpBudgets.clear() }
         multiKeys.clear()
         payloadMismatchLoggedKeys.clear()
     }
@@ -708,6 +995,7 @@ class TimelineService @Inject constructor(
     }
 
     internal fun timelineForTest(key: String): List<TimelineRef>? = timelines[key]?.refs
+    internal fun timelineStateForTest(key: String): Timeline? = timelines[key]
 
     // ── Internals ──────────────────────────────────────────────────────────
     private fun generateMultiKey(subRequests: List<SubRequest>): String {
@@ -716,7 +1004,7 @@ class TimelineService @Inject constructor(
     }
 
     internal fun generateTimelineKey(urls: List<String>, filter: NostrFilter): String {
-        val payload = urls.sorted().joinToString(",") + "|" + filter.toJsonObject().toString()
+        val payload = urls.mapNotNull(::normalizeRelayUrl).distinct().sorted().joinToString(",") + "|" + filter.toJsonObject().toString()
         return sha256(payload).take(16)
     }
 

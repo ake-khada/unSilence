@@ -15,6 +15,7 @@ class FakeRelayTransport : RelayTransport {
     val connectRequests = CopyOnWriteArrayList<ConnectRequest>()
     var sendShouldSucceed: (String) -> Boolean = { true }
     var connectAndAwaitReturns: Int = 0
+    var onSend: (String, String) -> Unit = { _, _ -> }
     val rateLimitedUrls: MutableSet<String> = mutableSetOf()
 
     override suspend fun connectAndAwait(
@@ -29,7 +30,10 @@ class FakeRelayTransport : RelayTransport {
 
     override fun sendToRelay(url: String, msg: String): Boolean {
         val ok = sendShouldSucceed(url)
-        if (ok) sends.add(SentMessage(url, msg))
+        if (ok) {
+            sends.add(SentMessage(url, msg))
+            onSend(url, msg)
+        }
         return ok
     }
 

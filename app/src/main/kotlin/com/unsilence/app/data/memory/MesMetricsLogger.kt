@@ -6,6 +6,7 @@ import androidx.lifecycle.DefaultLifecycleObserver
 import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.ProcessLifecycleOwner
 import com.unsilence.app.data.relay.RelayPool
+import com.unsilence.app.data.relay.Subscription
 import com.unsilence.app.ui.feed.ImageDimensionCache
 import com.unsilence.app.ui.feed.VideoThumbnailCache
 import kotlinx.coroutines.CoroutineScope
@@ -33,6 +34,7 @@ class MesMetricsLogger @Inject constructor(
     private val relayPool: RelayPool,
     private val videoThumbnailCache: VideoThumbnailCache,
     private val imageDimensionCache: ImageDimensionCache,
+    private val subscription: Subscription,
 ) : DefaultLifecycleObserver {
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
@@ -150,7 +152,8 @@ class MesMetricsLogger @Inject constructor(
             TAG,
             "relay: inFlightPeak=${rm.eventFetchInFlightPeak} " +
                 "missingRefCache=${rm.missingRefCacheSize} " +
-                "missingRefHits=${rm.missingRefCacheHits}",
+                "missingRefHits=${rm.missingRefCacheHits} " +
+                "timelineCatchUpReqs=${subscription.snapshotCatchUpRequestCount()}",
         )
     }
 

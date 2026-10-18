@@ -89,8 +89,9 @@ internal val SNAPSHOT_BINARY_MAGIC = byteArrayOf(0x55, 0x53, 0x4E, 0x53) // "USN
  *  V16 appends bounded device-authoritative NIP-11 relay identities.
  *  V17 retains the owner's raw kind-3 inside the FOLLOWS section.
  *  V18 appends the unacknowledged own kind-10000 mutation journal.
- *  V19 appends the bounded NIP-05 verification cache. */
-private const val SNAPSHOT_BINARY_VERSION = 19
+ *  V19 appends the bounded NIP-05 verification cache.
+ *  V20 adds per-relay confirmed coverage and unresolved ranges to timelines. */
+private const val SNAPSHOT_BINARY_VERSION = 20
 /** Max retained own outgoing private-zap anon pubkeys (bounded, insertion-order eviction). */
 private const val OWN_ANON_ZAP_CAP = 500
 private const val ZAP_AUTH_RECORDED_IDS_MAX = 8_192
@@ -6438,6 +6439,18 @@ class MemoryEventStore @Inject constructor(
                     d.writeStr(ref.id)
                     d.writeLong(ref.createdAt)
                 }
+                if (snapshotVersion >= 20) {
+                    val coverageEntries = timeline.coverage.filterKeys { it in timeline.urls }
+                    d.writeInt(coverageEntries.size)
+                    for ((url, coverage) in coverageEntries) {
+                        d.writeStr(url)
+                        d.writeLong(coverage.head ?: -1L)
+                        d.writeBoolean(coverage.pending)
+                        d.writeLong(coverage.floor ?: -1L)
+                        d.writeLong(coverage.until ?: -1L)
+                        d.writeLong(coverage.targetHead ?: -1L)
+                    }
+                }
             }
         }
 
@@ -6816,7 +6829,27 @@ class MemoryEventStore @Inject constructor(
                 val refs = List(refCount) {
                     TimelineRef(input.readStr(), input.readLong())
                 }
-                restored[key] = TimelineService.Timeline(refs = refs, filter = filter, urls = urls)
+                val coverage = if (version >= 20) {
+                    val count = input.readInt()
+                    if (count < 0 || count > 1_000) throw IOException("Invalid timeline coverage count: $count")
+                    val entries = HashMap<String, com.unsilence.app.data.relay.TimelineCoverage>(count)
+                    var valid = count <= urlCount
+                    repeat(count) {
+                        val url = input.readStr()
+                        if (url !in urls || entries.containsKey(url)) valid = false
+                        fun boundary(): Long? {
+                            val value = input.readLong()
+                            if (value < -1L) valid = false
+                            return value.takeIf { it >= 0L }
+                        }
+                        entries[url] = com.unsilence.app.data.relay.TimelineCoverage(
+                            head = boundary(), pending = input.readBoolean(),
+                            floor = boundary(), until = boundary(), targetHead = boundary(),
+                        )
+                    }
+                    if (valid) entries else emptyMap()
+                } else emptyMap()
+                restored[key] = TimelineService.Timeline(refs = refs, filter = filter, urls = urls, coverage = coverage)
             }
             timelineServiceProvider.get().restoreFromSnapshot(restored)
         }
