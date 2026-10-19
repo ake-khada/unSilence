@@ -6,6 +6,24 @@ import org.junit.Test
 class ThreadProjectionTest {
     private val focusedId = "video"
 
+    @Test fun `explicit event root keeps orphan visible until its parent arrives`() {
+        assertEquals("poll", threadProjectionParentId(
+            replyToId = "parent", rootId = "poll", focusedId = "poll",
+            availableReplyIds = setOf("child"), coordinateScoped = false,
+        ))
+        assertEquals("parent", threadProjectionParentId(
+            replyToId = "parent", rootId = "poll", focusedId = "poll",
+            availableReplyIds = setOf("child", "parent"), coordinateScoped = false,
+        ))
+    }
+
+    @Test fun `another event root does not attach an orphan to the focused thread`() {
+        assertEquals("parent", threadProjectionParentId(
+            replyToId = "parent", rootId = "other-poll", focusedId = "poll",
+            availableReplyIds = setOf("child"), coordinateScoped = false,
+        ))
+    }
+
     @Test
     fun `coordinate child with missing parent stays visible at root`() {
         assertEquals(

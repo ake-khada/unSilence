@@ -292,6 +292,23 @@ internal fun buildCommentParentsReq(subId: String, parentIds: List<String>): Str
         })
     }.toString()
 
+/** Direct replies and root-scoped NIP-22 descendants are OR'd, not intersected. */
+internal fun buildThreadRepliesReq(subId: String, eventId: String): String =
+    buildJsonArray {
+        add(JsonPrimitive("REQ"))
+        add(JsonPrimitive(subId))
+        add(buildJsonObject {
+            put("kinds", buildJsonArray { add(JsonPrimitive(1)); add(JsonPrimitive(1111)) })
+            put("#e", buildJsonArray { add(JsonPrimitive(eventId)) })
+            put("limit", JsonPrimitive(200))
+        })
+        add(buildJsonObject {
+            put("kinds", buildJsonArray { add(JsonPrimitive(1111)) })
+            put("#E", buildJsonArray { add(JsonPrimitive(eventId)) })
+            put("limit", JsonPrimitive(200))
+        })
+    }.toString()
+
 internal fun isRateLimitedClosedReason(reason: String): Boolean =
     reason.contains("rate-limit", ignoreCase = true) ||
         reason.contains("too many", ignoreCase = true)
@@ -4972,19 +4989,9 @@ class RelayPool @Inject constructor(
             })
         }.toString()
 
-        // Replies: legacy kind 1 plus NIP-22 comments on event-addressed videos.
-        val repliesReq = buildJsonArray {
-            add(JsonPrimitive("REQ"))
-            add(JsonPrimitive("thread-replies-$ts"))
-            add(buildJsonObject {
-                put("kinds", buildJsonArray {
-                    add(JsonPrimitive(1))
-                    add(JsonPrimitive(1111))
-                })
-                put("#e",    buildJsonArray { add(JsonPrimitive(eventId)) })
-                put("limit", JsonPrimitive(200))
-            })
-        }.toString()
+        // Lowercase e finds direct replies; uppercase E also finds nested comments
+        // rooted at this event, even when the intermediate parent is not cached.
+        val repliesReq = buildThreadRepliesReq("thread-replies-$ts", eventId)
 
         // Reactions on this event and its replies
         val reactionsReq = buildJsonArray {

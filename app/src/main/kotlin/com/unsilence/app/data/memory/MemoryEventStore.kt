@@ -54,6 +54,7 @@ import com.unsilence.app.data.relay.boundedSeenRelayHints
 import com.unsilence.app.data.relay.boundedIdentitySearchCandidates
 import com.unsilence.app.data.relay.deriveProfileRelayCount
 import com.unsilence.app.data.relay.normalizeRelayUrl
+import com.unsilence.app.data.relay.parseNip22Threading
 import com.unsilence.app.data.relay.parseNip51RelayTags
 import com.unsilence.app.data.relay.parseNip65RelayTags
 import com.unsilence.app.data.relay.profileDerivedBridgeOutbox
@@ -169,7 +170,7 @@ private val NOTIFICATION_KINDS = setOf(1, 6, 7, 1018, 9735, 16, 1111)
 // Kind-5 keeps only tombstones plus a separate, bounded owner history for snapshots.
 private val DERIVED_ONLY_KINDS = setOf(5, 30166, 30382)
 // Some clients use kind-1111 comments on ordinary notes too; threads and counts share this gate.
-private val COUNTED_NIP22_PARENT_KINDS = setOf(1, 21, 22, 34235, 34236, 1111)
+private val COUNTED_NIP22_PARENT_KINDS = setOf(1, 21, 22, 1068, 34235, 34236, 1111)
 
 /** Live-memory caps. Snapshot persistence has separate, lower bounds. */
 internal val CONTENT_EVENT_KIND_CAPS = mapOf(
@@ -4119,7 +4120,12 @@ class MemoryEventStore @Inject constructor(
                             ?.toIntOrNull()
                         val parentId = event.replyToId
                             ?: event.tags.firstOrNull { it.size >= 2 && it[0] == "e" }?.getOrNull(1)
-                        parentKind in COUNTED_NIP22_PARENT_KINDS && parentId == targetId
+                        // A nested poll comment can arrive via #E before its direct
+                        // parent. Keep the parsed poll scope as a conversation seed;
+                        // lowercase e still owns the direct parent relationship.
+                        val rootedAtPoll = parentKind == 1111 && event.rootId == targetId &&
+                            event.tags.firstOrNull { it.size >= 2 && it[0] == "K" }?.getOrNull(1) == "1068"
+                        parentKind in COUNTED_NIP22_PARENT_KINDS && (parentId == targetId || rootedAtPoll)
                     }
                     else -> false
                 }
@@ -7260,13 +7266,23 @@ class MemoryEventStore @Inject constructor(
     }
 
     internal fun insertFromSnapshot(event: NostrEvent) {
-        val contentLock = contentMutationLocks[event.kind]
+        // Older snapshots persist null roots on poll comments. Rebuild these
+        // derived fields with the same parser used for live ingest, before indexing.
+        // The binary format and coordinate-based article semantics do not change.
+        val restored = if (event.kind == 1111 && event.tags.any {
+                it.size >= 2 && (it[0] == "K" || it[0] == "k") && it[1] == "1068"
+            }) {
+            val (parentId, rootId) = parseNip22Threading(event.tags)
+            if (event.replyToId == parentId && event.rootId == rootId) event
+            else event.copy(replyToId = parentId, rootId = rootId)
+        } else event
+        val contentLock = contentMutationLocks[restored.kind]
         if (contentLock != null) {
-            synchronized(contentLock) { insertFromSnapshotUnlocked(event) }
-        } else if (event.kind == 10000) {
-            synchronized(muteStateLock) { insertFromSnapshotUnlocked(event) }
+            synchronized(contentLock) { insertFromSnapshotUnlocked(restored) }
+        } else if (restored.kind == 10000) {
+            synchronized(muteStateLock) { insertFromSnapshotUnlocked(restored) }
         } else {
-            insertFromSnapshotUnlocked(event)
+            insertFromSnapshotUnlocked(restored)
         }
     }
 

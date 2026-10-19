@@ -43,6 +43,24 @@ class ThreadViewModelInvariantsTest {
     // ── Normal tree ──────────────────────────────────────────────────────────
 
     @Test
+    fun `kind 1 rooted orphan stays visible and reattaches to its arriving parent`() {
+        val child = row("child", replyToId = "parent", rootId = "root", createdAt = 200)
+        val parent = row("parent", replyToId = "root", rootId = "root", createdAt = 100)
+        assertEquals(1, child.kind)
+
+        val orphan = flattenThreadReplies("root", listOf(child), coordinateScoped = false)
+        assertEquals(listOf("child"), orphan.map { it.row.id })
+        assertEquals(listOf(1), orphan.map { it.depth })
+        assertEquals("parent", orphan.single().row.replyToId)
+
+        val attached = flattenThreadReplies("root", listOf(child, parent), coordinateScoped = false)
+        assertEquals(listOf("parent", "child"), attached.map { it.row.id })
+        assertEquals(listOf(1, 2), attached.map { it.depth })
+        assertEquals("parent", attached.last().row.replyToId)
+        assertTrue(flattenThreadReplies("other-root", listOf(child), coordinateScoped = false).isEmpty())
+    }
+
+    @Test
     fun `simple thread tree flattens correctly with depths`() {
         // Tree:  focused
         //          ├─ A (depth 1)

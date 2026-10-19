@@ -5,6 +5,38 @@ import org.junit.Test
 
 class Nip22ThreadingTest {
 
+    @Test fun `top level poll comment keeps poll as parent and root`() {
+        assertEquals("poll" to "poll", parseNip22Threading(listOf(
+            listOf("E", "poll"), listOf("K", "1068"), listOf("e", "poll"), listOf("k", "1068"),
+        )))
+    }
+
+    @Test fun `nested poll comment keeps lowercase parent and uppercase poll root`() {
+        assertEquals("parent" to "poll", parseNip22Threading(listOf(
+            listOf("E", "poll"), listOf("K", "1068"), listOf("e", "parent"), listOf("k", "1111"),
+        )))
+    }
+
+    @Test fun `poll scope without a lowercase parent does not invent threading`() {
+        assertEquals(null to null, parseNip22Threading(listOf(listOf("E", "poll"), listOf("K", "1068"))))
+    }
+
+    @Test fun `nested comment without poll E or matching K has no fabricated root`() {
+        val parent = listOf(listOf("e", "parent"), listOf("k", "1111"))
+        for (scope in listOf(
+            listOf(listOf("K", "1068")),
+            listOf(listOf("E", ""), listOf("K", "1068")),
+            listOf(listOf("E", "poll"), listOf("K", "30023")),
+            listOf(listOf("E", "poll")),
+        )) assertEquals("parent" to null, parseNip22Threading(scope + parent))
+    }
+
+    @Test fun `unsupported parent kind does not gain poll root from uppercase tags`() {
+        assertEquals("parent" to null, parseNip22Threading(listOf(
+            listOf("E", "poll"), listOf("K", "1068"), listOf("e", "parent"), listOf("k", "30078"),
+        )))
+    }
+
     @Test
     fun `top-level article comment uses article event id when lowercase parent e is present`() {
         val (replyToId, rootId) = parseNip22Threading(

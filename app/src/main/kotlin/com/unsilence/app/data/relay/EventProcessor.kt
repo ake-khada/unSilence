@@ -711,7 +711,7 @@ internal fun parseNip10Threading(tags: List<List<String>>): Pair<String?, String
 /**
  * Returns (replyToId, rootId) parsed from NIP-22 kind-1111 tags.
  *
- * Uppercase tags describe the root scope (`A`/`K`/`P`). Lowercase tags describe
+ * Uppercase tags describe the root scope (`A`/`E`/`K`/`P`). Lowercase tags describe
  * the direct parent. For an article comment:
  *
  * - top-level: lowercase `k=30023`, optional lowercase `e=<article event id>`
@@ -720,7 +720,10 @@ internal fun parseNip10Threading(tags: List<List<String>>): Pair<String?, String
  * The article root is usually addressable (`A=30023:pubkey:d`) and may not have
  * a known event id at parse time, so only top-level comments with a lowercase
  * article `e` get a rootId. Comment replies always get replyToId from lowercase
- * `e`, which is what MES needs for parent comment reply counts.
+ * `e`, which is what MES needs for parent comment reply counts. Event-addressed
+ * polls additionally retain their explicit `E`/`K=1068` root on nested comments,
+ * so a missing intermediate comment does not hide the rest of the conversation.
+ * Coordinate-rooted article/video comment behavior remains unchanged.
  */
 internal fun parseNip22Threading(tags: List<List<String>>): Pair<String?, String?> {
     val parentKind = tags.firstOrNull { it.size >= 2 && it[0] == "k" }?.getOrNull(1)?.toIntOrNull()
@@ -728,9 +731,15 @@ internal fun parseNip22Threading(tags: List<List<String>>): Pair<String?, String
 
     return when {
         parentId == null -> Pair(null, null)
-        parentKind == 30023 || parentKind == 21 || parentKind == 22 ||
+        parentKind == 1068 || parentKind == 30023 || parentKind == 21 || parentKind == 22 ||
             parentKind == 34235 || parentKind == 34236 -> Pair(parentId, parentId)
-        parentKind == 1111 -> Pair(parentId, null)
+        parentKind == 1111 -> {
+            val rootKind = tags.firstOrNull { it.size >= 2 && it[0] == "K" }?.getOrNull(1)
+            val pollRoot = if (rootKind == "1068") {
+                tags.firstOrNull { it.size >= 2 && it[0] == "E" }?.getOrNull(1)?.takeIf { it.isNotBlank() }
+            } else null
+            Pair(parentId, pollRoot)
+        }
         else -> Pair(parentId, null)
     }
 }

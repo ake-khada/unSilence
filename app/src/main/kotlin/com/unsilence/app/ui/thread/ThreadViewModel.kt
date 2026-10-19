@@ -60,9 +60,9 @@ data class ThreadUiState(
 )
 
 /**
- * Coordinate queries prove every supplied row belongs to the same thread. If a
- * relay returns a child before its parent, attach that orphan to the root until
- * the missing parent arrives instead of counting a comment that cannot render.
+ * Coordinate membership or an explicit parsed event root identifies the thread.
+ * If a relay returns a child before its parent, attach that orphan to the known
+ * root until the parent arrives instead of counting a comment that cannot render.
  */
 internal fun threadProjectionParentId(
     replyToId: String?,
@@ -73,7 +73,7 @@ internal fun threadProjectionParentId(
 ): String {
     val parentId = replyToId ?: rootId ?: return focusedId
     return if (
-        coordinateScoped &&
+        (coordinateScoped || rootId == focusedId) &&
         parentId != focusedId &&
         parentId !in availableReplyIds
     ) focusedId else parentId

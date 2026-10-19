@@ -17,6 +17,20 @@ class ThreadAncestorWalkTest {
         id, "author", 1, "body", 100, "[]", replyToId = parent,
     )
 
+    @Test fun `NIP22 explicit poll root is not replaced by a missing intermediate comment`() = runTest {
+        val queried = mutableListOf<String>()
+        val root = walkThreadAncestors("child", lookup = { id ->
+            queried += id
+            when (id) {
+                "child" -> event(id, "missing-parent").copy(kind = 1111, rootId = "poll")
+                "poll" -> event(id).copy(kind = 1068)
+                else -> null
+            }
+        }, onParent = { _, _ -> })
+        assertEquals("poll", root)
+        assertEquals(listOf("child", "poll"), queried)
+    }
+
     @Test fun `fallback completing after eight seconds still refines root`() = runTest {
         val hops = mutableListOf<String>()
         val root = walkThreadAncestors("reply", lookup = { id ->
