@@ -1648,6 +1648,35 @@ class MemoryEventStoreInvariantsTest {
     // ── Feed query: limit ───────────────────────────────────────────────────
 
     @Test
+    fun `cursor restore seeks the closest bounded window including timestamp ties`() {
+        for (id in listOf("a", "b", "c", "d")) store.insert(event(id = id, createdAt = 100))
+        store.insert(event(id = "new", createdAt = 101))
+        store.insert(event(id = "old", createdAt = 99))
+        assertEquals(listOf("b", "c"), store.feedEvents(defaultFilter, limit = 2,
+            through = TimelineRef("c", 100)).map { it.id })
+        // The exact cursor event can be absent; no newest-head fallback.
+        assertEquals(listOf("c", "d"), store.feedEvents(defaultFilter, limit = 2,
+            through = TimelineRef("missing", 100)).map { it.id })
+        assertTrue(store.feedEvents(defaultFilter, limit = 0, through = TimelineRef("c", 100)).isEmpty())
+        assertEquals(listOf("new", "a"), store.feedEvents(defaultFilter, limit = 2).map { it.id })
+    }
+
+    @Test
+    fun `cursor restore respects authors kinds relay scope and content filters before counting limit`() {
+        val wanted = event(id = "wanted", pubkey = "followed", createdAt = 110, relayUrl = "wss://wanted")
+        store.insert(wanted)
+        store.insert(event(id = "wrong-author", pubkey = "other", createdAt = 109, relayUrl = "wss://wanted"))
+        store.insert(event(id = "wrong-relay", pubkey = "followed", createdAt = 108, relayUrl = "wss://other"))
+        store.insert(event(id = "wrong-kind", pubkey = "followed", kind = 30023, createdAt = 107, relayUrl = "wss://wanted"))
+        store.insert(event(id = "reply", pubkey = "followed", createdAt = 106, relayUrl = "wss://wanted", replyToId = "parent"))
+        val query = FeedQuery(kinds = setOf(1), followedPubkeys = setOf("followed"),
+            relayUrls = setOf("wss://wanted"), contentFilter = 1)
+        assertEquals(listOf(wanted), store.feedEvents(query, limit = 1, through = TimelineRef("absent", 100)))
+        assertTrue(store.feedEvents(query.copy(followedPubkeys = emptySet()),
+            through = TimelineRef("absent", 100)).isEmpty())
+    }
+
+    @Test
     fun `feedEvents respects limit parameter`() {
         for (i in 1..500) {
             store.insert(event(id = "limit-$i", kind = 1, createdAt = i.toLong()))

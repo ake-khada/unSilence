@@ -500,6 +500,12 @@ fun FeedScreen(
                                         color = TextSecondary,
                                         strokeWidth = 1.5.dp,
                                     )
+                                } else if (!presentation.paging.canLoadMore) {
+                                    Text(
+                                        text = "Reading limit reached · return to top or refresh",
+                                        style = AppTextStyles.bodySmall,
+                                        color = TextSecondary,
+                                    )
                                 } else {
                                     Text(
                                         text = "Load more",

@@ -3393,9 +3393,14 @@ class MemoryEventStore @Inject constructor(
 
     // ─── Query API ──────────────────────────────────────────────────────────
 
-    fun feedEvents(filter: FeedQuery, limit: Int = 300): List<NostrEvent> {
+    /** With [through], rebuild the closest bounded window ending at that cursor.
+     * The cursor need not still have a payload. Used only for explicit session
+     * restoration; ordinary feed queries retain their newest-first behavior. */
+    fun feedEvents(filter: FeedQuery, limit: Int = 300, through: TimelineRef? = null): List<NostrEvent> {
         val result = mutableListOf<NostrEvent>()
-        for (entry in recentByCreatedAt) {
+        val entries = if (through == null) recentByCreatedAt else
+            recentByCreatedAt.headSet(EventEntry(through.id, through.createdAt), true).descendingSet()
+        for (entry in entries) {
             if (result.size >= limit) break
             val event = eventsById[entry.id] ?: continue
             if (event.kind !in filter.kinds) continue
@@ -3414,6 +3419,7 @@ class MemoryEventStore @Inject constructor(
             if (!filter.relayUrls.isNullOrEmpty() && event.relaysSeen.none { it in filter.relayUrls }) continue
             result.add(event)
         }
+        if (through != null) result.reverse()
         return result
     }
 

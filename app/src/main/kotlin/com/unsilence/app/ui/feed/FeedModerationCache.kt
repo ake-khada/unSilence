@@ -13,9 +13,13 @@ import java.lang.ref.WeakReference
  * Mute lists and event content are immutable snapshots; relay provenance is not
  * part of moderation. No lowercase content or parsed hashtag lists are retained.
  */
-internal class FeedModerationCache(private val maxEntries: Int = 1000) {
+internal class FeedModerationCache(
+    private val maxEntries: Int = 1000,
+    private val maxReferenceExclusions: Int = maxEntries,
+) {
     init {
         require(maxEntries > 0)
+        require(maxReferenceExclusions > 0)
     }
 
     private var current: Verdicts? = null
@@ -30,7 +34,7 @@ internal class FeedModerationCache(private val maxEntries: Int = 1000) {
         ) {
             return existing
         }
-        return Verdicts(muteList, hashtagCap, maxEntries).also { current = it }
+        return Verdicts(muteList, hashtagCap, maxEntries, maxReferenceExclusions).also { current = it }
     }
 
     @Synchronized
@@ -42,6 +46,7 @@ internal class FeedModerationCache(private val maxEntries: Int = 1000) {
         internal val muteList: MuteList?,
         internal val hashtagCap: Int?,
         private val maxEntries: Int,
+        private val maxReferenceExclusions: Int,
     ) {
         private class Entry(event: NostrEvent, val excluded: Boolean) {
             // Evicted MES/timeline content must not be kept alive by this cache.
@@ -84,7 +89,7 @@ internal class FeedModerationCache(private val maxEntries: Int = 1000) {
                 synchronized(excludedReferences) {
                     if (excluded && cacheResult) {
                         excludedReferences[event.id] = Unit
-                        if (excludedReferences.size > maxEntries) {
+                        if (excludedReferences.size > maxReferenceExclusions) {
                             val oldest = excludedReferences.entries.iterator()
                             oldest.next()
                             oldest.remove()

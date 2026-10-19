@@ -10,6 +10,7 @@ import androidx.lifecycle.viewModelScope
 import com.unsilence.app.data.auth.KeyManager
 import com.unsilence.app.data.init.InitGate
 import com.unsilence.app.data.memory.FeedRow
+import com.unsilence.app.data.memory.FeedQuery
 import com.unsilence.app.data.memory.isMuted
 import com.unsilence.app.data.memory.MemoryEventStore
 import com.unsilence.app.data.memory.MuteList
@@ -31,6 +32,7 @@ import com.unsilence.app.data.relay.RelayPool
 import com.unsilence.app.data.relay.RelayPreferencesStore
 import com.unsilence.app.data.relay.SubRequest
 import com.unsilence.app.data.relay.TimelineMerge
+import com.unsilence.app.data.relay.TimelineRef
 import com.unsilence.app.data.relay.TimelineService
 import com.unsilence.app.data.relay.WotHydrationCoalescer
 import com.unsilence.app.data.relay.normalizeRelayUrl
@@ -54,6 +56,7 @@ import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.FlowPreview
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -72,6 +75,7 @@ import kotlinx.coroutines.flow.conflate
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import java.util.concurrent.ConcurrentHashMap
 import javax.inject.Inject
@@ -198,6 +202,8 @@ class FeedViewModel @Inject constructor(
     val isAtTop: StateFlow<Boolean> = _isAtTop.asStateFlow()
     private val _isLoading = MutableStateFlow(false)
     private val _isLoadingMore = MutableStateFlow(false)
+    private var loadMoreJob: Job? = null
+    private var loadMoreToken: Any? = null
 
     val isLoading: StateFlow<Boolean> = _isLoading.asStateFlow()
     val isLoadingMore: StateFlow<Boolean> = _isLoadingMore.asStateFlow()
@@ -248,6 +254,7 @@ class FeedViewModel @Inject constructor(
     val trustedHydrationFailed: StateFlow<Boolean> = _trustedHydrationFailed.asStateFlow()
 
     fun setFeedType(type: FeedType) {
+        resetPaging()
         hasFeedChoice = true
         pendingRestoredSession = null
         restoreTimelineOnSubscribe = false
@@ -270,6 +277,7 @@ class FeedViewModel @Inject constructor(
         val wasAutomatic = automaticTrustedGlobal.value
         automaticTrustedGlobal.value = false
         if (!wasAutomatic && lens == storedGlobalFeedLens.value) return
+        resetPaging()
         viewModelScope.launch { relayPreferencesStore.setGlobalFeedLens(lens) }
     }
 
@@ -320,8 +328,14 @@ class FeedViewModel @Inject constructor(
 
     /** Bounded row cache — retains rows across slice swaps so pull-refresh hits instead of re-synth. */
     private val feedRowCache = androidx.collection.LruCache<String, FeedRow>(FEED_ROW_CACHE_SIZE)
-    // One normal timeline plus one pending window. Weak entries retain no bodies.
-    private val moderationCache = FeedModerationCache(2 * TimelineMerge.EVENTS_CAP)
+    // The last projection itself, not another body cache; combine runs serially.
+    private var previousFeedRows: List<FeedRow> = emptyList()
+    // One bounded paged timeline plus the pending window. Weak entries retain no
+    // bodies; the reference-exclusion working set keeps its existing 2,000 bound.
+    private val moderationCache = FeedModerationCache(
+        FeedPagingWindow.MAX_RAW_LIMIT + TimelineMerge.EVENTS_CAP,
+        maxReferenceExclusions = 2 * TimelineMerge.EVENTS_CAP,
+    )
 
     val sensitiveContentMode: StateFlow<SensitiveContentMode> =
         relayPreferencesStore.sensitiveContentMode
@@ -332,6 +346,7 @@ class FeedViewModel @Inject constructor(
         val type: FeedType,
         val lens: GlobalFeedLens,
         val restorationReady: Boolean,
+        val paging: FeedPagingWindow,
     )
 
     private val eventsWithFilter = combine(
@@ -344,6 +359,7 @@ class FeedViewModel @Inject constructor(
         FeedProjectionInput(
             timeline.events, filter, type, lens ?: GlobalFeedLens.TRUSTED,
             timeline.isSeededFor(type, filter) && (type != FeedType.Global || lens != null),
+            timeline.paging,
         )
     }
     private val feedSafetyFlow = combine(
@@ -366,8 +382,10 @@ class FeedViewModel @Inject constructor(
             val projected = FeedPresentation(
                 selection = FeedSelection(input.type.savedSource(), filter, cf.value),
                 restorationReady = input.restorationReady,
+                paging = input.paging,
             )
             if (events.isEmpty()) {
+                previousFeedRows = emptyList()
                 feedRowCache.evictAll()
                 _globalFeedDropCounters.value = GlobalFeedDropCounters()
                 _trustedHiddenCount.value = 0
@@ -392,11 +410,11 @@ class FeedViewModel @Inject constructor(
             val preActivityCandidates = policyProjection.accepted
             requestActivityCandidateSweep(filter, preActivityCandidates)
 
-            val displayed = preActivityCandidates.asSequence()
-                .filter { matchesActivityThresholds(it, filter) }
-                .take(FEED_DISPLAY_CAP)
-                .toList()
+            val page = input.paging.project(
+                preActivityCandidates.filter { matchesActivityThresholds(it, filter) }, previousFeedRows)
+            val displayed = page.events
             if (displayed.isEmpty()) {
+                previousFeedRows = emptyList()
                 feedRowCache.evictAll()
                 return@combine projected
             }
@@ -408,29 +426,12 @@ class FeedViewModel @Inject constructor(
             // active timeline must stay in MES for EventModel resolution.
             memoryEventStore.markTouched(displayedIds)
 
-            val missingIds = displayedIds.filter { feedRowCache.get(it) == null }
-            val hitCount = displayedIds.size - missingIds.size
-            feedTrace { "feedRowCache hit=${hitCount} miss=${missingIds.size}" }
-
-            // Fetch only missing rows from MES
-            if (missingIds.isNotEmpty()) {
-                val missingSet = missingIds.toSet()
-                val newRows = memoryEventStore.feedRowsByIds(missingSet)
-                for (row in newRows) {
-                    feedRowCache.put(row.id, row)
-                }
-                // Synthesize fallback for any still-missing (race with MES insert)
-                for (id in missingIds) {
-                    if (feedRowCache.get(id) == null) {
-                        val evt = displayed.first { it.id == id }
-                        feedRowCache.put(id, memoryEventStore.synthesizeFeedRow(evt))
-                    }
-                }
-            }
-
-            // LRU bounds the cache — no manual eviction needed
-            // Build ordered result from cache
-            projected.copy(rows = displayed.mapNotNull { evt -> feedRowCache.get(evt.id) })
+            projected.copy(
+                rows = resolveFeedRows(displayed, feedRowCache,
+                    memoryEventStore::feedRowsByIds, memoryEventStore::synthesizeFeedRow,
+                    previousFeedRows).also { previousFeedRows = it },
+                nextBufferedEnd = page.nextBufferedEnd,
+            )
         }
             .conflate()
             .flowOn(Dispatchers.Default)
@@ -472,10 +473,10 @@ class FeedViewModel @Inject constructor(
         val targetResolver = memoryEventStore::getNostrEvent
         return buildList {
             for ((index, event) in events.withIndex()) {
-                // Pagination can exceed EVENTS_CAP. Check the older tail normally
-                // without letting a sequential scan evict the entire hot window.
+                // Cache the entire bounded reading window, not just its first
+                // 1,000 rows; pending passes have their own capacity headroom.
                 if (memoryEventStore.isDeleted(event)) continue
-                if (moderation.excludes(event, targetResolver, cacheResult = index < TimelineMerge.EVENTS_CAP)) continue
+                if (moderation.excludes(event, targetResolver, cacheResult = index < FeedPagingWindow.MAX_RAW_LIMIT)) continue
                 if (!matchesFeedFilterBeforeActivity(event, filter, nowSec, enabledKinds)) continue
                 if (!matchesContentFilter(event, cf)) continue
                 if (hideSensitive && event.hasContentWarning) continue
@@ -522,6 +523,7 @@ class FeedViewModel @Inject constructor(
 
     fun setContentFilter(f: FeedContentFilter) {
         if (_contentFilter.value == f) return
+        resetPaging()
         pendingRestoredSession = null
         restoreTimelineOnSubscribe = false
         feedTrace { "setContentFilter: ${_contentFilter.value} → $f" }
@@ -532,6 +534,7 @@ class FeedViewModel @Inject constructor(
 
     fun updateFilter(filter: FeedFilter) {
         if (filter != _filter.value) {
+            resetPaging()
             pendingRestoredSession = null
             restoreTimelineOnSubscribe = false
         }
@@ -750,6 +753,7 @@ class FeedViewModel @Inject constructor(
      */
     private suspend fun setupSubscription(key: ResubKey, resetView: Boolean) {
         refreshTimeoutJob?.cancel()
+        cancelLoadMore()
         lastFeedType = key.type
 
         // Manage FEED_SUB tag: remove from previous, add to new.
@@ -777,19 +781,27 @@ class FeedViewModel @Inject constructor(
         // the live list and admit subsequent content exclusively through their relay REQs.
         lastActivitySweepKey = null
         if (resetView) resetTrustedCandidateSweep()
-        val cachedEvents = if (resetView) loadCachedEvents(key.type, key.filter) else emptyList()
+        val restoring = restoredSession?.takeIf {
+            resetView && restoreTimelineOnSubscribe && it.source.restore() == key.type && it.filter == key.filter
+        }
+        val cachedEvents = if (resetView) withContext(Dispatchers.Default) {
+            loadCachedEvents(key.type, key.filter, restoring)
+        } else emptyList()
         if (resetView) {
-            val restoring = restoredSession?.takeIf {
-                restoreTimelineOnSubscribe && it.source.restore() == key.type && it.filter == key.filter
-            }
             restoreTimelineOnSubscribe = false
+            val paging = FeedPagingWindow(
+                pages = restoring?.pagingPages ?: 0,
+                through = restoring?.pagingThrough,
+                generation = _timeline.value.paging.generation + 1,
+            )
             _timeline.value = FeedTimeline(
-                events = TimelineMerge.merge(
-                    cachedEvents,
+                events = paging.merge(
                     restoring?.eventIds.orEmpty().mapNotNull(memoryEventStore::getNostrEvent),
+                    cachedEvents,
                 ),
                 source = key.type,
                 filter = key.filter,
+                paging = paging,
             )
             _newEvents.value = emptyList()
             _liveArrivalIds.value = emptySet()
@@ -830,9 +842,7 @@ class FeedViewModel @Inject constructor(
             },
             onNew    = { event -> handleNew(event) },
             seedHead = _timeline.value.events.firstOrNull()?.createdAt,
-            onHistory = { history ->
-                _timeline.update { it.copy(events = TimelineMerge.merge(it.events, history)) }
-            },
+            onHistory = ::handleHistory,
         )
         feedTrace { "setupSubscription: started subs=${subRequests.size} since=$since cached=${cachedEvents.size} events=${_timeline.value.events.size}" }
 
@@ -856,11 +866,11 @@ class FeedViewModel @Inject constructor(
         feedTrace { "handleBatch: size=${batch.size} eosed=$eosed since=$since current=${_timeline.value.events.size}" }
         if (batch.isNotEmpty()) {
             if (since == null) {
-                _timeline.update { it.copy(events = TimelineMerge.merge(it.events, batch)) }
+                _timeline.update { it.merge(batch) }
             } else {
                 val history = batch.filter { it.createdAt < since }
                 if (history.isNotEmpty()) {
-                    _timeline.update { it.copy(events = TimelineMerge.merge(it.events, history)) }
+                    handleHistory(history)
                 }
                 val newer = batch.filter { it.createdAt >= since }
                 if (newer.isNotEmpty()) {
@@ -876,6 +886,10 @@ class FeedViewModel @Inject constructor(
         }
     }
 
+    private fun handleHistory(history: List<NostrEvent>) {
+        _timeline.update { it.merge(history) }
+    }
+
     /**
      * Mirrors Jumble NoteList:handleNewEvents for single live-tail events.
      *   - At top: merge into events (visible immediately)
@@ -884,7 +898,7 @@ class FeedViewModel @Inject constructor(
     private fun handleNew(event: NostrEvent) {
         if (_isAtTop.value) {
             _liveArrivalIds.update { it + event.id }
-            _timeline.update { it.copy(events = TimelineMerge.merge(it.events, listOf(event))) }
+            _timeline.update { it.merge(listOf(event)) }
         } else {
             _newEvents.update { current -> TimelineMerge.merge(current, listOf(event)) }
         }
@@ -894,7 +908,7 @@ class FeedViewModel @Inject constructor(
     private fun handleNewBatch(newEvents: List<NostrEvent>) {
         if (_isAtTop.value) {
             _liveArrivalIds.update { it + newEvents.map { e -> e.id }.toSet() }
-            _timeline.update { it.copy(events = TimelineMerge.merge(it.events, newEvents)) }
+            _timeline.update { it.merge(newEvents) }
         } else {
             _newEvents.update { current -> TimelineMerge.merge(current, newEvents) }
         }
@@ -920,7 +934,10 @@ class FeedViewModel @Inject constructor(
     fun setAtTop(atTop: Boolean) {
         val wasAtTop = _isAtTop.value
         _isAtTop.value = atTop
-        if (atTop && !wasAtTop) flushPending()
+        if (atTop && (!wasAtTop || _timeline.value.paging.pages > 0)) {
+            resetPaging()
+            flushPending()
+        }
     }
 
     fun onDotTapped() = setAtTop(true)
@@ -929,28 +946,66 @@ class FeedViewModel @Inject constructor(
         val pending = _newEvents.value
         if (pending.isEmpty()) return
         _liveArrivalIds.update { it + pending.map { e -> e.id }.toSet() }
-        _timeline.update { it.copy(events = TimelineMerge.merge(it.events, pending)) }
+        _timeline.update { it.merge(pending) }
         _newEvents.value = emptyList()
     }
 
     fun loadMore() {
         if (_isLoadingMore.value) return
+        val timeline = _timeline.value
+        val window = timeline.paging
+        val projected = presentation.value
+        // Do not act on a projection from a previous selection or paging step.
+        if (!window.canLoadMore || projected.paging != window ||
+            projected.selection != FeedSelection(_feedType.value.savedSource(), _filter.value, _contentFilter.value.value)
+        ) return
+
+        val bufferedEnd = projected.nextBufferedEnd
+        if (bufferedEnd != null && timeline.events.any { it.id == bufferedEnd.id }) {
+            _timeline.update { if (it.paging == window) it.copy(paging = window.advance(bufferedEnd)) else it }
+            return
+        }
         val handle = currentHandle ?: return
-        val until = _timeline.value.events.lastOrNull()?.createdAt ?: return
-        viewModelScope.launch {
-            _isLoadingMore.value = true
+        val until = timeline.events.lastOrNull()?.createdAt ?: return
+        if (!_isLoadingMore.compareAndSet(false, true)) return
+        val token = Any()
+        loadMoreToken = token
+        loadMoreJob = viewModelScope.launch {
             try {
-                val older = timelineService.fetchOlderTimeline(handle.timelineKey, until, 100)
-                if (currentHandle === handle && older.isNotEmpty()) {
-                    _timeline.update { it.copy(events = TimelineMerge.merge(it.events, older, capTail = false)) }
+                val older = timelineService.fetchOlderTimeline(handle.timelineKey, until, FeedPagingWindow.PAGE_SIZE)
+                if (loadMoreToken === token && currentHandle === handle && older.isNotEmpty()) {
+                    _timeline.update {
+                        if (it.paging == window) it.copy(paging = window.advance(older.last().pageCursor())).merge(older)
+                        else it
+                    }
                 }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (failure: Exception) {
+                Log.w(TAG, "Older feed page failed", failure)
             } finally {
-                _isLoadingMore.value = false
+                if (loadMoreToken === token) {
+                    loadMoreToken = null
+                    _isLoadingMore.value = false
+                }
             }
         }
     }
 
+    private fun cancelLoadMore() {
+        loadMoreToken = null
+        loadMoreJob?.cancel()
+        loadMoreJob = null
+        _isLoadingMore.value = false
+    }
+
+    private fun resetPaging() {
+        cancelLoadMore()
+        _timeline.update { it.resetPaging() }
+    }
+
     fun refresh() {
+        resetPaging()
         pendingRestoredSession = null
         restoreTimelineOnSubscribe = false
         if (_trustedHydrationFailed.value) retryTrustedHydration()
@@ -978,6 +1033,7 @@ class FeedViewModel @Inject constructor(
         val now = System.currentTimeMillis()
         if (_isRefreshing.value) return
         if (now - lastRefreshAt < REFRESH_DEBOUNCE_MS) return
+        resetPaging()
         pendingRestoredSession = null
         restoreTimelineOnSubscribe = false
         lastRefreshAt = now
@@ -1004,7 +1060,8 @@ class FeedViewModel @Inject constructor(
                         isAtTop = _isAtTop.value,
                     )
                     putString(FEED_JSON_KEY, encodeFeedSession(
-                        feedSessionForSave(current, pendingRestoredSession, presentation.value),
+                        feedSessionForSave(current, pendingRestoredSession, presentation.value,
+                            _hydrationViewport.value.first),
                     ))
                 }
             }
@@ -1161,14 +1218,41 @@ class FeedViewModel @Inject constructor(
             } else emptyList()
             if (cached.isNotEmpty()) {
                 feedTrace { "snapshot restored: merging ${cached.size} cached events into ${_timeline.value.events.size} current" }
-                _timeline.update { it.copy(events = TimelineMerge.merge(it.events, cached)) }
+                _timeline.update { it.merge(cached) }
             }
         }
     }
 
-    private fun loadCachedEvents(type: FeedType, filter: FeedFilter): List<NostrEvent> {
+    private fun loadCachedEvents(
+        type: FeedType,
+        filter: FeedFilter,
+        restoring: SavedFeedSession? = null,
+    ): List<NostrEvent> {
         val kinds = filter.enabledKinds.toSet()
         if (kinds.isEmpty()) return emptyList()
+        // Rebuild a deep window during the existing one-shot restore seed, not
+        // by carrying thousands of IDs through Binder or fetching relay pages.
+        val through = restoring?.pagingThrough?.takeIf {
+            !restoring.isAtTop && restoring.pagingPages > 0
+        }
+        if (through != null) {
+            val query = when (type) {
+                FeedType.Following -> FeedQuery(kinds = kinds, followedPubkeys =
+                    keyManager.getPublicKeyHex()?.let(memoryEventStore::getFollows).orEmpty())
+                FeedType.Global -> FeedQuery(kinds = kinds)
+                is FeedType.SingleRelay -> FeedQuery(kinds = kinds, relayUrls = setOf(type.url))
+                is FeedType.RelaySet -> {
+                    val urls = keyManager.getPublicKeyHex()
+                        ?.let { memoryEventStore.getSetMembers(it, type.dTag) }.orEmpty()
+                        .mapNotNull(::normalizeRelayUrl).toSet()
+                    if (urls.isEmpty()) return emptyList()
+                    FeedQuery(kinds = kinds, relayUrls = urls)
+                }
+            }
+            return memoryEventStore.feedEvents(query,
+                limit = FeedPagingWindow(restoring.pagingPages).rawLimit,
+                through = TimelineRef(through.id, through.createdAt))
+        }
         return when (type) {
             is FeedType.Following -> {
                 val follows = keyManager.getPublicKeyHex()
@@ -1475,7 +1559,6 @@ class FeedViewModel @Inject constructor(
         const val ENGAGEMENT_LOOKAHEAD_CHURNY = 6
         const val ACTIVITY_SWEEP_CANDIDATE_LIMIT = 150
         const val TRUSTED_SWEEP_CANDIDATE_LIMIT = 150
-        const val FEED_DISPLAY_CAP = 500
         const val SNAPSHOT_MERGE_CEILING = 20
         /** Debounce window — collapses frantic mashing, not deliberate retries. */
         const val REFRESH_DEBOUNCE_MS = 1_500L

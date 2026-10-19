@@ -5,7 +5,7 @@ import com.unsilence.app.domain.model.FeedFilter
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 
-// Save references, never event bodies or media. The visible feed is capped at 500 rows.
+// Activity state carries a small reading neighborhood, not the whole paged feed.
 internal const val SAVED_FEED_EVENT_LIMIT = 500
 private const val MAX_SAVED_FEED_CHARS = 96 * 1024
 private val FeedStateJson = Json { ignoreUnknownKeys = true }
@@ -41,6 +41,8 @@ internal data class SavedFeedSession(
     val automaticTrustedGlobal: Boolean = false,
     val isAtTop: Boolean = true,
     val eventIds: List<String> = emptyList(),
+    val pagingPages: Int = 0,
+    val pagingThrough: FeedPageCursor? = null,
 )
 
 internal fun encodeFeedSession(state: SavedFeedSession): String? =
@@ -51,5 +53,6 @@ internal fun decodeFeedSession(encoded: String?, owner: String): SavedFeedSessio
     if (encoded.isNullOrEmpty() || encoded.length > MAX_SAVED_FEED_CHARS) return null
     return runCatching { FeedStateJson.decodeFromString<SavedFeedSession>(encoded) }.getOrNull()
         ?.takeIf { it.owner == owner && it.source.restore() != null }
-        ?.let { it.copy(eventIds = it.eventIds.take(SAVED_FEED_EVENT_LIMIT)) }
+        ?.let { it.copy(eventIds = it.eventIds.take(SAVED_FEED_EVENT_LIMIT),
+            pagingPages = it.pagingPages.coerceIn(0, FeedPagingWindow.MAX_PAGES)) }
 }

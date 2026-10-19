@@ -23,6 +23,28 @@ class FeedModerationCacheTest {
     private val noTarget: (String) -> NostrEvent? = { null }
     private val emptyMutes = MuteList(emptySet(), emptySet(), emptySet(), emptySet())
 
+    @Test fun `larger verdict capacity does not widen reference exclusion bound`() {
+        val policy = FeedModerationCache(100, maxReferenceExclusions = 2)
+            .forPolicy(emptyMutes.copy(words = setOf("spam")), null)
+        val wrappers = List(3) { repost(6, "target-$it").copy(id = "wrapper-$it") }
+        wrappers.forEach { assertTrue(policy.excludes(it, { id -> event(id, "spam") })) }
+        assertFalse(policy.excludes(wrappers[0], noTarget))
+        assertTrue(policy.excludes(wrappers[1], noTarget))
+        assertTrue(policy.excludes(wrappers[2], noTarget))
+    }
+
+    @Test fun `expanded reading and pending windows reuse weak verdicts without scanning content again`() {
+        val cache = FeedModerationCache(3500, maxReferenceExclusions = 2000)
+        val tags = CountingTags()
+        val rows = List(2500) { event("feed-$it", "Reading #topic", tags) }
+        val pending = List(1000) { event("pending-$it", "Reading #topic", tags) }
+        repeat(3) {
+            val policy = cache.forPolicy(emptyMutes, 5)
+            (rows + pending).forEach { assertFalse(policy.excludes(it, noTarget)) }
+        }
+        assertEquals(3500, tags.reads.get())
+    }
+
     @Test
     fun `unchanged feed and pending passes reuse verdicts without rescanning tags`() {
         val cache = FeedModerationCache(2000)

@@ -28,6 +28,17 @@ class FeedPresentationTest {
     )
     private val current = saved.copy(eventIds = emptyList())
 
+    @Test fun `paging metadata survives ready and pending activity saves but not a selection change`() {
+        val window = FeedPagingWindow(5, FeedPageCursor(100, "bottom"))
+        val settled = FeedPresentation(selection = saved.selection, restorationReady = true, paging = window)
+        val ready = feedSessionForSave(current, null, settled)
+        assertEquals(window.pages, ready.pagingPages)
+        assertEquals(window.through, ready.pagingThrough)
+        assertEquals(ready, feedSessionForSave(current, ready, FeedPresentation()))
+        val switched = current.copy(source = FeedType.Following.savedSource())
+        assertEquals(switched, feedSessionForSave(switched, ready, FeedPresentation()))
+    }
+
     @Test fun `another save before projection retains pending references and reading intent`() {
         val loading = feedSessionForSave(current, saved, FeedPresentation())
         assertEquals(saved, loading)

@@ -58,4 +58,26 @@ class FeedSavedStateTest {
         assertNull(encodeFeedSession(state))
         assertNull(decodeFeedSession("x".repeat(100_000), "owner"))
     }
+
+    @Test fun `largest paging budget saves only 500 ids but preserves its cursor and page count`() {
+        val ids = List(2000) { it.toString(16).padStart(64, '0') }
+        val state = SavedFeedSession("owner", FeedType.Following.savedSource(), isAtTop = false,
+            eventIds = ids, pagingPages = FeedPagingWindow.MAX_PAGES,
+            pagingThrough = FeedPageCursor(123, ids.last()))
+        val encoded = encodeFeedSession(state)
+        assertNotNull(encoded)
+        assertEquals(state.copy(eventIds = ids.take(500)), decodeFeedSession(encoded, "owner"))
+        assertTrue(encoded!!.length < 96 * 1024)
+    }
+
+    @Test fun `legacy saved state has normal paging limits and invalid page counts are bounded`() {
+        val legacy = """{"owner":"owner","source":{"kind":"following"},"eventIds":["a"]}"""
+        assertEquals(0, decodeFeedSession(legacy, "owner")!!.pagingPages)
+        assertNull(decodeFeedSession(legacy, "owner")!!.pagingThrough)
+        for (pages in listOf(-10, 10000)) {
+            val state = SavedFeedSession("owner", FeedType.Following.savedSource(), pagingPages = pages)
+            assertEquals(pages.coerceIn(0, FeedPagingWindow.MAX_PAGES),
+                decodeFeedSession(encodeFeedSession(state), "owner")!!.pagingPages)
+        }
+    }
 }
