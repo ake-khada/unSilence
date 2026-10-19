@@ -662,6 +662,7 @@ class RelayPool @Inject constructor(
      * Never use completion alone as evidence that engagement was fetched. */
     internal val oneShotEoseCallbacks = ConcurrentHashMap<String, CompletableDeferred<Unit>>()
     private val oneShotOutcomes = OneShotOutcomes()
+    private val idRequestBackoff = RelayIdRequestBackoff()
     /** Per-subId set of relay URLs the one-shot was sent to. */
     private val oneShotSubTargets = ConcurrentHashMap<String, Set<String>>()
     /** Per-subId set of relay URLs that have EOSE'd or CLOSED. */
@@ -803,13 +804,24 @@ class RelayPool @Inject constructor(
         val eventFetchInFlightPeak: Int,
         val missingRefCacheSize: Int,
         val missingRefCacheHits: Long,
+        val idLookupSent: Long,
+        val idLookupBackoffSkips: Long,
+        val idLookupBackoffOpened: Long,
+        val idLookupBackoffRelays: Int,
     )
 
-    fun snapshotRelayMetrics(): RelayMetrics = RelayMetrics(
-        eventFetchInFlightPeak = eventFetchInFlightPeak.getAndSet(0),
-        missingRefCacheSize = missingRefCache.size,
-        missingRefCacheHits = missingRefCacheHits.getAndSet(0),
-    )
+    fun snapshotRelayMetrics(): RelayMetrics {
+        val ids = idRequestBackoff.snapshotMetrics()
+        return RelayMetrics(
+            eventFetchInFlightPeak = eventFetchInFlightPeak.getAndSet(0),
+            missingRefCacheSize = missingRefCache.size,
+            missingRefCacheHits = missingRefCacheHits.getAndSet(0),
+            idLookupSent = ids.sent,
+            idLookupBackoffSkips = ids.skipped,
+            idLookupBackoffOpened = ids.opened,
+            idLookupBackoffRelays = ids.activeRelays,
+        )
+    }
 
     // ── In-flight fetch monitor ──────────────────────────────────────
 
@@ -912,11 +924,12 @@ class RelayPool @Inject constructor(
         canCreateNew = {
             bypassPoolCap || ensurePoolSlot(forceEvict)
         },
-        beforeInstall = { installedUrl, _ ->
+        beforeInstall = { installedUrl, replaced ->
             // Applies to both first install and replacement. If any stale
             // URL-scoped state survived an older removal path, it cannot leak
             // into this socket's one-shot ownership.
             resetConnectionScopedState(installedUrl)
+            replaced?.let(idRequestBackoff::forgetOwner)
             if (resetAuth) resetRelayAuthState(installedUrl)
             connectionLastActivity[installedUrl] = System.currentTimeMillis()
         },
@@ -927,6 +940,7 @@ class RelayPool @Inject constructor(
         clearPurposes: Boolean = false,
     ): RelayConnection? = synchronized(socketLifecycleLock) {
         val removed = connectionRegistry.remove(url) ?: return@synchronized null
+        idRequestBackoff.forgetOwner(removed)
         resetConnectionScopedState(url)
         connectionLastActivity.remove(url)
         if (clearPurposes) connectionPurposes.remove(url)
@@ -939,6 +953,7 @@ class RelayPool @Inject constructor(
         clearPurposes: Boolean = false,
     ): RelayConnection? = synchronized(socketLifecycleLock) {
         if (connectionRegistry.remove(url, expected) == null) return@synchronized null
+        idRequestBackoff.forgetOwner(expected)
         resetConnectionScopedState(url)
         connectionLastActivity.remove(url)
         if (clearPurposes) connectionPurposes.remove(url)
@@ -1027,7 +1042,9 @@ class RelayPool @Inject constructor(
                 extractReqSubId(req)?.let { subId -> recordOneShotRelayCoverage(subId, conn.url, OneShotOutcome.SKIPPED) }
                 return@synchronized
             }
-            if (relayCapabilitiesStore.shouldSkipRequest(current.url, requestClass, bypassCooldown)) {
+            if (relayCapabilitiesStore.shouldSkipRequest(current.url, requestClass, bypassCooldown) ||
+                idRequestBackoff.shouldSkip(current.url, req)
+            ) {
                 extractReqSubId(req)?.let { subId -> recordOneShotRelayCoverage(subId, current.url, OneShotOutcome.SKIPPED) }
                 Log.d(TAG, "One-shot REQ skipped for ${current.url} ($requestClass)")
                 return@synchronized
@@ -1045,11 +1062,14 @@ class RelayPool @Inject constructor(
             count.incrementAndGet()
             val ownerKey = extractReqSubId(req)?.let { RelayOneShotOwnerKey(it, current.url) }
             if (ownerKey != null) relayOneShotOwners[ownerKey] = current
-            if (!current.send(req)) {
+            val outcome = idRequestBackoff.send(current, current.url, req) { current.send(req) }
+            if (outcome != null) {
                 count.decrementAndGet()
                 if (ownerKey != null) relayOneShotOwners.remove(ownerKey, current)
-                extractReqSubId(req)?.let { subId -> recordOneShotRelayCoverage(subId, current.url, OneShotOutcome.FAILED) }
-                Log.w(TAG, "One-shot send failed for ${current.url}; slot released")
+                extractReqSubId(req)?.let { subId -> recordOneShotRelayCoverage(subId, current.url, outcome) }
+                if (outcome == OneShotOutcome.FAILED) {
+                    Log.w(TAG, "One-shot send failed for ${current.url}; slot released")
+                }
             }
         }
     }
@@ -1073,7 +1093,9 @@ class RelayPool @Inject constructor(
             Log.w(TAG, "sendOneShotPooledOrEphemeral: skipping invalid relay url: ${url.take(80)}")
             return
         }
-        if (relayCapabilitiesStore.shouldSkipRequest(clean, requestClass)) {
+        if (relayCapabilitiesStore.shouldSkipRequest(clean, requestClass) ||
+            idRequestBackoff.shouldSkip(clean, req)
+        ) {
             recordOneShotRelayCoverage(subId, clean, OneShotOutcome.SKIPPED)
             return
         }
@@ -1116,7 +1138,7 @@ class RelayPool @Inject constructor(
                         conn.url,
                         queued.requestClass,
                         queued.bypassCooldown,
-                    )
+                    ) || idRequestBackoff.shouldSkip(conn.url, queued.payload)
                 ) {
                     extractReqSubId(queued.payload)?.let { subId ->
                         recordOneShotRelayCoverage(subId, conn.url, OneShotOutcome.SKIPPED)
@@ -1126,14 +1148,19 @@ class RelayPool @Inject constructor(
                 count.incrementAndGet()
                 val ownerKey = extractReqSubId(queued.payload)?.let { RelayOneShotOwnerKey(it, conn.url) }
                 if (ownerKey != null) relayOneShotOwners[ownerKey] = conn
-                if (conn.send(queued.payload)) {
+                val outcome = idRequestBackoff.send(conn, conn.url, queued.payload) { conn.send(queued.payload) }
+                if (outcome == null) {
                     Log.d(TAG, "Flushed queued REQ on ${conn.url} (${count.get()}/$MAX_CONCURRENT_REQS_PER_RELAY active)")
                 } else {
                     count.decrementAndGet()
                     if (ownerKey != null) relayOneShotOwners.remove(ownerKey, conn)
-                    queue.add(queued)
-                    Log.w(TAG, "Queued REQ send failed for ${conn.url}; slot released")
-                    break
+                    if (outcome == OneShotOutcome.SKIPPED) {
+                        extractReqSubId(queued.payload)?.let { recordOneShotRelayCoverage(it, conn.url, outcome) }
+                    } else {
+                        queue.add(queued)
+                        Log.w(TAG, "Queued REQ send failed for ${conn.url}; slot released")
+                        break
+                    }
                 }
             }
         }
@@ -1407,6 +1434,7 @@ class RelayPool @Inject constructor(
 
     /** Clear transient caches. Called on logout. */
     fun clearCaches() {
+        idRequestBackoff.clear()
         profileFetchAttempted.clear()
         hintedProfileFetchAttempted.clear()
         profileFallbackNegCache.clear()
@@ -1534,6 +1562,7 @@ class RelayPool @Inject constructor(
         val activeFeedRelay = activeSingleRelayFeedUrl?.let(::normalizeRelayUrl)
         val bypassRelays = capabilityBypassRelays.mapNotNull { normalizeRelayUrl(it) }.toSet()
         val logBypass = bypassRelays.isNotEmpty()
+        val onlyIdLookups = reqs.isNotEmpty() && reqs.all { idLookupSubId(it) != null }
         val normalized = oneShotRelayTargets(
             relayUrls = urls,
             activeSingleRelayFeedUrl = activeFeedRelay,
@@ -1545,7 +1574,7 @@ class RelayPool @Inject constructor(
                         relayUrl,
                         requestClass,
                         bypassCooldown = relayUrl in bypassRelays,
-                    )
+                    ) && !(onlyIdLookups && idRequestBackoff.shouldSkip(relayUrl))
             }
         if (logBypass) {
             Log.i(TAG, "sendOneShotBatch: capability bypass relays=${bypassRelays.joinToString(",")}")
@@ -1693,6 +1722,15 @@ class RelayPool @Inject constructor(
             subIds.forEach { recordOneShotRelayCoverage(it, url, OneShotOutcome.SKIPPED) }
             return
         }
+        // A mixed batch may still contain feed/search/engagement work. Never suppress
+        // those REQs just because the same socket also carries a backed-off ID lookup.
+        val eligibleReqs = reqs.filter { req ->
+            if (!idRequestBackoff.shouldSkip(url, req)) true else {
+                extractReqSubId(req)?.let { recordOneShotRelayCoverage(it, url, OneShotOutcome.SKIPPED) }
+                false
+            }
+        }
+        if (eligibleReqs.isEmpty()) return
         // Rate limit: min 50ms gap per URL
         val lastOpen = ephemeralLastOpenNanos.computeIfAbsent(url) { AtomicLong(0) }
         val now = System.nanoTime()
@@ -1714,6 +1752,15 @@ class RelayPool @Inject constructor(
                 subIds.forEach { recordOneShotRelayCoverage(it, url, OneShotOutcome.SKIPPED) }
                 return
             }
+            // Waiting for a permit may outlast another ID query's rejection.
+            // Recheck before opening a socket, as well as at the actual send.
+            val readyReqs = eligibleReqs.filter { req ->
+                if (!idRequestBackoff.shouldSkip(url, req)) true else {
+                    extractReqSubId(req)?.let { recordOneShotRelayCoverage(it, url, OneShotOutcome.SKIPPED) }
+                    false
+                }
+            }
+            if (readyReqs.isEmpty()) return
             val conn = relayConnectionFactory.create(url)
             activeEphemeralConnections.add(conn)
             var unfinishedOutcome = OneShotOutcome.FAILED
@@ -1736,14 +1783,19 @@ class RelayPool @Inject constructor(
                 }
 
                 // Send all REQs
-                reqs.forEach { req ->
-                    if (!conn.send(req)) {
-                        extractReqSubId(req)?.let { recordOneShotRelayCoverage(it, url, OneShotOutcome.FAILED) }
+                val pendingSubs = mutableSetOf<String>()
+                readyReqs.forEach { req ->
+                    val subId = extractReqSubId(req)
+                    val outcome = idRequestBackoff.send(conn, url, req) { conn.send(req) }
+                    if (outcome != null) {
+                        subId?.let { recordOneShotRelayCoverage(it, url, outcome) }
+                    } else if (subId in subIds) {
+                        pendingSubs.add(requireNotNull(subId))
                     }
                 }
+                if (pendingSubs.isEmpty()) return
 
                 // Collect events until all sub-IDs EOSE'd or timeout
-                val pendingSubs = subIds.toMutableSet()
                 val completed = withTimeoutOrNull(timeoutMs) {
                     conn.messages.consumeEach { raw ->
                         when {
@@ -1757,6 +1809,7 @@ class RelayPool @Inject constructor(
                                 processor.process(raw, url)
                                 val eoseSubId = extractEoseSubId(raw)
                                 if (eoseSubId != null && eoseSubId in pendingSubs) {
+                                    idRequestBackoff.onEose(conn, eoseSubId)
                                     relayCapabilitiesStore.recordRequestSuccess(url)
                                     conn.send("""["CLOSE","$eoseSubId"]""")
                                     recordOneShotRelayCoverage(eoseSubId, url, OneShotOutcome.EOSE)
@@ -1778,6 +1831,7 @@ class RelayPool @Inject constructor(
                                     relayCapabilitiesStore.learnFromClosed(url, reason)
                                 }
                                 if (closedSubId != null && closedSubId in pendingSubs) {
+                                    recordIdLookupClosed(conn, closedSubId, reason)
                                     recordOneShotRelayCoverage(closedSubId, url, OneShotOutcome.CLOSED)
                                     pendingSubs.remove(closedSubId)
                                     if (pendingSubs.isEmpty()) return@withTimeoutOrNull
@@ -1804,6 +1858,7 @@ class RelayPool @Inject constructor(
                 // Release lifecycle waiters, but retain the actual outcome for freshness.
                 val outcome = if (currentCoroutineContext().isActive) unfinishedOutcome else OneShotOutcome.CANCELLED
                 subIds.forEach { recordOneShotRelayCoverage(it, url, outcome) }
+                idRequestBackoff.forgetOwner(conn)
                 activeEphemeralConnections.remove(conn)
                 conn.close()
             }
@@ -1982,6 +2037,9 @@ class RelayPool @Inject constructor(
                         // A CLOSED relay won't send EOSE — release its slot and
                         // count it as done for coverage so it doesn't force a full timeout.
                         if (isOneShot) {
+                            // Learn before release drains the queue; otherwise the next
+                            // already-queued ID request escapes a newly opened backoff.
+                            recordIdLookupClosed(conn, closedSubId, reason)
                             releaseOneShotForRelay(closedSubId, conn.url, conn)
                             recordOneShotRelayCoverage(closedSubId, conn.url, OneShotOutcome.CLOSED)
                         }
@@ -2099,6 +2157,12 @@ class RelayPool @Inject constructor(
         }
     }
 
+    private fun recordIdLookupClosed(conn: RelayConnection, subId: String, reason: String) {
+        if (idRequestBackoff.onClosed(conn, subId, reason)) {
+            Log.w(TAG, "ID-BACKOFF: ${conn.url} paused ID lookups for ${ID_REQUEST_BACKOFF_MS}ms after empty CLOSEDs")
+        }
+    }
+
     /**
      * Fix 3: Subscription lifecycle — CLOSE after EOSE for one-shot subscriptions.
      *
@@ -2111,6 +2175,8 @@ class RelayPool @Inject constructor(
      */
     private fun handleEose(conn: RelayConnection, raw: String) {
         val subId = extractEoseSubId(raw) ?: return
+        // This handler receives real wire EOSE only, never watchdog/CLOSED/skip.
+        idRequestBackoff.onEose(conn, subId)
         val isTrackedRequest = _activePages.containsKey(subId) || subId in _activeOneShotSubs
         if (isTrackedRequest) relayCapabilitiesStore.recordRequestSuccess(conn.url)
         // Paginated fetch: signal EOSE without sending CLOSE (pagination loop decides)
@@ -2131,6 +2197,7 @@ class RelayPool @Inject constructor(
     /** Remove a one-shot sub from all tracking maps, release slots for every
      *  target relay (idempotent — skips already-released), and clean up. */
     internal fun cleanupOneShotSub(subId: String) {
+        idRequestBackoff.forgetSubscription(subId)
         _activeOneShotSubs.remove(subId)
         oneShotEoseCallbacks.remove(subId)
         val targets = oneShotSubTargets.remove(subId) ?: emptySet()
@@ -4485,10 +4552,12 @@ class RelayPool @Inject constructor(
         val indexerUrls = relayPreferencesStore.get().indexerRelayUrlsSnapshot()
             .mapNotNull { normalizeRelayUrl(it) }.toSet()
         val nonIndexer = connections.values.filter {
-            it.url !in indexerUrls && !relayCapabilitiesStore.shouldSkip(it.url)
+            it.url !in indexerUrls && !relayCapabilitiesStore.shouldSkip(it.url) &&
+                !idRequestBackoff.shouldSkip(it.url)
         }.shuffled()
         val indexer = connections.values.filter {
-            it.url in indexerUrls && !relayCapabilitiesStore.shouldSkip(it.url)
+            it.url in indexerUrls && !relayCapabilitiesStore.shouldSkip(it.url) &&
+                !idRequestBackoff.shouldSkip(it.url)
         }
         val targets = (nonIndexer + indexer).take(6)
         scheduleBridgeEventFallback(
@@ -4576,6 +4645,7 @@ class RelayPool @Inject constructor(
         val normalized = normalizeRelayUrl(relayUrl) ?: return
         if (normalized in blockedUrls) return
         if (relayCapabilitiesStore.shouldSkip(normalized)) return
+        if (idRequestBackoff.shouldSkip(normalized)) return
         // NOTE: do NOT exclude activeSingleRelayFeedUrl — targeted id-fetches
         // never overlap the feed filter (distinct subId, different filter shape).
         // Dedup BEFORE dispatch — don't open any connection (pooled or ephemeral)
@@ -4761,7 +4831,10 @@ class RelayPool @Inject constructor(
             } else {
                 normalizedRelayTargets(relayHints)
             })
-                .filter { it !in excluded && it !in blockedUrls && !relayCapabilitiesStore.shouldSkip(it) }
+                .filter {
+                    it !in excluded && it !in blockedUrls && !relayCapabilitiesStore.shouldSkip(it) &&
+                        !idRequestBackoff.shouldSkip(it)
+                }
             if (hintTargets.isNotEmpty()) {
                 hintTargets
             } else {
@@ -4774,10 +4847,12 @@ class RelayPool @Inject constructor(
         // No usable hints — broadened fallback.
         val resolvedTargets = targetUrls.ifEmpty {
             val nonIndexer = connections.values.filter {
-                it.url !in indexerUrls && it.url !in excluded && !relayCapabilitiesStore.shouldSkip(it.url)
+                it.url !in indexerUrls && it.url !in excluded && !relayCapabilitiesStore.shouldSkip(it.url) &&
+                    !idRequestBackoff.shouldSkip(it.url)
             }.shuffled()
             val indexer = connections.values.filter {
-                it.url in indexerUrls && it.url !in excluded && !relayCapabilitiesStore.shouldSkip(it.url)
+                it.url in indexerUrls && it.url !in excluded && !relayCapabilitiesStore.shouldSkip(it.url) &&
+                    !idRequestBackoff.shouldSkip(it.url)
             }
             (nonIndexer + indexer).take(6).map { it.url }
         }
@@ -5640,6 +5715,7 @@ class RelayPool @Inject constructor(
             eventFetchInFlight.values.forEach { it.complete(null) }
             eventFetchInFlight.clear()
             missingRefCache.clear()
+            idRequestBackoff.clear()
             authenticatedRelays.clear()
             authInFlight.clear()
             pendingChallenges.clear()
