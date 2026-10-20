@@ -177,6 +177,7 @@ internal fun NotificationHeader(
     current: NotifFilter,
     showHint: Boolean,
     motionEnabled: Boolean,
+    blinkActive: Boolean,
     onToggle: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -184,7 +185,7 @@ internal fun NotificationHeader(
         accent = Brand,
         isRefreshing = false,
         motionEnabled = motionEnabled,
-        start = { LogoMark(sizeDp = Spacing.xxl, static = !motionEnabled) },
+        start = { LogoMark(sizeDp = Spacing.xxl, static = !motionEnabled, blinkActive = blinkActive) },
         center = { NotificationFilterPill(current, showHint, motionEnabled, onToggle) },
         end = {},
         modifier = modifier,

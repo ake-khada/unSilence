@@ -488,6 +488,7 @@ fun AppNavigation(
                                 showHint = notifications.showFilterHint.collectAsStateWithLifecycle().value &&
                                     topBarShown && navigator.backStack.size == 1,
                                 motionEnabled = headerMotionEnabled,
+                                blinkActive = topBarShown,
                                 onToggle = notifications::toggleFilter,
                             )
                         } else {
@@ -498,6 +499,7 @@ fun AppNavigation(
                                 pullFraction = pullRefreshFraction,
                                 isRefreshing = isFeedRefreshing,
                                 motionEnabled = headerMotionEnabled,
+                                blinkActive = topBarShown,
                                 sourceExpanded = showFeedSheet,
                                 onLogoClick = { scrollToTopTrigger++ },
                                 onSourceClick = { showFeedSheet = true },
@@ -852,6 +854,7 @@ private fun UnifiedFeedHeader(
     pullFraction: State<Float>,
     isRefreshing: Boolean,
     motionEnabled: Boolean,
+    blinkActive: Boolean,
     sourceExpanded: Boolean,
     onLogoClick: () -> Unit,
     onSourceClick: () -> Unit,
@@ -874,6 +877,7 @@ private fun UnifiedFeedHeader(
                 firstBarColor = Brand,
                 barHeightScale = { barHeightScale.value },
                 static = !motionEnabled,
+                blinkActive = blinkActive,
                 modifier = Modifier
                     .semantics { contentDescription = "Scroll feed to top" }
                     .clickable(

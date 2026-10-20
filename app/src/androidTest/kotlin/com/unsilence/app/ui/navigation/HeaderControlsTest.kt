@@ -353,7 +353,7 @@ class HeaderControlsTest {
         val filter = mutableStateOf(NotifFilter.Global)
         compose.setContent {
             UnsilenceTheme {
-                NotificationHeader(filter.value, false, true, {}, Modifier.width(360.dp).testTag("header"))
+                NotificationHeader(filter.value, false, true, true, {}, Modifier.width(360.dp).testTag("header"))
             }
         }
         val pill = compose.onNodeWithContentDescription("Notification filter")
@@ -374,7 +374,7 @@ class HeaderControlsTest {
         val restoration = StateRestorationTester(compose)
         restoration.setContent {
             UnsilenceTheme {
-                NotificationHeader(filter.value, true, false, {
+                NotificationHeader(filter.value, true, false, true, {
                     clicks++
                     filter.value = filter.value.next()
                 }, Modifier.width(360.dp).testTag("header"))
@@ -404,7 +404,7 @@ class HeaderControlsTest {
             UnsilenceTheme {
                 Box(Modifier.width(360.dp).background(Color.Black)) {
                     if (notifications.value) {
-                        NotificationHeader(NotifFilter.Global, false, false, {}, Modifier.testTag("header"))
+                        NotificationHeader(NotifFilter.Global, false, false, true, {}, Modifier.testTag("header"))
                     } else {
                         HeaderFrame(Brand, false, false,
                             start = { Box(Modifier.size(52.dp)) },

@@ -54,6 +54,7 @@ import androidx.compose.ui.unit.sp
 import com.unsilence.app.data.auth.AmberSigner
 import com.unsilence.app.data.auth.KeyManager
 import com.unsilence.app.ui.common.LogoMark
+import com.unsilence.app.ui.common.rememberAnimatorDurationScale
 import com.unsilence.app.ui.theme.AppType
 import com.unsilence.app.ui.theme.Black
 import com.unsilence.app.ui.theme.BorderDefault
@@ -103,7 +104,11 @@ fun OnboardingScreen(keyManager: KeyManager, onComplete: () -> Unit) {
         Spacer(Modifier.weight(1.618f))
 
         // 3. Animated waveform mark
-        LogoMark(sizeDp = 112.dp, color = Brand)
+        LogoMark(
+            sizeDp = 112.dp,
+            color = Brand,
+            static = rememberAnimatorDurationScale() == 0f,
+        )
 
         // 4. Logo → headline
         Spacer(Modifier.height(Spacing.xxl))
