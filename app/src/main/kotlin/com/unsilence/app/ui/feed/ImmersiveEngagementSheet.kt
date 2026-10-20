@@ -16,7 +16,8 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.lazy.LazyColumn
+import com.unsilence.app.ui.common.AvatarLazyColumn
+import com.unsilence.app.ui.common.ProvideAvatarViewport
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -138,176 +139,178 @@ internal fun ImmersiveEngagementSheet(
             )
         },
     ) {
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(sheetHeight)
-                .navigationBarsPadding(),
-        ) {
-            LazyColumn(modifier = Modifier.weight(1f)) {
-                item(key = "author-${row.id}") {
-                    AuthorHeader(
-                        pubkey = model.pubkey,
-                        picture = authorProfile?.picture ?: row.authorPicture.takeIf { rowDescribesAuthor },
-                        displayName = authorProfile?.displayName
-                            ?: authorProfile?.name
-                            ?: row.displayName.takeIf { rowDescribesAuthor },
-                        nip05 = authorProfile?.nip05 ?: row.authorNip05.takeIf { rowDescribesAuthor },
-                        createdAt = model.createdAt,
-                        onAuthorClick = host.actions.onAuthorClick,
-                        onNoteClick = { host.actions.onNoteClick(model.navigateId) },
-                        lookupProfile = lookupProfile,
-                        wotLookup = host.surface.wotLookup,
-                        feedWotDisplayMode = host.surface.feedWotDisplayMode,
-                    )
-                    InlineText(
-                        segments = model.segments,
-                        kind = model.effectiveKind,
-                        lookupProfile = lookupProfile,
-                        onAuthorClick = host.actions.onAuthorClick,
-                        onHashtagClick = host.actions.onHashtagClick,
-                        onTextClick = { host.actions.onNoteClick(model.navigateId) },
-                        customEmojis = model.customEmojis,
-                        modifier = Modifier.padding(
-                            horizontal = Spacing.medium,
-                            vertical = Spacing.small,
-                        ),
-                    )
-                }
-
-                item(key = "actions-${row.id}") {
-                    EventActionBar(
-                        noteId = model.navigateId,
-                        zapTargetId = model.engagementId,
-                        replyCount = liveStats?.replyCount ?: row.replyCount,
-                        repostCount = liveStats?.repostCount ?: row.repostCount,
-                        reactionCount = liveStats?.reactionCount ?: row.reactionCount,
-                        zapTotalSats = liveStats?.zapTotalSats ?: row.zapTotalSats,
-                        hasReacted = eventEngagement.hasReacted,
-                        hasReposted = eventEngagement.hasReposted,
-                        hasZapped = eventEngagement.hasZapped,
-                        isNwcConfigured = eventEngagement.isNwcConfigured,
-                        isZapLoading = eventEngagement.isZapLoading,
-                        extraZapSats = eventEngagement.extraZapSats,
-                        zapFlash = eventEngagement.zapFlash,
-                        zapEnabled = zapEnabled,
-                        drawerOpen = drawerOpen,
-                        onChevronTap = { drawerOpen = !drawerOpen },
-                        onNoteClick = { host.actions.onNoteClick(model.navigateId) },
-                        onComment = {
-                            onDismiss()
-                            host.actions.onComment(row, model)
-                        },
-                        onReact = { host.services.react(model.engagementId, model.pubkey, "+", null) },
-                        onReactLongPress = {
-                            host.actions.onReactLongPress?.invoke(model.engagementId, model.pubkey)
-                        },
-                        pinnedEmojis = pinnedEmojis,
-                        onReactWithEmoji = { emoji ->
-                            host.services.react(
-                                model.engagementId,
-                                model.pubkey,
-                                ":${emoji.shortcode}:",
-                                emoji.url,
-                            )
-                        },
-                        onRepost = {
-                            host.services.repost(model.engagementId, model.pubkey, row.relayUrl)
-                        },
-                        onQuote = host.actions.onQuote,
-                        onZap = { request: ZapRequest ->
-                            host.services.zap(model.engagementId, model.pubkey, row.relayUrl, request)
-                        },
-                        onSaveNwcUri = host.services.saveNwcUri,
-                    )
-                    AnimatedVisibility(
-                        visible = drawerOpen,
-                        enter = expandVertically(),
-                        exit = shrinkVertically(),
-                    ) {
-                        EngagementDrawer(
-                            eventId = model.engagementId,
-                            statsFlow = host.surface.statsFlow,
-                            zapDetailsForEvent = host.surface.zapDetailsForEvent,
-                            repostPubkeysForEvent = host.surface.repostPubkeysForEvent,
-                            reactionsForEvent = host.surface.reactionsForEvent,
-                            profileFlow = host.surface.profileFlow,
+        ProvideAvatarViewport(bounds = null) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(sheetHeight)
+                    .navigationBarsPadding(),
+            ) {
+                AvatarLazyColumn(modifier = Modifier.weight(1f)) {
+                    item(key = "author-${row.id}") {
+                        AuthorHeader(
+                            pubkey = model.pubkey,
+                            picture = authorProfile?.picture ?: row.authorPicture.takeIf { rowDescribesAuthor },
+                            displayName = authorProfile?.displayName
+                                ?: authorProfile?.name
+                                ?: row.displayName.takeIf { rowDescribesAuthor },
+                            nip05 = authorProfile?.nip05 ?: row.authorNip05.takeIf { rowDescribesAuthor },
+                            createdAt = model.createdAt,
+                            onAuthorClick = host.actions.onAuthorClick,
+                            onNoteClick = { host.actions.onNoteClick(model.navigateId) },
                             lookupProfile = lookupProfile,
-                            onProfileTap = host.actions.onAuthorClick,
+                            wotLookup = host.surface.wotLookup,
+                            feedWotDisplayMode = host.surface.feedWotDisplayMode,
+                        )
+                        InlineText(
+                            segments = model.segments,
+                            kind = model.effectiveKind,
+                            lookupProfile = lookupProfile,
+                            onAuthorClick = host.actions.onAuthorClick,
+                            onHashtagClick = host.actions.onHashtagClick,
+                            onTextClick = { host.actions.onNoteClick(model.navigateId) },
+                            customEmojis = model.customEmojis,
+                            modifier = Modifier.padding(
+                                horizontal = Spacing.medium,
+                                vertical = Spacing.small,
+                            ),
                         )
                     }
-                    HorizontalDivider(color = BorderFaint)
-                }
 
-                item(key = "comments-label-${row.id}") {
-                    Text(
-                        text = when {
-                            threadState.loading -> "Comments"
-                            threadState.replies.isEmpty() -> "No comments yet"
-                            else -> "${threadState.replies.size} ${if (threadState.replies.size == 1) "comment" else "comments"}"
-                        },
-                        color = TextSecondary,
-                        style = AppTextStyles.footnote,
-                        fontWeight = FontWeight.SemiBold,
-                        modifier = Modifier.padding(
-                            horizontal = Spacing.medium,
-                            vertical = Spacing.small,
-                        ),
-                    )
-                }
-
-                if (threadState.loading) {
-                    item(key = "comments-loading-${row.id}") {
-                        Box(
-                            modifier = Modifier.fillMaxWidth().padding(Spacing.large),
-                            contentAlignment = Alignment.Center,
+                    item(key = "actions-${row.id}") {
+                        EventActionBar(
+                            noteId = model.navigateId,
+                            zapTargetId = model.engagementId,
+                            replyCount = liveStats?.replyCount ?: row.replyCount,
+                            repostCount = liveStats?.repostCount ?: row.repostCount,
+                            reactionCount = liveStats?.reactionCount ?: row.reactionCount,
+                            zapTotalSats = liveStats?.zapTotalSats ?: row.zapTotalSats,
+                            hasReacted = eventEngagement.hasReacted,
+                            hasReposted = eventEngagement.hasReposted,
+                            hasZapped = eventEngagement.hasZapped,
+                            isNwcConfigured = eventEngagement.isNwcConfigured,
+                            isZapLoading = eventEngagement.isZapLoading,
+                            extraZapSats = eventEngagement.extraZapSats,
+                            zapFlash = eventEngagement.zapFlash,
+                            zapEnabled = zapEnabled,
+                            drawerOpen = drawerOpen,
+                            onChevronTap = { drawerOpen = !drawerOpen },
+                            onNoteClick = { host.actions.onNoteClick(model.navigateId) },
+                            onComment = {
+                                onDismiss()
+                                host.actions.onComment(row, model)
+                            },
+                            onReact = { host.services.react(model.engagementId, model.pubkey, "+", null) },
+                            onReactLongPress = {
+                                host.actions.onReactLongPress?.invoke(model.engagementId, model.pubkey)
+                            },
+                            pinnedEmojis = pinnedEmojis,
+                            onReactWithEmoji = { emoji ->
+                                host.services.react(
+                                    model.engagementId,
+                                    model.pubkey,
+                                    ":${emoji.shortcode}:",
+                                    emoji.url,
+                                )
+                            },
+                            onRepost = {
+                                host.services.repost(model.engagementId, model.pubkey, row.relayUrl)
+                            },
+                            onQuote = host.actions.onQuote,
+                            onZap = { request: ZapRequest ->
+                                host.services.zap(model.engagementId, model.pubkey, row.relayUrl, request)
+                            },
+                            onSaveNwcUri = host.services.saveNwcUri,
+                        )
+                        AnimatedVisibility(
+                            visible = drawerOpen,
+                            enter = expandVertically(),
+                            exit = shrinkVertically(),
                         ) {
-                            CircularProgressIndicator(
-                                modifier = Modifier.size(20.dp),
-                                color = Brand,
-                                strokeWidth = 1.5.dp,
+                            EngagementDrawer(
+                                eventId = model.engagementId,
+                                statsFlow = host.surface.statsFlow,
+                                zapDetailsForEvent = host.surface.zapDetailsForEvent,
+                                repostPubkeysForEvent = host.surface.repostPubkeysForEvent,
+                                reactionsForEvent = host.surface.reactionsForEvent,
+                                profileFlow = host.surface.profileFlow,
+                                lookupProfile = lookupProfile,
+                                onProfileTap = host.actions.onAuthorClick,
+                            )
+                        }
+                        HorizontalDivider(color = BorderFaint)
+                    }
+
+                    item(key = "comments-label-${row.id}") {
+                        Text(
+                            text = when {
+                                threadState.loading -> "Comments"
+                                threadState.replies.isEmpty() -> "No comments yet"
+                                else -> "${threadState.replies.size} ${if (threadState.replies.size == 1) "comment" else "comments"}"
+                            },
+                            color = TextSecondary,
+                            style = AppTextStyles.footnote,
+                            fontWeight = FontWeight.SemiBold,
+                            modifier = Modifier.padding(
+                                horizontal = Spacing.medium,
+                                vertical = Spacing.small,
+                            ),
+                        )
+                    }
+
+                    if (threadState.loading) {
+                        item(key = "comments-loading-${row.id}") {
+                            Box(
+                                modifier = Modifier.fillMaxWidth().padding(Spacing.large),
+                                contentAlignment = Alignment.Center,
+                            ) {
+                                CircularProgressIndicator(
+                                    modifier = Modifier.size(20.dp),
+                                    color = Brand,
+                                    strokeWidth = 1.5.dp,
+                                )
+                            }
+                        }
+                    } else {
+                        items(threadState.replies, key = { it.row.id }) { depthRow ->
+                            EventFeedItem(
+                                row = depthRow.row,
+                                engagement = engagement,
+                                host = replyHost,
+                                role = CardRole.Reply,
                             )
                         }
                     }
-                } else {
-                    items(threadState.replies, key = { it.row.id }) { depthRow ->
-                        EventFeedItem(
-                            row = depthRow.row,
-                            engagement = engagement,
-                            host = replyHost,
-                            role = CardRole.Reply,
+                }
+
+                HorizontalDivider(color = BorderFaint)
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .background(Surface2)
+                        .clickable {
+                            onDismiss()
+                            host.actions.onComment(row, model)
+                        }
+                        .padding(horizontal = Spacing.medium, vertical = 12.dp),
+                ) {
+                    androidx.compose.foundation.layout.Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Icon(
+                            Icons.AutoMirrored.Filled.Chat,
+                            contentDescription = null,
+                            tint = Brand,
+                            modifier = Modifier.size(20.dp),
+                        )
+                        Spacer(Modifier.size(Spacing.small))
+                        Text(
+                            text = "Reply",
+                            color = White,
+                            style = AppTextStyles.body,
+                            fontWeight = FontWeight.SemiBold,
                         )
                     }
-                }
-            }
-
-            HorizontalDivider(color = BorderFaint)
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .background(Surface2)
-                    .clickable {
-                        onDismiss()
-                        host.actions.onComment(row, model)
-                    }
-                    .padding(horizontal = Spacing.medium, vertical = 12.dp),
-            ) {
-                androidx.compose.foundation.layout.Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Icon(
-                        Icons.AutoMirrored.Filled.Chat,
-                        contentDescription = null,
-                        tint = Brand,
-                        modifier = Modifier.size(20.dp),
-                    )
-                    Spacer(Modifier.size(Spacing.small))
-                    Text(
-                        text = "Reply",
-                        color = White,
-                        style = AppTextStyles.body,
-                        fontWeight = FontWeight.SemiBold,
-                    )
                 }
             }
         }

@@ -15,6 +15,7 @@ import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.lazy.LazyColumn
+import com.unsilence.app.ui.common.AvatarLazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.material.icons.Icons
@@ -307,7 +308,7 @@ fun ThreadScreen(
                 }
 
                 else -> {
-                    LazyColumn(state = listState, modifier = Modifier.weight(1f).fillMaxWidth().navigationBarsPadding()) {
+                    AvatarLazyColumn(state = listState, modifier = Modifier.weight(1f).fillMaxWidth().navigationBarsPadding()) {
                         // Focused (OP) note — plain NoteCard, no border decoration
                         state.focusedNote?.let { note ->
                             item(key = note.id) {

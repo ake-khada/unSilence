@@ -66,7 +66,6 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import coil3.compose.AsyncImage
 import com.unsilence.app.data.media.SaveMediaKind
 import com.unsilence.app.data.media.isSavableVideoSource
 import com.unsilence.app.data.memory.FeedRow
@@ -74,6 +73,7 @@ import com.unsilence.app.data.memory.UserEntity
 import com.unsilence.app.data.model.ContentParser
 import com.unsilence.app.data.relay.Nip19FailureCache
 import com.unsilence.app.ui.common.IdentIcon
+import com.unsilence.app.ui.common.AvatarAsyncImage
 import com.unsilence.app.ui.common.rememberAvatarImageRequest
 import com.unsilence.app.ui.theme.AppType
 import com.unsilence.app.ui.theme.Brand
@@ -261,7 +261,7 @@ internal fun AvatarImage(
             IdentIcon(pubkey = pubkey, modifier = Modifier.fillMaxSize())
         }
         if (!effectivePicture.isNullOrBlank()) {
-            AsyncImage(
+            AvatarAsyncImage(
                 model              = rememberAvatarImageRequest(effectivePicture, sizeDp),
                 contentDescription = null,
                 modifier           = Modifier.fillMaxSize(),

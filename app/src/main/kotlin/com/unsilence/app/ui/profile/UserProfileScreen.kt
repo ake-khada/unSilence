@@ -18,7 +18,8 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.lazy.LazyColumn
+import com.unsilence.app.ui.common.AvatarLazyColumn
+import com.unsilence.app.ui.common.AvatarAsyncImage
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
@@ -370,7 +371,7 @@ fun UserProfileScreen(
             .background(Black),
     ) {
         // ── Scrollable content ────────────────────────────────────────────────
-        LazyColumn(
+        AvatarLazyColumn(
             state               = listState,
             modifier            = Modifier
                 .fillMaxSize()
@@ -431,7 +432,7 @@ fun UserProfileScreen(
                             IdentIcon(pubkey = pubkeyHex!!, modifier = Modifier.fillMaxSize())
                         }
                         if (!user?.picture.isNullOrBlank()) {
-                            AsyncImage(
+                            AvatarAsyncImage(
                                 model              = rememberAvatarImageRequest(user?.picture, 85.dp),
                                 contentDescription = null,
                                 contentScale       = ContentScale.Crop,

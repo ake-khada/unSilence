@@ -44,6 +44,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.unit.dp
 import com.unsilence.app.data.memory.UserEntity
+import com.unsilence.app.ui.common.ProvideAvatarViewport
 import com.unsilence.app.ui.theme.AppType
 import com.unsilence.app.ui.theme.TextSecondary
 import com.unsilence.app.ui.theme.Zap
@@ -75,127 +76,129 @@ fun PostActionsBottomSheet(
         sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
         dragHandle = { BottomSheetDefaults.DragHandle(color = TextSecondary) },
     ) {
-        Column(
-            modifier = Modifier
-                .verticalScroll(rememberScrollState())
-                .padding(bottom = 24.dp),
-        ) {
-            // Author context header
-            Row(
+        ProvideAvatarViewport(bounds = null) {
+            Column(
                 modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 20.dp, vertical = 12.dp),
-                verticalAlignment = Alignment.CenterVertically,
+                    .verticalScroll(rememberScrollState())
+                    .padding(bottom = 24.dp),
             ) {
-                AvatarImage(
-                    pubkey = authorPubkey,
-                    picture = authorProfile?.picture,
-                    modifier = Modifier.size(36.dp),
-                    sizeDp = 36.dp,
-                )
-                Spacer(Modifier.width(12.dp))
-                Column {
-                    Text(
-                        text = authorProfile?.displayName?.takeIf { it.isNotBlank() }
-                            ?: authorProfile?.name?.takeIf { it.isNotBlank() }
-                            ?: "${authorPubkey.take(8)}…",
-                        style = AppTextStyles.body,
-                        color = Color.White,
-                    )
-                    authorProfile?.nip05?.takeIf { it.isNotBlank() }?.let {
-                        Text(it, style = AppTextStyles.caption, color = TextSecondary)
-                    }
-                }
-            }
-
-            HorizontalDivider(color = Color.White.copy(alpha = 0.1f))
-
-            if (onCopyText != null) {
-                SheetActionRow(Icons.Default.ContentCopy, "Copy text") { onCopyText(); onDismiss() }
-            }
-            SheetActionRow(Icons.Default.Link, "Copy link") { onCopyLink(); onDismiss() }
-            SheetActionRow(Icons.Default.Share, "Share") { onShare(); onDismiss() }
-
-            if (relayItems.isNotEmpty()) {
+                // Author context header
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .clickable { relaysExpanded = !relaysExpanded }
-                        .padding(horizontal = 20.dp, vertical = 14.dp),
+                        .padding(horizontal = 20.dp, vertical = 12.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    Icon(
-                        imageVector = Icons.Outlined.Dns,
-                        contentDescription = null,
-                        tint = Color.White,
-                        modifier = Modifier.size(20.dp),
+                    AvatarImage(
+                        pubkey = authorPubkey,
+                        picture = authorProfile?.picture,
+                        modifier = Modifier.size(36.dp),
+                        sizeDp = 36.dp,
                     )
-                    Spacer(Modifier.width(16.dp))
-                    Text(
-                        text = "Seen on ${relayItems.size} ${if (relayItems.size == 1) "relay" else "relays"}",
-                        style = AppTextStyles.body,
-                        color = Color.White,
-                        modifier = Modifier.weight(1f),
-                    )
-                    Icon(
-                        imageVector = if (relaysExpanded) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
-                        contentDescription = if (relaysExpanded) "Collapse relays" else "Expand relays",
-                        tint = TextSecondary,
-                        modifier = Modifier.size(20.dp),
-                    )
-                }
-                AnimatedVisibility(
-                    visible = relaysExpanded,
-                    enter = expandVertically() + fadeIn(),
-                    exit = shrinkVertically() + fadeOut(),
-                ) {
+                    Spacer(Modifier.width(12.dp))
                     Column {
-                        relayItems.forEach { relay ->
-                            Row(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .clickable {
-                                        onRelayClick(relay.url)
-                                        onDismiss()
-                                    }
-                                    .padding(start = 56.dp, end = 20.dp, top = 8.dp, bottom = 8.dp),
-                                verticalAlignment = Alignment.CenterVertically,
-                            ) {
-                                RelayIcon(relay.iconUrl, Modifier.size(28.dp))
-                                Spacer(Modifier.width(12.dp))
-                                Text(
-                                    text = relay.host,
-                                    style = AppTextStyles.body,
-                                    color = TextSecondary,
-                                    modifier = Modifier.weight(1f),
-                                )
+                        Text(
+                            text = authorProfile?.displayName?.takeIf { it.isNotBlank() }
+                                ?: authorProfile?.name?.takeIf { it.isNotBlank() }
+                                ?: "${authorPubkey.take(8)}…",
+                            style = AppTextStyles.body,
+                            color = Color.White,
+                        )
+                        authorProfile?.nip05?.takeIf { it.isNotBlank() }?.let {
+                            Text(it, style = AppTextStyles.caption, color = TextSecondary)
+                        }
+                    }
+                }
+
+                HorizontalDivider(color = Color.White.copy(alpha = 0.1f))
+
+                if (onCopyText != null) {
+                    SheetActionRow(Icons.Default.ContentCopy, "Copy text") { onCopyText(); onDismiss() }
+                }
+                SheetActionRow(Icons.Default.Link, "Copy link") { onCopyLink(); onDismiss() }
+                SheetActionRow(Icons.Default.Share, "Share") { onShare(); onDismiss() }
+
+                if (relayItems.isNotEmpty()) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable { relaysExpanded = !relaysExpanded }
+                            .padding(horizontal = 20.dp, vertical = 14.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Icon(
+                            imageVector = Icons.Outlined.Dns,
+                            contentDescription = null,
+                            tint = Color.White,
+                            modifier = Modifier.size(20.dp),
+                        )
+                        Spacer(Modifier.width(16.dp))
+                        Text(
+                            text = "Seen on ${relayItems.size} ${if (relayItems.size == 1) "relay" else "relays"}",
+                            style = AppTextStyles.body,
+                            color = Color.White,
+                            modifier = Modifier.weight(1f),
+                        )
+                        Icon(
+                            imageVector = if (relaysExpanded) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
+                            contentDescription = if (relaysExpanded) "Collapse relays" else "Expand relays",
+                            tint = TextSecondary,
+                            modifier = Modifier.size(20.dp),
+                        )
+                    }
+                    AnimatedVisibility(
+                        visible = relaysExpanded,
+                        enter = expandVertically() + fadeIn(),
+                        exit = shrinkVertically() + fadeOut(),
+                    ) {
+                        Column {
+                            relayItems.forEach { relay ->
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .clickable {
+                                            onRelayClick(relay.url)
+                                            onDismiss()
+                                        }
+                                        .padding(start = 56.dp, end = 20.dp, top = 8.dp, bottom = 8.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                ) {
+                                    RelayIcon(relay.iconUrl, Modifier.size(28.dp))
+                                    Spacer(Modifier.width(12.dp))
+                                    Text(
+                                        text = relay.host,
+                                        style = AppTextStyles.body,
+                                        color = TextSecondary,
+                                        modifier = Modifier.weight(1f),
+                                    )
+                                }
                             }
                         }
                     }
                 }
-            }
-            if (canDelete) {
-                HorizontalDivider(
-                    color = Color.White.copy(alpha = 0.1f),
-                    modifier = Modifier.padding(vertical = 4.dp),
-                )
-                SheetActionRow(Icons.Default.Delete, "Delete", Zap) {
-                    onDelete()
-                    onDismiss()
+                if (canDelete) {
+                    HorizontalDivider(
+                        color = Color.White.copy(alpha = 0.1f),
+                        modifier = Modifier.padding(vertical = 4.dp),
+                    )
+                    SheetActionRow(Icons.Default.Delete, "Delete", Zap) {
+                        onDelete()
+                        onDismiss()
+                    }
                 }
-            }
 
-            if (showModerationActions) {
-                HorizontalDivider(
-                    color = Color.White.copy(alpha = 0.1f),
-                    modifier = Modifier.padding(vertical = 4.dp),
-                )
+                if (showModerationActions) {
+                    HorizontalDivider(
+                        color = Color.White.copy(alpha = 0.1f),
+                        modifier = Modifier.padding(vertical = 4.dp),
+                    )
 
-                SheetActionRow(Icons.AutoMirrored.Filled.VolumeOff, "Mute user", Zap) {
-                    onMuteUser(); onDismiss()
-                }
-                SheetActionRow(Icons.Default.Flag, "Report", Zap) {
-                    onReport()
+                    SheetActionRow(Icons.AutoMirrored.Filled.VolumeOff, "Mute user", Zap) {
+                        onMuteUser(); onDismiss()
+                    }
+                    SheetActionRow(Icons.Default.Flag, "Report", Zap) {
+                        onReport()
+                    }
                 }
             }
         }

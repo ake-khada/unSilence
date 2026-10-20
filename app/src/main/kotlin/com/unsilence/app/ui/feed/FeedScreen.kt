@@ -19,7 +19,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.lazy.LazyColumn
+import com.unsilence.app.ui.common.AvatarLazyColumn
 import com.unsilence.app.ui.shared.rememberFeedScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -453,7 +453,7 @@ fun FeedScreen(
                     modifier     = Modifier.fillMaxSize(),
                     indicator    = {},
                 ) {
-                LazyColumn(
+                AvatarLazyColumn(
                     state    = listState,
                     modifier = Modifier.fillMaxWidth(),
                     contentPadding = PaddingValues(top = totalTopPadding, bottom = staticBottomPadding),

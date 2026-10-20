@@ -134,16 +134,24 @@ class AvatarAnimationIntegrationTest {
     @Test fun disposalStopsAnimationEvenBeforeTheCrossfadeHasFinished() {
         val screen = Screen()
         val drawable = RecordingAnimation()
+        val arrival = CompletableDeferred<Unit>()
         compose.mainClock.autoAdvance = false
-        render(screen, crossfadeMillis = 60_000) { ScaleDrawable(drawable) }
-        compose.mainClock.advanceTimeByFrame()
-        compose.waitUntil { screen.successes.get() == 1 }
-        compose.runOnIdle {
+        // Let setContent settle before starting the crossfade. Once it is active,
+        // Espresso's idle wait would wait for the very animation we want to dispose.
+        render(screen, crossfadeMillis = 60_000) { arrival.await(); ScaleDrawable(drawable) }
+        compose.mainClock.advanceTimeBy(32)
+        compose.runOnUiThread { arrival.complete(Unit) }
+        compose.waitUntil(5_000) {
+            compose.mainClock.advanceTimeBy(16)
+            screen.successes.get() == 1
+        }
+        compose.mainClock.advanceTimeBy(32)
+        compose.runOnUiThread {
             assertTrue(drawable.isRunning)
             screen.composed.value = false
         }
-        compose.mainClock.advanceTimeByFrame()
-        compose.runOnIdle {
+        compose.mainClock.advanceTimeBy(32)
+        compose.runOnUiThread {
             assertFalse(drawable.isRunning)
             assertEquals(1, drawable.stops)
             assertNull((requireNotNull(screen.input).painter as DrawablePainter).drawable.callback)

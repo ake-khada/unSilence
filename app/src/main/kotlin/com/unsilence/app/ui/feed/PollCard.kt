@@ -1,5 +1,8 @@
 package com.unsilence.app.ui.feed
 
+import com.unsilence.app.ui.common.AvatarLazyColumn
+import com.unsilence.app.ui.common.ProvideAvatarViewport
+
 import com.unsilence.app.ui.theme.AppTextStyles
 import com.unsilence.app.ui.shared.CardDataFlow
 
@@ -373,55 +376,57 @@ private fun PollVotersSheet(
         sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
         dragHandle = { BottomSheetDefaults.DragHandle(color = TextSecondary) },
     ) {
-        Column(modifier = Modifier.padding(bottom = 24.dp)) {
-            Text(
-                text = "$totalVoters ${if (totalVoters == 1) "voter" else "voters"}",
-                color = Color.White,
-                style = AppTextStyles.subheading,
-                fontWeight = FontWeight.SemiBold,
-                modifier = Modifier.padding(horizontal = 20.dp, vertical = 12.dp),
-            )
-            HorizontalDivider(color = BorderFaint)
-            androidx.compose.foundation.lazy.LazyColumn(
-                modifier = Modifier.heightIn(max = 520.dp),
-            ) {
-                groups.forEach { group ->
-                    item(key = "option-${group.optionId}") {
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .background(SurfaceVariant)
-                                .padding(horizontal = 20.dp, vertical = 10.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                        ) {
-                            Text(
-                                text = group.optionLabel,
-                                color = Color.White,
-                                style = AppTextStyles.body,
-                                fontWeight = FontWeight.Medium,
-                                maxLines = 2,
-                                overflow = TextOverflow.Ellipsis,
-                                modifier = Modifier.weight(1f),
-                            )
-                            Text(
-                                text = "${group.voters.size} · ${group.percentage}%",
-                                color = TextSecondary,
-                                style = AppTextStyles.caption,
+        ProvideAvatarViewport(bounds = null) {
+            Column(modifier = Modifier.padding(bottom = 24.dp)) {
+                Text(
+                    text = "$totalVoters ${if (totalVoters == 1) "voter" else "voters"}",
+                    color = Color.White,
+                    style = AppTextStyles.subheading,
+                    fontWeight = FontWeight.SemiBold,
+                    modifier = Modifier.padding(horizontal = 20.dp, vertical = 12.dp),
+                )
+                HorizontalDivider(color = BorderFaint)
+                AvatarLazyColumn(
+                    modifier = Modifier.heightIn(max = 520.dp),
+                ) {
+                    groups.forEach { group ->
+                        item(key = "option-${group.optionId}") {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .background(SurfaceVariant)
+                                    .padding(horizontal = 20.dp, vertical = 10.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                Text(
+                                    text = group.optionLabel,
+                                    color = Color.White,
+                                    style = AppTextStyles.body,
+                                    fontWeight = FontWeight.Medium,
+                                    maxLines = 2,
+                                    overflow = TextOverflow.Ellipsis,
+                                    modifier = Modifier.weight(1f),
+                                )
+                                Text(
+                                    text = "${group.voters.size} · ${group.percentage}%",
+                                    color = TextSecondary,
+                                    style = AppTextStyles.caption,
+                                )
+                            }
+                        }
+                        items(group.voters, key = { "${group.optionId}-${it.pubkey}" }) { response ->
+                            PollVoterRow(
+                                pubkey = response.pubkey,
+                                isCurrentUser = response.pubkey == currentPubkey,
+                                lookupProfile = lookupProfile,
+                                profileFlow = profileFlow,
+                                wotLookup = wotLookup,
+                                onClick = {
+                                    onVoterClick(response.pubkey)
+                                    onDismiss()
+                                },
                             )
                         }
-                    }
-                    items(group.voters, key = { "${group.optionId}-${it.pubkey}" }) { response ->
-                        PollVoterRow(
-                            pubkey = response.pubkey,
-                            isCurrentUser = response.pubkey == currentPubkey,
-                            lookupProfile = lookupProfile,
-                            profileFlow = profileFlow,
-                            wotLookup = wotLookup,
-                            onClick = {
-                                onVoterClick(response.pubkey)
-                                onDismiss()
-                            },
-                        )
                     }
                 }
             }

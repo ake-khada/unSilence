@@ -21,6 +21,8 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import com.unsilence.app.ui.common.AvatarLazyColumn
+import com.unsilence.app.ui.common.AvatarAsyncImage
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
@@ -76,7 +78,6 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.sp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import coil3.compose.AsyncImage
 import com.unsilence.app.ui.common.rememberAvatarImageRequest
 import com.unsilence.app.data.memory.UserEntity
 import com.unsilence.app.data.memory.WotLookup
@@ -559,7 +560,7 @@ fun SearchScreen(
                             reactedIds, repostedIds, zappedIds, isNwcConfigured,
                             zapLoadingIds, optimisticSats, zapFlash,
                         )
-                        LazyColumn(
+                        AvatarLazyColumn(
                             state = noteListState,
                             modifier = Modifier.fillMaxSize(),
                             contentPadding = PaddingValues(bottom = staticBottomPadding),
@@ -607,7 +608,7 @@ fun SearchScreen(
                             message = "No results for \u201c${state.query}\u201d",
                         )
                     } else {
-                        LazyColumn(
+                        AvatarLazyColumn(
                             modifier = Modifier.fillMaxSize(),
                             contentPadding = PaddingValues(bottom = staticBottomPadding),
                         ) {
@@ -651,7 +652,7 @@ fun SearchScreen(
                             reactedIds, repostedIds, zappedIds, isNwcConfigured,
                             zapLoadingIds, optimisticSats, zapFlash,
                         )
-                        LazyColumn(
+                        AvatarLazyColumn(
                             state = noteListState,
                             modifier = Modifier.fillMaxSize(),
                             contentPadding = PaddingValues(bottom = staticBottomPadding),
@@ -815,7 +816,7 @@ private fun ProfileCard(
         ) {
             IdentIcon(pubkey = user.pubkey, modifier = Modifier.fillMaxSize())
             if (!user.picture.isNullOrBlank()) {
-                AsyncImage(
+                AvatarAsyncImage(
                     model              = rememberAvatarImageRequest(user.picture, Sizing.avatar + 8.dp),
                     contentDescription = null,
                     modifier           = Modifier.fillMaxSize(),
@@ -916,7 +917,7 @@ private fun TrendingDiscovery(
     onHashtagClick: (String) -> Unit,
     onUserClick: (String) -> Unit,
 ) {
-    LazyColumn(
+    AvatarLazyColumn(
         modifier = Modifier.fillMaxSize(),
         contentPadding = PaddingValues(bottom = Spacing.xl + staticBottomPadding),
     ) {
@@ -1064,7 +1065,7 @@ private fun TrendingUserRow(
         ) {
             IdentIcon(pubkey = user.pubkey, modifier = Modifier.fillMaxSize())
             if (!user.picture.isNullOrBlank()) {
-                AsyncImage(
+                AvatarAsyncImage(
                     model              = rememberAvatarImageRequest(user.picture, Sizing.avatar),
                     contentDescription = null,
                     modifier           = Modifier.fillMaxSize(),

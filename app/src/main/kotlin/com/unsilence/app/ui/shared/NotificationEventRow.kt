@@ -40,7 +40,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.LineHeightStyle
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import coil3.compose.AsyncImage
+import com.unsilence.app.ui.common.AvatarAsyncImage
 import com.unsilence.app.ui.common.rememberAvatarImageRequest
 import com.unsilence.app.data.memory.NotificationActor
 import com.unsilence.app.data.memory.NotificationRow
@@ -171,7 +171,7 @@ private fun SingleNotificationRow(
             Box(modifier = Modifier.fillMaxSize().clip(CircleShape)) {
                 IdentIcon(pubkey = row.actorPubkey, modifier = Modifier.fillMaxSize())
                 if (!row.actorPicture.isNullOrBlank()) {
-                    AsyncImage(
+                    AvatarAsyncImage(
                         model = rememberAvatarImageRequest(row.actorPicture, Sizing.avatar),
                         contentDescription = null,
                         modifier = Modifier.fillMaxSize(),
@@ -318,7 +318,7 @@ private fun ActorStrip(
                 if (pk != null) {
                     IdentIcon(pubkey = pk, modifier = Modifier.fillMaxSize())
                     if (!actor.picture.isNullOrBlank()) {
-                        AsyncImage(
+                        AvatarAsyncImage(
                             model = rememberAvatarImageRequest(actor.picture, 27.dp),
                             contentDescription = null,
                             modifier = Modifier.fillMaxSize(),

@@ -13,7 +13,7 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.lazy.LazyColumn
+import com.unsilence.app.ui.common.AvatarLazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
@@ -33,7 +33,9 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import com.unsilence.app.ui.common.AvatarAsyncImage
 import coil3.compose.AsyncImage
+import com.unsilence.app.ui.common.ProvideAvatarViewport
 import com.unsilence.app.data.memory.NotificationActor
 import com.unsilence.app.data.memory.NotificationRow
 import com.unsilence.app.data.memory.ReactionContent
@@ -65,53 +67,55 @@ fun NotificationActorSheet(
         sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
         dragHandle = { BottomSheetDefaults.DragHandle(color = TextSecondary) },
     ) {
-        Column(modifier = Modifier.padding(bottom = 24.dp)) {
-            // Header: "N verb (· sats)".
-            Row(
-                modifier = Modifier.padding(horizontal = 20.dp, vertical = 12.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Icon(icon, contentDescription = null, tint = iconTint, modifier = Modifier.size(18.dp))
-                Spacer(Modifier.width(Spacing.small))
-                Text(
-                    text = "${row.people} $verb",
-                    color = Color.White,
-                    style = AppTextStyles.subheading,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
-                if (row.notifType == "zap" && row.sumSats > 0) {
+        ProvideAvatarViewport(bounds = null) {
+            Column(modifier = Modifier.padding(bottom = 24.dp)) {
+                // Header: "N verb (· sats)".
+                Row(
+                    modifier = Modifier.padding(horizontal = 20.dp, vertical = 12.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Icon(icon, contentDescription = null, tint = iconTint, modifier = Modifier.size(18.dp))
                     Spacer(Modifier.width(Spacing.small))
                     Text(
-                        text = "· ${formatSats(row.sumSats)} sats",
-                        color = Zap,
-                        fontWeight = FontWeight.Medium,
+                        text = "${row.people} $verb",
+                        color = Color.White,
                         style = AppTextStyles.subheading,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
                     )
-                }
-            }
-            HorizontalDivider(color = Color.White.copy(alpha = 0.1f))
-
-            LazyColumn(modifier = Modifier.heightIn(max = 420.dp)) {
-                items(row.actors, key = { it.pubkey ?: "anon-${it.createdAt}" }) { actor ->
-                    ActorSheetRow(
-                        actor = actor,
-                        notifType = row.notifType,
-                        onClick = {
-                            actor.pubkey?.let {
-                                onProfileClick(it)
-                                onDismiss()
-                            }
-                        },
-                    )
-                }
-                if (row.anonymousCount > 0) {
-                    item(key = "anon-aggregate") {
-                        AnonymousActorRow(
-                            count = row.anonymousCount,
-                            sats = row.anonymousSats,
-                            notifType = row.notifType,
+                    if (row.notifType == "zap" && row.sumSats > 0) {
+                        Spacer(Modifier.width(Spacing.small))
+                        Text(
+                            text = "· ${formatSats(row.sumSats)} sats",
+                            color = Zap,
+                            fontWeight = FontWeight.Medium,
+                            style = AppTextStyles.subheading,
                         )
+                    }
+                }
+                HorizontalDivider(color = Color.White.copy(alpha = 0.1f))
+
+                AvatarLazyColumn(modifier = Modifier.heightIn(max = 420.dp)) {
+                    items(row.actors, key = { it.pubkey ?: "anon-${it.createdAt}" }) { actor ->
+                        ActorSheetRow(
+                            actor = actor,
+                            notifType = row.notifType,
+                            onClick = {
+                                actor.pubkey?.let {
+                                    onProfileClick(it)
+                                    onDismiss()
+                                }
+                            },
+                        )
+                    }
+                    if (row.anonymousCount > 0) {
+                        item(key = "anon-aggregate") {
+                            AnonymousActorRow(
+                                count = row.anonymousCount,
+                                sats = row.anonymousSats,
+                                notifType = row.notifType,
+                            )
+                        }
                     }
                 }
             }
@@ -142,7 +146,7 @@ private fun ActorSheetRow(
             if (pk != null) {
                 IdentIcon(pubkey = pk, modifier = Modifier.fillMaxSize())
                 if (!actor.picture.isNullOrBlank()) {
-                    AsyncImage(
+                    AvatarAsyncImage(
                         model = rememberAvatarImageRequest(actor.picture, 36.dp),
                         contentDescription = null,
                         modifier = Modifier.fillMaxSize(),
