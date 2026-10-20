@@ -122,6 +122,7 @@ import coil3.compose.AsyncImage
 import com.unsilence.app.ui.common.LogoMark
 import com.unsilence.app.ui.common.rememberAnimatorDurationScale
 import com.unsilence.app.ui.common.rememberAvatarImageRequest
+import com.unsilence.app.ui.common.rememberAvatarAnimationTransform
 import com.unsilence.app.ui.common.rememberPowerSaveMode
 import com.unsilence.app.data.memory.RelaySet
 import com.unsilence.app.data.memory.RelayHealthInfo
@@ -597,6 +598,7 @@ fun AppNavigation(
                                             ) {
                                                 AsyncImage(
                                                     model = rememberAvatarImageRequest(userAvatarUrl, iconSize),
+                                                    transform = rememberAvatarAnimationTransform(bottomBarShown),
                                                     contentDescription = "Profile",
                                                     contentScale = ContentScale.Crop,
                                                     modifier = Modifier.fillMaxSize(),

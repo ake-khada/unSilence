@@ -127,6 +127,8 @@ dependencies {
     implementation(libs.coil.gif)
     implementation(libs.coil.network.okhttp)
     implementation(libs.coil.video)
+    // Avatar playback owns this painter's lifecycle; don't rely on Coil's transitive edge.
+    implementation(libs.accompanist.drawablepainter)
     implementation(libs.telephoto.zoomable.image.coil3)
     implementation(libs.exifinterface)
 
