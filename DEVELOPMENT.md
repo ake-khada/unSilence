@@ -28,6 +28,7 @@ this does not change the shipped app's Java target.
 | `./dev -- COMMAND` | Run a command in the project environment |
 | `./dev doctor` | Inspect local toolchain and signing configuration |
 | `./dev check` | Run JVM tests, lint, minified release, benchmark compilation and Python tests |
+| `./dev tooling:test` | Test local launch guards without a device or Android SDK |
 | `./dev privacy` | Check staged and publishable working files for private metadata |
 | `./dev privacy:secrets` | Scan local Git history for secrets with redacted output |
 | `./dev build` | Build the minified release APK |
@@ -73,6 +74,19 @@ profile. Use a suitable test device or the optional isolated emulator:
 
 The emulator requires host KVM access. Disposable test-identity provisioning is
 restricted to that isolated emulator and must never run on a personal device.
+
+An optional `.toolchains/profile-emulator-preflight` executable can enforce a
+checkout's local maintenance policy before the emulator starts. An absent hook
+allows launch. If present, it must be a readable, executable regular file with a
+valid interpreter or executable format; symlinks and special files block launch.
+The hook runs from the project root with the project environment and must exit
+zero to allow launch. Configuration errors must produce a nonzero exit status;
+failed checks, signals and execution errors prevent the emulator from starting.
+Scripts should explicitly propagate failures and bound any waits they perform.
+Keep the hook, its configuration and evidence in ignored `.toolchains/` paths.
+The hook's result reflects its own checks; the launcher does not independently
+certify the emulator's state. `./dev tooling:test` exercises this launch boundary
+using temporary files and stub commands.
 
 ## Local-only information
 

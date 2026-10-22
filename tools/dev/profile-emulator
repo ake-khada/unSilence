@@ -30,7 +30,9 @@ case "${1:-start}" in
             printf '%s\n' 'Run ./dev profile:emulator:setup first.' >&2
             exit 1
         fi
-        exec "$profile_sdk/emulator/emulator" -avd "$profile_name" \
+        exec python3 -I "$project_dir/tools/dev/with_preflight.py" \
+            "$project_dir/.toolchains/profile-emulator-preflight" \
+            "$profile_sdk/emulator/emulator" -avd "$profile_name" \
             -no-window -no-audio -no-boot-anim -no-snapshot -gpu swiftshader \
             -accel on -memory 3072 -cores 4
         ;;

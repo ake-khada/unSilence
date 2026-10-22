@@ -45,7 +45,11 @@ run = "./gradlew lintDebug"
 
 [tasks.check]
 description = "Run the full local build gate without a phone"
-run = ["python3 tools/privacy/check_public_tree.py", "python3 -m unittest discover -s tools/privacy/tests -v", "./gradlew testDebugUnitTest lintDebug assembleRelease :macrobenchmark:assembleBenchmark --continue", "python3 -m unittest discover -s tools/perf/tests -v"]
+run = ["python3 tools/privacy/check_public_tree.py", "python3 -m unittest discover -s tools/privacy/tests -v", "python3 -m unittest discover -s tools/dev/tests -v", "./gradlew testDebugUnitTest lintDebug assembleRelease :macrobenchmark:assembleBenchmark --continue", "python3 -m unittest discover -s tools/perf/tests -v"]
+
+[tasks."tooling:test"]
+description = "Test the local launch guards without a device or Android SDK"
+run = "python3 -m unittest discover -s tools/dev/tests -v"
 
 [tasks.privacy]
 description = "Check staged and publishable working files for private metadata"
