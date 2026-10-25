@@ -11,11 +11,14 @@ import com.unsilence.app.data.relay.ProtectedProfile
 import com.unsilence.app.data.relay.detectImpersonationRisk
 import com.unsilence.app.data.relay.sortPeopleForSearch
 import com.unsilence.app.data.relay.wotSubjectsForFeedRows
+import com.unsilence.app.ui.feed.FeedModerationCache
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.buffer
 import kotlinx.coroutines.flow.conflate
+import kotlinx.coroutines.flow.emitAll
+import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.map
 
@@ -50,28 +53,34 @@ internal fun Flow<SearchResultsBundle>.projectSearchResults(
     cachedModelProvider: (String) -> EventModel?,
     wotLookup: (String) -> WotLookup,
     protectedProfiles: () -> List<ProtectedProfile>,
-): Flow<SearchResultProjection> = conflate().map { results ->
-    val localNotes = filterSearchNoteRows(results.localNotes, results.muteList, results.hashtagCap, eventProvider)
-    val relayNotes = filterSearchNoteRows(results.relayNotes, results.muteList, results.hashtagCap, eventProvider)
-    val notes = (localNotes + relayNotes).distinctBy { it.id }.sortedByDescending { it.createdAt }
-    val localTags = filterSearchNoteRows(results.tagNotes, results.muteList, results.hashtagCap, eventProvider)
-    val tags = (localTags + if (explicitHashtag) relayNotes else emptyList())
-        .distinctBy { it.id }.sortedByDescending { it.createdAt }
-    val people = sortPeopleForSearch(
-        users = filterSearchPeople(results.people, results.muteList),
-        query = query,
-        followedPubkeys = results.followedPubkeys,
-        limit = 50,
-        lookup = wotLookup,
-    )
-    val protected = if (people.isEmpty()) emptyList() else protectedProfiles()
-    val risks = people.mapNotNull { user ->
-        detectImpersonationRisk(user, wotLookup(user.pubkey), protected)?.let { user.pubkey to it }
-    }.toMap()
-    val subjects = buildSet {
-        addAll(people.map { it.pubkey })
-        addAll(wotSubjectsForFeedRows(notes, cachedModelProvider = cachedModelProvider))
-        addAll(wotSubjectsForFeedRows(tags, cachedModelProvider = cachedModelProvider))
-    }
-    SearchResultProjection(notes, tags, people, risks, subjects)
+): Flow<SearchResultProjection> = flow {
+    // One bounded weak verdict cache per collection/query, released on cover,
+    // query replacement or account teardown. Never retain normalized bodies.
+    val moderation = FeedModerationCache(maxEntries = 1_000)
+    emitAll(this@projectSearchResults.conflate().map { results ->
+        val verdicts = moderation.forPolicy(results.muteList, results.hashtagCap)
+        val localNotes = filterSearchNoteRows(results.localNotes, results.muteList, results.hashtagCap, eventProvider, verdicts)
+        val relayNotes = filterSearchNoteRows(results.relayNotes, results.muteList, results.hashtagCap, eventProvider, verdicts)
+        val notes = (localNotes + relayNotes).distinctBy { it.id }.sortedByDescending { it.createdAt }
+        val localTags = filterSearchNoteRows(results.tagNotes, results.muteList, results.hashtagCap, eventProvider, verdicts)
+        val tags = (localTags + if (explicitHashtag) relayNotes else emptyList())
+            .distinctBy { it.id }.sortedByDescending { it.createdAt }
+        val people = sortPeopleForSearch(
+            users = filterSearchPeople(results.people, results.muteList),
+            query = query,
+            followedPubkeys = results.followedPubkeys,
+            limit = 50,
+            lookup = wotLookup,
+        )
+        val protected = if (people.isEmpty()) emptyList() else protectedProfiles()
+        val risks = people.mapNotNull { user ->
+            detectImpersonationRisk(user, wotLookup(user.pubkey), protected)?.let { user.pubkey to it }
+        }.toMap()
+        val subjects = buildSet {
+            addAll(people.map { it.pubkey })
+            addAll(wotSubjectsForFeedRows(notes, cachedModelProvider = cachedModelProvider))
+            addAll(wotSubjectsForFeedRows(tags, cachedModelProvider = cachedModelProvider))
+        }
+        SearchResultProjection(notes, tags, people, risks, subjects)
+    })
 }.flowOn(Dispatchers.Default).buffer(Channel.CONFLATED)

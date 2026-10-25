@@ -40,6 +40,203 @@ class SearchResultProjectionTest {
         content = content, createdAt = id.toLong(), tags = emptyList(), sig = "0".repeat(128),
     ).toNostrEvent("wss://relay.example")
 
+    @Test fun `repeated local relay and topic results evaluate immutable moderation once`() = runTest {
+        val reads = java.util.concurrent.atomic.AtomicInteger()
+        val tags = object : AbstractList<List<String>>() {
+            override val size = 1
+            override fun get(index: Int): List<String> {
+                reads.incrementAndGet()
+                return listOf("t", "topic")
+            }
+        }
+        val note = event(1, "A long Σ İ article. ".repeat(2_000), 30023).copy(tags = tags)
+        val store = store()
+        store.insert(note)
+        val rows = store.feedRowsByIds(setOf(note.id))
+        val mutes = MuteList(emptySet(), emptySet(), setOf("absent"), emptySet())
+        val bundle = SearchResultsBundle(rows, rows, rows, emptyList(), mutes, 5)
+        reads.set(0) // Count moderation only, not ingest or row construction.
+        val updates = Channel<SearchResultsBundle>(Channel.UNLIMITED)
+        updates.receiveAsFlow().projectSearchResults(
+            "article", true, { note.takeIf { id -> it == id.id } }, { null },
+            { WotLookup.Pending }, { emptyList() },
+        ).test {
+            repeat(20) {
+                updates.send(bundle)
+                val projection = awaitItem()
+                assertEquals(rows, projection.notes)
+                assertEquals(rows, projection.tags)
+            }
+            assertEquals("one policy evaluation, not one per source and signal", 1, reads.get())
+        }
+    }
+
+    @Test fun `cached verdicts preserve Unicode private policy replacement and missing event fallback`() = runTest {
+        val store = store()
+        val initial = event(1, "ΟΣ İ")
+        store.insert(initial)
+        val rows = store.feedRowsByIds(setOf(initial.id))
+        val current = AtomicReference<com.unsilence.app.data.memory.NostrEvent?>(initial)
+        val updates = Channel<SearchResultsBundle>(Channel.UNLIMITED)
+        val empty = MuteList(emptySet(), emptySet(), emptySet(), emptySet())
+        val bundle = SearchResultsBundle(rows, rows, rows, emptyList(), empty)
+        updates.receiveAsFlow().projectSearchResults(
+            "query", false, { current.get() }, { null }, { WotLookup.Pending }, { emptyList() },
+        ).test {
+            suspend fun check(policy: MuteList, visible: Boolean) {
+                updates.send(bundle.copy(muteList = policy))
+                val result = awaitItem()
+                assertEquals(visible, result.notes.isNotEmpty())
+                assertEquals(visible, result.tags.isNotEmpty())
+            }
+            check(empty, true)
+            // Exact old String.lowercase semantics: final sigma and expanded I.
+            check(empty.copy(words = setOf("οσ")), true)
+            check(empty.copy(words = setOf("ος")), false)
+            check(empty.copy(privateWords = setOf("i\u0307")), false)
+            check(empty.copy(words = setOf("absent")), true)
+            current.set(initial.copy(content = "ABSENT")) // Same ID, new immutable body.
+            check(empty.copy(words = setOf("absent")), false)
+            current.set(null) // MES miss must evaluate the supplied row, not a stale verdict.
+            check(empty.copy(words = setOf("absent")), true)
+            check(empty.copy(privateWords = setOf("i\u0307")), false)
+        }
+    }
+
+    @Test fun `each collection owns its verdicts and hashtag changes invalidate them`() = runTest {
+        val reads = java.util.concurrent.atomic.AtomicInteger()
+        val tags = object : AbstractList<List<String>>() {
+            override val size = 1
+            override fun get(index: Int): List<String> {
+                reads.incrementAndGet()
+                return listOf("t", "topic")
+            }
+        }
+        val store = store()
+        val note = event(1).copy(tags = tags)
+        store.insert(note)
+        val rows = store.feedRowsByIds(setOf(note.id))
+        reads.set(0)
+        val updates = Channel<SearchResultsBundle>(Channel.UNLIMITED)
+        val bundle = SearchResultsBundle(rows, emptyList(), emptyList(), emptyList(), hashtagCap = 5)
+        val projection = updates.receiveAsFlow().projectSearchResults(
+            "query", false, { note }, { null }, { WotLookup.Pending }, { emptyList() },
+        )
+        projection.test {
+            updates.send(bundle)
+            assertEquals(rows, awaitItem().notes)
+            updates.send(bundle)
+            assertEquals(rows, awaitItem().notes)
+            assertEquals(1, reads.get())
+            updates.send(bundle.copy(hashtagCap = 0))
+            assertTrue(awaitItem().notes.isEmpty())
+            assertEquals(2, reads.get())
+        }
+        projection.test {
+            updates.send(bundle)
+            assertEquals(rows, awaitItem().notes)
+            assertEquals("cover/query teardown must release the old collection cache", 3, reads.get())
+        }
+    }
+
+    @Test fun `reference targets stay live across missing and replaced targets`() = runTest {
+        val store = store()
+        val target = event(2, "SPAM")
+        val wrapper = event(1, kind = 6).copy(repostInfo = com.unsilence.app.data.model.RepostInfo(
+            target.id, null, null, null, null, null,
+            com.unsilence.app.data.model.RepostPayload.ReferenceOnly,
+        ))
+        store.insert(wrapper)
+        val rows = store.feedRowsByIds(setOf(wrapper.id))
+        val current = AtomicReference<com.unsilence.app.data.memory.NostrEvent?>(null)
+        val updates = Channel<SearchResultsBundle>(Channel.UNLIMITED)
+        val bundle = SearchResultsBundle(rows, emptyList(), rows, emptyList(),
+            MuteList(emptySet(), emptySet(), setOf("spam"), emptySet()))
+        updates.receiveAsFlow().projectSearchResults(
+            "query", false, { if (it == wrapper.id) wrapper else current.get() }, { null },
+            { WotLookup.Pending }, { emptyList() },
+        ).test {
+            updates.send(bundle)
+            assertEquals(rows, awaitItem().notes)
+            current.set(target)
+            updates.send(bundle)
+            assertTrue(awaitItem().notes.isEmpty())
+            current.set(target.copy(content = "clean"))
+            updates.send(bundle)
+            assertEquals(rows, awaitItem().notes)
+            current.set(null)
+            updates.send(bundle)
+            assertEquals(rows, awaitItem().notes)
+            updates.send(bundle.copy(localNotes = emptyList(), relayNotes = emptyList()))
+            assertTrue(awaitItem().notes.isEmpty()) // Cache never adds removed rows.
+        }
+    }
+
+    @Test fun `projection verdict retention is bounded to one thousand events`() = runTest {
+        val reads = java.util.concurrent.atomic.AtomicInteger()
+        val tags = object : AbstractList<List<String>>() {
+            override val size = 1
+            override fun get(index: Int): List<String> {
+                reads.incrementAndGet()
+                return listOf("t", "topic")
+            }
+        }
+        val store = store()
+        val events = (1..1_001).map { event(it).copy(tags = tags) }.associateBy { it.id }
+        store.insertBatch(events.values.toList())
+        val rows = store.feedRowsByIds(events.keys).sortedBy { it.createdAt }
+        reads.set(0)
+        val updates = Channel<SearchResultsBundle>(Channel.UNLIMITED)
+        val bundle = SearchResultsBundle(rows, emptyList(), emptyList(), emptyList(), hashtagCap = 5)
+        updates.receiveAsFlow().projectSearchResults(
+            "query", false, events::get, { null }, { WotLookup.Pending }, { emptyList() },
+        ).test {
+            updates.send(bundle)
+            assertEquals(1_001, awaitItem().notes.size)
+            assertEquals(1_001, reads.get())
+            updates.send(bundle.copy(localNotes = listOf(rows.first())))
+            assertEquals(1, awaitItem().notes.size)
+            assertEquals("oldest verdict was evicted, rows were not capped", 1_002, reads.get())
+        }
+    }
+
+    @Test fun `repeated moderation fixture reduces allocations without changing verdicts`() {
+        val store = store()
+        val events = (1..100).map { event(it, "Σ İ " + "Mixed CASE café article text. ".repeat(256), 30023) }
+        store.insertBatch(events)
+        val byId = events.associateBy { it.id }
+        val rows = store.feedRowsByIds(byId.keys)
+        val mutes = MuteList(emptySet(), emptySet(), setOf("missing-word"), emptySet(),
+            privateWords = setOf("also-absent"))
+        val policy = com.unsilence.app.ui.feed.FeedModerationCache().forPolicy(mutes, null)
+        val api = Class.forName("com.sun.management.ThreadMXBean")
+        val bean = Class.forName("java.lang.management.ManagementFactory")
+            .getMethod("getThreadMXBean").invoke(null)
+        api.getMethod("setThreadAllocatedMemoryEnabled", Boolean::class.javaPrimitiveType).invoke(bean, true)
+        val read = api.getMethod("getThreadAllocatedBytes", Long::class.javaPrimitiveType)
+        fun allocated() = read.invoke(bean, Thread.currentThread().threadId()) as Long
+        repeat(5) {
+            filterSearchNoteRows(rows, mutes, null, byId::get)
+            filterSearchNoteRows(rows, mutes, null, byId::get, policy)
+        }
+        fun measure(cached: Boolean): Long {
+            val before = allocated()
+            val start = System.nanoTime()
+            repeat(20) {
+                val result = filterSearchNoteRows(rows, mutes, null, byId::get, policy.takeIf { cached })
+                assertEquals(rows, result)
+            }
+            val duration = System.nanoTime() - start
+            val bytes = allocated() - before
+            println("SEARCH_MODERATION_FIXTURE cached=$cached entries=100 passes=20 chars=${events.sumOf { it.content.length }} allocatedBytes=$bytes durationNs=$duration")
+            return bytes
+        }
+        val uncached = measure(false)
+        val cached = measure(true)
+        // Allocation regression, not a timing gate or phone responsiveness claim.
+        assertTrue("uncached=$uncached cached=$cached", cached < uncached / 4)
+    }
+
     @Test fun `repeated projections never parse cold articles and cached quote subjects still appear`() = runTest {
         val store = store()
         val reference = NEvent.create("c".repeat(64), quotedAuthor, null, null as NormalizedRelayUrl?)

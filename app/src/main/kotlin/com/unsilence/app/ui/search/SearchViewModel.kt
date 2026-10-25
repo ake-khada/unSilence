@@ -1,5 +1,6 @@
 package com.unsilence.app.ui.search
 
+import com.unsilence.app.ui.feed.FeedModerationCache
 import com.unsilence.app.ui.shared.CardDataFlow
 
 import android.util.Log
@@ -564,9 +565,14 @@ internal fun filterSearchNoteRows(
     muteList: MuteList?,
     hashtagCap: Int?,
     eventProvider: ((String) -> com.unsilence.app.data.memory.NostrEvent?)? = null,
+    verdicts: FeedModerationCache.Verdicts? = null,
 ): List<FeedRow> = rows.filterNot { row ->
     val event = eventProvider?.invoke(row.id)
-    if (event != null) {
+    if (event != null && verdicts != null && event.kind != 6 && event.kind != 16) {
+        verdicts.excludes(event, checkNotNull(eventProvider))
+    } else if (event != null) {
+        // Keep reference resolution live. Search does not adopt Feed's sticky
+        // reference exclusions; missing/replaced targets retain existing behavior.
         isMuted(event, muteList, eventProvider) || exceedsHashtagCap(event, hashtagCap, eventProvider)
     } else {
         isMuted(row, muteList) || exceedsHashtagCap(row, hashtagCap)
