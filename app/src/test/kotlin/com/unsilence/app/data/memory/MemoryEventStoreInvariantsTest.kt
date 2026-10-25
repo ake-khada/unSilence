@@ -4072,6 +4072,19 @@ class MemoryEventStoreInvariantsTest {
     }
 
     @Test
+    fun `searchNotesFlow keeps Unicode literal matches across store updates`() = runTest {
+        store.insert(event(id = "unicode-note", kind = 1, content = "CAFÉ [news]", createdAt = 100))
+        store.insert(event(id = "plain-note", kind = 1, content = "Cafe [news]", createdAt = 200))
+        store.searchNotesFlow("café [NEWS]").test {
+            assertEquals(listOf("unicode-note"), awaitItem().map { it.id })
+            store.insert(event(id = "unicode-article", kind = 30023,
+                content = "A new CAFÉ [news] article", createdAt = 300))
+            assertEquals(listOf("unicode-article", "unicode-note"), awaitItem().map { it.id })
+            cancelAndIgnoreRemainingEvents()
+        }
+    }
+
+    @Test
     fun `searchNotesFlow excludes kind-6 reposts and kind-7 reactions`() = runTest {
         store.insert(event(id = "note", kind = 1, content = "searchable content here"))
         store.insert(event(id = "repost", kind = 6, content = "searchable content here", rootId = "note"))

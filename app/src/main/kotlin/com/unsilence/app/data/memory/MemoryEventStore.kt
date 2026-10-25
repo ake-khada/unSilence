@@ -4837,9 +4837,8 @@ class MemoryEventStore @Inject constructor(
             .flowOn(Dispatchers.Default)
 
     private fun searchNotes(query: String): List<FeedRow> {
-        val lq = query.lowercase()
         return eventsById.values
-            .filter { (it.kind == 1 || it.kind == 30023) && it.content.lowercase().contains(lq) }
+            .filter { (it.kind == 1 || it.kind == 30023) && containsNoteSearchText(it.content, query) }
             .sortedByDescending { it.createdAt }
             .take(50)
             .map { toFeedRow(it) }
