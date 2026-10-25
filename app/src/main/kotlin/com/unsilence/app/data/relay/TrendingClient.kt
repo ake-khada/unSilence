@@ -4,6 +4,8 @@ import com.unsilence.app.data.memory.MemoryEventStore
 import com.unsilence.app.data.memory.UserEntity
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
@@ -12,10 +14,9 @@ import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
-import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
@@ -32,7 +33,6 @@ import okhttp3.Response
 import okhttp3.WebSocket
 import okhttp3.WebSocketListener
 import java.util.concurrent.TimeUnit
-import java.util.concurrent.atomic.AtomicLong
 import javax.inject.Inject
 import javax.inject.Singleton
 import kotlin.coroutines.resume
@@ -58,6 +58,15 @@ data class TrendingData(
     val profiles: List<TrendingProfile>,
 )
 
+enum class TrendingOutcome { Idle, Success, Empty, Unavailable }
+
+/** One shared progressive snapshot, including terminal outcomes when no data exists. */
+data class TrendingState(
+    val data: TrendingData? = null,
+    val refreshing: Boolean = false,
+    val outcome: TrendingOutcome = TrendingOutcome.Idle,
+)
+
 internal interface TrendingTransport {
     suspend fun fetchTrendingEvents(): List<JsonObject>?
     suspend fun warmCountRelay()
@@ -69,7 +78,7 @@ class TrendingClient internal constructor(
     private val transport: TrendingTransport,
     private val profileLookup: (String) -> UserEntity?,
     private val scope: CoroutineScope,
-    private val nowMs: () -> Long = { System.currentTimeMillis() },
+    private val nowMs: () -> Long = { android.os.SystemClock.elapsedRealtime() },
 ) {
     @Inject constructor(
         okHttpClient: OkHttpClient,
@@ -81,67 +90,106 @@ class TrendingClient internal constructor(
         scope = CoroutineScope(SupervisorJob() + Dispatchers.IO),
     )
 
-    private val lastFetchMs = AtomicLong(0L)
-    private val freshnessWindowMs = AtomicLong(TRENDING_FRESH_MS)
-    private val refreshMutex = Mutex()
+    private val refreshLock = Any()
+    // All attempt/freshness fields are guarded by refreshLock. A completed job is
+    // retained until the next attempt; waiters never enqueue another forced fetch.
+    private var inFlight: Deferred<Unit>? = null
+    private var lastFetchMs: Long? = null
+    private var freshnessWindowMs = TRENDING_FRESH_MS
+    private var failureRetryAtMs: Long? = null
+    private var lastManualRetryMs: Long? = null
 
-    private val _data = MutableStateFlow<TrendingData?>(null)
-    val data: StateFlow<TrendingData?> = _data.asStateFlow()
+    private val _state = MutableStateFlow(TrendingState())
+    val state: StateFlow<TrendingState> = _state.asStateFlow()
 
     fun refreshIfStale(forceRefresh: Boolean = false) {
-        if (!forceRefresh && isFresh()) return
-        scope.launch { refresh(forceRefresh) }
+        attempt(forceRefresh)?.start()
     }
+
+    /** Explicit intent bypasses automatic cooldowns, but not single-flight/tap debounce. */
+    fun retry() { attempt(forceRefresh = true, manual = true)?.start() }
 
     suspend fun fetch(forceRefresh: Boolean = false): TrendingData? {
         refresh(forceRefresh)
-        return data.value
+        return state.value.data
     }
 
     internal suspend fun refresh(forceRefresh: Boolean = false) {
-        if (!forceRefresh && isFresh()) return
-        refreshMutex.withLock {
-            if (!forceRefresh && isFresh()) return
-            try {
-                doRefresh()
-            } catch (e: CancellationException) {
-                throw e
-            } catch (_: Exception) {}
-        }
+        attempt(forceRefresh)?.await()
     }
 
-    private fun isFresh(): Boolean =
-        _data.value != null && nowMs() - lastFetchMs.get() < freshnessWindowMs.get()
+    private fun attempt(forceRefresh: Boolean, manual: Boolean = false): Deferred<Unit>? =
+        synchronized(refreshLock) {
+            inFlight?.takeUnless { it.isCompleted }?.let { return@synchronized it }
+            val now = nowMs()
+            if (manual && lastManualRetryMs?.let { now - it < MANUAL_RETRY_MS } == true) {
+                return@synchronized null
+            }
+            if (!forceRefresh && (
+                failureRetryAtMs?.let { now < it } == true ||
+                    lastFetchMs?.let { now - it < freshnessWindowMs } == true
+                )) return@synchronized null
+            if (manual) lastManualRetryMs = now
+            _state.update { it.copy(refreshing = true) }
+            val job = scope.async(start = CoroutineStart.LAZY) {
+                try {
+                    doRefresh()
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (_: Exception) {
+                    finishWithoutData(TrendingOutcome.Unavailable)
+                }
+            }
+            inFlight = job
+            job.invokeOnCompletion { cause ->
+                // Also covers cancellation before a lazy job starts. Cancelling a
+                // waiter leaves the shared request running for its other consumers.
+                if (cause != null) synchronized(refreshLock) {
+                    if (inFlight === job) _state.update {
+                        it.copy(refreshing = false, outcome = TrendingOutcome.Unavailable)
+                    }
+                }
+            }
+            job
+        }
+
+    private fun finishWithoutData(outcome: TrendingOutcome) = synchronized(refreshLock) {
+        failureRetryAtMs = nowMs() + TRENDING_RETRY_MS
+        _state.update { it.copy(refreshing = false, outcome = outcome) }
+    }
 
     private suspend fun doRefresh(): Unit = coroutineScope {
         val warm = launch {
             try {
-                transport.warmCountRelay()
+                withTimeoutOrNull(3_000L) { transport.warmCountRelay() }
             } catch (e: CancellationException) {
                 throw e
             } catch (_: Exception) {}
         }
 
-        val events = transport.fetchTrendingEvents()
+        val events = withTimeoutOrNull(5_000L) { transport.fetchTrendingEvents() }
         if (events.isNullOrEmpty()) {
             warm.cancel()
+            finishWithoutData(if (events == null) TrendingOutcome.Unavailable else TrendingOutcome.Empty)
             return@coroutineScope
         }
         val (topHashtags, topAuthorPubkeys) = aggregate(events)
         if (topHashtags.isEmpty() && topAuthorPubkeys.isEmpty()) {
             warm.cancel()
+            finishWithoutData(TrendingOutcome.Empty)
             return@coroutineScope
         }
 
-        val previousCounts = _data.value?.profiles
+        val previousCounts = _state.value.data?.profiles
             ?.associate { it.pubkey to it.followerCount }
             .orEmpty()
-        _data.value = TrendingData(
+        val firstData = TrendingData(
             hashtags = topHashtags,
             profiles = topAuthorPubkeys.map { pubkey ->
                 toProfile(pubkey, previousCounts[pubkey])
             },
         )
+        _state.value = TrendingState(firstData, refreshing = true, outcome = TrendingOutcome.Success)
 
         warm.join()
         val enriched = topAuthorPubkeys.map { pubkey ->
@@ -159,14 +207,16 @@ class TrendingClient internal constructor(
             }
         }.awaitAll()
 
-        _data.value = TrendingData(
+        val enrichedData = TrendingData(
             hashtags = topHashtags,
             profiles = enriched.map { it.first },
         )
-        freshnessWindowMs.set(
-            if (enriched.any { it.second }) TRENDING_FRESH_MS else TRENDING_RETRY_MS,
-        )
-        lastFetchMs.set(nowMs())
+        synchronized(refreshLock) {
+            freshnessWindowMs = if (enriched.any { it.second }) TRENDING_FRESH_MS else TRENDING_RETRY_MS
+            lastFetchMs = nowMs()
+            failureRetryAtMs = null
+            _state.value = TrendingState(enrichedData, outcome = TrendingOutcome.Success)
+        }
     }
 
     private fun aggregate(events: List<JsonObject>): Pair<List<TrendingHashtag>, List<String>> {
@@ -216,6 +266,7 @@ class TrendingClient internal constructor(
         private const val TRENDING_FRESH_MS = 10 * 60 * 1000L
         private const val TRENDING_RETRY_MS = 60_000L
         private const val COUNT_TIMEOUT_MS = 2_500L
+        private const val MANUAL_RETRY_MS = 1_500L
     }
 }
 

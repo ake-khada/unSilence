@@ -3830,6 +3830,13 @@ class MemoryEventStore @Inject constructor(
             .distinctUntilChanged()
             .flowOn(Dispatchers.Default)
 
+    /** Fixed-owner observation for session-scoped discovery; injectable dispatcher for flow tests. */
+    internal fun discoveryMuteListFlow(
+        owner: String,
+        dispatcher: kotlinx.coroutines.CoroutineDispatcher = Dispatchers.Default,
+    ): Flow<MuteList?> = _muteListSignal.map { getMuteList(owner) }
+        .distinctUntilChanged().flowOn(dispatcher)
+
     /**
      * Update the private (decrypted) portion of an existing MuteList.
      * Called from bootstrap after Amber/signer-based decrypt completes.
@@ -4546,20 +4553,34 @@ class MemoryEventStore @Inject constructor(
     }
 
     /**
-     * Trending hashtags: frequency scan of `t` tags across recent kind-1 events.
-     * Returns up to [limit] (tag, count) pairs sorted by count DESC.
-     * Scans the most recent 500 kind-1 events by createdAt.
+     * Local discovery from verified MES content, ordered by recency (then event ID).
+     * Call on Default. Both examined entries and notes are bounded, including
+     * stale IDs/non-content entries; excluded people never spend candidate slots.
      */
-    fun trendingHashtags(limit: Int = 8): List<Pair<String, Int>> {
+    internal fun discoverySnapshot(owner: String, limit: Int = 32): LocalDiscoverySnapshot {
+        if (ownPubkey != owner) return LocalDiscoverySnapshot()
+        val follows = getFollows(owner).orEmpty()
+        val muteList = getMuteList(owner)
+        val candidateLimit = limit.coerceIn(0, 32)
+        val users = LinkedHashMap<String, UserEntity>()
         val freq = HashMap<String, Int>()
-        // recentByCreatedAt is already createdAt-DESC ordered — walk it and
-        // stop after 500 kind-1 events. No full materialization, no full sort.
+        var examined = 0
         var counted = 0
         for (entry in recentByCreatedAt) {
-            if (counted >= 500) break
+            if (examined >= DISCOVERY_INDEX_SCAN_LIMIT || counted >= DISCOVERY_NOTE_SCAN_LIMIT) break
+            examined++
             val event = eventsById[entry.id] ?: continue
             if (event.kind != 1) continue
             counted++
+            if (isMuted(event, muteList)) continue
+            val pubkey = event.pubkey
+            if (users.size < candidateLimit && pubkey != owner && pubkey !in follows &&
+                !isPubkeyMuted(pubkey, muteList) && pubkey !in users
+            ) {
+                // Unknown profiles/counts remain eligible and use the existing
+                // bounded profile/WoT hydration after presentation projection.
+                users[pubkey] = discoveryUser(pubkey)
+            }
             event.tags.forEach { tag ->
                 if (tag.size >= 2 && tag[0] == "t" && tag[1].isNotBlank()) {
                     val value = tag[1].lowercase()
@@ -4567,27 +4588,18 @@ class MemoryEventStore @Inject constructor(
                 }
             }
         }
-        return freq.entries
+        val hashtags = freq.entries
             .sortedByDescending { it.value }
-            .take(limit)
+            .take(candidateLimit)
             .map { it.key to it.value }
+        if (ownPubkey != owner) return LocalDiscoverySnapshot()
+        return LocalDiscoverySnapshot(hashtags, users.values.toList(), examined, counted)
     }
 
-    /**
-     * Trending users: profiles with the highest cached follower counts.
-     * Returns up to [limit] UserEntity objects with followerCount populated.
-     */
-    fun trendingUsers(limit: Int = 8): List<UserEntity> {
-        return followerCountCache.entries
-            .filter { it.value.first > 0 && profilesByPubkey.containsKey(it.key) }
-            .sortedByDescending { it.value.first }
-            .take(limit)
-            .mapNotNull { (pubkey, countPair) ->
-                getUserEntity(pubkey)?.copy(
-                    followerCount = countPair.first,
-                    followerCountUpdatedAt = countPair.second,
-                )
-            }
+    internal fun discoveryUser(pubkey: String, fallback: UserEntity? = null): UserEntity {
+        val user = getUserEntity(pubkey) ?: fallback ?: UserEntity(pubkey = pubkey)
+        val (count, updatedAt) = getFollowerCount(pubkey)
+        return user.copy(followerCount = count, followerCountUpdatedAt = updatedAt)
     }
 
     // ─── A.5.1 T2: Optimistic follow mutations ───────────────────────────

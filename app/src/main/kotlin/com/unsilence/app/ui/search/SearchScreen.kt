@@ -78,6 +78,9 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.sp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.lifecycle.compose.LifecycleResumeEffect
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import com.unsilence.app.ui.common.rememberAvatarImageRequest
 import com.unsilence.app.data.memory.UserEntity
 import com.unsilence.app.data.memory.WotLookup
@@ -147,9 +150,7 @@ fun SearchScreen(
 ) {
     val state           by viewModel.uiState.collectAsStateWithLifecycle()
     val sensitiveMode   by viewModel.sensitiveContentMode.collectAsStateWithLifecycle()
-    val trendingHashtags by viewModel.trendingHashtags.collectAsStateWithLifecycle()
-    val trendingUsers   by viewModel.trendingUsers.collectAsStateWithLifecycle()
-    val trendingWotLookups by viewModel.trendingWotLookups.collectAsStateWithLifecycle()
+    val discovery by viewModel.discovery.collectAsStateWithLifecycle()
     val wotLookupState = viewModel.wotLookups.collectAsStateWithLifecycle()
     val wotLookups by wotLookupState
     val wotLookup = rememberCardWotLookup(wotLookupState)
@@ -341,8 +342,11 @@ fun SearchScreen(
     }
 
     DisposableEffect(Unit) { onDispose { viewModel.onScreenLeft() } }
+    LifecycleResumeEffect(state.hasSearched, viewModel) {
+        viewModel.setDiscoveryActive(!state.hasSearched)
+        onPauseOrDispose { viewModel.setDiscoveryActive(false) }
+    }
     LaunchedEffect(Unit) {
-        viewModel.refreshTrendingIfStale()
         // Only auto-focus (open keyboard) if there's no pre-filled query
         if (initialQuery == null) focusRequester.requestFocus()
     }
@@ -493,22 +497,17 @@ fun SearchScreen(
         ) {
             when {
                 !state.hasSearched -> {
-                    if (trendingHashtags.isEmpty() && trendingUsers.isEmpty()) {
-                        ShimmerTrendingDiscovery()
-                    } else {
-                        TrendingDiscovery(
-                            staticBottomPadding = staticBottomPadding,
-                            hashtags = trendingHashtags,
-                            users = trendingUsers,
-                            wotLookups = trendingWotLookups,
-                            onHashtagClick = { tag ->
-                                viewModel.search("#$tag")
-                                pendingSearch = true
-                                selectedTab = 3
-                            },
-                            onUserClick = onAuthorClickDismiss,
-                        )
-                    }
+                    SearchDiscoveryContent(
+                        state = discovery,
+                        staticBottomPadding = staticBottomPadding,
+                        onRetry = viewModel::retryDiscovery,
+                        onHashtagClick = { tag ->
+                            viewModel.search("#$tag")
+                            pendingSearch = true
+                            selectedTab = 3
+                        },
+                        onUserClick = onAuthorClickDismiss,
+                    )
                 }
 
                 state.rejectedSecret -> {
@@ -907,6 +906,62 @@ private fun rememberEngagement(
 
 // ── Trending discovery (empty state) ─────────────────────────────────────────
 
+@Composable
+internal fun SearchDiscoveryContent(
+    state: SearchDiscoveryState,
+    staticBottomPadding: Dp,
+    onRetry: () -> Unit,
+    onHashtagClick: (String) -> Unit,
+    onUserClick: (String) -> Unit,
+) {
+    when {
+        state.hasContent -> TrendingDiscovery(
+            staticBottomPadding = staticBottomPadding,
+            hashtags = state.hashtags,
+            users = state.users,
+            wotLookups = state.wotLookups,
+            hashtagTitle = if (state.hashtagSource == DiscoverySource.Provider) "TRENDING TOPICS" else "RECENT TOPICS",
+            onHashtagClick = onHashtagClick,
+            onUserClick = onUserClick,
+            missingSection = when {
+                state.users.isEmpty() -> discoverySectionMessage("People", state.peopleStatus)
+                state.hashtags.isEmpty() -> discoverySectionMessage("Topics", state.hashtagStatus)
+                else -> null
+            },
+            onRetry = onRetry,
+            retryEnabled = !state.refreshing,
+        )
+        state.loading -> Box(Modifier.semantics { contentDescription = "Loading suggestions" }) {
+            ShimmerTrendingDiscovery()
+        }
+        else -> DiscoveryRetryMessage(
+            message = if (state.unavailable) "Suggestions unavailable" else "No suggestions available yet",
+            onRetry = onRetry,
+            enabled = !state.refreshing,
+        )
+    }
+}
+
+private fun discoverySectionMessage(section: String, status: DiscoveryStatus): String? = when (status) {
+    DiscoveryStatus.Unavailable -> "$section unavailable"
+    DiscoveryStatus.Empty -> "No ${section.lowercase()} available yet"
+    else -> null
+}
+
+@Composable
+private fun DiscoveryRetryMessage(message: String, onRetry: () -> Unit, enabled: Boolean) {
+    Column(
+        modifier = Modifier.fillMaxWidth().padding(Spacing.large),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(Spacing.small),
+    ) {
+        Text(text = message, color = Text3, style = AppTextStyles.body)
+        androidx.compose.material3.TextButton(onClick = onRetry, enabled = enabled) {
+            Text("Retry")
+        }
+    }
+}
+
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun TrendingDiscovery(
@@ -914,8 +969,12 @@ private fun TrendingDiscovery(
     hashtags: List<Pair<String, Int>>,
     users: List<UserEntity>,
     wotLookups: Map<String, WotLookup>,
+    hashtagTitle: String,
     onHashtagClick: (String) -> Unit,
     onUserClick: (String) -> Unit,
+    missingSection: String?,
+    onRetry: () -> Unit,
+    retryEnabled: Boolean,
 ) {
     AvatarLazyColumn(
         modifier = Modifier.fillMaxSize(),
@@ -923,7 +982,7 @@ private fun TrendingDiscovery(
     ) {
         if (hashtags.isNotEmpty()) {
             item {
-                // Section header: TRENDING TONIGHT
+                // Source-aware topics heading, retaining the original typography.
                 Row(
                     modifier = Modifier.padding(
                         start = Spacing.medium, end = Spacing.medium,
@@ -939,7 +998,7 @@ private fun TrendingDiscovery(
                         modifier = Modifier.size(13.dp),
                     )
                     Text(
-                        text           = "TRENDING TONIGHT",
+                        text           = hashtagTitle,
                         color          = Text3,
                         style = AppTextStyles.caption,
                         fontWeight     = FontWeight.Medium,
@@ -1008,6 +1067,9 @@ private fun TrendingDiscovery(
                     )
                 }
             }
+        }
+        if (missingSection != null) item {
+            DiscoveryRetryMessage(missingSection, onRetry, retryEnabled)
         }
     }
 }

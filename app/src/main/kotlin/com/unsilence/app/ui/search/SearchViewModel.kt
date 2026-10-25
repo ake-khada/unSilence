@@ -17,7 +17,6 @@ import com.unsilence.app.data.memory.ReactionInfo
 import com.unsilence.app.data.memory.UserEntity
 import com.unsilence.app.data.memory.MemoryEventStore
 import com.unsilence.app.data.memory.MuteList
-import com.unsilence.app.data.memory.normalizedMutedHashtags
 import com.unsilence.app.data.memory.WotLookup
 import com.unsilence.app.data.memory.ZapDetail
 import com.unsilence.app.data.relay.DEFAULT_SEARCH_RELAY_URLS
@@ -55,23 +54,18 @@ import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.conflate
 import kotlinx.coroutines.flow.debounce
 import kotlinx.coroutines.flow.distinctUntilChanged
-import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.map
-import kotlinx.coroutines.flow.onStart
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
-import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicLong
 import javax.inject.Inject
 
-private const val TRENDING_DISPLAY_LIMIT = 8
-private const val TRENDING_WOT_RERANK_DEBOUNCE_MS = 400L
 private const val TRENDING_WOT_CHUNK_COUNT =
     (TRENDING_CANDIDATE_LIMIT + WOT_ASSERTION_CHUNK_SIZE - 1) / WOT_ASSERTION_CHUNK_SIZE
 // WoT chunks run sequentially: coalescing + every possible pool chunk + scheduling margin.
@@ -89,19 +83,6 @@ data class SearchUiState(
     val rejectedSecret: Boolean         = false,
     val loading: Boolean        = false,
     val hasSearched: Boolean    = false,
-)
-
-private data class TrendingCandidates(
-    val hashtags: List<Pair<String, Int>> = emptyList(),
-    val users: List<UserEntity> = emptyList(),
-    val refreshAuthorSet: Set<String>? = null,
-)
-
-private data class TrendingProjection(
-    val hashtags: List<Pair<String, Int>>,
-    val users: List<UserEntity>,
-    val refreshAuthorSet: Set<String>?,
-    val wotLookups: Map<String, WotLookup>,
 )
 
 private data class SearchSafetyBundle(
@@ -132,20 +113,23 @@ class SearchViewModel @Inject constructor(
     val sensitiveContentMode: StateFlow<com.unsilence.app.data.memory.SensitiveContentMode> =
         relayPreferencesStore.sensitiveContentMode
 
-    /** Visible trending hashtags after account-level mute filtering. */
-    private val _trendingHashtags = MutableStateFlow<List<Pair<String, Int>>>(emptyList())
-    val trendingHashtags: StateFlow<List<Pair<String, Int>>> = _trendingHashtags.asStateFlow()
+    private val discoveryOwner = keyManager.getPublicKeyHex().orEmpty()
+    private val discoveryActive = MutableStateFlow(false)
+    private val _discovery = MutableStateFlow(SearchDiscoveryState())
+    internal val discovery: StateFlow<SearchDiscoveryState> = _discovery.asStateFlow()
 
-    /** Visible trending users after account-level mute filtering. */
-    private val _trendingUsers = MutableStateFlow<List<UserEntity>>(emptyList())
-    val trendingUsers: StateFlow<List<UserEntity>> = _trendingUsers.asStateFlow()
+    private fun discoveryOwnerIsCurrent(): Boolean =
+        discoveryOwner.isNotBlank() && keyManager.getPublicKeyHex() == discoveryOwner &&
+            memoryEventStore.ownPubkey == discoveryOwner
 
-    /** WoT state for the bounded trending candidate pool, independent of active search subjects. */
-    private val _trendingWotLookups = MutableStateFlow<Map<String, WotLookup>>(emptyMap())
-    val trendingWotLookups: StateFlow<Map<String, WotLookup>> = _trendingWotLookups.asStateFlow()
+    fun setDiscoveryActive(active: Boolean) {
+        discoveryActive.value = active
+        if (active && discoveryOwnerIsCurrent()) trendingClient.refreshIfStale()
+    }
 
-    private val trendingCandidates = MutableStateFlow(TrendingCandidates())
-    private val requestedTrendingProfilePubkeys = ConcurrentHashMap.newKeySet<String>()
+    fun retryDiscovery() {
+        if (discoveryActive.value && discoveryOwnerIsCurrent()) trendingClient.retry()
+    }
 
     private val _queryFlow = MutableStateFlow("")
     private val _entityTarget = MutableStateFlow<DeepLinkTarget?>(null)
@@ -230,98 +214,39 @@ class SearchViewModel @Inject constructor(
     fun reactionsForEvent(eventId: String): List<ReactionInfo> =
         timelineCardData.reactionsForEvent(eventId)
 
-    fun refreshTrendingIfStale() {
-        trendingClient.refreshIfStale()
-    }
-
     init {
-        // Paint immediately from local MES, then collect the shared progressive
-        // trending snapshot: stale cache, phase-1 hashtags/users, then counts.
-        viewModelScope.launch(kotlinx.coroutines.Dispatchers.Default) {
-            if (trendingClient.data.value == null) {
-                trendingCandidates.value = TrendingCandidates(
-                    hashtags = memoryEventStore.trendingHashtags(TRENDING_CANDIDATE_LIMIT),
-                    users = memoryEventStore.trendingUsers(TRENDING_CANDIDATE_LIMIT),
-                )
-            }
-            trendingClient.refreshIfStale()
-            trendingClient.data.collect { data ->
-                if (data != null && data.hashtags.isNotEmpty()) {
-                    trendingCandidates.value = TrendingCandidates(
-                        hashtags = data.hashtags.map { it.tag to it.score.toInt().coerceAtLeast(1) },
-                        users = data.profiles.map { profile ->
-                            UserEntity(
-                                pubkey = profile.pubkey,
-                                name = profile.name,
-                                displayName = profile.displayName,
-                                picture = profile.picture,
-                                about = profile.about,
-                                nip05 = profile.nip05,
-                                followerCount = profile.followerCount,
-                            )
-                        },
-                        refreshAuthorSet = data.profiles.mapTo(linkedSetOf()) { it.pubkey },
-                    )
+        viewModelScope.launch(Dispatchers.Default) {
+            val hydration = DiscoveryHydration()
+            var measurement: kotlinx.coroutines.Job? = null
+            searchDiscoveryFlow(
+                store = memoryEventStore,
+                owner = discoveryOwner,
+                provider = trendingClient.state,
+                active = discoveryActive,
+                ownerIsCurrent = ::discoveryOwnerIsCurrent,
+            ).collect { projection ->
+                if (!discoveryOwnerIsCurrent()) {
+                    _discovery.value = SearchDiscoveryState()
+                    return@collect
                 }
-            }
-        }
-
-        viewModelScope.launch(kotlinx.coroutines.Dispatchers.Default) {
-            // Key on the refresh set, not later mute/profile re-emissions: one probe per refresh.
-            var lastMeasuredRefreshAuthors: Set<String>? = null
-            // Seed immediately; debounce only later assertion bursts so first paint stays instant.
-            val rerankSignal = memoryEventStore.wotSignalFlow
-                .drop(1)
-                .debounce(TRENDING_WOT_RERANK_DEBOUNCE_MS)
-                .onStart { emit(memoryEventStore.wotSignalFlow.value) }
-            val candidatesWithWot = combine(trendingCandidates, rerankSignal) { candidates, _ ->
-                candidates to wotLookupSnapshot(
-                    candidates.users.map(UserEntity::pubkey),
-                    memoryEventStore::wotFor,
-                )
-            }
-            combine(
-                candidatesWithWot,
-                memoryEventStore.ownMuteListFlow(),
-                memoryEventStore.profileSignalFlow,
-            ) { (candidates, rankLookups), muteList, _ ->
-                val mutedHashtags = normalizedMutedHashtags(muteList)
-                val hashtags = candidates.hashtags
-                    .filterNot { (tag, _) -> normalizeHashtag(tag) in mutedHashtags }
-                    .take(TRENDING_DISPLAY_LIMIT)
-                val eligibleUsers = candidates.users
-                    .map { user ->
-                        mergeTrendingUserWithLatest(user, memoryEventStore.getUserEntity(user.pubkey))
+                _discovery.value = projection
+                val requests = hydration.next(projection)
+                if (requests.profiles.isNotEmpty()) launch(Dispatchers.IO) {
+                    if (discoveryOwnerIsCurrent()) {
+                        userRepository.fetchProfilesWithFanout(requests.profiles, maxRelays = 4)
                     }
-                    .filterNot { isPubkeyMuted(it.pubkey, muteList) }
-                val users = rankTrendingUsers(eligibleUsers) { pubkey ->
-                    rankLookups[pubkey] ?: WotLookup.Pending
                 }
-                    .take(TRENDING_DISPLAY_LIMIT)
-                TrendingProjection(
-                    hashtags = hashtags,
-                    users = users,
-                    refreshAuthorSet = candidates.refreshAuthorSet,
-                    wotLookups = rankLookups,
-                )
-            }.collect { projection ->
-                _trendingHashtags.value = projection.hashtags
-                _trendingUsers.value = projection.users
-                _trendingWotLookups.value = projection.wotLookups
-                hydrateIncompleteTrendingProfiles(projection.users)
-                val refreshAuthorSet = projection.refreshAuthorSet
-                if (refreshAuthorSet != null && refreshAuthorSet != lastMeasuredRefreshAuthors) {
-                    lastMeasuredRefreshAuthors = refreshAuthorSet
-                    requestWotHydration(refreshAuthorSet)
-                    viewModelScope.launch(Dispatchers.Default) {
+                val authors = requests.wot
+                if (authors.isNotEmpty()) {
+                    wotHydrationCoalescer.requestHydration(authors)
+                    measurement?.cancel()
+                    measurement = launch {
                         val summary = withTimeoutOrNull(TRENDING_WOT_MEASUREMENT_TIMEOUT_MS) {
-                            memoryEventStore.wotSignalFlow
-                                .map {
-                                    trendingWotCoverage(refreshAuthorSet, memoryEventStore::wotFor)
-                                }
-                                .first { it.settled }
-                        } ?: trendingWotCoverage(refreshAuthorSet, memoryEventStore::wotFor)
-                        Log.w("SearchViewModel", summary.logMessage())
+                            memoryEventStore.wotSignalFlow.map {
+                                trendingWotCoverage(authors, memoryEventStore::wotFor)
+                            }.first { it.settled }
+                        } ?: trendingWotCoverage(authors, memoryEventStore::wotFor)
+                        if (discoveryOwnerIsCurrent()) Log.w("SearchViewModel", summary.logMessage())
                     }
                 }
             }
@@ -525,6 +450,7 @@ class SearchViewModel @Inject constructor(
 
     /** Called by DisposableEffect when SearchScreen exits composition (nav back). */
     fun onScreenLeft() {
+        discoveryActive.value = false
         currentSearchToken.getAndSet(0L).let { prev ->
             if (prev != 0L) relayPool.closeSearch(prev)
         }
@@ -552,21 +478,6 @@ class SearchViewModel @Inject constructor(
         super.onCleared()
         currentSearchToken.get().let { token ->
             if (token != 0L) relayPool.closeSearch(token)
-        }
-    }
-
-    private fun hydrateIncompleteTrendingProfiles(users: List<UserEntity>) {
-        val missing = users
-            .asSequence()
-            .filter { it.displayName.isNullOrBlank() && it.name.isNullOrBlank() || it.picture.isNullOrBlank() }
-            .map { it.pubkey }
-            .distinct()
-            .filter { requestedTrendingProfilePubkeys.add(it) }
-            .toList()
-        if (missing.isEmpty()) return
-
-        viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
-            userRepository.fetchProfilesWithFanout(missing, maxRelays = 4)
         }
     }
 
@@ -714,6 +625,3 @@ internal fun filterSearchPeople(
 ): List<UserEntity> = users.filterNot { user ->
     isPubkeyMuted(user.pubkey, muteList)
 }
-
-private fun normalizeHashtag(tag: String): String =
-    tag.trim().trimStart('#').lowercase()
