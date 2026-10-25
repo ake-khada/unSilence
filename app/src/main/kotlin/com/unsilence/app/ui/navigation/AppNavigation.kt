@@ -94,6 +94,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.Saver
+import androidx.compose.runtime.saveable.rememberSaveableStateHolder
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -153,6 +154,8 @@ import com.unsilence.app.ui.relays.RelayDiscoveryScreen
 import com.unsilence.app.ui.relays.RelayManagementScreen
 import com.unsilence.app.ui.relays.RelayManagementViewModel
 import com.unsilence.app.ui.search.SearchScreen
+import com.unsilence.app.ui.search.SearchViewModel
+import com.unsilence.app.ui.common.ScrollAwayState
 import com.unsilence.app.ui.common.LocalAppSessionKey
 import com.unsilence.app.ui.common.LocalOpenRelayDetail
 import com.unsilence.app.ui.common.LocalShowSnackbar
@@ -223,13 +226,12 @@ fun AppNavigation(
     val navigator = rememberAppNavigator(sessionKey)
     var scrollToTopTrigger   by rememberSaveable { mutableIntStateOf(0) }
     var profileScrollToTopTrigger by rememberSaveable { mutableIntStateOf(0) }
-    var hashtagSearchQuery   by rememberSaveable { mutableStateOf<String?>(null) }
     val pullRefreshFraction = remember { mutableFloatStateOf(0f) }
     val updatePullRefreshFraction: (Float) -> Unit = remember(pullRefreshFraction) {
         { fraction -> pullRefreshFraction.floatValue = fraction }
     }
 
-    BackHandler(enabled = selectedTab != 0) { selectedTab = 0 }
+    BackHandler(enabled = navigator.backStack.size == 1 && selectedTab != 0) { selectedTab = 0 }
 
     val onAuthorClick: (String) -> Unit = remember(navigator) {
         { pubkey -> navigator.push(AppDestination.Profile(pubkey)) }
@@ -240,13 +242,8 @@ fun AppNavigation(
     val onNoteClick: (String) -> Unit = remember(navigator) {
         { eventId -> navigator.push(AppDestination.Thread(eventId)) }
     }
-    val onHashtagClick: (String) -> Unit = { tag ->
-        // Clear any open overlays (thread / user profile) so the search tab isn't
-        // hidden behind them when a hashtag is tapped from inside one (incl. the
-        // article reader hosted there).
-        navigator.popToTabs()
-        hashtagSearchQuery = "#$tag"
-        selectedTab = 1
+    val onHashtagClick: (String) -> Unit = remember(navigator) {
+        { tag -> navigator.push(AppDestination.Search("#$tag")) }
     }
 
     // SessionContent owns these shell VMs and clears them on account replacement.
@@ -356,6 +353,10 @@ fun AppNavigation(
     // Prevents jittery show/hide on micro-scrolls and the "back jerk" when
     // contentTopPadding animates on a barely-moved finger.
     val scrollAccumulator = remember { mutableFloatStateOf(0f) }
+    val showBars: () -> Unit = remember {
+        { barsVisible = true; scrollAccumulator.floatValue = 0f }
+    }
+    LaunchedEffect(selectedTab) { showBars() }
     val nestedScrollConnection = remember {
         object : NestedScrollConnection {
             override fun onPreScroll(available: Offset, source: NestedScrollSource): Offset {
@@ -399,6 +400,7 @@ fun AppNavigation(
                 AppDestination.Tabs -> Box(
                     Modifier.fillMaxSize().nestedScroll(nestedScrollConnection),
                 ) {
+                    val tabStateHolder = rememberSaveableStateHolder()
                     // ── Content ───────────────────────────────────────────────────────
                     // Full-height viewports let content pass behind the sliding bars.
                     // Each tab reserves bottom clearance in its own scrollable content.
@@ -406,68 +408,71 @@ fun AppNavigation(
                         modifier = Modifier
                             .fillMaxSize(),
                     ) {
-                        when (selectedTab) {
-                            0    -> FeedScreen(
-                                onArticleClick = onArticleClick,
-                                scrollToTopTrigger = scrollToTopTrigger,
-                                topBarShown        = topBarShown,
-                                staticTopPadding   = staticTopPadding,
-                                staticBottomPadding = staticBottomPadding,
-                                onNoteClick        = onNoteClick,
-                                onComment          = { eventId -> navigator.push(AppDestination.Compose(replyToEventId = eventId)) },
-                                onAuthorClick      = onAuthorClick,
-                                onHashtagClick     = onHashtagClick,
-                                onQuote            = { noteId  -> navigator.push(AppDestination.Compose(quoteEventId = noteId))  },
-                                onPullRefreshProgress = updatePullRefreshFraction,
-                                showFindPeopleEmptyState = graphPrompt.showEmptyFollowing,
-                                onFindPeople = {
-                                    navigator.push(AppDestination.StartGraph)
-                                },
-                                viewModel          = feedViewModel,
-                                actionsViewModel   = noteActionsVm,
-                            )
-                            1    -> Box(Modifier.padding(top = statusBarHeight)) {
-                                SearchScreen(
+                        tabStateHolder.SaveableStateProvider(selectedTab) {
+                            when (selectedTab) {
+                                0    -> FeedScreen(
                                     onArticleClick = onArticleClick,
+                                    scrollToTopTrigger = scrollToTopTrigger,
+                                    topBarShown        = topBarShown,
+                                    staticTopPadding   = staticTopPadding,
                                     staticBottomPadding = staticBottomPadding,
-                                    onNoteClick   = onNoteClick,
-                                    onComment     = { eventId -> navigator.push(AppDestination.Compose(replyToEventId = eventId)) },
+                                    onNoteClick        = onNoteClick,
+                                    onComment          = { eventId -> navigator.push(AppDestination.Compose(replyToEventId = eventId)) },
+                                    onAuthorClick      = onAuthorClick,
+                                    onHashtagClick     = onHashtagClick,
+                                    onQuote            = { noteId  -> navigator.push(AppDestination.Compose(quoteEventId = noteId))  },
+                                    onPullRefreshProgress = updatePullRefreshFraction,
+                                    showFindPeopleEmptyState = graphPrompt.showEmptyFollowing,
+                                    onFindPeople = {
+                                        navigator.push(AppDestination.StartGraph)
+                                    },
+                                    viewModel          = feedViewModel,
+                                    actionsViewModel   = noteActionsVm,
+                                )
+                                1    -> Box(Modifier.padding(top = statusBarHeight)) {
+                                    SearchScreen(
+                                        onArticleClick = onArticleClick,
+                                        staticBottomPadding = staticBottomPadding,
+                                        onNoteClick   = onNoteClick,
+                                        onComment     = { eventId -> navigator.push(AppDestination.Compose(replyToEventId = eventId)) },
+                                        onAuthorClick = onAuthorClick,
+                                        onHashtagClick = onHashtagClick,
+                                        onQuote       = { noteId  -> navigator.push(AppDestination.Compose(quoteEventId = noteId))  },
+                                        controlsVisible = barsVisible,
+                                        onShowControls = showBars,
+                                        actionsViewModel = noteActionsVm,
+                                    )
+                                }
+                                2    -> NotificationsScreen(
+                                    onNoteClick      = onNoteClick,
+                                    onProfileClick   = onAuthorClick,
+                                    onHashtagClick   = onHashtagClick,
+                                    onQuote          = { navigator.push(AppDestination.Compose(quoteEventId = it)) },
+                                    actionsViewModel = noteActionsVm,
+                                    staticTopPadding = staticTopPadding,
+                                    staticBottomPadding = staticBottomPadding,
+                                    viewModel        = requireNotNull(notifViewModel),
+                                )
+                                3    -> ProfileScreen(
+                                    onArticleClick = onArticleClick,
+                                    onOpenSettings = { navigator.push(AppDestination.Settings) },
+                                    onEditProfile = { navigator.push(AppDestination.EditProfile) },
+                                    headerVisible = barsVisible,
+                                    staticBottomPadding = staticBottomPadding,
+                                    scrollToTopTrigger = profileScrollToTopTrigger,
+                                    onBack = { selectedTab = 0 },
+                                    onNoteClick = onNoteClick,
+                                    onComment = { eventId -> navigator.push(AppDestination.Compose(replyToEventId = eventId)) },
                                     onAuthorClick = onAuthorClick,
+                                    onQuote = { noteId -> navigator.push(AppDestination.Compose(quoteEventId = noteId)) },
+                                    onConnectionsClick = { tab -> navigator.push(AppDestination.Connections(ownPubkey, tab)) },
+                                    onRelaysClick = { navigator.push(AppDestination.ProfileRelays(ownPubkey)) },
                                     onHashtagClick = onHashtagClick,
-                                    onQuote       = { noteId  -> navigator.push(AppDestination.Compose(quoteEventId = noteId))  },
-                                    initialQuery  = hashtagSearchQuery,
-                                    onInitialQueryConsumed = { hashtagSearchQuery = null },
+                                    viewModel = hiltViewModel(key = "profile-$sessionKey"),
                                     actionsViewModel = noteActionsVm,
                                 )
+                                else -> PlaceholderScreen()
                             }
-                            2    -> NotificationsScreen(
-                                onNoteClick      = onNoteClick,
-                                onProfileClick   = onAuthorClick,
-                                onHashtagClick   = onHashtagClick,
-                                onQuote          = { navigator.push(AppDestination.Compose(quoteEventId = it)) },
-                                actionsViewModel = noteActionsVm,
-                                staticTopPadding = staticTopPadding,
-                                staticBottomPadding = staticBottomPadding,
-                                viewModel        = requireNotNull(notifViewModel),
-                            )
-                            3    -> ProfileScreen(
-                                onArticleClick = onArticleClick,
-                                onOpenSettings = { navigator.push(AppDestination.Settings) },
-                                onEditProfile = { navigator.push(AppDestination.EditProfile) },
-                                staticBottomPadding = staticBottomPadding,
-                                scrollToTopTrigger = profileScrollToTopTrigger,
-                                onBack = { selectedTab = 0 },
-                                onNoteClick = onNoteClick,
-                                onComment = { eventId -> navigator.push(AppDestination.Compose(replyToEventId = eventId)) },
-                                onAuthorClick = onAuthorClick,
-                                onQuote = { noteId -> navigator.push(AppDestination.Compose(quoteEventId = noteId)) },
-                                onConnectionsClick = { tab -> navigator.push(AppDestination.Connections(ownPubkey, tab)) },
-                                onRelaysClick = { navigator.push(AppDestination.ProfileRelays(ownPubkey)) },
-                                onHashtagClick = onHashtagClick,
-                                viewModel = hiltViewModel(key = "profile-$sessionKey"),
-                                actionsViewModel = noteActionsVm,
-                            )
-                            else -> PlaceholderScreen()
                         }
                     }
 
@@ -634,6 +639,26 @@ fun AppNavigation(
                         }
                     }
 
+                }
+                is AppDestination.Search -> {
+                    val controls = remember { ScrollAwayState() }
+                    Box(Modifier.fillMaxSize().statusBarsPadding().nestedScroll(controls.connection)) {
+                        SearchScreen(
+                            onArticleClick = onArticleClick,
+                            staticBottomPadding = navBarHeight,
+                            onNoteClick = onNoteClick,
+                            onComment = { navigator.push(AppDestination.Compose(replyToEventId = it)) },
+                            onAuthorClick = onAuthorClick,
+                            onHashtagClick = onHashtagClick,
+                            onQuote = { navigator.push(AppDestination.Compose(quoteEventId = it)) },
+                            initialQuery = destination.query,
+                            navigationOwnsBack = true,
+                            controlsVisible = controls.visible,
+                            onShowControls = controls::show,
+                            viewModel = hiltViewModel<SearchViewModel>(key = "search-${entry.id}"),
+                            actionsViewModel = noteActionsVm,
+                        )
+                    }
                 }
                 is AppDestination.Thread -> ThreadScreen(
                     onArticleClick = { row, focus -> navigator.push(articleDestination(row, focus)) },

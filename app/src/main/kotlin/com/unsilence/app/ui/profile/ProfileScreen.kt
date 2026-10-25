@@ -49,6 +49,7 @@ import kotlinx.coroutines.flow.sample
 import kotlinx.coroutines.launch
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import com.unsilence.app.ui.common.scrollAwayHeader
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
@@ -118,6 +119,7 @@ private val PROFILE_AVATAR_SIZE = 85.dp
 fun ProfileScreen(
     onArticleClick: (FeedRow) -> Unit,
     scrollToTopTrigger: Int = 0,
+    headerVisible: Boolean = true,
     staticBottomPadding: Dp = 0.dp,
     onOpenSettings: () -> Unit,
     onEditProfile: () -> Unit,
@@ -618,6 +620,7 @@ fun ProfileScreen(
         Box(
             modifier = Modifier
                 .align(Alignment.TopStart)
+                .scrollAwayHeader(headerVisible)
                 .fillMaxWidth()
                 .background(Black)
                 .statusBarsPadding(),

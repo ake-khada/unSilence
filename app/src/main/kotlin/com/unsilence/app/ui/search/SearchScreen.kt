@@ -1,6 +1,7 @@
 package com.unsilence.app.ui.search
 
 import com.unsilence.app.ui.theme.AppTextStyles
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -20,6 +21,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.LazyColumn
 import com.unsilence.app.ui.common.AvatarLazyColumn
 import com.unsilence.app.ui.common.AvatarAsyncImage
@@ -39,7 +41,6 @@ import androidx.compose.material.icons.outlined.SearchOff
 import com.unsilence.app.ui.common.EmptyState
 import com.unsilence.app.ui.theme.AppType
 import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
@@ -52,6 +53,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
@@ -59,6 +61,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
@@ -139,8 +142,10 @@ fun SearchScreen(
     onAuthorClick: (pubkey: String) -> Unit = {},
     onHashtagClick: (String) -> Unit = {},
     onQuote: (String) -> Unit = {},
+    controlsVisible: Boolean,
+    onShowControls: () -> Unit,
+    navigationOwnsBack: Boolean = false,
     initialQuery: String? = null,
-    onInitialQueryConsumed: () -> Unit = {},
     viewModel: SearchViewModel = hiltViewModel(
         key = "search-${LocalAppSessionKey.current}",
     ),
@@ -164,9 +169,8 @@ fun SearchScreen(
     val isNwcConfigured = actionsViewModel.isNwcConfigured
 
     val showSnackbar = LocalShowSnackbar.current
-    var selectedTab by remember { mutableIntStateOf(0) }
+    var selectedTab by rememberSaveable { mutableIntStateOf(0) }
     var actionsRow by remember { mutableStateOf<FeedRow?>(null) }
-    val noteListState = rememberLazyListState()
     val cardWidthPx = LocalWindowInfo.current.containerSize.width
 
     // ── Emoji reaction picker state ─────────────────────────────────────────
@@ -187,14 +191,17 @@ fun SearchScreen(
     val keyboardDismissal = remember(keyboardController) { SearchKeyboardDismissal() }
     val imeVisible = WindowInsets.isImeVisible
     SideEffect { keyboardDismissal.updateVisibility(imeVisible) }
-    val dismissKeyboardOnScroll = remember(keyboardController, keyboardDismissal) {
+    val dismissKeyboardOnScroll = remember(keyboardController, keyboardDismissal, focusManager) {
         object : NestedScrollConnection {
             override fun onPreScroll(available: Offset, source: NestedScrollSource): Offset {
                 if (keyboardDismissal.onScroll(
                         userInput = source == NestedScrollSource.UserInput,
                         verticalMovement = available.y != 0f,
                     )
-                ) keyboardController?.hide()
+                ) {
+                    keyboardController?.hide()
+                    focusManager.clearFocus()
+                }
                 return Offset.Zero
             }
         }
@@ -233,6 +240,13 @@ fun SearchScreen(
             onArticleClick(row)
         }
     }
+    val onHashtagClickDismiss: (String) -> Unit = remember(keyboardController, focusManager, onHashtagClick) {
+        { tag ->
+            keyboardController?.hide()
+            focusManager.clearFocus()
+            onHashtagClick(tag)
+        }
+    }
     val onCardReactLongPress: (String, String) -> Unit = remember {
         { id, pubkey ->
             emojiReactTarget = id to pubkey
@@ -246,7 +260,7 @@ fun SearchScreen(
         onNoteClickDismiss,
         onComment,
         onAuthorClickDismiss,
-        onHashtagClick,
+        onHashtagClickDismiss,
         onArticleClick,
         onQuote,
         actionsViewModel,
@@ -264,7 +278,7 @@ fun SearchScreen(
                 onNoteClick = onNoteClickDismiss,
                 onComment = { _, model -> onComment(model.navigateId) },
                 onAuthorClick = onAuthorClickDismiss,
-                onHashtagClick = onHashtagClick,
+                onHashtagClick = onHashtagClickDismiss,
                 onQuote = onQuote,
                 onArticleClick = onArticleClickDismiss,
                 onReactLongPress = onCardReactLongPress,
@@ -289,11 +303,28 @@ fun SearchScreen(
         focusManager.clearFocus()
         viewModel.openEntityTarget(target)
     }
-    var pendingSearch by remember { mutableStateOf(false) }
     val activeEventResults = if (selectedTab == 3) state.tagResults else state.noteResults
     val peopleBelowEntity = remember(state.entityTarget, state.peopleResults) {
         peopleBelowEntityResult(state.entityTarget, state.peopleResults)
     }
+
+    val entityKey = state.entityTarget?.let { "entity:${entityResultKey(it)}" }
+    val allViewport = rememberSearchResultViewport(state.query,
+        entityKey ?: peopleBelowEntity.firstOrNull()?.pubkey ?: state.noteResults.firstOrNull()?.id)
+    val peopleViewport = rememberSearchResultViewport(state.query,
+        entityKey?.takeIf { state.entityTarget is DeepLinkTarget.Profile } ?: peopleBelowEntity.firstOrNull()?.pubkey)
+    val notesViewport = rememberSearchResultViewport(state.query,
+        entityKey?.takeIf { state.entityTarget is DeepLinkTarget.Note || state.entityTarget is DeepLinkTarget.Address }
+            ?: state.noteResults.firstOrNull()?.id)
+    val tagsViewport = rememberSearchResultViewport(state.query, state.tagResults.firstOrNull()?.id)
+    val activeViewport = when (selectedTab) {
+        1 -> peopleViewport
+        2 -> notesViewport
+        3 -> tagsViewport
+        else -> allViewport
+    }
+    val noteListState = activeViewport.listState
+    val discoveryListState = rememberLazyListState()
 
     val engagementRetryRevision by actionsViewModel.engagementRetryRevision.collectAsStateWithLifecycle()
     @OptIn(FlowPreview::class)
@@ -341,148 +372,155 @@ fun SearchScreen(
         }
     }
 
-    DisposableEffect(Unit) { onDispose { viewModel.onScreenLeft() } }
+    DisposableEffect(viewModel) { onDispose { viewModel.onScreenLeft() } }
+    LifecycleResumeEffect(viewModel) {
+        viewModel.setScreenResumed(true)
+        onPauseOrDispose { viewModel.setScreenResumed(false) }
+    }
     LifecycleResumeEffect(state.hasSearched, viewModel) {
         viewModel.setDiscoveryActive(!state.hasSearched)
         onPauseOrDispose { viewModel.setDiscoveryActive(false) }
     }
+    var initialFocusHandled by rememberSaveable { mutableStateOf(false) }
+    var initialQueryHandled by rememberSaveable { mutableStateOf(false) }
     LaunchedEffect(Unit) {
-        // Only auto-focus (open keyboard) if there's no pre-filled query
-        if (initialQuery == null) focusRequester.requestFocus()
+        if (!initialFocusHandled) {
+            initialFocusHandled = true
+            if (initialQuery == null && state.query.isEmpty()) focusRequester.requestFocus()
+        }
     }
-    LaunchedEffect(state.loading) { if (state.loading) pendingSearch = false }
-    LaunchedEffect(state.rejectedSecret) { if (state.rejectedSecret) pendingSearch = false }
+    BackHandler(enabled = !navigationOwnsBack && !imeVisible &&
+        (state.hasSearched || state.query.isNotEmpty())) {
+        focusManager.clearFocus()
+        viewModel.search("")
+        selectedTab = 0
+        onShowControls()
+    }
     // Consume initial query from hashtag tap navigation
     LaunchedEffect(initialQuery) {
-        if (initialQuery != null) {
+        if (initialQuery != null && !initialQueryHandled) {
+            initialQueryHandled = true
             keyboardController?.hide()
             viewModel.search(initialQuery)
-            pendingSearch = initialQuery.length >= 3
             if (initialQuery.startsWith("#")) selectedTab = 3 // Tags tab
-            onInitialQueryConsumed()
+            onShowControls()
         }
     }
 
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .background(Black),
-    ) {
-        // ── Search bar ────────────────────────────────────────────────────────
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = Spacing.medium, vertical = Spacing.small)
-                .background(Surface1, RoundedCornerShape(Spacing.medium))
-                .border(1.dp, BorderSubtle, RoundedCornerShape(Spacing.medium))
-                .padding(horizontal = Spacing.medium, vertical = 10.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Icon(
-                imageVector        = Icons.Filled.Search,
-                contentDescription = null,
-                tint               = Text3,
-                modifier           = Modifier.size(14.dp),
-            )
-            Spacer(Modifier.width(Spacing.small))
-            BasicTextField(
-                value         = state.query,
-                onValueChange = {
-                    viewModel.search(it)
-                    pendingSearch = it.length >= 3
-                },
-                textStyle     = TextStyle(color = Color.White, fontSize = AppType.bodySmall),
-                cursorBrush   = SolidColor(Brand),
-                singleLine    = true,
-                modifier      = Modifier.weight(1f).focusRequester(focusRequester),
-                decorationBox = { inner ->
-                    // Box centers the placeholder and the text/cursor on the same
-                    // vertical axis \u2014 without it they stack at the top, so the
-                    // cursor sits higher than the placeholder text.
-                    Box(contentAlignment = Alignment.CenterStart) {
-                        if (state.query.isEmpty()) {
-                            Text(
-                                text     = "Search voices, notes, npubs\u2026",
-                                color    = Text3,
-                                style = AppTextStyles.bodySmall,
-                            )
-                        }
-                        inner()
-                    }
-                },
-            )
-            if (state.query.isNotEmpty()) {
-                Spacer(Modifier.width(Spacing.small))
-                Icon(
-                    imageVector        = Icons.Filled.Close,
-                    contentDescription = "Clear search",
-                    tint               = Text3,
-                    modifier           = Modifier
-                        .size(14.dp)
-                        .clickable {
-                            viewModel.search("")
-                            pendingSearch = false
-                            focusRequester.requestFocus()
+    SearchControlsLayout(
+        controlsVisible = controlsVisible || imeVisible,
+        header = {
+            Column {
+                // ── Search bar ────────────────────────────────────────────────────────
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = Spacing.medium, vertical = Spacing.small)
+                        .background(Surface1, RoundedCornerShape(Spacing.medium))
+                        .border(1.dp, BorderSubtle, RoundedCornerShape(Spacing.medium))
+                        .padding(horizontal = Spacing.medium, vertical = 10.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Icon(
+                        imageVector        = Icons.Filled.Search,
+                        contentDescription = null,
+                        tint               = Text3,
+                        modifier           = Modifier.size(14.dp),
+                    )
+                    Spacer(Modifier.width(Spacing.small))
+                    BasicTextField(
+                        value         = state.query,
+                        onValueChange = {
+                            onShowControls()
+                            viewModel.search(it)
                         },
-                )
-            }
-        }
-
-        // Typing / loading feedback
-        if (pendingSearch || state.loading) {
-            LinearProgressIndicator(
-                modifier   = Modifier.fillMaxWidth().height(2.dp),
-                color      = Brand,
-                trackColor = Color.Transparent,
-            )
-        } else {
-            Spacer(Modifier.height(2.dp))
-        }
-
-        // ── Underlined tab row (only visible with active search) ─────────────
-        if (state.hasSearched) {
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .drawBehind {
-                        drawLine(
-                            color       = BorderFaint,
-                            start       = Offset(0f, size.height),
-                            end         = Offset(size.width, size.height),
-                            strokeWidth = 1f,
-                        )
-                    },
-            ) {
-                TAB_LABELS.forEachIndexed { index, label ->
-                    val isActive = selectedTab == index
-                    Box(
-                        modifier = Modifier
-                            .weight(1f)
-                            .clickable { selectedTab = index }
-                            .drawBehind {
-                                if (isActive) {
-                                    drawLine(
-                                        color       = Brand,
-                                        start       = Offset(0f, size.height),
-                                        end         = Offset(size.width, size.height),
-                                        strokeWidth = 2.dp.toPx(),
+                        textStyle     = TextStyle(color = Color.White, fontSize = AppType.bodySmall),
+                        cursorBrush   = SolidColor(Brand),
+                        singleLine    = true,
+                        modifier      = Modifier.weight(1f).focusRequester(focusRequester)
+                            .onFocusChanged { if (it.isFocused) onShowControls() },
+                        decorationBox = { inner ->
+                            // Box centers the placeholder and the text/cursor on the same
+                            // vertical axis \u2014 without it they stack at the top, so the
+                            // cursor sits higher than the placeholder text.
+                            Box(contentAlignment = Alignment.CenterStart) {
+                                if (state.query.isEmpty()) {
+                                    Text(
+                                        text     = "Search voices, notes, npubs\u2026",
+                                        color    = Text3,
+                                        style = AppTextStyles.bodySmall,
                                     )
                                 }
+                                inner()
                             }
-                            .padding(vertical = Spacing.small),
-                        contentAlignment = Alignment.Center,
-                    ) {
-                        Text(
-                            text       = label,
-                            color      = if (isActive) Color.White else Text3,
-                            style = AppTextStyles.footnote,
-                            fontWeight = if (isActive) FontWeight.SemiBold else FontWeight.Medium,
+                        },
+                    )
+                    if (state.query.isNotEmpty()) {
+                        Spacer(Modifier.width(Spacing.small))
+                        Icon(
+                            imageVector        = Icons.Filled.Close,
+                            contentDescription = "Clear search",
+                            tint               = Text3,
+                            modifier           = Modifier
+                                .size(14.dp)
+                                .clickable {
+                                    viewModel.search("")
+                                    focusRequester.requestFocus()
+                                },
                         )
                     }
                 }
-            }
-        }
 
+                // Includes the debounce window; one loading source for this visit.
+                SearchLoadingLine(state.loading)
+
+                // ── Underlined tab row (only visible with active search) ─────────────
+                if (state.hasSearched) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .drawBehind {
+                                drawLine(
+                                    color       = BorderFaint,
+                                    start       = Offset(0f, size.height),
+                                    end         = Offset(size.width, size.height),
+                                    strokeWidth = 1f,
+                                )
+                            },
+                    ) {
+                        TAB_LABELS.forEachIndexed { index, label ->
+                            val isActive = selectedTab == index
+                            Box(
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .clickable { selectedTab = index }
+                                    .drawBehind {
+                                        if (isActive) {
+                                            drawLine(
+                                                color       = Brand,
+                                                start       = Offset(0f, size.height),
+                                                end         = Offset(size.width, size.height),
+                                                strokeWidth = 2.dp.toPx(),
+                                            )
+                                        }
+                                    }
+                                    .padding(vertical = Spacing.small),
+                                contentAlignment = Alignment.Center,
+                            ) {
+                                Text(
+                                    text       = label,
+                                    color      = if (isActive) Color.White else Text3,
+                                    style = AppTextStyles.footnote,
+                                    fontWeight = if (isActive) FontWeight.SemiBold else FontWeight.Medium,
+                                )
+                            }
+                        }
+                    }
+                }
+
+            }
+        },
+    ) { staticTopPadding ->
         // ── Results ───────────────────────────────────────────────────────────
         Box(modifier = Modifier
             .fillMaxSize()
@@ -494,6 +532,7 @@ fun SearchScreen(
                 onNext = { selectedTab = (selectedTab + 1).coerceAtMost(TAB_LABELS.lastIndex) },
             )
             .nestedScroll(dismissKeyboardOnScroll)
+            .nestedScroll(activeViewport.scrollConnection)
         ) {
             when {
                 !state.hasSearched -> {
@@ -501,11 +540,9 @@ fun SearchScreen(
                         state = discovery,
                         staticBottomPadding = staticBottomPadding,
                         onRetry = viewModel::retryDiscovery,
-                        onHashtagClick = { tag ->
-                            viewModel.search("#$tag")
-                            pendingSearch = true
-                            selectedTab = 3
-                        },
+                        staticTopPadding = staticTopPadding,
+                        listState = discoveryListState,
+                        onHashtagClick = onHashtagClickDismiss,
                         onUserClick = onAuthorClickDismiss,
                     )
                 }
@@ -538,7 +575,7 @@ fun SearchScreen(
                         LazyColumn(
                             state = noteListState,
                             modifier = Modifier.fillMaxSize(),
-                            contentPadding = PaddingValues(bottom = staticBottomPadding),
+                            contentPadding = PaddingValues(top = staticTopPadding, bottom = staticBottomPadding),
                         ) {
                             items(3) { ShimmerNoteCard(showMedia = it == 0) }
                         }
@@ -562,7 +599,7 @@ fun SearchScreen(
                         AvatarLazyColumn(
                             state = noteListState,
                             modifier = Modifier.fillMaxSize(),
-                            contentPadding = PaddingValues(bottom = staticBottomPadding),
+                            contentPadding = PaddingValues(top = staticTopPadding, bottom = staticBottomPadding),
                         ) {
                             state.entityTarget?.let { target ->
                                 item(key = "entity:${entityResultKey(target)}") {
@@ -608,8 +645,9 @@ fun SearchScreen(
                         )
                     } else {
                         AvatarLazyColumn(
+                            state = peopleViewport.listState,
                             modifier = Modifier.fillMaxSize(),
-                            contentPadding = PaddingValues(bottom = staticBottomPadding),
+                            contentPadding = PaddingValues(top = staticTopPadding, bottom = staticBottomPadding),
                         ) {
                             profileTarget?.let { target ->
                                 item(key = "entity:${entityResultKey(target)}") {
@@ -654,7 +692,7 @@ fun SearchScreen(
                         AvatarLazyColumn(
                             state = noteListState,
                             modifier = Modifier.fillMaxSize(),
-                            contentPadding = PaddingValues(bottom = staticBottomPadding),
+                            contentPadding = PaddingValues(top = staticTopPadding, bottom = staticBottomPadding),
                         ) {
                             noteTarget?.let { target ->
                                 item(key = "entity:${entityResultKey(target)}") {
@@ -910,12 +948,16 @@ private fun rememberEngagement(
 internal fun SearchDiscoveryContent(
     state: SearchDiscoveryState,
     staticBottomPadding: Dp,
+    staticTopPadding: Dp = 0.dp,
+    listState: LazyListState = rememberLazyListState(),
     onRetry: () -> Unit,
     onHashtagClick: (String) -> Unit,
     onUserClick: (String) -> Unit,
 ) {
     when {
         state.hasContent -> TrendingDiscovery(
+            staticTopPadding = staticTopPadding,
+            listState = listState,
             staticBottomPadding = staticBottomPadding,
             hashtags = state.hashtags,
             users = state.users,
@@ -931,14 +973,17 @@ internal fun SearchDiscoveryContent(
             onRetry = onRetry,
             retryEnabled = !state.refreshing,
         )
-        state.loading -> Box(Modifier.semantics { contentDescription = "Loading suggestions" }) {
+        state.loading -> Box(Modifier.padding(top = staticTopPadding)
+            .semantics { contentDescription = "Loading suggestions" }) {
             ShimmerTrendingDiscovery()
         }
-        else -> DiscoveryRetryMessage(
-            message = if (state.unavailable) "Suggestions unavailable" else "No suggestions available yet",
-            onRetry = onRetry,
-            enabled = !state.refreshing,
-        )
+        else -> Box(Modifier.padding(top = staticTopPadding)) {
+            DiscoveryRetryMessage(
+                message = if (state.unavailable) "Suggestions unavailable" else "No suggestions available yet",
+                onRetry = onRetry,
+                enabled = !state.refreshing,
+            )
+        }
     }
 }
 
@@ -966,6 +1011,8 @@ private fun DiscoveryRetryMessage(message: String, onRetry: () -> Unit, enabled:
 @Composable
 private fun TrendingDiscovery(
     staticBottomPadding: Dp,
+    staticTopPadding: Dp,
+    listState: LazyListState,
     hashtags: List<Pair<String, Int>>,
     users: List<UserEntity>,
     wotLookups: Map<String, WotLookup>,
@@ -977,8 +1024,9 @@ private fun TrendingDiscovery(
     retryEnabled: Boolean,
 ) {
     AvatarLazyColumn(
+        state = listState,
         modifier = Modifier.fillMaxSize(),
-        contentPadding = PaddingValues(bottom = Spacing.xl + staticBottomPadding),
+        contentPadding = PaddingValues(top = staticTopPadding, bottom = Spacing.xl + staticBottomPadding),
     ) {
         if (hashtags.isNotEmpty()) {
             item {

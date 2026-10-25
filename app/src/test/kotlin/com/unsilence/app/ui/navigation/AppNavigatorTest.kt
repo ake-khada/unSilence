@@ -7,9 +7,26 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class AppNavigatorTest {
+    @Test fun `topic search and nested results return to their exact caller`() {
+        val nav = navigator()
+        val landing = nav.backStack.last()
+        nav.push(AppDestination.Search("#nostr"))
+        val search = nav.backStack.last()
+        nav.push(AppDestination.Thread("result"))
+        val thread = nav.backStack.last()
+        nav.push(AppDestination.Search("#another"))
+        nav.pop()
+        assertSame(thread, nav.backStack.last())
+        nav.pop()
+        assertSame(search, nav.backStack.last())
+        nav.pop()
+        assertSame(landing, nav.backStack.last())
+    }
+
     @Test fun `all full screen destinations serialize and unwind without skipping their caller`() {
         val nav = navigator()
         val path = listOf(
+            AppDestination.Search("#nostr"),
             AppDestination.Thread("note"),
             AppDestination.Compose(replyToEventId = "note"),
             AppDestination.Compose(quoteEventId = "quote"),

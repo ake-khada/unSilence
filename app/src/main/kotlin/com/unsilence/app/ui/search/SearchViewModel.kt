@@ -52,9 +52,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.conflate
-import kotlinx.coroutines.flow.debounce
 import kotlinx.coroutines.flow.distinctUntilChanged
-import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.flowOf
@@ -63,7 +61,6 @@ import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
-import java.util.concurrent.atomic.AtomicLong
 import javax.inject.Inject
 
 private const val TRENDING_WOT_CHUNK_COUNT =
@@ -131,6 +128,17 @@ class SearchViewModel @Inject constructor(
         if (discoveryActive.value && discoveryOwnerIsCurrent()) trendingClient.retry()
     }
 
+    private val screenResumed = MutableStateFlow(false)
+
+    fun setScreenResumed(resumed: Boolean) {
+        screenResumed.value = resumed
+        if (!resumed) {
+            discoveryActive.value = false
+            searchRequests.close()
+            _uiState.update { it.copy(loading = false) }
+        }
+    }
+
     private val _queryFlow = MutableStateFlow("")
     private val _entityTarget = MutableStateFlow<DeepLinkTarget?>(null)
     private val _wotSubjects = MutableStateFlow<Set<String>>(emptySet())
@@ -147,52 +155,27 @@ class SearchViewModel @Inject constructor(
     /** Accumulates event IDs that arrive on search-notes-* subscriptions from RelayPool. */
     private val _searchResultEventIds = MutableStateFlow<Set<String>>(emptySet())
 
-    /** Token of the current search session — late results from old tokens are dropped.
-     *  AtomicLong eliminates the race between the relay-result collector (IO) and
-     *  collectLatest / onScreenLeft / onCleared (Main). 0L = no active search. */
-    private val currentSearchToken = AtomicLong(0L)
+    private val searchRequests = SearchRequestLifetime(closeRequest = relayPool::closeSearch)
 
     fun search(query: String) {
+        if (_queryFlow.value == query) return
+        searchRequests.queryChanged() // Fence the old query before the debounce.
+        _searchResultEventIds.value = emptySet()
+        _wotSubjects.value = emptySet()
         val entityInput = detectSearchEntityInput(query)
         val target = (entityInput as? SearchEntityInput.Resolved)?.target
         _entityTarget.value = target
         _queryFlow.value = query
-        _uiState.update { current ->
-            when (entityInput) {
-                is SearchEntityInput.Resolved -> current.copy(
-                    query = query,
-                    peopleResults = emptyList(),
-                    impersonationRisks = emptyMap(),
-                    noteResults = emptyList(),
-                    tagResults = emptyList(),
-                    entityTarget = entityInput.target,
-                    entityProfile = (entityInput.target as? DeepLinkTarget.Profile)?.let {
-                        memoryEventStore.getUserEntity(it.pubkey)
-                    },
-                    rejectedSecret = false,
-                    loading = true,
-                    hasSearched = true,
-                )
-                SearchEntityInput.RejectedSecret -> current.copy(
-                    query = query,
-                    peopleResults = emptyList(),
-                    impersonationRisks = emptyMap(),
-                    noteResults = emptyList(),
-                    tagResults = emptyList(),
-                    entityTarget = null,
-                    entityProfile = null,
-                    rejectedSecret = true,
-                    loading = false,
-                    hasSearched = true,
-                )
-                SearchEntityInput.None -> current.copy(
-                    query = query,
-                    entityTarget = null,
-                    entityProfile = null,
-                    rejectedSecret = false,
-                )
-            }
-        }
+        _uiState.value = SearchUiState(
+            query = query,
+            entityTarget = target,
+            entityProfile = (target as? DeepLinkTarget.Profile)?.let {
+                memoryEventStore.getUserEntity(it.pubkey)
+            },
+            rejectedSecret = entityInput == SearchEntityInput.RejectedSecret,
+            loading = query.length >= 3 && entityInput != SearchEntityInput.RejectedSecret,
+            hasSearched = query.length >= 3 || target != null || entityInput == SearchEntityInput.RejectedSecret,
+        )
     }
 
     fun openEntityTarget(target: DeepLinkTarget) {
@@ -257,14 +240,17 @@ class SearchViewModel @Inject constructor(
         // late arrivals from previous queries are silently dropped.
         viewModelScope.launch {
             relayPool.searchResults.collect { result ->
-                if (result.token == currentSearchToken.get()) {
+                if (result.token != 0L && result.token == searchRequests.token) {
                     _searchResultEventIds.update { it + result.eventId }
                 }
             }
         }
 
         viewModelScope.launch {
-            _entityTarget.collectLatest { target ->
+            screenResumed.flatMapLatest { resumed ->
+                if (resumed) _entityTarget else flowOf(null)
+            }.collectLatest { target ->
+                if (!screenResumed.value) return@collectLatest
                 if (target !is DeepLinkTarget.Profile) {
                     _uiState.update { it.copy(entityProfile = null) }
                     return@collectLatest
@@ -281,81 +267,68 @@ class SearchViewModel @Inject constructor(
         }
 
         viewModelScope.launch {
-            _queryFlow
-                .debounce(1000)
-                .filter { it.isEmpty() || it.length >= 3 }
-                .distinctUntilChanged()
-                .collectLatest { query ->
-                    // Close prior search sub-IDs on relays before doing anything else.
-                    currentSearchToken.get().let { prev ->
-                        if (prev != 0L) relayPool.closeSearch(prev)
-                    }
+            screenResumed.searchQueriesWhileResumed(_queryFlow).collectLatest { query ->
+                searchRequests.close()
+                if (query == null || query != _queryFlow.value || !discoveryOwnerIsCurrent()) return@collectLatest
 
-                    if (query.isEmpty()) {
-                        currentSearchToken.set(0L)
-                        _searchResultEventIds.value = emptySet()
-                        _wotSubjects.value = emptySet()
-                        _uiState.update {
-                            it.copy(
-                                peopleResults = emptyList(),
-                                impersonationRisks = emptyMap(),
-                                noteResults   = emptyList(),
-                                tagResults    = emptyList(),
-                                entityTarget = null,
-                                entityProfile = null,
-                                rejectedSecret = false,
-                                loading       = false,
-                                hasSearched   = false,
-                            )
-                        }
-                        return@collectLatest
-                    }
-
-                    if (detectSearchEntityInput(query) == SearchEntityInput.RejectedSecret) {
-                        currentSearchToken.set(0L)
-                        _searchResultEventIds.value = emptySet()
-                        _wotSubjects.value = emptySet()
-                        _uiState.update {
-                            it.copy(
-                                peopleResults = emptyList(),
-                                impersonationRisks = emptyMap(),
-                                noteResults = emptyList(),
-                                tagResults = emptyList(),
-                                entityTarget = null,
-                                entityProfile = null,
-                                rejectedSecret = true,
-                                loading = false,
-                                hasSearched = true,
-                            )
-                        }
-                        return@collectLatest
-                    }
-
-                    _uiState.update { it.copy(loading = true, hasSearched = true) }
-
-                    val ownPubkey = keyManager.getPublicKeyHex() ?: ""
-                    val userSearchRelays = memoryEventStore.getSearchRelayUrls(ownPubkey)
-                    val searchRelays = userSearchRelays.ifEmpty { DEFAULT_SEARCH_RELAY_URLS }
-
-                    // Generate token and set it BEFORE sending any REQ so the collector
-                    // is ready to accept the first fast result.
-                    val token = System.currentTimeMillis()
-                    currentSearchToken.set(token)
+                if (query.length < 3) {
                     _searchResultEventIds.value = emptySet()
+                    _wotSubjects.value = emptySet()
+                    _uiState.update {
+                        it.copy(
+                            peopleResults = emptyList(),
+                            impersonationRisks = emptyMap(),
+                            noteResults   = emptyList(),
+                            tagResults    = emptyList(),
+                            entityTarget = null,
+                            entityProfile = null,
+                            rejectedSecret = false,
+                            loading       = false,
+                            hasSearched   = false,
+                        )
+                    }
+                    return@collectLatest
+                }
 
+                if (detectSearchEntityInput(query) == SearchEntityInput.RejectedSecret) {
+                    _searchResultEventIds.value = emptySet()
+                    _wotSubjects.value = emptySet()
+                    _uiState.update {
+                        it.copy(
+                            peopleResults = emptyList(),
+                            impersonationRisks = emptyMap(),
+                            noteResults = emptyList(),
+                            tagResults = emptyList(),
+                            entityTarget = null,
+                            entityProfile = null,
+                            rejectedSecret = true,
+                            loading = false,
+                            hasSearched = true,
+                        )
+                    }
+                    return@collectLatest
+                }
+
+                val ownPubkey = keyManager.getPublicKeyHex() ?: ""
+                val userSearchRelays = memoryEventStore.getSearchRelayUrls(ownPubkey)
+                val searchRelays = userSearchRelays.ifEmpty { DEFAULT_SEARCH_RELAY_URLS }
+
+                // A covered visit retains IDs/rows, but owns no socket subscription.
+                // Re-entering rebuilds the local projection without another REQ.
+                val attempt = searchRequests.begin()
+                val token = attempt.token
+                try {
                     val explicitHashtagTag = extractExplicitHashtagQuery(query)
                     val tagSearchTag = extractTagSearchQuery(query)
 
-                    if (explicitHashtagTag != null) {
-                        // NIP-12 #t filter search
-                        relayPool.searchHashtag(searchRelays, explicitHashtagTag, token)
-                    } else {
-                        // NIP-50 full-text search
-                        relayPool.searchNotes(searchRelays, query, token)
+                    if (attempt.fetch) {
+                        _uiState.update { it.copy(loading = true, hasSearched = true) }
+                        if (explicitHashtagTag != null) {
+                            relayPool.searchHashtag(searchRelays, explicitHashtagTag, token)
+                        } else {
+                            relayPool.searchNotes(searchRelays, query, token)
+                        }
                     }
-
-                    // Give relays time to respond before declaring "no results"
-                    val searchStart = System.currentTimeMillis()
 
                     // Relay results: events whose IDs were emitted by RelayPool's search-notes subs.
                     // flatMapLatest re-queries MES each time new IDs arrive.
@@ -414,31 +387,37 @@ class SearchViewModel @Inject constructor(
                         cachedModelProvider = memoryEventStore::getEventModel,
                         wotLookup = memoryEventStore::wotFor,
                         protectedProfiles = { buildProtectedProfiles(ownPubkey) },
-                    ).collect { projection ->
-                        // Background work may finish while a new query is being debounced
-                        // or after navigation cleared this screen. Never publish stale work.
-                        if (currentSearchToken.get() != token || _queryFlow.value != query) return@collect
+                    ).collectWithInitialSearchLoading(
+                        fetch = attempt.fetch,
+                        isCurrent = {
+                            searchRequests.token == token && _queryFlow.value == query &&
+                                screenResumed.value && discoveryOwnerIsCurrent()
+                        },
+                        hasResults = { projection ->
+                            _entityTarget.value != null || projection.notes.isNotEmpty() ||
+                                projection.people.isNotEmpty() || projection.tags.isNotEmpty()
+                        },
+                        onLoadingChanged = { loading -> _uiState.update { it.copy(loading = loading) } },
+                    ) { projection ->
                         val wotSubjects = buildSet {
                             (_entityTarget.value as? DeepLinkTarget.Profile)?.pubkey?.let(::add)
                             addAll(projection.wotSubjects)
                         }
                         _wotSubjects.value = wotSubjects
                         wotHydrationCoalescer.requestHydration(wotSubjects)
-                        val hasResults = _entityTarget.value != null || projection.notes.isNotEmpty() ||
-                            projection.people.isNotEmpty() || projection.tags.isNotEmpty()
-                        val elapsed = System.currentTimeMillis() - searchStart
-                        val doneLoading = hasResults || elapsed > 3_000
                         _uiState.update {
                             it.copy(
                                 noteResults   = projection.notes,
                                 tagResults    = projection.tags,
                                 peopleResults = projection.people,
                                 impersonationRisks = projection.impersonationRisks,
-                                loading       = !doneLoading,
                             )
                         }
                     }
+                } finally {
+                    searchRequests.close(token)
                 }
+            }
         }
     }
 
@@ -448,37 +427,12 @@ class SearchViewModel @Inject constructor(
         wotHydrationCoalescer.requestHydration(pubkeys)
     }
 
-    /** Called by DisposableEffect when SearchScreen exits composition (nav back). */
-    fun onScreenLeft() {
-        discoveryActive.value = false
-        currentSearchToken.getAndSet(0L).let { prev ->
-            if (prev != 0L) relayPool.closeSearch(prev)
-        }
-        _queryFlow.value = ""
-        _entityTarget.value = null
-        _searchResultEventIds.value = emptySet()
-        _wotSubjects.value = emptySet()
-        _uiState.update {
-            it.copy(
-                query         = "",
-                peopleResults = emptyList(),
-                impersonationRisks = emptyMap(),
-                noteResults   = emptyList(),
-                tagResults    = emptyList(),
-                entityTarget = null,
-                entityProfile = null,
-                rejectedSecret = false,
-                loading       = false,
-                hasSearched   = false,
-            )
-        }
-    }
+    /** Covered entries retain bounded results in their VM, not active relay work. */
+    fun onScreenLeft() { setScreenResumed(false) }
 
     override fun onCleared() {
+        searchRequests.close()
         super.onCleared()
-        currentSearchToken.get().let { token ->
-            if (token != 0L) relayPool.closeSearch(token)
-        }
     }
 
     private fun buildProtectedProfiles(ownPubkey: String): List<ProtectedProfile> {

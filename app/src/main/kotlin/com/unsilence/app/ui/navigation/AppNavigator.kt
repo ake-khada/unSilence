@@ -18,6 +18,7 @@ internal sealed interface AppDestination {
         val openArticleOnLoad: Boolean = false,
     ) : AppDestination
     @Serializable data class Profile(val pubkey: String) : AppDestination
+    @Serializable data class Search(val query: String) : AppDestination
     @Serializable data class Compose(
         val replyToEventId: String? = null,
         val quoteEventId: String? = null,
