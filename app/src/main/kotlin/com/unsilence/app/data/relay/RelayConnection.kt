@@ -1,12 +1,17 @@
 package com.unsilence.app.data.relay
 
 import android.util.Log
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.channels.ClosedSendChannelException
 import kotlinx.coroutines.channels.ReceiveChannel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.selects.select
 import kotlinx.coroutines.withTimeout
 import okhttp3.Request
 import okhttp3.Response
@@ -70,6 +75,10 @@ private fun parseHttpCodeFromMessage(msg: String?): Int? {
  *
  * Thread model: OkHttp calls listener methods on its own threads.
  * We push raw JSON strings into [messages] for the caller to consume in a coroutine.
+ * A full inbox holds this socket's reader until capacity or termination. Incoming
+ * WebSocket control frames also wait behind it; an independent ping timeout can
+ * fail the socket and release the reader. This is bounded backpressure, not a
+ * guarantee that a stalled consumer can keep a connection alive indefinitely.
  */
 class RelayConnection(
     val url: String,
@@ -78,6 +87,9 @@ class RelayConnection(
 ) {
     private val _messages = Channel<String>(capacity = Channel.BUFFERED)
     val messages: ReceiveChannel<String> get() = _messages
+
+    /** Channel.close alone does not release an already suspended sender. */
+    private val terminated = CompletableDeferred<Unit>()
 
     private val _state = MutableStateFlow(RelayState.DISCONNECTED)
     val state: StateFlow<RelayState> get() = _state.asStateFlow()
@@ -113,7 +125,7 @@ class RelayConnection(
             capabilitiesStore?.markStructurallyInvalid(url)
             _state.value = RelayState.FAILED
             connected.set(false)
-            _messages.close()
+            terminateInbox()
             return
         }
         ws = webSocketFactory.newWebSocket(request, Listener())
@@ -126,11 +138,40 @@ class RelayConnection(
         val wasConnecting = _state.value == RelayState.CONNECTING
         _state.value = RelayState.DISCONNECTED
         connected.set(false)
+        terminateInbox()
         // A graceful close only queues a frame while an upgrade is still pending.
         // Cancel the handshake so a bounded owner cannot leave its socket running.
         if (wasConnecting) ws?.cancel() else ws?.close(1000, "Client shutdown")
-        _messages.close()
         Log.d(TAG, "Closed $url")
+    }
+
+    /** Idempotent release for every terminal path, even when nobody drains the inbox. */
+    private fun terminateInbox() {
+        terminated.complete(Unit)
+        _messages.close()
+    }
+
+    /** Called only on the OkHttp reader's full-inbox slow path, never the UI thread. */
+    private fun awaitInboxCapacity(text: String) {
+        try {
+            runBlocking {
+                select<Unit> {
+                    // Prefer termination when both clauses are ready.
+                    terminated.onAwait {}
+                    _messages.onSend(text) {}
+                }
+            }
+        } catch (_: ClosedSendChannelException) {
+            // Inbox terminated while entering the slow path.
+        } catch (_: CancellationException) {
+            // ReceiveChannel.cancel (including consumeEach cancellation) releases onSend.
+            // This callback has no caller coroutine Job whose cancellation could be swallowed.
+        } catch (interrupted: InterruptedException) {
+            // Do not silently lose a frame and continue an otherwise live connection.
+            close()
+            Thread.currentThread().interrupt()
+            throw interrupted
+        }
     }
 
     private inner class Listener : WebSocketListener() {
@@ -141,19 +182,23 @@ class RelayConnection(
         }
 
         override fun onMessage(webSocket: WebSocket, text: String) {
+            if (terminated.isCompleted) return
             if (text.length > MAX_RELAY_MESSAGE_CHARS) {
                 Log.w(TAG, "Dropping oversized relay frame from $url (${text.length} chars)")
+                terminateInbox()
                 webSocket.close(1009, "Message too large")
                 return
             }
-            _messages.trySend(text)
+            val offered = _messages.trySend(text)
+            if (offered.isSuccess || offered.isClosed) return
+            awaitInboxCapacity(text)
         }
 
         override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
             Log.w(TAG, "Failure on $url: ${t.message}")
             _state.value = RelayState.FAILED
             connected.set(false)
-            _messages.close()
+            terminateInbox()
 
             // Record transport failure for capability tracking
             val reason = categorizeTransportFailure(t, response)
@@ -166,7 +211,7 @@ class RelayConnection(
             Log.w(TAG, "WS closed by remote: url=$url code=$code reason='$reason' (was state=${_state.value})")
             _state.value = RelayState.DISCONNECTED
             connected.set(false)
-            _messages.close()
+            terminateInbox()
         }
     }
 }
