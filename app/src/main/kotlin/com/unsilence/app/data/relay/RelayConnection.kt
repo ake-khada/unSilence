@@ -185,8 +185,12 @@ class RelayConnection(
             if (terminated.isCompleted) return
             if (text.length > MAX_RELAY_MESSAGE_CHARS) {
                 Log.w(TAG, "Dropping oversized relay frame from $url (${text.length} chars)")
-                terminateInbox()
                 webSocket.close(1009, "Message too large")
+                // The inbox consumer may reconnect immediately when it ends. Publish
+                // terminal state first; onClosed can arrive after that listener exits.
+                _state.value = RelayState.DISCONNECTED
+                connected.set(false)
+                terminateInbox()
                 return
             }
             val offered = _messages.trySend(text)

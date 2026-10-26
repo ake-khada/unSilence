@@ -32,6 +32,45 @@ import java.util.concurrent.atomic.AtomicReference
 @OptIn(ExperimentalCoroutinesApi::class)
 class RelayPoolInvariantsTest {
     @Test
+    fun `oversized frame permits reconnect before delayed onClosed and replays once`() = runTest {
+        val fixture = RegistryFixture()
+        try {
+            val original = fixture.acquire()
+            fixture.sockets.open(0)
+            val oldSocket = fixture.sockets.created.single()
+            val received = mutableListOf<String>()
+            val drain = async {
+                original.messages.consumeEach(received::add)
+                // The pool's listener decides to reconnect as soon as the inbox ends.
+                // Do not deliver onClosed until after the replacement has opened.
+                assertFalse("closed inbox must not advertise a healthy socket", original.isConnected)
+                assertEquals(listOf(TEST_RELAY), fixture.registry.reconnectUrls(emptyList()))
+                fixture.acquire()
+            }
+            runCurrent()
+            oldSocket.listener.onMessage(oldSocket, "accepted before oversized frame")
+            oldSocket.listener.onMessage(oldSocket, "x".repeat(512 * 1024 + 1))
+            runCurrent()
+            val replacement = drain.await()
+            assertEquals(listOf("accepted before oversized frame"), received)
+            assertNotSame(original, replacement)
+            assertEquals(1009, oldSocket.closeCodes.first())
+            fixture.sockets.open(1)
+            assertFalse(fixture.completeReconnect(replacement) { it.send("replayed subscription") })
+
+            oldSocket.listener.onClosed(oldSocket, 1009, "Message too large")
+            runCurrent()
+            assertSame(replacement, fixture.registry.connections[TEST_RELAY])
+            assertTrue(replacement.isConnected)
+            assertEquals(2, fixture.sockets.created.size)
+            assertEquals(listOf(replacement), fixture.handedOff)
+            assertEquals(listOf("replayed subscription"), fixture.sockets.created[1].sent)
+        } finally {
+            fixture.registry.clear().forEach { it.close(); it.messages.cancel() }
+        }
+    }
+
+    @Test
     fun `reconnect opening after five seconds still installs listener and replays once`() = runTest {
         val fixture = RegistryFixture()
         val connection = fixture.acquire()
@@ -760,6 +799,7 @@ class RelayPoolInvariantsTest {
         val listener: WebSocketListener,
     ) : WebSocket {
         val closeCalls = AtomicInteger(0)
+        val closeCodes = mutableListOf<Int>()
         var cancelCalls = 0
         var onCancel: () -> Unit = {}
         val sent = mutableListOf<String>()
@@ -769,6 +809,7 @@ class RelayPoolInvariantsTest {
         override fun send(text: String): Boolean = sent.add(text)
         override fun send(bytes: ByteString): Boolean = true
         override fun close(code: Int, reason: String?): Boolean {
+            closeCodes.add(code)
             closeCalls.incrementAndGet()
             return true
         }

@@ -62,6 +62,20 @@ class RelayConnectionSocketTest {
         }
     }
 
+    @Test fun `oversized frame closes real socket with 1009 and preserves accepted frames`() = runBlocking {
+        SocketFixture().use { f ->
+            assertTrue(f.serverSocket.send("accepted before oversized frame"))
+            assertTrue(f.serverSocket.send("x".repeat(512 * 1024 + 1)))
+            assertEquals("accepted before oversized frame", withTimeout(5_000) { f.connection.messages.receive() })
+            assertTrue(withTimeout(5_000) { f.connection.messages.receiveCatching() }.isClosed)
+            assertFalse("inbox exhaustion cannot leave a healthy pooled socket", f.connection.isConnected)
+            assertEquals(1009, f.serverClosed.get(5, TimeUnit.SECONDS))
+            assertEquals(1009, f.clientClosed.get(5, TimeUnit.SECONDS))
+            assertNull(f.failure.get())
+            println("SOCKET oversized: accepted=1 rejectedChars=524289 close=1009 failures=0")
+        }
+    }
+
     @Test fun `client close completes real close handshake while inbox is full and unconsumed`() {
         SocketFixture().use { f ->
             repeat(400) { assertTrue(f.serverSocket.send("frame-$it")) }
