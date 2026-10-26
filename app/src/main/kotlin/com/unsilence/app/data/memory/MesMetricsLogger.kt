@@ -1,10 +1,14 @@
 package com.unsilence.app.data.memory
 
+import android.net.TrafficStats
+import android.os.Process
+import android.os.SystemClock
 import android.os.Debug
 import android.util.Log
 import androidx.lifecycle.DefaultLifecycleObserver
 import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.ProcessLifecycleOwner
+import com.unsilence.app.data.relay.RelayTrafficMetrics
 import com.unsilence.app.data.relay.RelayPool
 import com.unsilence.app.data.relay.Subscription
 import com.unsilence.app.ui.feed.ImageDimensionCache
@@ -15,6 +19,8 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -35,10 +41,13 @@ class MesMetricsLogger @Inject constructor(
     private val videoThumbnailCache: VideoThumbnailCache,
     private val imageDimensionCache: ImageDimensionCache,
     private val subscription: Subscription,
+    trafficMetrics: RelayTrafficMetrics,
 ) : DefaultLifecycleObserver {
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private var periodicJob: Job? = null
+    private val writer = Mutex()
+    private val trafficSnapshot = RelayTrafficSnapshot(trafficMetrics)
 
     fun attach() {
         ProcessLifecycleOwner.get().lifecycle.addObserver(this)
@@ -51,6 +60,8 @@ class MesMetricsLogger @Inject constructor(
     override fun onStop(owner: LifecycleOwner) {
         periodicJob?.cancel()
         periodicJob = null
+        // One finite, cheap stop sample; no MES traversal and no new worker loop.
+        scope.launch { writer.withLock { logTraffic("stop") } }
     }
 
     private fun startPeriodicLog() {
@@ -58,9 +69,20 @@ class MesMetricsLogger @Inject constructor(
         periodicJob = scope.launch {
             while (true) {
                 delay(INTERVAL_MS)
-                log()
+                writer.withLock {
+                    logTraffic("periodic")
+                    log()
+                }
             }
         }
+    }
+
+    private fun logTraffic(reason: String) {
+        val uid = Process.myUid()
+        Log.w("MES/traffic", trafficSnapshot.sample(
+            SystemClock.elapsedRealtime(), Process.myPid(), uid,
+            TrafficStats.getUidRxBytes(uid), TrafficStats.getUidTxBytes(uid), reason,
+        ))
     }
 
     private fun log() {

@@ -30,9 +30,10 @@ internal const val RECONNECT_HANDSHAKE_TIMEOUT_MS = 15_000L
 class RelayConnectionFactory @Inject constructor(
     private val client: OkHttpClient,
     private val capabilitiesStore: RelayCapabilitiesStore,
+    private val trafficMetrics: RelayTrafficMetrics,
 ) {
     fun create(url: String): RelayConnection =
-        RelayConnection(url, client, capabilitiesStore)
+        RelayConnection(url, client, capabilitiesStore, trafficMetrics)
 }
 
 internal data class RelayConnectionClaim(

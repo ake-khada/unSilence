@@ -75,6 +75,7 @@ private val RECOVERABLE_CONTENT_KINDS = setOf(1, 6, 16, 20, 21, 22, 34235, 34236
 class EventProcessor @Inject constructor(
     private val memoryEventStore: MemoryEventStore,
     private val signatureVerifier: com.unsilence.app.data.auth.SignatureVerifier,
+    private val trafficMetrics: RelayTrafficMetrics = RelayTrafficMetrics(),
 ) : TapRegistration {
     // CPU-bound work (JSON parse, MES insert, kind handlers).
     // Belongs on Default not IO. limitedParallelism(2) keeps this from
@@ -321,6 +322,7 @@ class EventProcessor @Inject constructor(
                     memoryEventStore.getNostrEvent(eventId) != null ||
                     pendingContent.containsKey(eventId))
             ) {
+                trafficMetrics.processorDuplicate()
                 memoryEventStore.addRelaySeen(eventId, relayUrl)
                 return
             }
@@ -448,18 +450,21 @@ class EventProcessor @Inject constructor(
         // MES enforces deletion authorship and registry staleness on every pass.
         if (nostrEvent.kind in RECOVERABLE_CONTENT_KINDS) {
             if (pendingContent.putIfAbsent(nostrEvent.id, nostrEvent) != null) {
+                trafficMetrics.processorDuplicate()
                 memoryEventStore.addRelaySeen(nostrEvent.id, nostrEvent.relayUrl)
                 return
             }
             seenIds[nostrEvent.id] = Unit
             trimDedupCacheIfNeeded()
             if (memoryEventStore.getNostrEvent(nostrEvent.id) != null) {
+                trafficMetrics.processorDuplicate()
                 memoryEventStore.addRelaySeen(nostrEvent.id, nostrEvent.relayUrl)
                 releasePendingContent(nostrEvent)
                 return
             }
         } else if (nostrEvent.kind != 5 && nostrEvent.kind != 10040) {
             if (seenIds.putIfAbsent(nostrEvent.id, Unit) != null) {
+                trafficMetrics.processorDuplicate()
                 memoryEventStore.addRelaySeen(nostrEvent.id, nostrEvent.relayUrl)
                 return
             }
@@ -604,6 +609,7 @@ class EventProcessor @Inject constructor(
         for (event in batch) {
             val existing = events[event.id]
             if (existing != null) {
+                trafficMetrics.processorDuplicate()
                 existing.relaysSeen.addAll(event.relaysSeen)
             } else {
                 events[event.id] = event
@@ -627,6 +633,7 @@ class EventProcessor @Inject constructor(
         for (event in batch) {
             val existing = events[event.id]
             if (existing != null) {
+                trafficMetrics.processorDuplicate()
                 // Merge relay provenance
                 existing.relaysSeen.addAll(event.relaysSeen)
             } else {

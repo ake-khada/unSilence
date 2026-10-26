@@ -84,6 +84,7 @@ class RelayConnection(
     val url: String,
     private val webSocketFactory: WebSocket.Factory,
     private val capabilitiesStore: RelayCapabilitiesStore? = null,
+    private val trafficMetrics: RelayTrafficMetrics = RelayTrafficMetrics(),
 ) {
     private val _messages = Channel<String>(capacity = Channel.BUFFERED)
     val messages: ReceiveChannel<String> get() = _messages
@@ -132,7 +133,11 @@ class RelayConnection(
         Log.d(TAG, "Connecting to $url")
     }
 
-    fun send(text: String): Boolean = ws?.send(text) == true
+    fun send(text: String): Boolean {
+        val accepted = ws?.send(text) == true
+        if (accepted && text.startsWith("[\"REQ\"")) trafficMetrics.reqAccepted()
+        return accepted
+    }
 
     fun close() {
         val wasConnecting = _state.value == RelayState.CONNECTING
@@ -182,6 +187,9 @@ class RelayConnection(
         }
 
         override fun onMessage(webSocket: WebSocket, text: String) {
+            // Callback arrivals, including oversized/terminated inbox drops. No parsing
+            // or allocation on the reader thread, which is also our backpressure point.
+            if (text.startsWith("[\"EVENT\"")) trafficMetrics.eventFrameReceived()
             if (terminated.isCompleted) return
             if (text.length > MAX_RELAY_MESSAGE_CHARS) {
                 Log.w(TAG, "Dropping oversized relay frame from $url (${text.length} chars)")

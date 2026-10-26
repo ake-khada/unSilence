@@ -76,6 +76,7 @@ class Subscription @Inject constructor(
     private val tapRegistration: TapRegistration,
     private val reconnectSource: ReconnectSource,
     private val relayCapabilitiesStore: RelaySkipCheck,
+    private val trafficMetrics: RelayTrafficMetrics = RelayTrafficMetrics(),
 ) : ActiveSubsSource {
     internal var elapsedRealtime: () -> Long = { android.os.SystemClock.elapsedRealtime() }
     internal var watchdogDispatcher: kotlinx.coroutines.CoroutineDispatcher = Dispatchers.Default
@@ -342,7 +343,7 @@ class Subscription @Inject constructor(
             state.isPaused = false
             for (url in state.urls) {
                 if (!relayCapabilitiesStore.shouldSkipRequest(url, state.requestClass)) {
-                    transport.sendToRelay(url, state.reqPayload)
+                    if (transport.sendToRelay(url, state.reqPayload)) trafficMetrics.replayReqAccepted()
                 } else {
                     handleRelayEose(subId, url, RelayCompletionReason.Skipped)
                 }
@@ -399,6 +400,7 @@ class Subscription @Inject constructor(
             state.closedRelays.remove(normalized)
             state.pages.remove(normalized)
             if (transport.sendToRelay(normalized, state.reqPayload)) {
+                trafficMetrics.replayReqAccepted()
                 startRelayEoseWatchdog(subId, normalized)
                 count++
             } else {
@@ -483,7 +485,10 @@ class Subscription @Inject constructor(
                 page.newest = maxOf(page.newest ?: event.createdAt, event.createdAt)
             }
         }
-        if (!state.knownIds.add(event.id)) return
+        if (!state.knownIds.add(event.id)) {
+            trafficMetrics.subscriptionDuplicate()
+            return
+        }
         state.lastEventAt = elapsedRealtime()
         try {
             state.onevent(event)

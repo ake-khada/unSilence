@@ -21,6 +21,20 @@ import java.util.concurrent.atomic.AtomicReference
 import kotlin.concurrent.thread
 
 class RelayConnectionDeliveryTest {
+    @Test fun `traffic counts accepted REQs and callback EVENTs before inbox drops`() {
+        Fixture().use { f ->
+            assertTrue(f.connection.send("[\"REQ\",\"sub\",{}]"))
+            f.connection.send("[\"CLOSE\",\"sub\"]")
+            f.socket.accepts = false
+            assertFalse(f.connection.send("[\"REQ\",\"sub\",{}]"))
+            assertEquals(1L, f.metrics.snapshot()["req_accepted"])
+            f.socket.listener.onMessage(f.socket, "[\"EOSE\",\"sub\"]")
+            f.socket.listener.onMessage(f.socket, "[\"EVENT\",\"sub\"," + "x".repeat(512 * 1024))
+            f.socket.listener.onMessage(f.socket, "[\"EVENT\",\"sub\",{}]")
+            assertEquals(2L, f.metrics.snapshot()["event_frames"])
+        }
+    }
+
     @Test fun `thousand frame burst reaches late consumer intact and ordered`() = runBlocking {
         Fixture().use { f ->
             val frames = List(1_000) { """["EVENT","sub",{"n":$it}]""" }
@@ -113,11 +127,11 @@ class RelayConnectionDeliveryTest {
         }
     }
 
-    private class Fixture(open: Boolean = true) : AutoCloseable {
+    private class Fixture(open: Boolean = true, val metrics: RelayTrafficMetrics = RelayTrafficMetrics()) : AutoCloseable {
         lateinit var socket: CapturedSocket
         val connection = RelayConnection("wss://burst.example", WebSocket.Factory { request, listener ->
             CapturedSocket(request, listener).also { socket = it }
-        })
+        }, trafficMetrics = metrics)
         private var reader: Thread? = null
         private val completed = AtomicInteger()
         private val failure = AtomicReference<Throwable?>()
@@ -189,7 +203,8 @@ class RelayConnectionDeliveryTest {
         var lastCloseCode: Int? = null
         override fun request() = original
         override fun queueSize() = 0L
-        override fun send(text: String) = true
+        var accepts = true
+        override fun send(text: String) = accepts
         override fun send(bytes: ByteString) = true
         override fun close(code: Int, reason: String?): Boolean { lastCloseCode = code; return true }
         override fun cancel() { cancelCalls++ }

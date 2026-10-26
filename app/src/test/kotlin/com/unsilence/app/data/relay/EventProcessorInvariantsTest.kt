@@ -34,6 +34,7 @@ class EventProcessorInvariantsTest {
 
     private lateinit var store: MemoryEventStore
     private lateinit var processor: EventProcessor
+    private lateinit var trafficMetrics: RelayTrafficMetrics
 
     /** Always-pass stub: these fixtures isolate processor state-machine behavior. */
     private val passVerifier = object : SignatureVerifier() {
@@ -47,10 +48,30 @@ class EventProcessorInvariantsTest {
     @Before
     fun setUp() = runBlocking {
         store = MemoryEventStore(object : MuteKeyProvider {}, stubTimelineServiceProvider())
-        processor = EventProcessor(store, SignatureVerifier())
+        trafficMetrics = RelayTrafficMetrics()
+        processor = EventProcessor(store, SignatureVerifier(), trafficMetrics)
         processor.setTestVerifier(passVerifier)
         // Stop drainers — tests use drainForTest() for synchronous channel drain.
         processor.setTestScope(CoroutineScope(SupervisorJob() + UnconfinedTestDispatcher()))
+    }
+
+    @Test fun `processor and subscription duplicate counters remain independent`() = runTest {
+        val transport = FakeRelayTransport()
+        val subscription = Subscription(transport, processor, FakeReconnectSource(), FakeRelayCapabilitiesStore(), trafficMetrics)
+        var deliveries = 0
+        val handle = subscription.subscribe(listOf("wss://relay.example.com"), NostrFilter(), { deliveries++ })
+        val subId = transport.sends.first().msg.split('"')[3]
+        val (raw, url) = rawEvent(91)
+        val addressed = raw.replace("sub-1", subId)
+        try {
+            processor.process(addressed, url)
+            processor.process(addressed, url)
+            assertEquals(1, deliveries)
+            assertEquals(1L, trafficMetrics.snapshot()["subscription_duplicates"])
+            assertEquals(1L, trafficMetrics.snapshot()["processor_duplicates"])
+            processor.stop()
+            assertEquals(1L, trafficMetrics.snapshot()["processor_duplicates"])
+        } finally { handle.close() }
     }
 
     // ── Helpers ──────────────────────────────────────────────────────────────
