@@ -764,9 +764,14 @@ class RelayPool @Inject constructor(
 
     // Persistent #p notification tail — forward-looking only (since:bootstrap_time).
     // Catches new reactions/reposts/zaps/replies mentioning the user after bootstrap.
-    @Volatile private var liveNotifSubReq: String? = null
     @Volatile private var liveNotifSince: Long? = null
-    private val liveNotifSubRelays = ConcurrentHashMap.newKeySet<String>()
+    private val notificationInbox = NotificationInboxRouting(
+        relayListFor = { memoryEventStore.get().getRelayList(it) },
+        registeredUrls = { connections.keys },
+        connectedUrls = ::connectedRelayUrls,
+        indexerUrls = { relayPreferencesStore.get().indexerRelayUrlsSnapshot() },
+        send = { url, request -> connections[url]?.takeIf { it.send(request) } },
+    )
     private val searchTimeoutJobs = ConcurrentHashMap<Long, Job>()
 
     // ── Paginated fetch state ─────────────────────────────────────────
@@ -1920,7 +1925,12 @@ class RelayPool @Inject constructor(
         Log.d(TAG, "Pool has ${connections.size} connections")
     }
 
-    private suspend fun listenForEvents(conn: RelayConnection) {
+    private suspend fun listenForEvents(conn: RelayConnection) = coroutineScope {
+        val notificationReplay = launch {
+            notificationInbox.replayWhenConnected(conn) {
+                connections[conn.url] === conn && !socketTransportSuspended.get()
+            }
+        }
         try { try {
             conn.messages.consumeEach { raw ->
                 connectionLastActivity[conn.url] = System.currentTimeMillis()
@@ -2083,6 +2093,7 @@ class RelayPool @Inject constructor(
             Log.w(TAG, "Stream closed for ${conn.url}: ${e.message}")
         }
         } finally {
+            notificationReplay.cancel()
             // Skip the reconnect decision if we're being cancelled (scope teardown).
             // A `return` here would swallow the propagating CancellationException, so
             // gate with `if (isActive)` and use NO `return` statements in this block.
@@ -3027,31 +3038,17 @@ class RelayPool @Inject constructor(
     /**
      * Paginated historical notification backfill. Fetches notification-eligible
      * events addressed to [pubkeyHex] via #p tag, plus kind-1018 responses
-     * e-tagging one of the user's authored polls, from ALL connected relays,
-     * paginating as deep as each relay allows. Events flow through
+     * e-tagging one of the user's authored polls, from declared inbox/outbox relays
+     * and the remaining connected non-indexers, paginating as deep as each relay
+     * allows. Events flow through
      * EventProcessor → MES → snapshot automatically.
      *
-     * Strategy: write relays first (highest yield), then remaining connected
+     * Strategy: own read relays first, own writes for compatibility, then connected
      * non-indexer relays in batches of 6 (concurrent within batch, sequential
      * between batches). The #p filter is highly selective — relays without
      * matching events return EOSE immediately, so the cost of asking is low.
      */
     suspend fun fetchHistoricalNotifications(pubkeyHex: String) {
-        val indexerUrls = relayPreferencesStore.get().indexerRelayUrlsSnapshot()
-            .mapNotNull { normalizeRelayUrl(it) }.toSet()
-
-        // Write relays first — highest probability of carrying our notifications.
-        val writeUrls = memoryEventStore.get().writeRelaysFor(pubkeyHex)
-            .mapNotNull { normalizeRelayUrl(it) }
-            .filter { connections.containsKey(it) }
-
-        // Remaining connected relays (exclude indexers + already-queried write relays).
-        val otherUrls = connectedRelayUrls()
-            .filter { it !in indexerUrls && it !in writeUrls && connections[it]?.isConnected == true }
-
-        val allTargets = writeUrls + otherUrls
-        if (allTargets.isEmpty()) return
-
         val filter = buildJsonObject {
             put("kinds", buildJsonArray {
                 add(JsonPrimitive(1))    // replies
@@ -3073,7 +3070,7 @@ class RelayPool @Inject constructor(
 
         var grandTotal = 0
         // Process in batches of 6 relays (concurrent within batch).
-        for (batch in allTargets.chunked(6)) {
+        val targetCount = notificationInbox.backfill(pubkeyHex) { batch ->
             Log.d(TAG, "notif-hist batch: ${batch.size} relays")
             val results = fetchPaginatedEvents(
                 urls = batch,
@@ -3100,7 +3097,7 @@ class RelayPool @Inject constructor(
                 grandTotal += voteResults.sumOf { it.totalEvents }
             }
         }
-        Log.d(TAG, "fetchHistoricalNotifications done: $grandTotal events across ${allTargets.size} relays")
+        Log.d(TAG, "fetchHistoricalNotifications done: $grandTotal events across $targetCount relays")
     }
 
     /**
@@ -3110,13 +3107,6 @@ class RelayPool @Inject constructor(
      * after bootstrap. Replayed automatically on relay reconnect.
      */
     fun subscribeOwnNotifications(pubkeyHex: String, sinceEpochSeconds: Long) {
-        val readRelayUrls = memoryEventStore.get().writeRelaysFor(pubkeyHex)
-            .mapNotNull { normalizeRelayUrl(it) }
-            .filter { connections.containsKey(it) }
-            .ifEmpty {
-                connectedRelayUrls().mapNotNull { normalizeRelayUrl(it) }.take(4)
-            }
-        if (readRelayUrls.isEmpty()) return
         val pollIds = memoryEventStore.get().authoredPollIds(pubkeyHex)
         val req = buildJsonArray {
             add(JsonPrimitive("REQ"))
@@ -3139,14 +3129,9 @@ class RelayPool @Inject constructor(
                 })
             }
         }.toString()
-        liveNotifSubReq = req
+        val targetCount = notificationInbox.subscribe(pubkeyHex, req)
         liveNotifSince = sinceEpochSeconds
-        liveNotifSubRelays.clear()
-        liveNotifSubRelays.addAll(readRelayUrls)
-        for (url in readRelayUrls) {
-            connections[url]?.send(req)
-        }
-        Log.d(TAG, "subscribeOwnNotifications: ${readRelayUrls.size} relays, since=$sinceEpochSeconds")
+        Log.d(TAG, "subscribeOwnNotifications: $targetCount relays, since=$sinceEpochSeconds")
     }
 
     /** Rebuild the live #e filter after authoring a poll in this app session. */
@@ -3159,16 +3144,8 @@ class RelayPool @Inject constructor(
 
     /** Close the persistent notification subscription (teardown). */
     fun closeLiveNotifSub() {
-        val urls = liveNotifSubRelays.toList()
-        liveNotifSubReq = null
         liveNotifSince = null
-        liveNotifSubRelays.clear()
-        if (urls.isNotEmpty()) {
-            val close = """["CLOSE","own-notif-live"]"""
-            for (url in urls) {
-                connections[url]?.send(close)
-            }
-        }
+        notificationInbox.close()
     }
 
     /**
@@ -4951,8 +4928,8 @@ class RelayPool @Inject constructor(
     }
 
     /**
-     * Targeted publish (H20c): send an event to a SPECIFIC relay set — the author's
-     * own write relays — rather than broadcasting to every open socket. Two reasons:
+     * Targeted publish (H20c): send an event only to the caller's resolved relay set
+     * rather than broadcasting to every open socket. Two reasons:
      * the broadcast form spammed ~30 bystander relays per note (bandwidth) and leaked
      * note content to relays the user never configured (outbox-model violation + privacy).
      *
@@ -4979,7 +4956,7 @@ class RelayPool @Inject constructor(
         // reconnect defer, because this is explicit user intent (H20c).
         val unopened = targets.filter { connections[it]?.isConnected != true }
         if (unopened.isNotEmpty()) {
-            Log.w(TAG, "PUBLISH: connecting ${unopened.size} unopened write relay(s): $unopened")
+            Log.w(TAG, "PUBLISH: connecting ${unopened.size} unopened target relay(s): $unopened")
             connectAndAwait(unopened, timeoutMs = 5_000)
         }
 
@@ -5429,10 +5406,7 @@ class RelayPool @Inject constructor(
                         if (url in liveMuteSubRelays) {
                             liveMuteSubReq?.let { conn.send(it) }
                         }
-                        // Resend persistent notification subscription if this relay carries it
-                        if (url in liveNotifSubRelays) {
-                            liveNotifSubReq?.let { conn.send(it) }
-                        }
+                        // The pooled listener restores notifications from current inbox membership.
                         scope.launch { listenForEvents(conn) }
                         scope.launch {
                             delay(RECONNECT_HEALTHY_WINDOW_MS)

@@ -38,6 +38,7 @@ import com.unsilence.app.data.settings.SettingsStore
 import com.unsilence.app.data.relay.GLOBAL_RELAY_URLS
 import com.unsilence.app.data.relay.RelayPool
 import com.unsilence.app.data.relay.WotHydrationCoalescer
+import com.unsilence.app.data.relay.recipientPublishRelays
 import com.unsilence.app.data.relay.normalizeRelayUrl
 import com.unsilence.app.data.relay.sortMentionsByWotRank
 import com.unsilence.app.data.relay.toEventJson
@@ -84,12 +85,20 @@ internal fun resolveComposePublishRelays(
     configuredWriteRelays: List<String>,
     relayListSettled: Boolean,
     fallbackRelays: List<String>,
-): List<String> =
-    when {
+    signedAuthor: String = "",
+    signedTags: List<List<String>> = emptyList(),
+    cachedReadRelays: (String) -> List<String> = { emptyList() },
+    blocked: Set<String> = emptySet(),
+): List<String> {
+    val ownTargets = when {
         configuredWriteRelays.isNotEmpty() -> configuredWriteRelays
         relayListSettled -> fallbackRelays
         else -> emptyList()
     }
+    // Recipient metadata must never bypass unresolved own-relay readiness.
+    if (ownTargets.isEmpty()) return emptyList()
+    return recipientPublishRelays(ownTargets, signedAuthor, signedTags, cachedReadRelays, blocked)
+}
 
 internal class ComposeSessionGate(initialSessionKey: String? = null) {
     var activeSessionKey: String? = initialSessionKey
@@ -1382,6 +1391,8 @@ class ComposeViewModel @Inject constructor(
                 publishAndTrack(
                     eventId = signed.id,
                     eventJson = toEventJson(signed),
+                    signedAuthor = signed.pubKey,
+                    signedTags = signed.tags.map { it.toList() },
                     replyToId = payload.replyToId,
                     rootId = payload.rootId,
                     confirmation = confirmation,
@@ -1421,11 +1432,13 @@ class ComposeViewModel @Inject constructor(
 
     /**
      * Shared publish-and-track: inserts the signed event locally first, then publishes
-     * to write relays and tracks per-relay OK responses with a 6s timeout.
+     * to own writes plus cached recipient inboxes, tracking every target for 6s.
      */
     private suspend fun publishAndTrack(
         eventId: String,
         eventJson: String,
+        signedAuthor: String,
+        signedTags: List<List<String>>,
         replyToId: String?,
         rootId: String?,
         confirmation: SendState.Confirming,
@@ -1438,21 +1451,25 @@ class ComposeViewModel @Inject constructor(
             }
         }
         val relayListSettled = initGate.relaysReady
-        val writeRelays = resolveComposePublishRelays(
+        val publishRelays = resolveComposePublishRelays(
             configuredWriteRelays = memoryEventStore.writeRelaysFor(ownPk)
                 .mapNotNull(::normalizeRelayUrl),
             relayListSettled = relayListSettled,
             fallbackRelays = GLOBAL_RELAY_URLS,
+            signedAuthor = signedAuthor,
+            signedTags = signedTags,
+            cachedReadRelays = memoryEventStore::readRelaysFor,
+            blocked = memoryEventStore.getBlockedRelayUrls(ownPk).toSet(),
         )
 
-        // Record the intended outbox target set before RelayPool reports actual dispatch.
+        // Record the intended own-write and recipient-inbox target set before RelayPool reports actual dispatch.
         // The readiness bit distinguishes a configured empty list from a timed-out load.
         Log.w(
             TAG,
             "PUBLISH: event=$eventId settled=$relayListSettled " +
-                "targets=write$writeRelays (count=${writeRelays.size})",
+                "targets=$publishRelays (count=${publishRelays.size})",
         )
-        if (writeRelays.isEmpty()) {
+        if (publishRelays.isEmpty()) {
             _sendState.value = SendState.Failed(
                 reason = "Your relay list is still loading. Try again in a moment.",
                 confirmation = confirmation,
@@ -1461,24 +1478,21 @@ class ComposeViewModel @Inject constructor(
         }
 
         // Enter Publishing state with all relays Pending
-        val statusMap = ConcurrentHashMap<String, RelayPublishStatus>()
-        writeRelays.forEach { statusMap[it] = RelayPublishStatus.Pending }
+        val tracker = ComposePublishTracker(publishRelays)
         _sendState.value = SendState.Publishing(
-            statuses = HashMap(statusMap),
+            statuses = tracker.snapshot(),
             confirmation = confirmation,
         )
 
         // Register OK callback before sending
         relayPool.registerPublishCallback(eventId) { relayUrl, success, message ->
-            val normalized = com.unsilence.app.data.relay.normalizeRelayUrl(relayUrl)
-            val key = normalized ?: relayUrl
+            val isTarget = tracker.acknowledge(relayUrl, success)
             Log.w(TAG, "PUBLISH ${if (success) "OK" else "FAIL"} $relayUrl" +
                 (if (message.isNotBlank()) " — $message" else "") +
-                (if (!statusMap.containsKey(key)) " (non-target relay)" else ""))
-            if (statusMap.containsKey(key)) {
-                statusMap[key] = if (success) RelayPublishStatus.Accepted else RelayPublishStatus.Rejected
+                (if (!isTarget) " (non-target relay)" else ""))
+            if (isTarget) {
                 _sendState.value = SendState.Publishing(
-                    statuses = HashMap(statusMap),
+                    statuses = tracker.snapshot(),
                     confirmation = confirmation,
                 )
             }
@@ -1489,34 +1503,30 @@ class ComposeViewModel @Inject constructor(
             // feed/thread flows update immediately; relay failure remains surfaced below.
             withContext(Dispatchers.IO) { insertIntoMes() }
 
-            // Publish to the user's own write relays only — connectAndAwait handles any
-            // that aren't open (bypassing the degraded defer, explicit user intent). No
-            // more spraying note content to every open socket. (H20c)
+            // Only the resolved own-write and bounded recipient-read targets receive
+            // this signed event. Existing connectAndAwait readiness remains in force.
             withContext(Dispatchers.IO) {
-                relayPool.publish(eventJson, writeRelays)
+                relayPool.publish(eventJson, publishRelays)
             }
 
             // Wait up to 6s for all relays to respond
             val deadline = System.currentTimeMillis() + 6_000
             while (System.currentTimeMillis() < deadline) {
-                if (statusMap.values.none { it == RelayPublishStatus.Pending }) break
+                if (!tracker.hasPending) break
                 delay(200)
             }
 
             // Time out any remaining Pending relays
-            for ((url, status) in statusMap) {
-                if (status == RelayPublishStatus.Pending) {
-                    statusMap[url] = RelayPublishStatus.TimedOut
-                }
-            }
+            tracker.expirePending()
             _sendState.value = SendState.Publishing(
-                statuses = HashMap(statusMap),
+                statuses = tracker.snapshot(),
                 confirmation = confirmation,
             )
 
-            val acceptedCount = statusMap.values.count { it == RelayPublishStatus.Accepted }
-            Log.w(TAG, "PUBLISH verdict: $acceptedCount/${writeRelays.size} accepted " +
-                "(event=$eventId, statuses=${statusMap.values.groupingBy { it }.eachCount()})")
+            val statuses = tracker.snapshot()
+            val acceptedCount = statuses.values.count { it == RelayPublishStatus.Accepted }
+            Log.w(TAG, "PUBLISH verdict: $acceptedCount/${publishRelays.size} accepted " +
+                "(event=$eventId, statuses=${statuses.values.groupingBy { it }.eachCount()})")
             if (acceptedCount > 0) {
                 deleteCurrentDraft()
                 // Brief pause to show final state

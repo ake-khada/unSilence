@@ -504,9 +504,9 @@ class AppBootstrapper @Inject constructor(
             )
         }
 
-        // Historical notification backfill: paginated #p fetch across all connected
-        // relays. Delayed 15s so outbox relay connections stabilize first — notifications
-        // come from OTHER people's write relays, not just ours.
+        // Historical notification backfill: query our NIP-65 read inbox first,
+        // retaining our write relays for compatibility, then connected non-indexers.
+        // Delay 15s so relay connections stabilize before the paginated #p fetch.
         // Non-blocking — launched in background so it doesn't delay Phase 3.
         scope.launch {
             delay(15_000)
@@ -516,7 +516,13 @@ class AppBootstrapper @Inject constructor(
         // Persistent notification tail: forward-looking only (since:now).
         // New reactions/reposts/zaps/replies arrive via EventProcessor → MES
         // and surface in NotificationsViewModel's MES flow.
-        relayPool.subscribeOwnNotifications(pubkeyHex, System.currentTimeMillis() / 1000)
+        bootstrapNotificationInbox(
+            relayList = memoryEventStore.getRelayList(pubkeyHex),
+            isCurrent = { sessionGen.get() == myGen && initGate.isCurrent(initSession, pubkeyHex) },
+            addPurpose = relayPool::addPurpose,
+            connect = { urls, timeout -> relayPool.connectAndAwait(urls, timeoutMs = timeout); Unit },
+            subscribe = { relayPool.subscribeOwnNotifications(pubkeyHex, System.currentTimeMillis() / 1000) },
+        )
 
         // NIP-57 private zap decryption. Pending work is derived from MES's
         // authenticated receipt set, so a late collector receives snapshot work too.

@@ -18,6 +18,7 @@ import com.unsilence.app.data.memory.NostrEvent
 import com.unsilence.app.data.relay.GLOBAL_RELAY_URLS
 import com.unsilence.app.data.relay.CardHydrator
 import com.unsilence.app.data.relay.NostrJson
+import com.unsilence.app.data.relay.recipientPublishRelays
 import com.unsilence.app.data.relay.normalizeRelayUrl
 import com.unsilence.app.data.relay.OgFetcher
 import com.unsilence.app.data.relay.toEventJson
@@ -510,15 +511,14 @@ class NoteActionsViewModel @Inject constructor(
         ).ifEmpty { GLOBAL_RELAY_URLS }
     }
 
-    /** Own write relays for deleting an original event published through our outbox. */
-    private fun ownEventDeletionTargets(ownPubkey: String): List<String> {
-        val blocked = memoryEventStore.getBlockedRelayUrls(ownPubkey).toSet()
-        return normalizedPublishRelays(
-            relayUrls = memoryEventStore.writeRelaysFor(ownPubkey),
-            blocked = blocked,
-            maxRelays = Int.MAX_VALUE,
-        ).ifEmpty { GLOBAL_RELAY_URLS }
-    }
+    /** Reach the original event's own-write and bounded recipient-read copies. */
+    private fun ownEventDeletionTargets(original: NostrEvent): List<String> =
+        originalEventDeletionRelays(
+            original = original,
+            ownWrite = memoryEventStore.writeRelaysFor(original.pubkey),
+            cachedReadRelays = memoryEventStore::readRelaysFor,
+            blocked = memoryEventStore.getBlockedRelayUrls(original.pubkey).toSet(),
+        )
 
     /** Relay set for the NIP-57 zap-request ["relays", …] tag — where the wallet
      *  publishes the kind-9735 receipt. Mirrors the engagement READ path (target
@@ -686,7 +686,7 @@ class NoteActionsViewModel @Inject constructor(
             }
             publishDeletionRequest(
                 deletedEvents = listOf(original),
-                relayTargets = ownEventDeletionTargets(own),
+                relayTargets = ownEventDeletionTargets(original),
                 signingError = "Delete failed — signing rejected (check Amber permissions)",
             )
         }
@@ -1048,6 +1048,17 @@ internal data class RepostDescriptor(val kind: Int, val tags: Array<Array<String
     // kind + tag contents directly), so the default reference-based ones are fine.
     override fun equals(other: Any?) = this === other
     override fun hashCode() = System.identityHashCode(this)
+}
+
+/** Routing uses original signed p tags; kind-5 tags remain only deletion references. */
+internal fun originalEventDeletionRelays(
+    original: NostrEvent,
+    ownWrite: List<String>,
+    cachedReadRelays: (String) -> List<String>,
+    blocked: Set<String>,
+): List<String> {
+    val ownTargets = normalizedPublishRelays(ownWrite, blocked, Int.MAX_VALUE).ifEmpty { GLOBAL_RELAY_URLS }
+    return recipientPublishRelays(ownTargets, original.pubkey, original.tags, cachedReadRelays, blocked)
 }
 
 internal fun buildDeletionRequestTags(events: List<NostrEvent>): Array<Array<String>> {
