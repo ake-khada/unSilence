@@ -192,3 +192,16 @@ python3 tools/perf/analyze_replay.py compare \
 The example UID is synthetic; actual capture must resolve it dynamically. Lists
 are paired by position. The analyzer reports quantitative gates, not final owner
 acceptance. Synthetic standard-library tests run in `./dev check`.
+
+### Explicit scripted-method exception
+
+If the owner explicitly authorizes a separate Home/launcher-only scripted series,
+record `execution_method: "scripted-home-launcher-v1"`, `script_complete: true`,
+`owner_authorized_script: true`, and `human_complete: false`. Never relabel scripts
+as human runs or combine methods in pairs or controls. Existing manifests default
+to `human`. Restart the complete comparison and controls using the same timing,
+installation and settling protocol; retain manual attempts descriptively. Record
+the method change and exact timing boundaries in the experiment ledger before
+collection. Scripted launcher completion is a scheduling proxy, not an observation
+of feed visibility. Human feed continuity still requires separate owner acceptance.
+No scripted taps, swipes or settings changes are implied by this input format.

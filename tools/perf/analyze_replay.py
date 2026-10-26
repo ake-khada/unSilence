@@ -141,8 +141,17 @@ def summarize_run(run):
         raise ReplayError("wrong declared gesture durations")
     if not workload["transport"] or not workload["configuration"]:
         raise ReplayError("missing transport/configuration identity")
-    if run.get("human_complete") is not True or run.get("thermal_ok") is not True or run.get("deviations") != []:
-        raise ReplayError("incomplete, interrupted, thermal or deviating human workload")
+    method = run.get("execution_method", "human")
+    if method == "human":
+        complete = run.get("human_complete") is True
+    elif method == "scripted-home-launcher-v1":
+        complete = (run.get("script_complete") is True and
+                    run.get("owner_authorized_script") is True and
+                    run.get("human_complete") is False)
+    else:
+        raise ReplayError("unknown execution method")
+    if not complete or run.get("thermal_ok") is not True or run.get("deviations") != []:
+        raise ReplayError("incomplete, interrupted, thermal or deviating workload")
     start = integer(run.get("start_elapsed_ms"), "start_elapsed_ms")
     end = integer(run.get("end_elapsed_ms"), "end_elapsed_ms")
     if end <= start:
@@ -170,6 +179,7 @@ def summarize_run(run):
               for key in ("event_frames", "subscription_duplicates", "processor_duplicates")}
     return {"run_id": run["run_id"], "pair_id": run["pair_id"], "arm": run["arm"],
             "sequence": integer(run.get("sequence"), "sequence"), "workload": workload,
+            "execution_method": method,
             "uid": first["uid"], "pid": first["pid"], "duration_ms": end - start,
             "byte_duration_ms": byte_end - byte_start,
             "byte_boundary_offsets_ms": [byte_start-start, byte_end-end],
@@ -211,6 +221,8 @@ def compare_runs(baseline, candidate, baseline_controls=(), idle_controls=(), it
     if len({r["sequence"] for r in evidence_runs}) != len(evidence_runs):
         raise ReplayError("duplicate run sequence")
     for run in evidence_runs:
+        if run.get("execution_method", "human") != baseline[0].get("execution_method", "human"):
+            raise ReplayError("mixed execution methods")
         if run["uid"] != baseline[0]["uid"] or run["byte_source"] != baseline[0]["byte_source"]:
             raise ReplayError("run UID/byte source mismatch")
     used_pairs = {r["pair_id"] for r in baseline}
@@ -270,7 +282,8 @@ def compare_runs(baseline, candidate, baseline_controls=(), idle_controls=(), it
     }
     for key in ("event_frames", "subscription_duplicates", "processor_duplicates"):
         gates[key + "_per_replay_interval_below_zero"] = metrics[key + "_per_replay"]["bootstrap_95"][1] < 0
-    return {"experimental_unit": "complete paired human run", "pairs": len(baseline),
+    unit = "human" if baseline[0].get("execution_method", "human") == "human" else "scripted"
+    return {"experimental_unit": f"complete paired {unit} run", "pairs": len(baseline),
             "metrics": metrics, "rx_control_drift_bound": max(drift) if drift else None,
             "gates": gates, "quantitative_pass": all(gates.values()),
             "limitation": "Whole-UID bytes are not per-relay attribution. Unique delivery, coverage, reconnect and human continuity require separate acceptance."}

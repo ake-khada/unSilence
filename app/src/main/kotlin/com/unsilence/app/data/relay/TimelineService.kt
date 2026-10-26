@@ -676,6 +676,16 @@ class TimelineService @Inject constructor(
                 }
             },
             onclose = onClose ?: { _, _ -> },
+            replayFilterProvider = replay@{ url ->
+                val original = subRequest.filter
+                if (sessions[key] !== catchUp) return@replay original
+                // ConcurrentHashMap publishes immutable Timeline/coverage snapshots.
+                // Read one snapshot without taking the EOSE writer's locks or loading events.
+                val head = timelines[key]?.coverage?.get(url)?.head
+                if (head == null || sessions[key] !== catchUp) return@replay original
+                val confirmed = head.coerceAtMost(System.currentTimeMillis() / 1000L)
+                original.copy(since = maxOf(original.since ?: confirmed, confirmed))
+            },
         )
 
         catchUp.scope.coroutineContext[Job]?.invokeOnCompletion { handle.close() }

@@ -33,6 +33,18 @@ def run(arm="A", pair="p1", sequence=1):
 
 
 class ReplayParsingTest(unittest.TestCase):
+    def test_scripted_completion_is_explicit_and_never_reported_as_human(self):
+        value = run()
+        value.update(execution_method="scripted-home-launcher-v1", human_complete=False,
+                     script_complete=True, owner_authorized_script=True)
+        summary = analyzer.summarize_run(value)
+        self.assertEqual("scripted-home-launcher-v1", summary["execution_method"])
+        for changes in (dict(script_complete=False), dict(owner_authorized_script=False),
+                        dict(human_complete=True), dict(execution_method="unknown")):
+            bad = copy.deepcopy(value); bad.update(changes)
+            with self.subTest(changes=changes), self.assertRaises(analyzer.ReplayError):
+                analyzer.summarize_run(bad)
+
     def test_only_versioned_traffic_lines_not_heap_are_parsed(self):
         text = 'W MES/size: mesTotal~99mb heapUsed=123mb\nW MES/traffic: '+json.dumps(sample())
         self.assertEqual([sample()], analyzer.parse_app_samples(text))
@@ -157,6 +169,22 @@ class ReplayComparisonTest(unittest.TestCase):
         idle['deltas']['uid_rx']=10
         other=copy.deepcopy(idle); other.update(run_id='idleC93', arm='C', sequence=93)
         return [(a,b)], [idle,other]
+
+    def test_execution_methods_cannot_mix_in_pairs_or_controls(self):
+        for target in ("candidate", "baseline-control", "idle-control"):
+            a,c=self.pairs(); controls,idle=self.controls()
+            selected = {"candidate": c[0], "baseline-control": controls[0][0], "idle-control": idle[0]}[target]
+            selected["execution_method"] = "scripted-home-launcher-v1"
+            with self.subTest(target=target), self.assertRaises(analyzer.ReplayError):
+                analyzer.compare_runs(a,c,controls,idle,iterations=1000)
+
+    def test_scripted_series_reports_scripted_experimental_units(self):
+        a,c=self.pairs(); controls,idle=self.controls()
+        for value in a+c+[r for pair in controls for r in pair]+idle:
+            value["execution_method"]="scripted-home-launcher-v1"
+        result=analyzer.compare_runs(a,c,controls,idle,iterations=1000)
+        self.assertEqual("complete paired scripted run",result["experimental_unit"])
+        self.assertTrue(result["quantitative_pass"])
 
     def test_complete_paired_runs_pass_predeclared_quantitative_gates(self):
         a,c=self.pairs(); controls,idle=self.controls()

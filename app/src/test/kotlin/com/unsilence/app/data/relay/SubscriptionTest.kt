@@ -1,6 +1,7 @@
 package com.unsilence.app.data.relay
 
 import com.unsilence.app.data.memory.NostrEvent
+import kotlinx.serialization.json.jsonArray
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
@@ -36,6 +37,68 @@ class SubscriptionTest {
             FakeReconnectSource(),
             capabilities,
         )
+    }
+
+    @Test
+    fun `default subscribers replay byte for byte initial payload on both paths`() = runTest {
+        val url = "wss://a.example"
+        subscription.subscribe(listOf(url), NostrFilter(kinds = listOf(1), since = 7, until = 900, limit = 20), {})
+        val initial = transport.sends.single().msg
+        subscription.pauseAll(); subscription.resumeAll()
+        assertEquals(initial, transport.sends.last().msg)
+        subscription.resumeRelay(url, 1000)
+        assertEquals(initial, transport.sends.last().msg)
+        subscription.resetForTest()
+    }
+
+    @Test
+    fun `provider retains subId and fields and evaluates normalized URLs anew on each replay`() = runTest {
+        val a = "wss://a.example"
+        val b = "wss://b.example"
+        val filter = NostrFilter(kinds = listOf(1, 6), authors = listOf("a".repeat(64)),
+            since = 7, until = 900, limit = 20, search = "hello", tags = mapOf("t" to listOf("test")))
+        var cursor = 100L
+        val calls = mutableListOf<String>()
+        subscription.subscribe(listOf("$a/", "b.example"), filter, {}, replayFilterProvider = { url ->
+            calls += url
+            filter.copy(since = cursor + if (url == a) 0 else 50)
+        })
+        val initial = NostrJson.parseToJsonElement(transport.sends.first().msg).jsonArray
+        assertEquals(filter.toWireJsonObject(), initial[2])
+        assertTrue(calls.isEmpty())
+        repeat(2) {
+            subscription.pauseAll(); subscription.resumeAll()
+            for (url in listOf(a, b)) {
+                val req = NostrJson.parseToJsonElement(transport.sends.last { it.url == url }.msg).jsonArray
+                assertEquals(initial[1], req[1])
+                assertEquals(filter.copy(since = cursor + if (url == a) 0 else 50).toWireJsonObject(), req[2])
+            }
+            cursor += 100
+        }
+        assertEquals(listOf(a, b, a, b), calls)
+        subscription.resetForTest()
+    }
+
+    @Test
+    fun `provider exceptions use immutable original and next replay evaluates again`() = runTest {
+        val url = "wss://a.example"
+        val filter = NostrFilter(limit = 10)
+        var fail = false
+        subscription.subscribe(listOf(url), filter, {}, replayFilterProvider = {
+            if (fail) error("unavailable") else filter.copy(since = 200)
+        })
+        val initial = transport.sends.single().msg
+        subscription.resumeRelay(url, 1000)
+        assertTrue(transport.sends.last().msg.contains("\"since\":200"))
+        fail = true
+        subscription.pauseAll(); subscription.resumeAll()
+        assertEquals(initial, transport.sends.last().msg)
+        subscription.resumeRelay(url, 2000)
+        assertEquals(initial, transport.sends.last().msg)
+        fail = false
+        subscription.resumeRelay(url, 3000)
+        assertTrue(transport.sends.last().msg.contains("\"since\":200"))
+        subscription.resetForTest()
     }
 
     @Test

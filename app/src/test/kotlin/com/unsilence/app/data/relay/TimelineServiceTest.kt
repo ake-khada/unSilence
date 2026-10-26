@@ -1,6 +1,10 @@
 package com.unsilence.app.data.relay
 
 import com.unsilence.app.data.memory.NostrEvent
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.longOrNull
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
@@ -434,6 +438,119 @@ class TimelineServiceTest {
 
         assertTrue(snapshot.getValue(key).refs.isEmpty())
     }
+
+    @Test
+    fun `one multi URL request replays each confirmed head inclusively`() = runTest {
+        val urls = listOf("wss://a.example", "wss://b.example")
+        val filter = NostrFilter(kinds = listOf(1), limit = 10)
+        val handle = service.subscribeTimeline(listOf(SubRequest(urls, filter)), { _, _ -> })
+        try {
+            val initial = transport.sends.filter { it.msg.startsWith("[\"REQ\"") }
+            assertEquals(2, initial.size)
+            assertEquals(initial[0].msg, initial[1].msg)
+            val id = transport.lastReqSubId()
+            urls.forEachIndexed { index, url ->
+                tapRegistry.fire(eventMessage(id, "${index + 1}", 100L * (index + 1)), url)
+                tapRegistry.fire("""["EOSE","$id"]""", url)
+            }
+            subscription.pauseAll()
+            subscription.resumeAll()
+            urls.forEachIndexed { index, url ->
+                val req = NostrJson.parseToJsonElement(transport.sends.last {
+                    it.url == url && it.msg.startsWith("[\"REQ\"")
+                }.msg).jsonArray
+                assertEquals(id, req[1].jsonPrimitive.content)
+                assertEquals(filter.copy(since = 100L * (index + 1)).toWireJsonObject(), req[2])
+            }
+        } finally { handle.close(); subscription.resetForTest(); service.clear() }
+    }
+
+    @Test
+    fun `pending confirmed coverage replays head while unknown coverage uses original filter`() = runTest {
+        val url = "wss://a.example"
+        val original = NostrFilter(kinds = listOf(1), since = 7, limit = 10)
+        val key = service.generateTimelineKey(listOf(url), original)
+        fun restore(head: Long?) = service.restoreFromSnapshot(mapOf(key to TimelineService.Timeline(
+            listOf(TimelineRef("a".repeat(64), 900)), original, listOf(url),
+            mapOf(url to TimelineCoverage(head = head, pending = true, floor = 20, until = 50, targetHead = 800)),
+        )))
+        restore(100)
+        val handle = service.subscribeTimeline(listOf(SubRequest(listOf(url), original)), { _, _ -> })
+        try {
+            assertEquals(original.copy(since = 100).toWireJsonObject(), lastReplayFilter())
+            subscription.pauseAll(); subscription.resumeAll()
+            assertEquals(original.copy(since = 100).toWireJsonObject(), lastReplayFilter())
+            restore(null)
+            subscription.pauseAll(); subscription.resumeAll()
+            assertEquals(original.toWireJsonObject(), lastReplayFilter())
+            assertEquals(null, service.timelineStateForTest(key)!!.coverage.getValue(url).head)
+            assertTrue(eventLoader.repairCalls.isEmpty())
+        } finally { handle.close(); subscription.resetForTest(); service.clear() }
+    }
+
+    @Test
+    fun `replay retains later caller since and caps confirmed future head`() = runTest {
+        val url = "wss://a.example"
+        for (originalSince in listOf(300L, null)) {
+            val original = NostrFilter(kinds = listOf(1), since = originalSince, limit = 10)
+            val key = service.generateTimelineKey(listOf(url), original)
+            val head = if (originalSince != null) 100L else System.currentTimeMillis() / 1000 + 600
+            service.restoreFromSnapshot(mapOf(key to TimelineService.Timeline(emptyList(), original,
+                listOf(url), mapOf(url to TimelineCoverage(head = head)))))
+            val handle = service.subscribeTimeline(listOf(SubRequest(listOf(url), original)), { _, _ -> })
+            try {
+                val before = System.currentTimeMillis() / 1000
+                subscription.pauseAll(); subscription.resumeAll()
+                val since = lastReplayFilter()["since"]!!.jsonPrimitive.longOrNull!!
+                if (originalSince != null) assertEquals(originalSince, since)
+                else assertTrue(since in before..System.currentTimeMillis() / 1000)
+            } finally { handle.close(); subscription.resetForTest(); service.clear() }
+        }
+    }
+
+    @Test
+    fun `stale timeline session replays original filter rather than replacement head`() = runTest {
+        val url = "wss://a.example"
+        val original = NostrFilter(kinds = listOf(1), limit = 10)
+        val request = SubRequest(listOf(url), original)
+        val first = service.subscribeTimeline(listOf(request), { _, _ -> })
+        val oldId = transport.lastReqSubId()
+        tapRegistry.fire(eventMessage(oldId, "a", 100), url)
+        tapRegistry.fire("""["EOSE","$oldId"]""", url)
+        val second = service.subscribeTimeline(listOf(request), { _, _ -> })
+        try {
+            subscription.pauseAll(); subscription.resumeAll()
+            val oldReplay = transport.sends.last { it.msg.startsWith("[\"REQ\"") && extractSubId(it.msg) == oldId }
+            assertEquals(original.toWireJsonObject(), NostrJson.parseToJsonElement(oldReplay.msg).jsonArray[2])
+        } finally { first.close(); second.close(); subscription.resetForTest(); service.clear() }
+    }
+
+    @Test
+    fun `normalized subscription URL finds confirmed coverage on resume and reconnect`() = runTest {
+        // The shared normalizer strips the slash but intentionally preserves host case.
+        val coverageUrl = "wss://Relay.Example"
+        val subscriptionUrl = "$coverageUrl/"
+        assertEquals(coverageUrl, normalizeRelayUrl(subscriptionUrl))
+        val filter = NostrFilter(kinds = listOf(1), limit = 10)
+        val handle = service.subscribeTimeline(listOf(SubRequest(listOf(subscriptionUrl), filter)), { _, _ -> })
+        try {
+            val id = transport.lastReqSubId()
+            tapRegistry.fire(eventMessage(id, "a", 123), coverageUrl)
+            tapRegistry.fire("""["EOSE","$id"]""", coverageUrl)
+            val key = service.generateTimelineKey(listOf(subscriptionUrl), filter)
+            assertEquals(setOf(coverageUrl), service.timelineStateForTest(key)!!.coverage.keys)
+            assertEquals(123L, service.timelineStateForTest(key)!!.coverage.getValue(coverageUrl).head)
+            subscription.pauseAll(); subscription.resumeAll()
+            assertEquals(filter.copy(since = 123).toWireJsonObject(), lastReplayFilter())
+            subscription.resumeRelay(subscriptionUrl, 1000)
+            assertEquals(coverageUrl, transport.sends.last().url)
+            assertEquals(filter.copy(since = 123).toWireJsonObject(), lastReplayFilter())
+        } finally { handle.close(); subscription.resetForTest(); service.clear() }
+    }
+
+    private fun lastReplayFilter() = NostrJson.parseToJsonElement(transport.sends.last {
+        it.msg.startsWith("[\"REQ\"")
+    }.msg).jsonArray[2].jsonObject
 
     // ── helpers ───────────────────────────────────────────────────────────
 

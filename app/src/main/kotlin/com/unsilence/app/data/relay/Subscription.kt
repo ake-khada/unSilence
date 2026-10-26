@@ -46,11 +46,11 @@ private const val RELAY_REPLAY_DEBOUNCE_MS = 1_000L
  *   5. Handle.close() sends CLOSE to each relay and unregisters the
  *      subscription. Subsequent messages for this subId are dropped.
  *   6. pauseAll() sends CLOSE to every relay for all active subs without
- *      removing them. resumeAll() re-sends stored REQ payloads. Used by
+ *      removing them. resumeAll() replays with optional per-relay filters. Used by
  *      ProcessLifecycleOwner to stop event flow when backgrounded.
  *
- * On reconnect, the stored REQ is replayed for that relay. Consumers that keep
- * EOSE-sensitive state receive [onReplayCycleStarted] before the new cycle.
+ * On reconnect, the stored REQ or an optional provider filter is replayed for that relay.
+ * Consumers with EOSE-sensitive state receive [onReplayCycleStarted] before the new cycle.
  *
  * Thread safety: subscribe() is suspend (network I/O). Callbacks fire on
  * EventProcessor's bounded Default dispatcher. Callbacks must not block.
@@ -92,6 +92,7 @@ class Subscription @Inject constructor(
     private data class SubState(
         val urls: Set<String>,
         val reqPayload: String,
+        val replayFilterProvider: ((String) -> NostrFilter)?,
         val requestClass: RelayRequestClass,
         val onevent: (NostrEvent) -> Unit,
         val oneose: (allEosed: Boolean) -> Unit,
@@ -180,6 +181,7 @@ class Subscription @Inject constructor(
         onRelayCompletion: (RelayCompletion) -> Unit = {},
         replayable: Boolean = true,
         retryFailedSends: Boolean = true,
+        replayFilterProvider: ((url: String) -> NostrFilter)? = null,
     ): Handle {
         ensureTapRegistered()
 
@@ -194,6 +196,7 @@ class Subscription @Inject constructor(
         val state = SubState(
             urls = urlSet,
             reqPayload = req,
+            replayFilterProvider = replayFilterProvider,
             requestClass = requestClass,
             onevent = onevent,
             oneose = oneose,
@@ -319,7 +322,7 @@ class Subscription @Inject constructor(
     }
 
     /**
-     * Resume all paused subscriptions by re-sending stored REQ payloads.
+     * Resume paused subscriptions with provider filters or their original REQ payloads.
      * Resets EOSE/CLOSED tracking for a fresh cycle. [SubState.knownIds]
      * preserved for cross-relay dedup continuity. Called from
      * ProcessLifecycleOwner.onStart when app is foregrounded.
@@ -343,7 +346,7 @@ class Subscription @Inject constructor(
             state.isPaused = false
             for (url in state.urls) {
                 if (!relayCapabilitiesStore.shouldSkipRequest(url, state.requestClass)) {
-                    if (transport.sendToRelay(url, state.reqPayload)) trafficMetrics.replayReqAccepted()
+                    if (transport.sendToRelay(url, replayPayload(subId, state, url))) trafficMetrics.replayReqAccepted()
                 } else {
                     handleRelayEose(subId, url, RelayCompletionReason.Skipped)
                 }
@@ -399,7 +402,7 @@ class Subscription @Inject constructor(
             state.eosedRelays.remove(normalized)
             state.closedRelays.remove(normalized)
             state.pages.remove(normalized)
-            if (transport.sendToRelay(normalized, state.reqPayload)) {
+            if (transport.sendToRelay(normalized, replayPayload(subId, state, normalized))) {
                 trafficMetrics.replayReqAccepted()
                 startRelayEoseWatchdog(subId, normalized)
                 count++
@@ -410,6 +413,18 @@ class Subscription @Inject constructor(
             }
         }
         Log.d(TAG, "resumeRelay $normalized: replayed $count sub(s)")
+    }
+
+    /** Resolve only an actual replay attempt; initial dispatch and retries keep reqPayload. */
+    private fun replayPayload(subId: String, state: SubState, url: String): String {
+        val provider = state.replayFilterProvider ?: return state.reqPayload
+        return try {
+            buildReqJson(subId, provider(url))
+        } catch (_: Exception) {
+            // No attempted cursor is retained, and no provider data enters the log.
+            Log.w(TAG, "Replay filter unavailable; using initial request")
+            state.reqPayload
+        }
     }
 
     private fun claimReplayWindow(url: String, nowMs: Long): Boolean {

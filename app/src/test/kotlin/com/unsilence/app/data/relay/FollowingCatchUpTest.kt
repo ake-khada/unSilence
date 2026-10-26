@@ -102,6 +102,64 @@ class FollowingCatchUpTest {
         override fun close() { handles.forEach { it.close() }; subscription.resetForTest(); service.clear() }
     }
 
+    @Test fun `non genuine pages cannot become a replay cursor`() = runTest {
+        for (mode in listOf("CLOSED", "no-eose", "silent")) {
+            Fixture(this).use { f ->
+                f.remote[a] = listOf(f.event(200), f.event(100))
+                f.modes[a] = mode
+                f.open()
+                if (mode == "no-eose") { advanceTimeBy(2501); runCurrent() }
+                if (mode == "silent") { advanceTimeBy(30_001); runCurrent() }
+                assertNull(f.cached().coverage.getValue(a).head)
+                f.modes[a] = "silent"
+                f.subscription.pauseAll(); f.subscription.resumeAll()
+                assertNull(f.reqs().last()[2].jsonObject["since"])
+                assertNull(f.cached().coverage.getValue(a).head)
+            }
+        }
+    }
+
+    @Test fun `V19 binary restore stays unknown on replay until genuine completion`() = runTest {
+        Fixture(this).use { source ->
+            source.remote[a] = listOf(source.event(200), source.event(100))
+            source.open()
+            val store = source.store()
+            source.remote[a]!!.forEach { store.insert(it) }
+            val file = temp.newFile()
+            file.outputStream().use { store.saveSnapshotBinary(it, 19) }
+            Fixture(this).use { restored ->
+                DataInputStream(file.inputStream()).use { restored.store().restoreSnapshotBinary(it) }
+                restored.remote[a] = source.remote[a]!!
+                restored.remote[a]!!.forEach { restored.loader.put(it) }
+                restored.modes[a] = "silent"
+                restored.open()
+                restored.subscription.pauseAll(); restored.subscription.resumeAll()
+                assertNull(restored.reqs().last()[2].jsonObject["since"])
+                assertNull(restored.cached().coverage.getValue(a).head)
+                restored.deliver(a, restored.reqs().last(), restored.remote[a]!!)
+                assertEquals(200L, restored.cached().coverage.getValue(a).head)
+                restored.subscription.pauseAll(); restored.subscription.resumeAll()
+                assertEquals(200L, restored.reqs().last()[2].jsonObject["since"]?.jsonPrimitive?.longOrNull)
+            }
+        }
+    }
+
+    @Test fun `genuine EOSE replay uses exact head and live arrivals cannot advance it`() = runTest {
+        Fixture(this).use { f ->
+            f.remote[a] = listOf(f.event(200), f.event(100))
+            f.open()
+            assertEquals(200L, f.cached().coverage.getValue(a).head)
+            val live = f.event(System.currentTimeMillis() / 1000 + 30)
+            f.deliver(a, f.reqs().first(), listOf(live), "no-eose")
+            assertEquals(listOf(live.id), f.live.map { it.id })
+            f.subscription.pauseAll()
+            f.subscription.resumeAll()
+            assertEquals(200L, f.reqs().last()[2].jsonObject["since"]?.jsonPrimitive?.longOrNull)
+            assertEquals(200L, f.cached().coverage.getValue(a).head)
+            assertEquals(setOf(live.id, f.event(200).id, f.event(100).id), f.displayed.map { it.id }.toSet())
+        }
+    }
+
     @Test fun `cold seed gap is filled before paging below yesterday without dropping seed`() = runTest {
         Fixture(this).use { f ->
             f.displayed = listOf(f.event(100))

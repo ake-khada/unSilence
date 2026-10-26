@@ -25,6 +25,45 @@ class SubscriptionCompletionTest {
         taps.registrations.forEach { it.onMessage(RelayTapMessage.VerifiedEvent(id, e)) }
     }
 
+    @Test fun `replay callback precedes provider and failed send does not freeze cursor or bypass debounce`() = runTest {
+        val order = mutableListOf<String>()
+        var head = 100L
+        sub.subscribe(listOf(url), NostrFilter(), {},
+            onReplayCycleStarted = { order += "callback" },
+            replayFilterProvider = { order += "provider:$head"; NostrFilter(since = head) })
+        val initialId = id()
+        taps.fire("""["EOSE","$initialId"]""", url)
+        transport.sendShouldSucceed = { order += "send"; false }
+        sub.resumeRelay(url, 1000)
+        assertEquals(listOf("callback", "provider:100", "send"), order)
+        order.clear(); head = 200
+        sub.resumeRelay(url, 1500)
+        assertTrue(order.isEmpty())
+        transport.sendShouldSucceed = { order += "send"; true }
+        sub.resumeRelay(url, 2000)
+        assertEquals(listOf("callback", "provider:200", "send"), order)
+        assertTrue(transport.sends.last().msg.contains("\"since\":200"))
+        assertEquals(initialId, id())
+        order.clear(); head = 300
+        sub.pauseAll(); order.clear(); sub.resumeAll()
+        assertEquals(listOf("callback", "provider:300", "send"), order)
+        sub.resetForTest()
+    }
+
+    @Test fun `capability gate and non replayable pages never evaluate provider`() = runTest {
+        var calls = 0
+        sub.subscribe(listOf(url), NostrFilter(), {}, replayFilterProvider = { calls++; NostrFilter() })
+        caps.markSkipped(url)
+        sub.pauseAll(); sub.resumeAll(); sub.resumeRelay(url, 1000)
+        assertEquals(0, calls)
+        sub.resetForTest()
+        sub.subscribe(listOf("wss://b.example"), NostrFilter(since = 100, until = 200), {},
+            replayable = false, replayFilterProvider = { calls++; NostrFilter() })
+        sub.pauseAll(); sub.resumeAll(); sub.resumeRelay("wss://b.example", 2000)
+        assertEquals(0, calls)
+        sub.resetForTest()
+    }
+
     @Test fun `resumeAll notifies once before frames even if sockets reconnect later`() = runTest {
         var cycles = 0
         sub.subscribe(listOf(url), NostrFilter(limit = 300), {}, onReplayCycleStarted = { cycles++ })
