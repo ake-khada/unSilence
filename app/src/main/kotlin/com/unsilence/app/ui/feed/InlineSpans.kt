@@ -9,8 +9,6 @@ import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.withLink
 import com.unsilence.app.ui.theme.Brand
 import com.unsilence.app.ui.theme.BrandDeep
-import java.net.URI
-import java.net.URISyntaxException
 
 /**
  * Shared inline-span primitives for rich-text rendering. These are the single
@@ -26,9 +24,14 @@ import java.net.URISyntaxException
 
 /**
  * Shared secondary-cyan URL span. Raw URL labels are compacted only for display;
- * authored labels and the original [LinkAnnotation.Url] destination stay intact.
+ * authored address claims disclose a different destination origin. Rejected links
+ * remain plain text; accepted [LinkAnnotation.Url] destinations stay untouched.
  */
 internal fun AnnotatedString.Builder.appendLinkSpan(url: String, text: String = url) {
+    val label = contentLinkLabel(url, text) ?: run {
+        append(text)
+        return
+    }
     withLink(
         LinkAnnotation.Url(
             url = url,
@@ -42,39 +45,8 @@ internal fun AnnotatedString.Builder.appendLinkSpan(url: String, text: String = 
             ),
         ),
     ) {
-        append(if (text == url) compactLinkLabel(url) else text)
+        append(label)
     }
-}
-
-private const val LINK_PATH_LABEL_LIMIT = 24
-
-/** Never apply a length limit to the authority: the actual host must remain visible. */
-private fun compactLinkLabel(url: String): String {
-    val parsed = try {
-        URI(url)
-    } catch (_: URISyntaxException) {
-        return url
-    }
-    if ((!parsed.scheme.equals("https", ignoreCase = true) &&
-            !parsed.scheme.equals("http", ignoreCase = true)) || parsed.host == null
-    ) return url
-    // Validate the host before removing credentials. Keep all subdomains, www,
-    // explicit ports and IPv6 brackets exactly as written; never show userinfo
-    // in place of the destination host. Ambiguous/unsupported input stays raw.
-    val authority = parsed.rawAuthority?.substringAfterLast('@') ?: return url
-    val path = parsed.rawPath.orEmpty()
-    val clippedPath = if (path.length > LINK_PATH_LABEL_LIMIT) {
-        var end = LINK_PATH_LABEL_LIMIT
-        val slash = path.lastIndexOf('/', end - 1)
-        if (slash > 0) end = slash + 1
-        // Avoid displaying half a percent escape or a broken surrogate pair.
-        val percent = path.lastIndexOf('%', end - 1)
-        if (percent >= 0 && end - percent < 3) end = percent
-        if (end > 0 && path[end - 1].isHighSurrogate()) end--
-        path.take(end) + "…"
-    } else path
-    val omittedTail = parsed.rawQuery != null || parsed.rawFragment != null
-    return authority + clippedPath + if (omittedTail && path.length <= LINK_PATH_LABEL_LIMIT) "…" else ""
 }
 
 /** BrandDeep tappable `#tag`; [onTap] receives the bare tag (no `#`). */

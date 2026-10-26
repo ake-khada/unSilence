@@ -57,7 +57,7 @@ class InlineSpansTest {
     }
 
     @Test fun `unsupported or ambiguously parsed URLs keep their original label and destination`() {
-        for (url in listOf("mailto:person@example.com", "nostr:note1example", "https://example.com/%zz", "https://例え.example/" + "path".repeat(20))) {
+        for (url in listOf("mailto:person@example.com", "nostr:note1example", "https://example.com/%zz")) {
             assertEquals(url, note(url).text)
             assertEquals(url, (note(url).getLinkAnnotations(0, note(url).length).single().item as LinkAnnotation.Url).url)
         }
@@ -75,6 +75,53 @@ class InlineSpansTest {
             assertEquals(url, link.url)
             assertEquals(BrandDeep, link.styles!!.style!!.color)
             assertEquals(FontWeight.Medium, link.styles!!.style!!.fontWeight)
+        }
+    }
+
+    @Test fun `raw Unicode hosts display punycode with unchanged destination`() {
+        val url = "https://аpple.com/" + "long-path/".repeat(10)
+        val raw = note(url)
+        val article = buildAnnotatedString { appendMdInlines(listOf(MdInline.Link(url, listOf(MdInline.Text(url)))), {}) }
+        assertTrue(raw.text.startsWith("xn--pple-43d.com/"))
+        assertEquals(raw, article)
+        assertEquals(url, (raw.getLinkAnnotations(0, raw.length).single().item as LinkAnnotation.Url).url)
+    }
+
+    @Test fun `domain claims embedded in prose disclose a differing origin once`() {
+        val url = "https://evil.example/claim"
+        for (label in listOf("Visit wallet.example now", "Read wallet.example and bank.example", "Open https://wallet.example:8443 safely")) {
+            val text = buildAnnotatedString { appendLinkSpan(url, label) }
+            assertEquals("$label (https://evil.example)", text.text)
+            assertEquals(url, (text.getLinkAnnotations(0, text.length).single().item as LinkAnnotation.Url).url)
+        }
+    }
+
+    @Test fun `rejected destinations are plain text in both note and article spans`() {
+        for (url in listOf("nostrsigner:%7B%7D?type=sign_event", "nostr+walletauth://grant",
+            "intent://scan", "javascript:alert(1)", "tel:+15550100", "market://details?id=test",
+            "file:///tmp/test", "content://provider/item", "data:text/html,hello", "//example.com/path", "relative/path",
+            "https:opaque", "https:///missing-host", "https://", "https://example.com:", "https://[bad::address]")) {
+            val raw = note(url)
+            val article = buildAnnotatedString { appendMdInlines(listOf(MdInline.Link(url, listOf(MdInline.Text("Read the guide")))), {}) }
+            assertEquals(url, raw.text)
+            assertEquals("Read the guide", article.text)
+            for (text in listOf(raw, article)) {
+                assertTrue("rejected destination must have no annotation: $url", text.getLinkAnnotations(0, text.length).isEmpty())
+                assertTrue("rejected destination must have no link styling: $url", text.spanStyles.isEmpty())
+            }
+        }
+    }
+
+    @Test fun `address-shaped article labels disclose full differing destination origin`() {
+        for ((label, url, origin) in listOf(
+            Triple("https://wallet.example", "https://evil.example/claim", "https://evil.example"),
+            Triple("https://wallet.example", "http://wallet.example/login", "http://wallet.example"),
+            Triple("wallet.example:8443", "https://wallet.example:9443/", "https://wallet.example:9443"),
+            Triple("https://apple.com", "https://аpple.com/login", "https://xn--pple-43d.com"),
+        )) {
+            val text = buildAnnotatedString { appendMdInlines(listOf(MdInline.Link(url, listOf(MdInline.Text(label)))), {}) }
+            assertEquals("$label ($origin)", text.text)
+            assertEquals(url, (text.getLinkAnnotations(0, text.length).single().item as LinkAnnotation.Url).url)
         }
     }
 
