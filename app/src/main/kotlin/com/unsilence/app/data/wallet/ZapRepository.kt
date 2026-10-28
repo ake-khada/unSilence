@@ -101,7 +101,7 @@ class ZapRepository @Inject constructor(
         targetRelays: List<String> = emptyList(),
     ): Result<Event> {
         // NIP-57 receipt relays: where the recipient's wallet should publish kind-9735.
-        // Preserve own write + recipient read + event relays, falling back to relayUrl.
+        // Preserve target-author write + own read + event seen/hints, falling back to relayUrl.
         // The kind-9734 request itself goes only to the LNURL callback.
         val zapRelays = targetRelays.ifEmpty { listOf(relayUrl) }
         val amountSats = request.amountSats
