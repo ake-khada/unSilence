@@ -15,6 +15,7 @@ import com.unsilence.app.data.network.parseAllowedUntrustedHttpUrl
 import com.unsilence.app.data.repository.UserRepository
 import com.unsilence.app.ui.feed.ImageDimensionCache
 import com.unsilence.app.ui.feed.VideoThumbnailCache
+import com.unsilence.app.ui.feed.firstOpenablePreviewIndex
 import dagger.hilt.android.qualifiers.ApplicationContext
 import com.vitorpamplona.quartz.nip19Bech32.Nip19Parser
 import com.vitorpamplona.quartz.nip19Bech32.entities.NEvent
@@ -108,6 +109,13 @@ internal fun hasUsableAspectMetadata(aspectRatio: Float?): Boolean =
  *  interceptor remains the per-hop backstop for redirects and DNS rebinding. */
 internal fun allowedImagePrefetchUrl(url: String?): String? =
     parseAllowedUntrustedHttpUrl(url)?.toString()
+
+/** Select and dispatch at most one OG warm-up; callback reports whether it spent budget. */
+internal fun warmOgCandidate(model: EventModel, warm: (String) -> Boolean): Boolean {
+    val index = firstOpenablePreviewIndex(model.segments)
+    val link = model.segments.getOrNull(index) as? Segment.Link ?: return false
+    return warm(link.url)
+}
 
 private val NOSTR_URI_REGEX = Regex("nostr:[a-z0-9]+", RegexOption.IGNORE_CASE)
 
@@ -321,14 +329,10 @@ class CardHydrator @Inject constructor(
             }
 
             if (ogFetches < budget.og) {
-                val url = model.media.ogCandidate?.url
-                if (!url.isNullOrBlank()) {
-                    val countedAsFetch = warmOgMetadata(
-                        url = url,
-                        cardWidthPx = cardWidthPx,
-                    )
-                    if (countedAsFetch) ogFetches++
+                val countedAsFetch = warmOgCandidate(model) { url ->
+                    warmOgMetadata(url = url, cardWidthPx = cardWidthPx)
                 }
+                if (countedAsFetch) ogFetches++
             }
 
             videoThumbnails += warmVideoThumbnails(

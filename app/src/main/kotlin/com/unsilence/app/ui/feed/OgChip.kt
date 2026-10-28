@@ -41,15 +41,7 @@ import com.unsilence.app.ui.theme.Surface1
 import com.unsilence.app.ui.theme.SurfaceVariant
 import com.unsilence.app.ui.theme.TextSecondary
 import kotlinx.coroutines.delay
-import okhttp3.HttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
-
-/** Shared display identity only; never used to select an image or navigation request. */
-internal fun HttpUrl.previewHostLabel(): String {
-    val displayHost = if (':' in host) "[$host]" else host
-    val defaultPort = if (scheme == "https") 443 else 80
-    return if (port == defaultPort) displayHost else "$displayHost:$port"
-}
 
 /**
  * OpenGraph link preview card. Fetches OG metadata and renders a rich card
@@ -69,11 +61,10 @@ internal fun OgPreviewCard(
     showMinimalFallback: Boolean = true,
     modifier: Modifier = Modifier,
 ) {
+    if (!remember(url) { isOpenableContentLink(url) }) return
     val uriHandler = LocalUriHandler.current
     val destination = remember(url) { url.toHttpUrlOrNull() }
-    val domain = remember(url, destination) {
-        destination?.previewHostLabel() ?: url
-    }
+    val domain = remember(url) { previewHostLabel(url) ?: url }
 
     var ogLoaded by remember(url) { mutableStateOf(fetchOgMetadata == null) }
     val og by produceState<OgMetadata?>(null, url) {

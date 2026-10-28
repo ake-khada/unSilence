@@ -20,17 +20,36 @@ private val EMAIL_ADDRESSES = Regex(
     RegexOption.IGNORE_CASE,
 )
 
-/** Null means plain text: no link annotation and no link styling. Never resolves DNS. */
-internal fun contentLinkLabel(url: String, text: String = url): String? {
+private data class ContentLinkDestination(val scheme: String, val web: WebLink?)
+
+/** One activation boundary for inline spans, preview planning and direct cards. */
+private fun parseContentLink(url: String): ContentLinkDestination? {
     if (url.any { it.isWhitespace() || it.isISOControl() }) return null
     val colon = url.indexOf(':')
     if (colon <= 0 || colon == url.lastIndex) return null
     val scheme = url.substring(0, colon).lowercase()
     if (scheme !in OPENABLE_SCHEMES) return null
-    if (scheme != "http" && scheme != "https") {
+    val web = if (scheme == "http" || scheme == "https") parseWebLink(url) ?: return null else null
+    return ContentLinkDestination(scheme, web)
+}
+
+internal fun isOpenableContentLink(url: String): Boolean = parseContentLink(url) != null
+
+/** Strict display identity only; never selects favicon, image or navigation requests. */
+internal fun previewHostLabel(url: String): String? {
+    val destination = parseContentLink(url)?.web?.parsed ?: return null
+    val host = if (':' in destination.host) "[${destination.host}]" else destination.host
+    return host + if (destination.port == HttpUrl.defaultPort(destination.scheme)) "" else ":${destination.port}"
+}
+
+/** Null means plain text: no link annotation and no link styling. Never resolves DNS. */
+internal fun contentLinkLabel(url: String, text: String = url): String? {
+    val link = parseContentLink(url) ?: return null
+    val scheme = link.scheme
+    val destination = link.web
+    if (destination == null) {
         return if (text != url && webAddressClaims(text, ignoreEmailClaims = true).any()) "$text ($scheme:)" else text
     }
-    val destination = parseWebLink(url) ?: return null
     if (text == url) return compactLinkLabel(destination)
     val misleading = webAddressClaims(text).any { !it.sameOrigin(destination) }
     return if (misleading) "$text (${destination.origin})" else text

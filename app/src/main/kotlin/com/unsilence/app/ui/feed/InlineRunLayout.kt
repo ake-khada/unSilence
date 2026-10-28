@@ -8,6 +8,10 @@ internal sealed interface InlineRunBlock {
     data class Preview(val url: String) : InlineRunBlock
 }
 
+/** Shared preview selection for rendered runs and speculative OG warm-up. */
+internal fun firstOpenablePreviewIndex(segments: List<Segment>): Int =
+    segments.indexOfFirst { it is Segment.Link && isOpenableContentLink(it.url) }
+
 /**
  * A standalone link replaces its own line, not a hole in a larger text node.
  * Sentence links stay clickable in context; their preview follows the run.
@@ -15,7 +19,7 @@ internal sealed interface InlineRunBlock {
  */
 internal fun planInlineRun(segments: List<Segment>, allowPreview: Boolean): List<InlineRunBlock> {
     val run = coalesceAdjacentText(segments)
-    val linkIndex = if (allowPreview) run.indexOfFirst { it is Segment.Link } else -1
+    val linkIndex = if (allowPreview) firstOpenablePreviewIndex(run) else -1
     val link = run.getOrNull(linkIndex) as? Segment.Link
     return buildList {
         fun text(segments: List<Segment>) {

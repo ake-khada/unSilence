@@ -33,7 +33,6 @@ import com.unsilence.app.ui.common.rememberAvatarImageRequest
 import com.unsilence.app.ui.theme.AppType
 import com.unsilence.app.ui.theme.Spacing
 import com.unsilence.app.ui.theme.TextSecondary
-import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 
 internal enum class MinimalLinkIconStage {
     APPLE_TOUCH_ICON,
@@ -70,11 +69,12 @@ fun MinimalLinkCard(
     modifier: Modifier = Modifier,
     loadFavicon: Boolean = true,
 ) {
+    if (!remember(url) { isOpenableContentLink(url) }) return
     val host = remember(url) {
         runCatching { java.net.URI(url).host ?: url }.getOrDefault(url)
     }
     // Presentation is separate from the existing favicon request host.
-    val displayLabel = remember(url) { url.toHttpUrlOrNull()?.previewHostLabel() ?: url }
+    val displayLabel = remember(url) { previewHostLabel(url) ?: url }
     // Stay first-party even when a site's WAF blocks direct icon paths; a generic
     // icon is preferable to disclosing every viewed domain to a proxy.
     var iconStage by remember(url) { mutableStateOf(MinimalLinkIconStage.APPLE_TOUCH_ICON) }
