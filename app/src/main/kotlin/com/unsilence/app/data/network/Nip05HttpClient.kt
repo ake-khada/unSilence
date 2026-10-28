@@ -27,8 +27,9 @@ class Nip05HttpClient @Inject constructor(baseClient: OkHttpClient) {
         .readTimeout(4, TimeUnit.SECONDS)
         .callTimeout(6, TimeUnit.SECONDS)
         .pingInterval(0, TimeUnit.SECONDS)
-        .followRedirects(true)
-        .followSslRedirects(true)
+        // NIP-05 forbids following redirects from the well-known endpoint.
+        .followRedirects(false)
+        .followSslRedirects(false)
         .addNetworkInterceptor(UntrustedHttpNetworkGuard)
         .build()
 

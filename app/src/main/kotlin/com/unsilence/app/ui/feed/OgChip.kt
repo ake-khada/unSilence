@@ -25,6 +25,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextDirection
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -40,6 +41,15 @@ import com.unsilence.app.ui.theme.Surface1
 import com.unsilence.app.ui.theme.SurfaceVariant
 import com.unsilence.app.ui.theme.TextSecondary
 import kotlinx.coroutines.delay
+import okhttp3.HttpUrl
+import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
+
+/** Shared display identity only; never used to select an image or navigation request. */
+internal fun HttpUrl.previewHostLabel(): String {
+    val displayHost = if (':' in host) "[$host]" else host
+    val defaultPort = if (scheme == "https") 443 else 80
+    return if (port == defaultPort) displayHost else "$displayHost:$port"
+}
 
 /**
  * OpenGraph link preview card. Fetches OG metadata and renders a rich card
@@ -60,8 +70,9 @@ internal fun OgPreviewCard(
     modifier: Modifier = Modifier,
 ) {
     val uriHandler = LocalUriHandler.current
-    val domain = remember(url) {
-        runCatching { java.net.URI(url).host ?: url }.getOrDefault(url)
+    val destination = remember(url) { url.toHttpUrlOrNull() }
+    val domain = remember(url, destination) {
+        destination?.previewHostLabel() ?: url
     }
 
     var ogLoaded by remember(url) { mutableStateOf(fetchOgMetadata == null) }
@@ -80,6 +91,16 @@ internal fun OgPreviewCard(
     }
 
     val loadedOg = og
+    val destinationLabel = remember(domain, loadedOg?.siteName) {
+        // Remote bidi formatting must not visually reorder the destination identity.
+        val siteName = loadedOg?.siteName?.filterNot {
+            it == '\u061c' || it == '\u200e' || it == '\u200f' ||
+                it in '\u202a'..'\u202e' || it in '\u2066'..'\u2069'
+        }?.trim()
+        if (siteName.isNullOrEmpty() || siteName.equals(domain, ignoreCase = true) ||
+            siteName.equals(destination?.host, ignoreCase = true)
+        ) domain else "$domain · $siteName"
+    }
     val directImageUrl = loadedOg
         ?.takeIf { it.isDirectImage }
         ?.imageUrl
@@ -147,9 +168,9 @@ internal fun OgPreviewCard(
                     )
                 }
                 Text(
-                    text     = loadedOg.siteName ?: domain,
+                    text     = destinationLabel,
                     color    = TextSecondary,
-                    style = AppTextStyles.caption,
+                    style = AppTextStyles.caption.copy(textDirection = TextDirection.Ltr),
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                     modifier = Modifier.padding(top = 2.dp),

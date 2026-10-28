@@ -1,7 +1,6 @@
 package com.unsilence.app.data.wallet
 
 import com.unsilence.app.data.auth.SigningManager
-import com.unsilence.app.data.relay.RelayPool
 import com.unsilence.app.data.relay.NostrJson
 import com.unsilence.app.data.relay.toEventJson
 import com.unsilence.app.data.repository.UserRepository
@@ -57,7 +56,7 @@ private data class LnurlMeta(
  * Orchestrates the NIP-57 zap flow:
  *   1. Build a kind-9734 zap request event (signed by user key)
  *   2. Resolve the recipient's Lightning address (lud16) → LNURL endpoint
- *   3. POST to LNURL callback → get a BOLT-11 invoice
+ *   3. Send the signed request only to the LNURL callback via GET → get a BOLT-11 invoice
  *   4. Pay the invoice via NwcManager (NIP-47)
  */
 @Singleton
@@ -65,7 +64,6 @@ class ZapRepository @Inject constructor(
     private val nwcManager: NwcManager,
     private val userRepository: UserRepository,
     private val signingManager: SigningManager,
-    private val relayPool: RelayPool,
     private val okHttpClient: OkHttpClient,
 ) {
     /** LNURL metadata cache: lud16 → (metadata, expiresAtMs). Saves an HTTP round-trip on repeat zaps. */
@@ -102,9 +100,9 @@ class ZapRepository @Inject constructor(
         request: ZapRequest,
         targetRelays: List<String> = emptyList(),
     ): Result<Event> {
-        // NIP-57 relay set: where the recipient's wallet should publish the kind-9735
-        // receipt AND where we publish the zap request — own write + recipient read +
-        // event relays (H20c outbox targeting), falling back to the single relayUrl.
+        // NIP-57 receipt relays: where the recipient's wallet should publish kind-9735.
+        // Preserve own write + recipient read + event relays, falling back to relayUrl.
+        // The kind-9734 request itself goes only to the LNURL callback.
         val zapRelays = targetRelays.ifEmpty { listOf(relayUrl) }
         val amountSats = request.amountSats
 
@@ -144,16 +142,12 @@ class ZapRepository @Inject constructor(
                 ?: return Result.failure(IllegalStateException("Signing failed"))
         }
 
-        // Publish the zap request to the target relay set (not a broadcast) so the
-        // recipient's wallet can see it (H20c).
-        relayPool.publish(toEventJson(zapRequest), zapRelays)
-
         // ── 4. Fetch bolt11 + warm up NWC WebSocket IN PARALLEL ───────────────
         val warmSocket = nwcManager.warmUp()
             ?: return Result.failure(Exception("Wallet not configured"))
 
         val zapRequestJson = toEventJson(zapRequest)
-        val bolt11 = fetchBolt11(meta.callback, msats, zapRequestJson).getOrElse { e ->
+        val bolt11 = fetchZapInvoice(lnurlClient, meta.callback, msats, zapRequestJson).getOrElse { e ->
             return Result.failure(e)
         }
 
@@ -346,50 +340,6 @@ class ZapRepository @Inject constructor(
         }
     }
 
-    /** GET the bolt11 invoice from the LNURL callback. */
-    private suspend fun fetchBolt11(callback: String, msats: Long, zapRequestJson: String): Result<String> =
-        withContext(Dispatchers.IO) {
-            try {
-                val url = callback.toHttpUrlOrNull()
-                    ?.newBuilder()
-                    ?.addQueryParameter("amount", msats.toString())
-                    ?.addQueryParameter("nostr", zapRequestJson)
-                    ?.build()
-                    ?: return@withContext Result.failure(ZapException("Lightning service callback is invalid"))
-                val req = Request.Builder().url(url).build()
-                lnurlClient.newCall(req).execute().use { resp ->
-                    val body = resp.body.string()
-                    if (!resp.isSuccessful) {
-                        val fallback = if (resp.code == 413 || resp.code == 414) {
-                            "zap request too large (HTTP ${resp.code})"
-                        } else {
-                            "HTTP ${resp.code}"
-                        }
-                        return@withContext Result.failure(
-                            ZapException("Lightning service rejected the zap: ${lnurlErrorReason(body, fallback)}")
-                        )
-                    }
-                    if (body.isNullOrBlank()) {
-                        return@withContext Result.failure(ZapException("Empty response from lightning service"))
-                    }
-                    val obj = NostrJson.parseToJsonElement(body).jsonObject
-                    lnurlProtocolError(obj)?.let {
-                        return@withContext Result.failure(ZapException("Lightning service: $it"))
-                    }
-                    val invoice = obj["pr"]?.jsonPrimitive?.content?.takeIf { it.isNotBlank() }
-                        ?: return@withContext Result.failure(ZapException("No invoice returned by lightning service"))
-                    validateInvoiceAmount(invoice, msats)?.let {
-                        return@withContext Result.failure(it)
-                    }
-                    Result.success(invoice)
-                }
-            } catch (e: CancellationException) {
-                throw e
-            } catch (e: Exception) {
-                Result.failure(ZapException("Lightning service unreachable: ${e.message ?: e::class.java.simpleName}"))
-            }
-        }
-
     private fun validateZapMetadata(meta: LnurlMeta, msats: Long): ZapException? {
         val zapServicePubkey = meta.nostrPubkey
         if (!meta.allowsNostr || zapServicePubkey.isNullOrBlank()) {
@@ -409,64 +359,107 @@ class ZapRepository @Inject constructor(
 
     private fun isHexPubkey(value: String): Boolean =
         value.length == 64 && value.all { it in '0'..'9' || it in 'a'..'f' }
+}
 
-    private fun lnurlProtocolError(obj: JsonObject): String? {
-        val status = obj["status"]?.jsonPrimitive?.content
-        if (!status.equals("ERROR", ignoreCase = true)) return null
-        return obj["reason"]?.jsonPrimitive?.content?.take(160) ?: "unknown reason"
-    }
-
-    private fun lnurlErrorReason(body: String?, fallback: String): String {
-        if (body.isNullOrBlank()) return fallback
-        return runCatching {
-            val obj = NostrJson.parseToJsonElement(body).jsonObject
-            lnurlProtocolError(obj) ?: fallback
-        }.getOrDefault(fallback)
-    }
-
-    private fun satsCeil(msats: Long): Long = (msats + 999L) / 1000L
-
-    private fun validateInvoiceAmount(invoice: String, expectedMsats: Long): ZapException? {
-        val invoiceMsats = bolt11AmountMsats(invoice) ?: return null
-        return if (invoiceMsats == expectedMsats) {
-            null
-        } else {
-            ZapException(
-                "Lightning service returned invoice for ${satsCeil(invoiceMsats)} sats " +
-                    "instead of ${satsCeil(expectedMsats)} sats"
-            )
-        }
-    }
-
-    private fun bolt11AmountMsats(invoice: String): Long? {
-        val lower = invoice.trim().lowercase()
-        val separator = lower.lastIndexOf('1')
-        if (separator <= 0) return null
-        val hrp = lower.take(separator)
-        val amountPart = when {
-            hrp.startsWith("lnbcrt") -> hrp.removePrefix("lnbcrt")
-            hrp.startsWith("lnbc") -> hrp.removePrefix("lnbc")
-            hrp.startsWith("lntb") -> hrp.removePrefix("lntb")
-            else -> return null
-        }
-        if (amountPart.isEmpty()) return null
-
-        val suffix = amountPart.last()
-        val digits = if (suffix in setOf('m', 'u', 'n', 'p')) {
-            amountPart.dropLast(1)
-        } else {
-            amountPart
-        }
-        val amount = digits.toLongOrNull() ?: return null
-        return runCatching {
-            when (suffix) {
-                'm' -> Math.multiplyExact(amount, 100_000_000L)
-                'u' -> Math.multiplyExact(amount, 100_000L)
-                'n' -> Math.multiplyExact(amount, 100L)
-                'p' -> amount.takeIf { it % 10L == 0L }?.div(10L)
-                else -> Math.multiplyExact(amount, 100_000_000_000L)
+/** GET the bolt11 invoice from the LNURL callback. */
+internal suspend fun fetchZapInvoice(client: OkHttpClient, callback: String, msats: Long, zapRequestJson: String): Result<String> =
+    withContext(Dispatchers.IO) {
+        try {
+            val url = callback.toHttpUrlOrNull()
+                ?.newBuilder()
+                ?.addQueryParameter("amount", msats.toString())
+                ?.addQueryParameter("nostr", zapRequestJson)
+                ?.build()
+                ?: return@withContext Result.failure(ZapException("Lightning service callback is invalid"))
+            val req = Request.Builder().url(url).build()
+            client.newCall(req).execute().use { resp ->
+                val body = resp.body.string()
+                if (!resp.isSuccessful) {
+                    val fallback = if (resp.code == 413 || resp.code == 414) {
+                        "zap request too large (HTTP ${resp.code})"
+                    } else {
+                        "HTTP ${resp.code}"
+                    }
+                    return@withContext Result.failure(
+                        ZapException("Lightning service rejected the zap: ${lnurlErrorReason(body, fallback)}")
+                    )
+                }
+                if (body.isNullOrBlank()) {
+                    return@withContext Result.failure(ZapException("Empty response from lightning service"))
+                }
+                val obj = NostrJson.parseToJsonElement(body).jsonObject
+                lnurlProtocolError(obj)?.let {
+                    return@withContext Result.failure(ZapException("Lightning service: $it"))
+                }
+                val invoice = obj["pr"]?.jsonPrimitive?.content?.takeIf { it.isNotBlank() }
+                    ?: return@withContext Result.failure(ZapException("No invoice returned by lightning service"))
+                validateInvoiceAmount(invoice, msats)?.let {
+                    return@withContext Result.failure(it)
+                }
+                Result.success(invoice)
             }
-        }.getOrNull()
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            Result.failure(ZapException("Lightning service unreachable: ${e.message ?: e::class.java.simpleName}"))
+        }
     }
 
+private fun lnurlProtocolError(obj: JsonObject): String? {
+    val status = obj["status"]?.jsonPrimitive?.content
+    if (!status.equals("ERROR", ignoreCase = true)) return null
+    return obj["reason"]?.jsonPrimitive?.content?.take(160) ?: "unknown reason"
+}
+
+private fun lnurlErrorReason(body: String?, fallback: String): String {
+    if (body.isNullOrBlank()) return fallback
+    return runCatching {
+        val obj = NostrJson.parseToJsonElement(body).jsonObject
+        lnurlProtocolError(obj) ?: fallback
+    }.getOrDefault(fallback)
+}
+
+private fun satsCeil(msats: Long): Long = (msats + 999L) / 1000L
+
+private fun validateInvoiceAmount(invoice: String, expectedMsats: Long): ZapException? {
+    val invoiceMsats = bolt11AmountMsats(invoice) ?: return null
+    return if (invoiceMsats == expectedMsats) {
+        null
+    } else {
+        ZapException(
+            "Lightning service returned invoice for ${satsCeil(invoiceMsats)} sats " +
+                "instead of ${satsCeil(expectedMsats)} sats"
+        )
+    }
+}
+
+private fun bolt11AmountMsats(invoice: String): Long? {
+    val lower = invoice.trim().lowercase()
+    val separator = lower.lastIndexOf('1')
+    if (separator <= 0) return null
+    val hrp = lower.take(separator)
+    val amountPart = when {
+        hrp.startsWith("lnbcrt") -> hrp.removePrefix("lnbcrt")
+        hrp.startsWith("lnbc") -> hrp.removePrefix("lnbc")
+        hrp.startsWith("lntb") -> hrp.removePrefix("lntb")
+        else -> return null
+    }
+    if (amountPart.isEmpty()) return null
+
+    val suffix = amountPart.last()
+    val digits = if (suffix in setOf('m', 'u', 'n', 'p')) {
+        amountPart.dropLast(1)
+    } else {
+        amountPart
+    }
+    val amount = digits.toLongOrNull() ?: return null
+    return runCatching {
+        when (suffix) {
+            'm' -> Math.multiplyExact(amount, 100_000_000L)
+            'u' -> Math.multiplyExact(amount, 100_000L)
+            'n' -> Math.multiplyExact(amount, 100L)
+            'p' -> amount.takeIf { it % 10L == 0L }?.div(10L)
+            else -> Math.multiplyExact(amount, 100_000_000_000L)
+        }
+    }.getOrNull()
 }

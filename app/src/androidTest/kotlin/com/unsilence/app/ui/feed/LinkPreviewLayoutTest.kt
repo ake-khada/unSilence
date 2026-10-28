@@ -15,6 +15,7 @@ import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.test.performSemanticsAction
 import androidx.compose.ui.text.TextLayoutResult
+import androidx.compose.ui.text.LinkAnnotation
 import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.dp
 import androidx.test.core.app.ApplicationProvider
@@ -81,7 +82,15 @@ class LinkPreviewLayoutTest {
     @Test fun inlineSentenceKeepsItsClickableUrl() {
         val sentence = "Read https://example.test/paintings for details."
         render(sentence)
-        compose.onNodeWithText(sentence).assertExists()
+        // Raw links use the accepted compact label, while retaining the full destination.
+        val node = compose.onNodeWithText("Read example.test/paintings for details.")
+        node.assertExists()
+        val layouts = mutableListOf<TextLayoutResult>()
+        node.performSemanticsAction(SemanticsActions.GetTextLayoutResult) { it(layouts) }
+        val text = layouts.single().layoutInput.text
+        val link = text.getLinkAnnotations(0, text.length).single()
+        assertEquals("https://example.test/paintings", (link.item as LinkAnnotation.Url).url)
+        assertEquals("example.test/paintings", text.subSequence(link.start, link.end).text)
         compose.onNodeWithText("Preview title", useUnmergedTree = true).assertExists()
     }
 

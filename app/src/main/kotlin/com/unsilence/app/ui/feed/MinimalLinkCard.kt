@@ -25,6 +25,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextDirection
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import coil3.compose.AsyncImage
@@ -32,6 +33,7 @@ import com.unsilence.app.ui.common.rememberAvatarImageRequest
 import com.unsilence.app.ui.theme.AppType
 import com.unsilence.app.ui.theme.Spacing
 import com.unsilence.app.ui.theme.TextSecondary
+import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 
 internal enum class MinimalLinkIconStage {
     APPLE_TOUCH_ICON,
@@ -71,6 +73,8 @@ fun MinimalLinkCard(
     val host = remember(url) {
         runCatching { java.net.URI(url).host ?: url }.getOrDefault(url)
     }
+    // Presentation is separate from the existing favicon request host.
+    val displayLabel = remember(url) { url.toHttpUrlOrNull()?.previewHostLabel() ?: url }
     // Stay first-party even when a site's WAF blocks direct icon paths; a generic
     // icon is preferable to disclosing every viewed domain to a proxy.
     var iconStage by remember(url) { mutableStateOf(MinimalLinkIconStage.APPLE_TOUCH_ICON) }
@@ -107,10 +111,10 @@ fun MinimalLinkCard(
         Spacer(Modifier.width(Spacing.small))
         Column(modifier = Modifier.weight(1f)) {
             Text(
-                text = host,
+                text = displayLabel,
                 color = Color.White.copy(alpha = 0.85f),
                 fontWeight = FontWeight.SemiBold,
-                style = AppTextStyles.bodySmall,
+                style = AppTextStyles.bodySmall.copy(textDirection = TextDirection.Ltr),
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
             )
