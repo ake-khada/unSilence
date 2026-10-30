@@ -1,5 +1,5 @@
 # kotlinx.serialization
--keepattributes *Annotation*, InnerClasses
+-keepattributes *Annotation*, InnerClasses, Signature, EnclosingMethod, Exceptions
 -dontnote kotlinx.serialization.AnnotationsKt
 
 -keepclassmembers @kotlinx.serialization.Serializable class ** {
@@ -16,8 +16,23 @@
     kotlinx.serialization.KSerializer serializer(...);
 }
 
+# Jackson reflects on TypeReference's generic superclass. Full-mode R8 needs
+# the generic base kept as well as Signature; keeping the attribute alone can
+# leave a raw superclass signature with no type arguments.
+-keep,allowobfuscation class com.fasterxml.jackson.core.type.TypeReference { *; }
+
 # secp256k1-kmp JNI
 -keep class fr.acinq.secp256k1.** { *; }
+
+# Quartz 1.08.0 consumer rules, excluding its app-wide keepnames directive.
+# Recheck these compatibility rules when upgrading Quartz. Preserve native
+# resource lookup, scrypt, enum and Jackson protocol-model behavior.
+-keepdirectories libs
+-keep enum ** { *; }
+-keep class com.lambdaworks.codec.** { *; }
+-keep class com.lambdaworks.crypto.** { *; }
+-keep class com.lambdaworks.jni.** { *; }
+-keep class com.vitorpamplona.quartz.** { *; }
 
 # No Bouncy Castle implementation in releaseRuntimeClasspath. OkHttp's optional
 # provider references below need warning suppression, not a blanket keep rule.
@@ -44,7 +59,7 @@
 # Jackson Kotlin module (transitive via Quartz) uses kotlin-reflect to
 # introspect stdlib types. R8 strips serialVersionUID from EmptyList /
 # EmptyMap and metadata Jackson needs, causing crash on Amber NIP-55 login.
-# Quartz keeps its Jackson-reflected protocol models in its consumer rules.
+# The Quartz compatibility rules above keep its Jackson-reflected protocol models.
 # kotlin-reflect supplies Metadata retention. Preserve the concrete stdlib
 # singleton fields required by Jackson rather than all Jackson implementations.
 -keepclassmembers class kotlin.collections.EmptyList {

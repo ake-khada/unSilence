@@ -33,6 +33,14 @@ android {
             isShrinkResources = true
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
             testProguardFiles("proguard-test-rules.pro")
+            if (providers.gradleProperty("validationBuildType").orNull == "release") {
+                proguardFiles("proguard-validation-rules.pro")
+            }
+            // Quartz's global keepnames prevents obfuscation of the whole app.
+            // Its compatibility rules are retained in proguard-rules.pro.
+            optimization.keepRules {
+                ignoreFrom("com.vitorpamplona.quartz:quartz-android")
+            }
             // Sign with debug key for local testing — replace with real
             // release signing config before publishing to F-Droid / Zapstore.
             signingConfig = signingConfigs.getByName("debug")
@@ -80,7 +88,7 @@ kotlin {
     }
 }
 
-// Quartz 1.05.1 contains Java-21 test/runtime classes. Keep AGP, compilation,
+// Quartz contains Java-21 test/runtime classes. Keep AGP, compilation,
 // lint, R8, and the shipped bytecode on Java 17; only fork JVM Test workers
 // with the repo-local Java 21 toolchain so crypto boundaries are executable.
 val unitTestJavaLauncher = javaToolchains.launcherFor {
