@@ -77,6 +77,7 @@ private data class IdentifiedZap(
 private data class DrawerData(
     val zaps: List<IdentifiedZap> = emptyList(),
     val anonymousZapSats: Long = 0L,
+    val unverifiedZapSats: Long = 0L,
     val reposts: List<String> = emptyList(),
     val reactionGroups: List<ReactionGroup> = emptyList(),
 )
@@ -111,9 +112,10 @@ internal fun EngagementDrawer(
         val namedZaps = rawZaps.mapNotNull { zap ->
             (zap.attribution as? ZapAttribution.Identified)?.let { IdentifiedZap(it, zap.sats) }
         }
-        val anonZaps = rawZaps.filter { it.attribution is ZapAttribution.Anonymous }
+        val anonZaps = rawZaps.filter { it.attribution == ZapAttribution.IntentionallyAnonymous }
         val zaps = namedZaps.sortedByDescending { it.sats }
         val anonymousZapSats = anonZaps.sumOf { it.sats }
+        val unverifiedZapSats = rawZaps.sumOf { if (it.attribution == ZapAttribution.Unverified) it.sats else 0L }
         val reposts = repostPubkeysForEvent?.invoke(eventId) ?: emptyList()
         val reactions = reactionsForEvent?.invoke(eventId) ?: emptyList()
         val groups = reactions
@@ -133,7 +135,7 @@ internal fun EngagementDrawer(
                 )
             }
             .sortedByDescending { it.pubkeys.size }
-        value = DrawerData(zaps, anonymousZapSats, reposts, groups)
+        value = DrawerData(zaps, anonymousZapSats, unverifiedZapSats, reposts, groups)
     }.value
 
     Column(
@@ -142,7 +144,7 @@ internal fun EngagementDrawer(
             .padding(top = Spacing.micro, bottom = Spacing.small),
     ) {
         // Zaps — one row per named zap with optional comment, then anonymous aggregate
-        if (drawerData.zaps.isNotEmpty() || drawerData.anonymousZapSats > 0) {
+        if (drawerData.zaps.isNotEmpty() || drawerData.anonymousZapSats > 0 || drawerData.unverifiedZapSats > 0) {
             drawerData.zaps.forEachIndexed { index, zap ->
                 Row(
                     modifier = Modifier
@@ -192,8 +194,9 @@ internal fun EngagementDrawer(
                     }
                 }
             }
-            // Anonymous zap aggregate — single chip with QuestionMark icon
-            if (drawerData.anonymousZapSats > 0) {
+            // No unverified identity or comment is rendered, even alongside genuine anonymous zaps.
+            for ((label, sats) in listOf("Anonymous" to drawerData.anonymousZapSats, "Unverified" to drawerData.unverifiedZapSats)) {
+                if (sats <= 0) continue
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -205,14 +208,18 @@ internal fun EngagementDrawer(
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.End,
                     ) {
-                        AnonymousZapChip(sats = drawerData.anonymousZapSats)
+                        if (label == "Unverified") {
+                            Text(text = label, color = TextSecondary, style = AppTextStyles.footnote)
+                            Spacer(Modifier.width(Spacing.small))
+                        }
+                        UnattributedZapChip(sats = sats, label = label)
                     }
                     Box(
                         modifier = Modifier.weight(1f),
                         contentAlignment = Alignment.Center,
                     ) {
                         // Zap icon only if no named zaps above (otherwise already shown)
-                        if (drawerData.zaps.isEmpty()) {
+                        if (drawerData.zaps.isEmpty() && (label == "Anonymous" || drawerData.anonymousZapSats == 0L)) {
                             Icon(
                                 imageVector = Icons.Filled.ElectricBolt,
                                 contentDescription = null,
@@ -405,9 +412,9 @@ private fun ZapChip(
     }
 }
 
-/** Anonymous zap aggregate: QuestionMark icon + total sats. Non-clickable. */
+/** Anonymous/unverified aggregate: no identity, message or profile click. */
 @Composable
-private fun AnonymousZapChip(sats: Long, modifier: Modifier = Modifier) {
+private fun UnattributedZapChip(sats: Long, label: String, modifier: Modifier = Modifier) {
     Box(
         modifier = modifier
             .size(Sizing.avatar)
@@ -421,7 +428,7 @@ private fun AnonymousZapChip(sats: Long, modifier: Modifier = Modifier) {
         ) {
             Icon(
                 imageVector = Icons.Filled.QuestionMark,
-                contentDescription = "Anonymous zaps",
+                contentDescription = "$label zaps",
                 tint = TextSecondary,
                 modifier = Modifier.size(16.dp),
             )

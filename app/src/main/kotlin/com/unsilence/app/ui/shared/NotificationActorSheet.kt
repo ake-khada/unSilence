@@ -110,9 +110,20 @@ fun NotificationActorSheet(
                     }
                     if (row.anonymousCount > 0) {
                         item(key = "anon-aggregate") {
-                            AnonymousActorRow(
+                            UnattributedActorRow(
+                                label = "anonymous",
                                 count = row.anonymousCount,
                                 sats = row.anonymousSats,
+                                notifType = row.notifType,
+                            )
+                        }
+                    }
+                    if (row.unverifiedCount > 0) {
+                        item(key = "unverified-aggregate") {
+                            UnattributedActorRow(
+                                label = "unverified",
+                                count = row.unverifiedCount,
+                                sats = row.unverifiedSats,
                                 notifType = row.notifType,
                             )
                         }
@@ -181,7 +192,7 @@ private fun ActorSheetRow(
 }
 
 @Composable
-private fun AnonymousActorRow(count: Int, sats: Long, notifType: String) {
+private fun UnattributedActorRow(label: String, count: Int, sats: Long, notifType: String) {
     Row(
         modifier = Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 10.dp),
         verticalAlignment = Alignment.CenterVertically,
@@ -199,7 +210,7 @@ private fun AnonymousActorRow(count: Int, sats: Long, notifType: String) {
         }
         Spacer(Modifier.width(Spacing.medium))
         Text(
-            text = if (count == 1) "1 anonymous" else "$count anonymous",
+            text = "$count $label",
             modifier = Modifier.weight(1f),
             color = TextSecondary,
             style = AppTextStyles.bodyLarge,

@@ -2315,7 +2315,7 @@ class MemoryEventStore @Inject constructor(
         // outer request stays anonymous to every other client. Retaining the
         // locally-generated anon key mapping keeps this stable after restart.
         val signer = receipt.requestSignerPubkey
-        if (attribution is ZapAttribution.Anonymous && own != null && signer != null && isOwnAnonZap(signer)) {
+        if (attribution == ZapAttribution.IntentionallyAnonymous && own != null && signer != null && isOwnAnonZap(signer)) {
             attribution = ZapAttribution.Identified(own, null)
         }
 
@@ -2381,7 +2381,7 @@ class MemoryEventStore @Inject constructor(
         trimZapAuthRecordedIdsIfNeeded()
         val finalized = zapAuthFinalized.incrementAndGet()
         val requestFailure = when (decision) {
-            is ZapReceiptDecision.Accepted -> decision.receipt.requestFailureRenderedAnonymous
+            is ZapReceiptDecision.Accepted -> decision.receipt.attributionFailure
             is ZapReceiptDecision.Rejected -> decision.requestFailure
             ZapReceiptDecision.PendingOwnAuthority -> null
         }
@@ -4441,8 +4441,8 @@ class MemoryEventStore @Inject constructor(
             }
         }
         if (optimistic.isEmpty()) return receipts
-        val receiptKeys = receipts.map { it.senderPubkey to it.sats }.toSet()
-        val keptOptimistic = optimistic.filter { (it.senderPubkey to it.sats) !in receiptKeys }
+        val receiptKeys = receipts.map { (it.attribution as? ZapAttribution.Identified)?.pubkey to it.sats }.toSet()
+        val keptOptimistic = optimistic.filter { ((it.attribution as? ZapAttribution.Identified)?.pubkey to it.sats) !in receiptKeys }
         return receipts + keptOptimistic
     }
 
@@ -4478,7 +4478,7 @@ class MemoryEventStore @Inject constructor(
                     list[idx] = old.copy(
                         attribution = ZapAttribution.Identified(
                             verified.senderPubkey,
-                            verified.comment ?: old.comment,
+                            verified.comment ?: (old.attribution as? ZapAttribution.Identified)?.comment,
                         ),
                     )
                 }
@@ -4830,11 +4830,11 @@ class MemoryEventStore @Inject constructor(
                     val row = it.next()
                     val authenticated = row.eventId?.let(authenticatedZapReceiptsById::get)
                     if (authenticated?.requestSignerPubkey == anonPubkey &&
-                        authenticated.attribution is ZapAttribution.Anonymous
+                        authenticated.attribution == ZapAttribution.IntentionallyAnonymous
                     ) {
                         it.set(
                             row.copy(
-                                attribution = ZapAttribution.Identified(own, row.comment),
+                                attribution = ZapAttribution.Identified(own, (row.attribution as? ZapAttribution.Identified)?.comment),
                             )
                         )
                         matched = true
@@ -4856,7 +4856,7 @@ class MemoryEventStore @Inject constructor(
         val own = ownPubkey ?: return false
         fun anyOwnReceipt(key: String?): Boolean {
             val list = key?.let { zapDetailsByTarget[it] } ?: return false
-            return synchronized(list) { list.any { it.eventId != null && it.senderPubkey == own } }
+            return synchronized(list) { list.any { it.eventId != null && (it.attribution as? ZapAttribution.Identified)?.pubkey == own } }
         }
         return anyOwnReceipt(eventId) || anyOwnReceipt(articleCoordForEvent(eventId))
     }
@@ -5698,7 +5698,10 @@ class MemoryEventStore @Inject constructor(
                         actorPubkey = event.pubkey
                         actorFields = cachedProfileFields(event.pubkey)
                     }
-                    g.fold(actorPubkey, actorFields, event.createdAt, sats, reaction)
+                    g.fold(
+                        actorPubkey, actorFields, event.createdAt, sats, reaction,
+                        unverified = authenticatedZap?.attribution == ZapAttribution.Unverified,
+                    )
                 }
             }
         }
@@ -5821,6 +5824,9 @@ class MemoryEventStore @Inject constructor(
         private var anonymousCount = 0
         private var anonymousSats = 0L
         private var anonymousMostRecentAt = 0L
+        private var unverifiedCount = 0
+        private var unverifiedSats = 0L
+        private var unverifiedMostRecentAt = 0L
         private var sumSats = 0L
         private var mostRecentAt = 0L
 
@@ -5830,14 +5836,21 @@ class MemoryEventStore @Inject constructor(
             createdAt: Long,
             sats: Long,
             reaction: ReactionContent?,
+            unverified: Boolean,
         ) {
             if (createdAt > mostRecentAt) mostRecentAt = createdAt
             sumSats += sats
             if (reaction != null) reactionCounts[reaction] = (reactionCounts[reaction] ?: 0) + 1
             if (actorPubkey == null) {
-                anonymousCount++
-                anonymousSats += sats
-                anonymousMostRecentAt = maxOf(anonymousMostRecentAt, createdAt)
+                if (unverified) {
+                    unverifiedCount++
+                    unverifiedSats += sats
+                    unverifiedMostRecentAt = maxOf(unverifiedMostRecentAt, createdAt)
+                } else {
+                    anonymousCount++
+                    anonymousSats += sats
+                    anonymousMostRecentAt = maxOf(anonymousMostRecentAt, createdAt)
+                }
                 return
             }
             val prev = actorsByPubkey[actorPubkey]
@@ -5858,12 +5871,15 @@ class MemoryEventStore @Inject constructor(
                 notifType = notifType,
                 targetNoteId = targetNoteId,
                 actors = actors,
-                people = actors.size + anonymousCount,
+                people = actors.size + anonymousCount + unverifiedCount,
                 sumSats = sumSats,
                 dominantReaction = reactionCounts.maxByOrNull { it.value }?.key,
                 anonymousCount = anonymousCount,
                 anonymousSats = anonymousSats,
                 anonymousMostRecentAt = anonymousMostRecentAt,
+                unverifiedCount = unverifiedCount,
+                unverifiedSats = unverifiedSats,
+                unverifiedMostRecentAt = unverifiedMostRecentAt,
                 mostRecentAt = mostRecentAt,
             )
         }
@@ -6427,8 +6443,9 @@ class MemoryEventStore @Inject constructor(
             for ((id, details) in zapContribs) {
                 d.writeStr(id); d.writeInt(details.size)
                 for (z in details) {
-                    d.writeStrOrNull(z.senderPubkey); d.writeLong(z.sats)
-                    d.writeStrOrNull(z.comment); d.writeStrOrNull(z.eventId)
+                    val identified = z.attribution as? ZapAttribution.Identified
+                    d.writeStrOrNull(identified?.pubkey); d.writeLong(z.sats)
+                    d.writeStrOrNull(identified?.comment); d.writeStrOrNull(z.eventId)
                 }
             }
 

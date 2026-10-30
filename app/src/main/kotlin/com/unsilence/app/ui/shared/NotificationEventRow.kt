@@ -278,6 +278,12 @@ private fun GroupedNotificationRow(
                     )
                 }
             }
+            if (row.unverifiedCount > 0) {
+                NotificationPrimaryText(
+                    text = "${row.unverifiedCount} unverified",
+                    color = TextSecondary,
+                )
+            }
         }
     }
 

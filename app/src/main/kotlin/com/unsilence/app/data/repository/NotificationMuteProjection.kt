@@ -51,7 +51,7 @@ private fun projectGroupedNotification(
     val actors = row.actors.filterNot { actor ->
         actor.pubkey?.let { isPubkeyMuted(it, muteList) } == true
     }
-    if (actors.isEmpty() && row.anonymousCount == 0) return null
+    if (actors.isEmpty() && row.anonymousCount == 0 && row.unverifiedCount == 0) return null
 
     val reactionCounts = actors.asSequence()
         .mapNotNull { it.reaction }
@@ -61,12 +61,13 @@ private fun projectGroupedNotification(
 
     return row.copy(
         actors = actors,
-        people = actors.size + row.anonymousCount,
-        sumSats = actors.sumOf { it.sats } + row.anonymousSats,
+        people = actors.size + row.anonymousCount + row.unverifiedCount,
+        sumSats = actors.sumOf { it.sats } + row.anonymousSats + row.unverifiedSats,
         dominantReaction = dominantReaction,
         mostRecentAt = maxOf(
             actors.maxOfOrNull { it.createdAt } ?: 0L,
             row.anonymousMostRecentAt,
+            row.unverifiedMostRecentAt,
         ),
     )
 }

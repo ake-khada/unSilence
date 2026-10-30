@@ -36,7 +36,7 @@ class PrivateZapSelfRecognitionTest {
 
         val rows = store.zapDetailsForEvent(crypto.defaultTarget)
         assertEquals(1, rows.size)
-        assertEquals(crypto.sender.pubkey, rows.single().senderPubkey)
+        assertEquals(crypto.sender.pubkey, (rows.single().attribution as ZapAttribution.Identified).pubkey)
         assertTrue(rows.single().eventId != null)
         assertTrue(store.hasOwnZapReceipt(crypto.defaultTarget))
         assertEquals(1, store.zapStats(crypto.defaultTarget).count)
@@ -54,7 +54,7 @@ class PrivateZapSelfRecognitionTest {
 
         val rows = store.zapDetailsForEvent(crypto.defaultTarget)
         assertEquals(1, rows.size)
-        assertEquals(crypto.sender.pubkey, rows.single().senderPubkey)
+        assertEquals(crypto.sender.pubkey, (rows.single().attribution as ZapAttribution.Identified).pubkey)
         assertTrue(store.hasOwnZapReceipt(crypto.defaultTarget))
     }
 
@@ -87,7 +87,7 @@ class PrivateZapSelfRecognitionTest {
 
         val rows = store.zapDetailsForEvent(crypto.defaultTarget)
         assertEquals(1, rows.size)
-        assertEquals(crypto.sender.pubkey, rows.single().senderPubkey)
+        assertEquals(crypto.sender.pubkey, (rows.single().attribution as ZapAttribution.Identified).pubkey)
         assertTrue(store.hasOwnZapReceipt(crypto.defaultTarget))
     }
 
@@ -108,7 +108,7 @@ class PrivateZapSelfRecognitionTest {
 
         val rows = restored.zapDetailsForEvent(crypto.defaultTarget)
         assertEquals(1, rows.size)
-        assertEquals(crypto.sender.pubkey, rows.single().senderPubkey)
+        assertEquals(crypto.sender.pubkey, (rows.single().attribution as ZapAttribution.Identified).pubkey)
         assertTrue(rows.single().eventId != null)
     }
 

@@ -149,6 +149,20 @@ class NotificationMuteProjectionTest {
         }
     }
 
+    @Test
+    fun `muting named actors preserves unverified totals and recency`() {
+        val row = group(actors = listOf(actor("muted", sats = 10, createdAt = 200)))
+            .copy(unverifiedCount = 2, unverifiedSats = 2_000, unverifiedMostRecentAt = 150)
+        val result = projectMutedNotifications(listOf(row), muteList(pubkeys = setOf("muted"))) { null }
+            .single() as NotificationRow.Grouped
+        assertTrue(result.actors.isEmpty())
+        assertEquals(0, result.anonymousCount)
+        assertEquals(2, result.unverifiedCount)
+        assertEquals(2, result.people)
+        assertEquals(2_000L, result.sumSats)
+        assertEquals(150L, result.mostRecentAt)
+    }
+
     private fun single(id: String, actor: String) = NotificationRow.Single(
         id = id,
         notifType = "reply",

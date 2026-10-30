@@ -43,9 +43,8 @@ sealed interface ZapAttribution {
         val comment: String?,
     ) : ZapAttribution
 
-    sealed interface Anonymous : ZapAttribution
-    data object IntentionallyAnonymous : Anonymous
-    data object Unverified : Anonymous
+    data object IntentionallyAnonymous : ZapAttribution
+    data object Unverified : ZapAttribution
 }
 
 /** Per-zap breakdown for the engagement drawer. */
@@ -54,12 +53,6 @@ data class ZapDetail(
     val sats: Long,
     val eventId: String? = null,  // kind-9735 receipt id; null for a local optimistic row
 ) {
-    val senderPubkey: String?
-        get() = (attribution as? ZapAttribution.Identified)?.pubkey
-
-    val comment: String?
-        get() = (attribution as? ZapAttribution.Identified)?.comment
-
     companion object {
         fun identified(
             pubkey: String,
@@ -198,20 +191,23 @@ sealed interface NotificationRow {
 
     /**
      * Reactions / reposts (kind 6 & 16) / zaps folded by (targetNoteId, notifType).
-     * Anonymous zaps are collapsed into [anonymousCount]/[anonymousSats] — never
-     * shown as distinct LNURL identicons.
+     * Anonymous and unverified zaps have separate count/sats aggregates; neither
+     * exposes an unverified identity or LNURL identicon.
      */
     data class Grouped(
         val notifType: String,   // "reaction" | "repost" | "zap"
         val targetNoteId: String?,
         val actors: List<NotificationActor>,   // named, deduped by pubkey, recency-sorted
-        val people: Int,                        // distinct named actors + anonymous zaps
+        val people: Int,                        // distinct named actors + anonymous/unverified receipts
         val sumSats: Long,                      // zaps
         val dominantReaction: ReactionContent?, // reactions
         val anonymousCount: Int,
         val anonymousSats: Long,
         val anonymousMostRecentAt: Long,         // preserves recency when named actors are filtered
         override val mostRecentAt: Long,
+        val unverifiedCount: Int = 0,
+        val unverifiedSats: Long = 0L,
+        val unverifiedMostRecentAt: Long = 0L,
     ) : NotificationRow {
         override val key get() = "$notifType|$targetNoteId"
     }

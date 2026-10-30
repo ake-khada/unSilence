@@ -4022,7 +4022,7 @@ class MemoryEventStoreInvariantsTest {
 
         assertEquals(ZapAggregate.EMPTY, store.zapStats("note-z"))
         val row = store.zapDetailsForEvent("note-z").single()
-        assertEquals("me", row.senderPubkey)
+        assertEquals("me", (row.attribution as ZapAttribution.Identified).pubkey)
         assertEquals(1_000L, row.sats)
         assertNull(row.eventId)
     }

@@ -35,7 +35,7 @@ class ZapDrawerConsistencyTest {
         store.repairZapDetailsFromReceipts()
 
         val row = store.zapDetailsForEvent(crypto.defaultTarget).single()
-        assertEquals(crypto.sender.pubkey, row.senderPubkey)
+        assertEquals(crypto.sender.pubkey, (row.attribution as ZapAttribution.Identified).pubkey)
         assertEquals(1_000L, row.sats)
         assertEquals(1, store.zapStats(crypto.defaultTarget).count)
         assertEquals(1_000L, store.zapStats(crypto.defaultTarget).totalSats)

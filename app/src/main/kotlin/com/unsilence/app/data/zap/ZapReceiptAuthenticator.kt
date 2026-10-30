@@ -58,7 +58,7 @@ internal data class AuthenticatedZapReceipt(
     val attribution: ZapAttribution,
     val requestSignerPubkey: String?,
     val privateEnvelope: PrivateZapEnvelope?,
-    val requestFailureRenderedAnonymous: ZapRequestFailure?,
+    val attributionFailure: ZapRequestFailure?,
     val selfClaimedClient: String?,
 )
 
@@ -187,7 +187,7 @@ internal fun authenticateZapReceipt(
             attribution = verified?.attribution ?: ZapAttribution.Unverified,
             requestSignerPubkey = verified?.event?.pubkey,
             privateEnvelope = verified?.privateEnvelope,
-            requestFailureRenderedAnonymous = invalid?.reason,
+            attributionFailure = invalid?.reason,
             selfClaimedClient = verified?.selfClaimedClient ?: invalid?.selfClaimedClient,
         )
     )
@@ -217,7 +217,7 @@ private fun verifyEmbeddedZapRequest(
     // Amount integrity is independent of sender attribution. Carry the parsed
     // amount even when a later recipient/target/signature gate fails so a
     // malformed or tampered request cannot become an amount-check bypass merely
-    // by degrading to anonymous behind a trusted zapper receipt.
+    // by losing verified attribution behind a trusted zapper receipt.
     val amount = when (val amountTag = request.tags.optionalSingleValue("amount")) {
         OptionalTagValue.Absent -> RequestAmount.Absent
         OptionalTagValue.Invalid -> RequestAmount.Invalid

@@ -51,11 +51,11 @@ class ZapReceiptAuthenticatorTest {
         val accepted = decision.accepted()
         assertEquals(1_000L, accepted.sats)
         assertEquals(ZapAttribution.Identified(sender, "great post"), accepted.attribution)
-        assertNull(accepted.requestFailureRenderedAnonymous)
+        assertNull(accepted.attributionFailure)
     }
 
     @Test
-    fun `tampered request signature is credited anonymously only behind trusted zapper`() = runTest {
+    fun `tampered request signature is unverified only behind trusted zapper`() = runTest {
         val signed = request(senderSigner)
         val request = signed.copy(sig = tamper(signed.sig))
         val decision = authenticateZapReceipt(
@@ -67,7 +67,7 @@ class ZapReceiptAuthenticatorTest {
         val accepted = decision.accepted()
         assertEquals(ZapAttribution.Unverified, accepted.attribution)
         assertEquals(1_000L, accepted.sats)
-        assertEquals(ZapRequestFailure.INVALID_SIGNATURE, accepted.requestFailureRenderedAnonymous)
+        assertEquals(ZapRequestFailure.INVALID_SIGNATURE, accepted.attributionFailure)
     }
 
     @Test
@@ -97,7 +97,7 @@ class ZapReceiptAuthenticatorTest {
         ).accepted()
 
         assertEquals(ZapAttribution.Unverified, accepted.attribution)
-        assertEquals(ZapRequestFailure.INVALID_SIGNATURE, accepted.requestFailureRenderedAnonymous)
+        assertEquals(ZapRequestFailure.INVALID_SIGNATURE, accepted.attributionFailure)
     }
 
     @Test
@@ -276,7 +276,7 @@ class ZapReceiptAuthenticatorTest {
     }
 
     @Test
-    fun `forged own sender claim is counted anonymously and is not self-suppressed`() = runTest {
+    fun `forged own sender claim is unverified and is not self-suppressed`() = runTest {
         val store = ownRecipientStore()
         val signed = request(senderSigner)
         val forgedOwnClaim = signed.copy(pubkey = recipient)
@@ -288,8 +288,12 @@ class ZapReceiptAuthenticatorTest {
         assertEquals(1_000L, detail.sats)
         val notification = store.getNotifications(recipient, limit = 50).single() as NotificationRow.Grouped
         assertTrue(notification.actors.isEmpty())
-        assertEquals(1, notification.anonymousCount)
-        assertEquals(1_000L, notification.anonymousSats)
+        assertEquals(0, notification.anonymousCount)
+        assertEquals(0L, notification.anonymousSats)
+        assertEquals(1, notification.unverifiedCount)
+        assertEquals(1_000L, notification.unverifiedSats)
+        assertEquals(1, notification.people)
+        assertEquals(1_000L, notification.sumSats)
         assertEquals(MemoryEventStore.ZapAuthStats(finalized = 1, gate2Rejected = 1), store.zapAuthStatsForTest())
     }
 
@@ -471,7 +475,54 @@ class ZapReceiptAuthenticatorTest {
         val rows = store.zapDetailsForEvent(articleId)
         assertEquals(1, rows.size)
         assertNotNull(rows.single().eventId)
-        assertEquals(fixture.sender.pubkey, rows.single().senderPubkey)
+        assertEquals(fixture.sender.pubkey, (rows.single().attribution as ZapAttribution.Identified).pubkey)
+    }
+
+    @Test
+    fun `anonymous and unverified receipts stay distinct after snapshot reauthentication`() = runTest {
+        val store = ownRecipientStore()
+        val anonymous = request(crypto.identity("66"), anonCiphertext = "")
+        val valid = request(senderSigner)
+        val forged = valid.copy(sig = tamper(valid.sig))
+        store.insert(receipt(zapperSigner, anonymous))
+        store.insert(receipt(zapperSigner, forged))
+        store.insert(receipt(zapperSigner, valid))
+
+        val bytes = ByteArrayOutputStream()
+        DataOutputStream(bytes).use { store.copySnapshotForTest(it) }
+        val restored = storeWithTarget(includeTarget = false)
+        DataInputStream(ByteArrayInputStream(bytes.toByteArray())).use { restored.restoreSnapshotBinary(it) }
+        restored.updateOwnZapServiceAuthority(recipient, OwnZapServiceAuthority.Trusted(zapper))
+        for (candidate in listOf(store, restored)) {
+            val rows = candidate.zapDetailsForEvent(target)
+            assertEquals(setOf(ZapAttribution.IntentionallyAnonymous, ZapAttribution.Unverified,
+                ZapAttribution.Identified(sender, "great post")), rows.map { it.attribution }.toSet())
+            assertEquals(3_000L, candidate.zapStats(target).totalSats)
+            val row = candidate.getNotifications(recipient).single() as NotificationRow.Grouped
+            assertEquals(1, row.anonymousCount)
+            assertEquals(1, row.unverifiedCount)
+            assertEquals(1_000L, row.anonymousSats)
+            assertEquals(1_000L, row.unverifiedSats)
+            assertEquals(3_000L, row.sumSats)
+            assertEquals(listOf(sender), row.actors.map { it.pubkey })
+        }
+    }
+
+    @Test
+    fun `article coordinate cannot promote forged attribution into a sender`() = runTest {
+        val store = ownRecipientStore()
+        val articleId = "cd".repeat(32)
+        val coord = "30023:$recipient:article"
+        store.registerArticleCoord(articleId, coord)
+        val signed = crypto.request(targetTagName = "a", targetId = coord)
+        val forged = signed.copy(sig = tamper(signed.sig))
+        store.insert(crypto.receipt(request = forged, targetTagName = "a", targetId = coord))
+        assertEquals(ZapAttribution.Unverified, store.zapDetailsForEvent(articleId).single().attribution)
+        assertEquals(1_000L, store.zapStats(articleId).totalSats)
+        val row = store.getNotifications(recipient).single() as NotificationRow.Grouped
+        assertTrue(row.actors.isEmpty())
+        assertEquals(1, row.unverifiedCount)
+        assertEquals(0, row.anonymousCount)
     }
 
     private fun ownRecipientStore(): MemoryEventStore = storeWithTarget().also {
