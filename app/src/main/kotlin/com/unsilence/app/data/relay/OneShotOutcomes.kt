@@ -1,6 +1,8 @@
 package com.unsilence.app.data.relay
 
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
@@ -20,7 +22,7 @@ private const val MAX_TRACKED_ONE_SHOTS = 256
  * retry's distinct subscription id. Cleanup additionally checks ticket identity.
  */
 internal class OneShotOutcomes {
-    private class Ticket(val targets: Set<String>) {
+    private class Ticket(val targets: Set<String>, val owner: Job?) {
         val admitted = targets.associateWith { CompletableDeferred<Unit>() }
         val outcomes = targets.associateWith { CompletableDeferred<OneShotOutcome>() }
 
@@ -42,6 +44,10 @@ internal class OneShotOutcomes {
     @Synchronized
     fun contains(subId: String): Boolean = subId in tickets
 
+    /** Cancellation is visible before finally removes queued requests and releases slots. */
+    @Synchronized
+    fun isActive(subId: String): Boolean = tickets[subId]?.owner?.isActive == true
+
     fun record(subId: String, relay: String, outcome: OneShotOutcome) {
         synchronized(this) { tickets[subId] }?.record(relay, outcome)
     }
@@ -59,10 +65,11 @@ internal class OneShotOutcomes {
         dispatch: suspend (onAdmitted: (String) -> Unit) -> Set<String>,
         cleanup: () -> Unit,
         admissionTimeoutMs: Long = timeoutMs,
+        onOutcome: (relay: String, outcome: OneShotOutcome) -> Unit = { _, _ -> },
     ): Map<String, OneShotOutcome> {
         val targets = relays.mapNotNull(::normalizeRelayUrl).toSet()
         if (targets.isEmpty()) return emptyMap()
-        val ticket = Ticket(targets)
+        val ticket = Ticket(targets, currentCoroutineContext()[Job])
         synchronized(this) {
             check(subId !in tickets) { "Subscription id is already in use: $subId" }
             if (tickets.size >= MAX_TRACKED_ONE_SHOTS) {
@@ -100,7 +107,10 @@ internal class OneShotOutcomes {
                                 ticket.outcomes.getValue(relay).await()
                             } else null
                             ticket.record(relay, outcome ?: OneShotOutcome.TIMEOUT)
-                            relay to ticket.outcomes.getValue(relay).await()
+                            val terminal = ticket.outcomes.getValue(relay).await()
+                            // Runs in the caller's context, never on the socket reader.
+                            onOutcome(relay, terminal)
+                            relay to terminal
                         }
                     }.awaitAll().toMap()
                 } finally {

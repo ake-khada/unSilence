@@ -25,12 +25,12 @@ import com.unsilence.app.data.relay.wotLookupSnapshot
 import com.unsilence.app.data.relay.wotSubjectsForFeedRows
 import com.unsilence.app.ui.shared.TimelineCardData
 import com.unsilence.app.ui.shared.collectLatestWhileActive
+import kotlinx.coroutines.flow.channelFlow
 import kotlinx.coroutines.flow.emptyFlow
 import com.unsilence.app.ui.shared.ModeratedReplyRow
 import com.unsilence.app.ui.shared.markLikelyCoordinatedSpam
 import com.unsilence.app.ui.shared.mutedTimelineRowIds
 import com.unsilence.app.ui.shared.pruneFullyMutedSubtrees
-import java.util.concurrent.ConcurrentHashMap
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -176,6 +176,7 @@ class ThreadViewModel @Inject constructor(
 
     fun setScreenActive(active: Boolean) {
         screenActive.value = active
+        if (!active) loadJob?.cancel()
         retainRoot(eventIdFlow.value.takeIf { active })
         if (active) wotHydrationCoalescer.requestHydration(_wotSubjects.value)
     }
@@ -203,9 +204,11 @@ class ThreadViewModel @Inject constructor(
         if (screenActive.value) wotHydrationCoalescer.requestHydration(pubkeys)
     }
     @Volatile private var articleCommentRelays: List<String> = emptyList()
-    private val fetchedArticleCoords = ConcurrentHashMap.newKeySet<String>()
-    private val fetchedReplyDescendants = ConcurrentHashMap.newKeySet<String>()
-    private val fetchedMissingParents = ConcurrentHashMap.newKeySet<String>()
+    private var threadRelayUrls: List<String> = emptyList()
+    private val completedThreadQueries = HashSet<Pair<String, String>>()
+    private val fetchedArticleCoords = HashSet<String>()
+    private val fetchedReplyDescendants = HashSet<String>()
+    private val fetchedMissingParents = HashSet<String>()
     @Volatile private var tappedId: String? = null
     private var loadJob: Job? = null
 
@@ -230,19 +233,51 @@ class ThreadViewModel @Inject constructor(
                         .distinctUntilChanged()
                 }
                 .flatMapLatest { (id, coord) ->
-                    if (coord != null) {
-                        val relays = (
-                            articleCommentRelays +
-                                (memoryEventStore.getNostrEvent(id)?.relaysSeen ?: emptySet()) +
-                                memoryEventStore.relayHintsForEvent(id)
-                            ).distinct()
-                        articleCommentRelays = relays
-                        if (fetchedArticleCoords.add(coord) && relays.isNotEmpty()) {
-                            viewModelScope.launch { relayPool.fetchArticleComments(relays, coord) }
+                    // Children belong to this active root/coordinate observation.
+                    // Hiding, replacing or clearing it cancels their one-shots too.
+                    channelFlow {
+                        val descendants = HashSet<String>()
+                        val parents = HashSet<String>()
+                        val rowsFlow = if (coord != null) {
+                            val relays = (
+                                articleCommentRelays +
+                                    memoryEventStore.getNostrEvent(id)?.relaysSeen.orEmpty() +
+                                    memoryEventStore.relayHintsForEvent(id)
+                                ).distinct()
+                            articleCommentRelays = relays
+                            if (coord !in fetchedArticleCoords && relays.isNotEmpty()) launch {
+                                if (relayPool.fetchArticleComments(relays, coord) && eventIdFlow.value == id) fetchedArticleCoords.add(coord)
+                            }
+                            memoryEventStore.articleCommentsFlow(coord)
+                        } else {
+                            launch {
+                                relayPool.fetchThread(threadRelayUrls, id, completedThreadQueries) { query, relay ->
+                                    if (eventIdFlow.value == id) completedThreadQueries.add(query to relay)
+                                }
+                            }
+                            memoryEventStore.threadFeedRowFlow(id)
                         }
-                        memoryEventStore.articleCommentsFlow(coord).map { Triple(id, true, it) }
-                    } else {
-                        memoryEventStore.threadFeedRowFlow(id).map { Triple(id, false, it) }
+                        rowsFlow.collect { rows ->
+                            if (coord != null && rows.isNotEmpty() && articleCommentRelays.isNotEmpty()) {
+                                val relays = articleCommentRelays
+                                val rowIds = rows.mapTo(HashSet(rows.size)) { it.id }
+                                val missing = rows.asSequence()
+                                    .mapNotNull { it.replyToId }
+                                    .filter { it != id && it !in rowIds }
+                                    .filter { memoryEventStore.getEventEntity(it) == null }
+                                    .filter { it !in fetchedMissingParents && parents.add(it) }
+                                    .toList()
+                                if (missing.isNotEmpty()) launch {
+                                    if (relayPool.fetchCommentParents(relays, missing) && eventIdFlow.value == id) fetchedMissingParents.addAll(missing.take(200))
+                                }
+                                val novel = rows.map { it.id }
+                                    .filter { it !in fetchedReplyDescendants && descendants.add(it) }
+                                if (novel.isNotEmpty()) launch {
+                                    if (relayPool.fetchCommentReplies(relays, novel) && eventIdFlow.value == id) fetchedReplyDescendants.addAll(novel.take(200))
+                                }
+                            }
+                            send(Triple(id, coord != null, rows))
+                        }
                     }
                 }
                 .combine(memoryEventStore.ownMuteListFlow()) { source, muteList ->
@@ -275,23 +310,6 @@ class ThreadViewModel @Inject constructor(
                         val visibleRows = rows.filterNot { it.id in mutedReplyIds }
                         if (visibleRows.isNotEmpty()) {
                             cardHydrator.hydrateEngagement(visibleRows, 0, visibleRows.size - 1)
-                        }
-                        val rowIds = rows.mapTo(HashSet(rows.size)) { it.id }
-                        val missingParents = rows.asSequence()
-                            .mapNotNull { it.replyToId }
-                            .filter { it != focusedId && it !in rowIds }
-                            .filter { memoryEventStore.getEventEntity(it) == null }
-                            .filter { fetchedMissingParents.add(it) }
-                            .toList()
-                        if (missingParents.isNotEmpty() && articleCommentRelays.isNotEmpty()) {
-                            viewModelScope.launch {
-                                relayPool.fetchCommentParents(articleCommentRelays, missingParents)
-                            }
-                        }
-
-                        val novel = rows.map { it.id }.filter { fetchedReplyDescendants.add(it) }
-                        if (novel.isNotEmpty() && articleCommentRelays.isNotEmpty()) {
-                            viewModelScope.launch { relayPool.fetchCommentReplies(articleCommentRelays, novel) }
                         }
                     }
 
@@ -373,6 +391,8 @@ class ThreadViewModel @Inject constructor(
         loadJob = null
         eventIdFlow.value = null
         articleCommentRelays = emptyList()
+        threadRelayUrls = emptyList()
+        completedThreadQueries.clear()
         fetchedArticleCoords.clear()
         fetchedReplyDescendants.clear()
         fetchedMissingParents.clear()
@@ -388,7 +408,9 @@ class ThreadViewModel @Inject constructor(
      */
     private suspend fun applyRoot(rootId: String, urls: List<String>) {
         retainRoot(rootId.takeIf { screenActive.value })
+        threadRelayUrls = urls
         if (eventIdFlow.value != rootId) {
+            completedThreadQueries.clear()
             fetchedArticleCoords.clear()
             fetchedReplyDescendants.clear()
             fetchedMissingParents.clear()
@@ -402,8 +424,6 @@ class ThreadViewModel @Inject constructor(
             memoryEventStore.relayHintsForEvent(rootId)).distinct()
         if (coord != null) {
             memoryEventStore.registerArticleCoord(rootId, coord)
-        } else {
-            relayPool.fetchThread(urls, rootId)
         }
         // Set last: the reactive collector observes a fully registered coordinate
         // and complete relay set on its first emission.

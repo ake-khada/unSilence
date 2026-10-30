@@ -1040,6 +1040,10 @@ class RelayPool @Inject constructor(
         bypassCooldown: Boolean = false,
     ) {
         synchronized(socketLifecycleLock) {
+            val threadSubId = extractReqSubId(req)
+            if (threadSubId != null && isOwnedThreadRequest(threadSubId) && !oneShotOutcomes.isActive(threadSubId)) {
+                return@synchronized
+            }
             // A replacement can win after the caller reads the map. Retarget to
             // the current owner while holding the same lock used by install/remove.
             val current = connections[conn.url]
@@ -1139,6 +1143,10 @@ class RelayPool @Inject constructor(
                    queue.isNotEmpty() &&
                    isRelayOutOfCooldown(conn.url)) {
                 val queued = queue.poll() ?: break
+                val queuedSubId = extractReqSubId(queued.payload)
+                if (queuedSubId != null && isOwnedThreadRequest(queuedSubId) && !oneShotOutcomes.isActive(queuedSubId)) {
+                    continue
+                }
                 if (relayCapabilitiesStore.shouldSkipRequest(
                         conn.url,
                         queued.requestClass,
@@ -1934,6 +1942,11 @@ class RelayPool @Inject constructor(
         try { try {
             conn.messages.consumeEach { raw ->
                 connectionLastActivity[conn.url] = System.currentTimeMillis()
+                val eventSubId = if (raw.startsWith("[\"EVENT\"")) extractEventSubId(raw) else null
+                if (eventSubId != null && isOwnedThreadRequest(eventSubId) &&
+                    (!oneShotOutcomes.isActive(eventSubId) ||
+                        relayOneShotOwners[RelayOneShotOwnerKey(eventSubId, conn.url)] !== conn)
+                ) return@consumeEach
                 // Fire taps for ALL message types (EVENT/EOSE/CLOSED).
                 // Subscription taps demux by subId and need EOSE/CLOSED delivery.
                 // For non-EVENT, EventProcessor fires taps then returns early.
@@ -2058,7 +2071,7 @@ class RelayPool @Inject constructor(
                     }
                     return@consumeEach
                 }
-                val subId = extractEventSubId(raw)
+                val subId = eventSubId
                 if (subId != null) {
                     // Emit (token, eventId) for search-notes subscriptions so SearchViewModel
                     // can correlate relay results with the correct query session.
@@ -2186,6 +2199,7 @@ class RelayPool @Inject constructor(
      */
     private fun handleEose(conn: RelayConnection, raw: String) {
         val subId = extractEoseSubId(raw) ?: return
+        if (isOwnedThreadRequest(subId) && !oneShotOutcomes.isActive(subId)) return
         // This handler receives real wire EOSE only, never watchdog/CLOSED/skip.
         idRequestBackoff.onEose(conn, subId)
         val isTrackedRequest = _activePages.containsKey(subId) || subId in _activeOneShotSubs
@@ -5022,61 +5036,52 @@ class RelayPool @Inject constructor(
      * Fetch a thread: the event itself, replies, reactions, and zaps.
      * Separate REQs so each kind gets its own limit and they don't compete.
      */
-    fun fetchThread(rawRelayUrls: List<String>, eventId: String) {
+    suspend fun fetchThread(
+        rawRelayUrls: List<String>,
+        eventId: String,
+        completed: Set<Pair<String, String>> = emptySet(),
+        onCompleted: (String, String) -> Unit = { _, _ -> },
+    ) {
         val hintUrls = memoryEventStore.get().relayHintsForEvent(eventId)
             .mapNotNull { normalizeRelayUrl(it) }
         val relayUrls = (rawRelayUrls.mapNotNull { normalizeRelayUrl(it) }.toSet() + hintUrls).toList()
-        val ts = System.currentTimeMillis()
-        _activeOneShotSubs.add("thread-event-$ts")
-        _activeOneShotSubs.add("thread-replies-$ts")
-        _activeOneShotSubs.add("thread-reactions-$ts")
-        _activeOneShotSubs.add("thread-zaps-$ts")
-
-        // The event itself
-        val eventReq = buildJsonArray {
-            add(JsonPrimitive("REQ"))
-            add(JsonPrimitive("thread-event-$ts"))
-            add(buildJsonObject {
-                put("ids", buildJsonArray { add(JsonPrimitive(eventId)) })
-            })
-        }.toString()
-
-        // Lowercase e finds direct replies; uppercase E also finds nested comments
-        // rooted at this event, even when the intermediate parent is not cached.
-        val repliesReq = buildThreadRepliesReq("thread-replies-$ts", eventId)
-
-        // Reactions on this event and its replies
-        val reactionsReq = buildJsonArray {
-            add(JsonPrimitive("REQ"))
-            add(JsonPrimitive("thread-reactions-$ts"))
-            add(buildJsonObject {
-                put("kinds", buildJsonArray { add(JsonPrimitive(7)) })
-                put("#e",    buildJsonArray { add(JsonPrimitive(eventId)) })
-                put("limit", JsonPrimitive(100))
-            })
-        }.toString()
-
-        // Zaps on this event and its replies
-        val zapsReq = buildJsonArray {
-            add(JsonPrimitive("REQ"))
-            add(JsonPrimitive("thread-zaps-$ts"))
-            add(buildJsonObject {
-                put("kinds", buildJsonArray { add(JsonPrimitive(9735)) })
-                put("#e",    buildJsonArray { add(JsonPrimitive(eventId)) })
-                put("limit", JsonPrimitive(100))
-            })
-        }.toString()
-
-        for (url in relayUrls) {
-            connections[url]?.let { conn ->
-                sendOneShotToRelay(conn, eventReq)
-                sendOneShotToRelay(conn, repliesReq)
-                sendOneShotToRelay(conn, reactionsReq)
-                sendOneShotToRelay(conn, zapsReq)
-            }
-        }
-        Log.d(TAG, "Fetching thread + engagement for $eventId from ${relayUrls.size} relay(s)")
+        fetchThreadRequests(
+            eventId, java.util.UUID.randomUUID().toString(), relayUrls, completed,
+            fetch = { subId, pending, req, onEose ->
+                fetchOwnedThreadRequest(subId, pending, req, pooledOnly = true, onEose = onEose)
+            },
+            onCompleted = onCompleted,
+        )
     }
+
+    private suspend fun fetchOwnedThreadRequest(
+        subId: String,
+        relays: List<String>,
+        req: String,
+        pooledOnly: Boolean = false,
+        onEose: (String) -> Unit = {},
+    ): Boolean = awaitThreadOneShot(
+        outcomes = oneShotOutcomes,
+        subId = subId,
+        relays = relays,
+        dispatch = { admitted ->
+            if (pooledOnly) {
+                // Keep current routing: unpooled reply recovery is a separate correction.
+                synchronized(socketLifecycleLock) {
+                    val targets = relays.mapNotNull { connections[it] }
+                    val urls = targets.mapTo(HashSet()) { it.url }
+                    oneShotSubTargets[subId] = urls
+                    _activeOneShotSubs.add(subId)
+                    targets.forEach { admitted(it.url); sendOneShotToRelay(it, req) }
+                    urls
+                }
+            } else {
+                sendOneShotBatch(relays, listOf(req), listOf(subId), onAdmitted = admitted)
+            }
+        },
+        cleanup = { cleanupOneShotSub(subId) },
+        onEose = onEose,
+    )
 
     /**
      * Fetch comments on a long-form article by its coordinate (`30023:pk:d`).
@@ -5084,12 +5089,12 @@ class RelayPool @Inject constructor(
      * scope) + legacy kind-1 (lowercase `#a`) — NOT `#e`. Ephemeral one-shot
      * (reaches relays even if not in the persistent pool); CLOSE after EOSE.
      */
-    suspend fun fetchArticleComments(rawRelayUrls: List<String>, coord: String) {
-        if (coord.isBlank()) return
+    suspend fun fetchArticleComments(rawRelayUrls: List<String>, coord: String): Boolean {
+        if (coord.isBlank()) return false
         val hintUrls = memoryEventStore.get().relayHintsForEvent(coord).mapNotNull { normalizeRelayUrl(it) }
         val relayUrls = (rawRelayUrls.mapNotNull { normalizeRelayUrl(it) }.toSet() + hintUrls).toList()
-        if (relayUrls.isEmpty()) return
-        val subId = "article-comments-${System.currentTimeMillis()}"
+        if (relayUrls.isEmpty()) return false
+        val subId = "article-comments-${java.util.UUID.randomUUID()}"
         val req = buildJsonArray {
             add(JsonPrimitive("REQ"))
             add(JsonPrimitive(subId))
@@ -5105,12 +5110,7 @@ class RelayPool @Inject constructor(
             })
         }.toString()
 
-        val eoseDeferred = CompletableDeferred<Unit>()
-        oneShotEoseCallbacks[subId] = eoseDeferred
-        sendOneShotBatch(relayUrls, listOf(req), listOf(subId))
-        val eosed = withTimeoutOrNull(8_000L) { eoseDeferred.await() } != null
-        if (!eosed) cleanupOneShotSub(subId)
-        Log.d(TAG, "Fetching comments for $coord from ${relayUrls.size} relay(s)")
+        return fetchOwnedThreadRequest(subId, relayUrls, req)
     }
 
     /**
@@ -5164,11 +5164,11 @@ class RelayPool @Inject constructor(
      * comment via `#e`) — descendants that may carry no `#a`/`#A` article tag and
      * so aren't caught by fetchArticleComments. One-shot; CLOSE after EOSE.
      */
-    suspend fun fetchCommentReplies(rawRelayUrls: List<String>, parentIds: List<String>) {
-        if (parentIds.isEmpty()) return
+    suspend fun fetchCommentReplies(rawRelayUrls: List<String>, parentIds: List<String>): Boolean {
+        if (parentIds.isEmpty()) return false
         val relayUrls = rawRelayUrls.mapNotNull { normalizeRelayUrl(it) }.distinct()
-        if (relayUrls.isEmpty()) return
-        val subId = "comment-replies-${System.currentTimeMillis()}"
+        if (relayUrls.isEmpty()) return false
+        val subId = "comment-replies-${java.util.UUID.randomUUID()}"
         val req = buildJsonArray {
             add(JsonPrimitive("REQ"))
             add(JsonPrimitive(subId))
@@ -5178,11 +5178,7 @@ class RelayPool @Inject constructor(
                 put("limit", JsonPrimitive(200))
             })
         }.toString()
-        val eoseDeferred = CompletableDeferred<Unit>()
-        oneShotEoseCallbacks[subId] = eoseDeferred
-        sendOneShotBatch(relayUrls, listOf(req), listOf(subId))
-        val eosed = withTimeoutOrNull(8_000L) { eoseDeferred.await() } != null
-        if (!eosed) cleanupOneShotSub(subId)
+        return fetchOwnedThreadRequest(subId, relayUrls, req)
     }
 
     /**
@@ -5190,17 +5186,13 @@ class RelayPool @Inject constructor(
      * indexes can return a child from `#A` while its parent lives only on the source
      * relay. Until this exact-id fetch lands, the UI keeps the orphan visible at root.
      */
-    suspend fun fetchCommentParents(rawRelayUrls: List<String>, parentIds: List<String>) {
-        if (parentIds.isEmpty()) return
+    suspend fun fetchCommentParents(rawRelayUrls: List<String>, parentIds: List<String>): Boolean {
+        if (parentIds.isEmpty()) return false
         val relayUrls = rawRelayUrls.mapNotNull { normalizeRelayUrl(it) }.distinct()
-        if (relayUrls.isEmpty()) return
-        val subId = "comment-parents-${System.currentTimeMillis()}"
+        if (relayUrls.isEmpty()) return false
+        val subId = "comment-parents-${java.util.UUID.randomUUID()}"
         val req = buildCommentParentsReq(subId, parentIds)
-        val eoseDeferred = CompletableDeferred<Unit>()
-        oneShotEoseCallbacks[subId] = eoseDeferred
-        sendOneShotBatch(relayUrls, listOf(req), listOf(subId))
-        val eosed = withTimeoutOrNull(8_000L) { eoseDeferred.await() } != null
-        if (!eosed) cleanupOneShotSub(subId)
+        return fetchOwnedThreadRequest(subId, relayUrls, req)
     }
 
     /**
