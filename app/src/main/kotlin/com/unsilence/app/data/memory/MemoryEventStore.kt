@@ -213,7 +213,7 @@ internal data class ContentAdmissionVictim(
  * event is fully indexed. Tier membership is revalidated lazily at removal,
  * so follows and timeline changes cannot evict a newly-protected event.
  */
-internal class ContentAdmissionIndex {
+internal class ContentAdmissionIndex(private val lock: Any = Any()) {
     private class KindQueues {
         val tierById = HashMap<String, ContentEvictionTier>()
         val requested = java.util.LinkedHashMap<String, Unit>(16, 0.75f, true)
@@ -240,7 +240,6 @@ internal class ContentAdmissionIndex {
         }
     }
 
-    private val lock = Any()
     private val queuesByKind = HashMap<Int, KindQueues>()
 
     fun track(eventId: String, kind: Int, tier: ContentEvictionTier?) {
@@ -284,6 +283,7 @@ internal class ContentAdmissionIndex {
     fun pollVictim(
         kind: Int,
         cap: Int,
+        isProtected: (String) -> Boolean = { false },
         classify: (String) -> ContentEvictionTier?,
     ): ContentAdmissionVictim? {
         require(cap >= 0)
@@ -293,9 +293,9 @@ internal class ContentAdmissionIndex {
                 var reclassified = false
                 for (tier in EVICTION_ORDER) {
                     val queue = queues.queue(tier)
-                    val eventId = queue.entries.iterator().let { iterator ->
-                        if (iterator.hasNext()) iterator.next().key else null
-                    } ?: continue
+                    // Protected entries remain in their original tier and count
+                    // against the cap; only victim selection skips them.
+                    val eventId = queue.keys.firstOrNull { !isProtected(it) } ?: continue
                     val currentTier = classify(eventId)
                     when {
                         currentTier == null -> {
@@ -342,12 +342,13 @@ internal fun selectContentEvictionCandidates(
     timelineReferencedIds: Set<String>,
     lastTouchedAt: Map<String, Long>,
     requestedIds: Set<String> = emptySet(),
+    displayedIds: Set<String> = emptySet(),
 ): List<ContentEvictionCandidate> {
     require(cap >= 0)
     val excess = entries.size - cap
     if (excess <= 0) return emptyList()
 
-    val materialized = entries.map { entry ->
+    val materialized = entries.filter { it.id !in displayedIds }.map { entry ->
         val author = authorsByEventId[entry.id]
         val tier = when {
             entry.id in requestedIds -> ContentEvictionTier.REQUESTED_REFERENCE
@@ -632,8 +633,39 @@ class MemoryEventStore @Inject constructor(
      * Eviction sorts candidates ascending by this value — least-recently-touched first.
      */
     private val lastTouchedAt = ConcurrentHashMap<String, Long>()
-    private val contentAdmissionIndex = ContentAdmissionIndex()
+    private val contentPolicyLock = Any()
+    private val contentAdmissionIndex = ContentAdmissionIndex(contentPolicyLock)
+    private val displayWindows = DisplayWindowRetention(contentPolicyLock)
     private val requestedEvents = RequestedEventRetention()
+
+    /** One surface's visible rows and resolved engagement targets, with IDs only. */
+    inner class DisplayWindow internal constructor() : AutoCloseable {
+        private val lease = displayWindows.acquire()
+
+        fun update(rows: List<Pair<String, String>>, visibleRowIds: Set<String>) = synchronized(contentPolicyLock) {
+            val ids = rows.asSequence().filter { it.first in visibleRowIds }
+                .take(DISPLAY_WINDOW_ROW_LIMIT).flatMap { sequenceOf(it.first, it.second) }.toSet()
+            if (lease.update(ids)) {
+                markTouched(ids.filter { eventsById.containsKey(it) })
+            }
+        }
+
+        override fun close() = lease.close()
+    }
+
+    fun openDisplayWindow(): DisplayWindow = DisplayWindow()
+
+    private fun isDisplayProtected(event: NostrEvent): Boolean {
+        if (displayWindows.contains(event.id)) return true
+        val target = when (event.kind) {
+            6, 16 -> repostTargetId(event)
+            7 -> reactionTargetId(event)
+            9735 -> authenticatedZapReceiptsById[event.id]?.targetId
+            else -> null
+        } ?: return false
+        return displayWindows.contains(target) ||
+            articleIdByCoord[target]?.let(displayWindows::contains) == true
+    }
 
     /** Caller owns the lease until lookup completes/cancels or its thread hides.
      * At most 32 distinct targets receive priority; kind caps are unchanged. */
@@ -1265,11 +1297,18 @@ class MemoryEventStore @Inject constructor(
         val removedIds = mutableSetOf<String>()
 
         while (contentAdmissionIndex.size(event.kind) > cap) {
-            val victim = contentAdmissionIndex.pollVictim(
+            var victim = contentAdmissionIndex.pollVictim(
                 kind = event.kind,
                 cap = cap,
+                isProtected = { id -> eventsById[id]?.let(::isDisplayProtected) == true },
                 classify = ::currentContentAdmissionTier,
-            ) ?: break
+            )
+            if (victim == null) {
+                if (contentAdmissionIndex.size(event.kind) <= cap) break
+                // All existing capacity is protected: reject this attempted insert.
+                contentAdmissionIndex.remove(event.id, event.kind)
+                victim = ContentAdmissionVictim(event.id, ContentEvictionTier.ORDINARY)
+            }
             if (victim.eventId == event.id) {
                 eventsById.remove(event.id, event)
                 dirty.admissionRejected++
@@ -2000,6 +2039,7 @@ class MemoryEventStore @Inject constructor(
         }
         removeFromIndexes(event)
         lastTouchedAt.remove(event.id)
+        displayWindows.forget(event.id)
         feedRowCache.remove(event.id)
         feedRowAccessedAt.remove(event.id)
         videoRenderModelsByEventId.remove(event.id)
@@ -3167,6 +3207,8 @@ class MemoryEventStore @Inject constructor(
                 timelineReferencedIds = timelineReferencedIds,
                 lastTouchedAt = touchSnapshot,
                 requestedIds = requestedIds,
+                displayedIds = candidates.asSequence().mapNotNull { eventsById[it.id] }
+                    .filter(::isDisplayProtected).map { it.id }.toSet(),
             )
         }
 
@@ -3223,13 +3265,18 @@ class MemoryEventStore @Inject constructor(
     ): NostrEvent? {
         val kind = eventsById[eventId]?.kind ?: return null
         val lock = contentMutationLocks[kind]
-        return if (lock == null) {
-            removeContentEventForEvictionUnlocked(eventId, invalidatedReplyTargets)
-        } else {
-            synchronized(lock) {
+        fun removeIfUnobserved(): NostrEvent? = synchronized(contentPolicyLock) {
+            val event = eventsById[eventId] ?: return@synchronized null
+            if (isDisplayProtected(event)) {
+                // A lease may have started after selection. Restore the reserved
+                // admission entry and leave payload/indexes untouched.
+                contentAdmissionIndex.track(event.id, event.kind, contentAdmissionTier(event))
+                null
+            } else {
                 removeContentEventForEvictionUnlocked(eventId, invalidatedReplyTargets)
             }
         }
+        return if (lock == null) removeIfUnobserved() else synchronized(lock) { removeIfUnobserved() }
     }
 
     private fun removeContentEventForEvictionUnlocked(
@@ -3252,6 +3299,7 @@ class MemoryEventStore @Inject constructor(
         idsByKind[event.kind]?.remove(event.id)
         idsByPubkey[event.pubkey]?.remove(event.id)
         lastTouchedAt.remove(event.id)
+        displayWindows.forget(event.id)
         forEachReplyIndexTarget(event) { targetId ->
             if (removeReplyIndexEntry(targetId, event.id)) {
                 invalidatedReplyTargets += targetId
@@ -7543,6 +7591,7 @@ class MemoryEventStore @Inject constructor(
      * benefits from already-cached public Nostr data (events, profiles, stats).
      */
     fun clearUserState() {
+        displayWindows.clear()
         val requestedIds = requestedEvents.snapshot()
         requestedEvents.clear()
         requestedIds.forEach(::reclassifyRequestedEvent)
@@ -7590,6 +7639,7 @@ class MemoryEventStore @Inject constructor(
     }
 
     fun clear() {
+        displayWindows.clear()
         requestedEvents.clear()
         // Metrics are account-scoped evidence. Carrying interval work or the
         // last pass's anchors across logout would corrupt the next session's

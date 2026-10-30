@@ -396,6 +396,8 @@ fun ArticleReaderScreen(
         }
     }
 
+    com.unsilence.app.ui.shared.ObserveDisplayWindowLifecycle(commentActionsVm)
+
     val engagementRetryRevision by commentActionsVm.engagementRetryRevision.collectAsStateWithLifecycle()
     ResumedEffect(engagementRetryRevision) {
         if (engagementRetryRevision == 0L) return@ResumedEffect
@@ -405,9 +407,12 @@ fun ArticleReaderScreen(
 
     @OptIn(FlowPreview::class)
     ResumedEffect(commentRows, cardWidthPx) {
-        if (commentRows.isEmpty()) return@ResumedEffect
         val rowIndexById = commentRows.withIndex().associate { it.value.id to it.index }
         commentActionsVm.warmCardWindow(
+            contextRows = listOf(row),
+            visibleIds = listState.layoutInfo.visibleItemsInfo.mapNotNull {
+                (it.key as? String)?.let { key -> if (key == "article") row.id else key }
+            }.toSet(),
             rows = commentRows,
             first = 0,
             last = commentRows.lastIndex.coerceAtMost(8),
@@ -415,13 +420,14 @@ fun ArticleReaderScreen(
             hydrateEngagement = false,
         )
         snapshotFlow {
-            listState.layoutInfo.visibleItemsInfo.mapNotNull { item ->
-                (item.key as? String)?.let(rowIndexById::get)
-            }.distinct()
-        }.sample(100).collect { visibleRows ->
-            val first = visibleRows.minOrNull() ?: return@collect
+            listState.layoutInfo.visibleItemsInfo.mapNotNull { it.key as? String }.toSet()
+        }.sample(100).collect { visibleKeys ->
+            val visibleRows = visibleKeys.mapNotNull(rowIndexById::get)
+            val first = visibleRows.minOrNull() ?: 0
             val last = visibleRows.maxOrNull() ?: first
             commentActionsVm.warmCardWindow(
+                contextRows = listOf(row),
+                visibleIds = visibleKeys.mapTo(HashSet()) { if (it == "article") row.id else it },
                 rows = commentRows,
                 first = first,
                 last = last,

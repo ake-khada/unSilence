@@ -321,21 +321,27 @@ fun UserProfileScreen(
         }
     }
 
+    com.unsilence.app.ui.shared.ObserveDisplayWindowLifecycle(actionsViewModel)
+
     val engagementRetryRevision by actionsViewModel.engagementRetryRevision.collectAsStateWithLifecycle()
     @OptIn(FlowPreview::class)
     ResumedEffect(posts, cardWidthPx, engagementRetryRevision) {
+        if (posts.isEmpty()) actionsViewModel.clearDisplayWindow()
         val eventOffset = 3
         fun warmVisibleRange(first: Int, last: Int) {
             val dataFirst = (first - eventOffset).coerceAtLeast(0)
             val dataLast = (last - eventOffset).coerceAtMost(posts.lastIndex)
             if (dataFirst <= dataLast) {
                 actionsViewModel.warmCardWindow(
+                    visibleIds = listState.layoutInfo.visibleItemsInfo.mapNotNull { it.key as? String }.toSet(),
                     rows = posts,
                     first = dataFirst,
                     last = dataLast,
                     cardWidthPx = cardWidthPx,
                     hydrateEngagement = true,
                 )
+            } else {
+                actionsViewModel.clearDisplayWindow()
             }
         }
 

@@ -650,12 +650,15 @@ class FeedViewModel @Inject constructor(
         val first: Int,
         val last: Int,
         val cardWidthPx: Int,
+        val visibleIds: Set<String> = emptySet(),
     )
 
+    private val displayWindowReporter = com.unsilence.app.ui.shared.DisplayWindowReporter(memoryEventStore)
     private val screenActive = MutableStateFlow(false)
 
     fun setScreenActive(active: Boolean) {
         screenActive.value = active
+        displayWindowReporter.setActive(active)
         if (active) wotHydrationCoalescer.requestHydration(_wotSubjects.value)
     }
 
@@ -670,6 +673,7 @@ class FeedViewModel @Inject constructor(
             combine(feedRows, _hydrationViewport) { rows, viewport -> rows to viewport }
                 .conflate()
                 .collectLatestWhileActive(screenActive) { (rows, viewport) ->
+                    if (rows.isEmpty()) displayWindowReporter.report(emptyList(), emptySet())
                     if (rows.isEmpty() || viewport.cardWidthPx <= 0) return@collectLatestWhileActive
                     val first = viewport.first.coerceIn(0, rows.lastIndex)
                     val last = viewport.last.coerceAtLeast(first).coerceAtMost(rows.lastIndex)
@@ -688,6 +692,10 @@ class FeedViewModel @Inject constructor(
                         if (start < first) addAll(rows.subList(start, first))
                         if (visibleEnd < end) addAll(rows.subList(visibleEnd, end))
                     }
+                    displayWindowReporter.report(
+                        rows.subList(first, last + 1),
+                        viewport.visibleIds,
+                    )
                     cardHydrator.warmUpcomingAssets(
                         events = warmRows,
                         cardWidthPx = viewport.cardWidthPx,
@@ -920,11 +928,12 @@ class FeedViewModel @Inject constructor(
         _hydrationViewport.value = HydrationViewport(idx, idx, 0)
     }
 
-    fun onViewportChanged(first: Int, last: Int, cardWidthPx: Int) {
+    fun onViewportChanged(first: Int, last: Int, cardWidthPx: Int, visibleIds: Set<String> = emptySet()) {
         _hydrationViewport.value = HydrationViewport(
             first = first.coerceAtLeast(0),
             last = last.coerceAtLeast(first),
             cardWidthPx = cardWidthPx.coerceAtLeast(0),
+            visibleIds = visibleIds,
         )
     }
 
@@ -1363,6 +1372,7 @@ class FeedViewModel @Inject constructor(
     }
 
     override fun onCleared() {
+        displayWindowReporter.setActive(false)
         super.onCleared()
         moderationCache.clear()
         currentHandle?.close()

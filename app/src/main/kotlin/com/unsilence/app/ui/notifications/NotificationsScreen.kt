@@ -98,12 +98,19 @@ fun NotificationsScreen(
             }
         }
     }
-    LaunchedEffect(warmIds, cardWidthPx) {
+    com.unsilence.app.ui.shared.ObserveDisplayWindowLifecycle(actionsViewModel)
+    val visiblePreviewIds by remember(state.items, listState) {
+        androidx.compose.runtime.derivedStateOf {
+            listState.layoutInfo.visibleItemsInfo.mapNotNull { state.items.getOrNull(it.index)?.previewTargetId() }.toSet()
+        }
+    }
+    com.unsilence.app.ui.shared.ResumedEffect(warmIds, cardWidthPx, visiblePreviewIds) {
         val rows = viewModel.previewWarmRows(warmIds)
         actionsViewModel.warmCardWindow(
             rows, 0, rows.lastIndex, cardWidthPx,
             hydrateEngagement = false,
             maxRows = NOTIFICATION_PREVIEW_WINDOW,
+            visibleIds = visiblePreviewIds,
         )
     }
 

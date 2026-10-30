@@ -209,10 +209,12 @@ fun ThreadScreen(
         )
     }
 
+    com.unsilence.app.ui.shared.ObserveDisplayWindowLifecycle(actionsViewModel)
+
     val engagementRetryRevision by actionsViewModel.engagementRetryRevision.collectAsStateWithLifecycle()
     @OptIn(FlowPreview::class)
     ResumedEffect(allThreadRows, state.focusedNote?.id, cardWidthPx, engagementRetryRevision) {
-        if (allThreadRows.isEmpty()) return@ResumedEffect
+        if (allThreadRows.isEmpty()) { actionsViewModel.clearDisplayWindow(); return@ResumedEffect }
         val rowIndexById = allThreadRows.withIndex().associate { it.value.id to it.index }
         fun visibleRowsFromLayout(): List<Int> =
             listState.layoutInfo.visibleItemsInfo.mapNotNull { item ->
@@ -220,9 +222,10 @@ fun ThreadScreen(
             }.distinct()
 
         fun warmVisibleRows(visibleRows: List<Int>) {
-            val first = visibleRows.minOrNull() ?: return
+            val first = visibleRows.minOrNull() ?: run { actionsViewModel.clearDisplayWindow(); return }
             val last = visibleRows.maxOrNull() ?: first
             actionsViewModel.warmCardWindow(
+                visibleIds = listState.layoutInfo.visibleItemsInfo.mapNotNull { it.key as? String }.toSet(),
                 rows = allThreadRows,
                 first = first,
                 last = last,

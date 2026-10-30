@@ -283,6 +283,16 @@ class NoteActionsViewModel @Inject constructor(
      * The feed ViewModel has its own high-frequency lane because it owns the
      * subscription window. Other screens call this from LazyList viewport samples.
      */
+    private val displayWindowReporter = com.unsilence.app.ui.shared.DisplayWindowReporter(memoryEventStore)
+
+    fun setDisplayWindowActive(active: Boolean) = displayWindowReporter.setActive(active)
+    fun clearDisplayWindow() = displayWindowReporter.report(emptyList(), emptySet())
+
+    override fun onCleared() {
+        displayWindowReporter.setActive(false)
+        super.onCleared()
+    }
+
     fun warmCardWindow(
         rows: List<FeedRow>,
         first: Int,
@@ -290,13 +300,20 @@ class NoteActionsViewModel @Inject constructor(
         cardWidthPx: Int,
         hydrateEngagement: Boolean = true,
         maxRows: Int = CARD_WINDOW_WARM_MAX_ROWS,
+        visibleIds: Set<String>? = null,
+        contextRows: List<FeedRow> = emptyList(),
     ) {
+        if (rows.isEmpty()) displayWindowReporter.report(contextRows, visibleIds.orEmpty())
         if (rows.isEmpty() || cardWidthPx <= 0) return
         val safeFirst = first.coerceIn(0, rows.lastIndex)
         val safeLast = last.coerceAtLeast(safeFirst).coerceAtMost(rows.lastIndex)
         val warmStart = (safeFirst - CARD_WINDOW_WARM_ABOVE).coerceAtLeast(0)
         val warmEnd = (safeLast + 1 + CARD_WINDOW_WARM_LOOKAHEAD).coerceAtMost(rows.size)
         if (warmStart >= warmEnd) return
+
+        val viewportRows = rows.subList(safeFirst, safeLast + 1)
+        displayWindowReporter.report((viewportRows + contextRows).distinctBy { it.id },
+            visibleIds ?: viewportRows.mapTo(HashSet()) { it.id })
 
         val key = CardWindowWarmKey(
             rowCount = rows.size,

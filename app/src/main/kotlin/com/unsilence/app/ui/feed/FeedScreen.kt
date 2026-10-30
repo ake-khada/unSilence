@@ -108,6 +108,7 @@ private data class FeedViewport(
     val totalItems: Int,
     val loadingMore: Boolean,
     val cardWidthPx: Int,
+    val visibleIds: Set<String>,
 )
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -543,6 +544,7 @@ fun FeedScreen(
                             first = first,
                             last = last,
                             cardWidthPx = cardWidthPx,
+                            visibleIds = info.visibleItemsInfo.mapNotNull { it.key as? String }.toSet(),
                         )
                     }
                 }
@@ -554,12 +556,14 @@ fun FeedScreen(
                         val first = info.visibleItemsInfo.firstOrNull()?.index ?: 0
                         val last = info.visibleItemsInfo.lastOrNull()?.index ?: 0
                         val total = info.totalItemsCount
-                        FeedViewport(first, last, total, isLoadingMore, cardWidthPx)
+                        FeedViewport(first, last, total, isLoadingMore, cardWidthPx,
+                            info.visibleItemsInfo.mapNotNull { it.key as? String }.toSet())
                     }.sample(100).collect { viewport ->
                         viewModel.onViewportChanged(
                             first = viewport.firstVisible,
                             last = viewport.lastVisible,
                             cardWidthPx = viewport.cardWidthPx,
+                            visibleIds = viewport.visibleIds,
                         )
                         // total includes the "load-more" sentinel item when
                         // events.isNotEmpty(). last >= total - 1 - trigger
