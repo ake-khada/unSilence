@@ -543,6 +543,15 @@ class RelayPool @Inject constructor(
         .filter { it.isConnected }
         .map { it.url }
 
+    /** Resolution-time evidence only; unknown/connecting endpoints retain fallback coverage. */
+    fun healthyReadRelayUrls(): Set<String> = synchronized(socketLifecycleLock) {
+        connections.values.asSequence()
+            .filter { it.isConnected }
+            .filterNot { it.url in authUnavailableRelays || relayCapabilitiesStore.shouldSkipRequest(it.url, RelayRequestClass.GENERAL) }
+            .map { it.url }
+            .toSet()
+    }
+
     /**
      * Open [connection] only while foreground transport is allowed. The lock
      * closes the race where ProcessLifecycle.onStop lands between a caller's

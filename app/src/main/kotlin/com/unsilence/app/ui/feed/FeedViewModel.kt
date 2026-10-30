@@ -22,6 +22,13 @@ import com.unsilence.app.data.memory.RelaySet
 import com.unsilence.app.data.memory.UserEntity
 import com.unsilence.app.data.memory.WotLookup
 import com.unsilence.app.data.memory.ZapDetail
+import com.unsilence.app.data.relay.followingCoverageLosses
+import com.unsilence.app.data.relay.RELAY_METADATA_DEBOUNCE_MS
+import kotlinx.coroutines.flow.flowOf
+import kotlinx.coroutines.flow.flatMapLatest
+import kotlinx.coroutines.flow.merge
+import kotlinx.coroutines.flow.drop
+import kotlinx.coroutines.flow.runningFold
 import com.unsilence.app.data.relay.CardHydrator
 import com.unsilence.app.data.relay.ConnectionPurpose
 import com.unsilence.app.data.relay.ENGAGEMENT_LOOKAHEAD
@@ -492,9 +499,12 @@ class FeedViewModel @Inject constructor(
      * 75%, 90% of follows. Avoids the per-relay-list trickle that produced
      * 6+ resubscribes per cold start.
      */
+    private val screenActive = MutableStateFlow(false)
+    private val followingFallbackDependencies = MutableStateFlow<Set<String>>(emptySet())
+    @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
     private val relayMetadataVersion: StateFlow<Int> = run {
         val ownPubkey = keyManager.getPublicKeyHex()
-        if (ownPubkey == null) {
+        val milestones = if (ownPubkey == null) {
             MutableStateFlow(0).asStateFlow()
         } else {
             combine(
@@ -514,9 +524,24 @@ class FeedViewModel @Inject constructor(
                 }
             }
                 .distinctUntilChanged()
-                .debounce(2_000L) // coalesce kind-10002 bursts HERE, not globally
+                .debounce(RELAY_METADATA_DEBOUNCE_MS) // coalesce kind-10002 bursts here
                 .stateIn(viewModelScope, SharingStarted.Eagerly, 0)
         }
+        val watched = combine(screenActive, followingFallbackDependencies) { active, dependencies ->
+            if (active) dependencies else emptySet()
+        }.distinctUntilChanged()
+        val healthy = watched.flatMapLatest { dependencies ->
+            if (dependencies.isEmpty()) flowOf(emptySet()) else merge(
+                relayPool.connectionStates.map { Unit },
+                relayPool.onRelayReconnected.map { Unit },
+                relayPool.relayAuthUnavailable.map { Unit },
+            ).map { relayPool.healthyReadRelayUrls() }.distinctUntilChanged()
+        }.flowOn(Dispatchers.Default)
+        merge(
+            milestones.drop(1).map { Unit },
+            followingCoverageLosses(watched, healthy),
+        ).runningFold(0) { version, _ -> version + 1 }
+            .stateIn(viewModelScope, SharingStarted.Eagerly, 0)
     }
 
     // -- Content filter --------------------------------------------------------
@@ -654,7 +679,6 @@ class FeedViewModel @Inject constructor(
     )
 
     private val displayWindowReporter = com.unsilence.app.ui.shared.DisplayWindowReporter(memoryEventStore)
-    private val screenActive = MutableStateFlow(false)
 
     fun setScreenActive(active: Boolean) {
         screenActive.value = active
@@ -1299,7 +1323,8 @@ class FeedViewModel @Inject constructor(
         }
     }
 
-    private fun buildSubRequests(type: FeedType, filter: FeedFilter): List<SubRequest> {
+    private suspend fun buildSubRequests(type: FeedType, filter: FeedFilter): List<SubRequest> {
+        followingFallbackDependencies.value = emptySet()
         val ownPubkey = keyManager.getPublicKeyHex()
         val blockedRelays = ownPubkey
             ?.let { memoryEventStore.getBlockedRelayUrls(it).toSet() }
@@ -1331,6 +1356,8 @@ class FeedViewModel @Inject constructor(
                     fallbackRelays = readRelays.ifEmpty { GLOBAL_RELAY_URLS },
                     blockedRelays = blockedRelays,
                     config = config,
+                    healthyRelayUrls = withContext(Dispatchers.Default) { relayPool.healthyReadRelayUrls() },
+                    onFallbackDependencies = { followingFallbackDependencies.value = it },
                 )
             }
             is FeedType.Global -> outboxResolver.resolveGlobal(

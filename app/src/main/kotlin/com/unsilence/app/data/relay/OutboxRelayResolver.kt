@@ -44,7 +44,8 @@ interface RelayMetadataSource {
  * Mirrors Jumble's generateSubRequestsForPubkeys (client.service.ts:1542):
  * produces N SubRequests, ONE PER RELAY, each with `urls: [oneRelay]` ×
  * `authors: [authorsAtThisRelay]`. Fallback relays (user's read relays)
- * carry all authors; write relays carry only the authors who publish there.
+ * carry uncovered authors plus their own declared writers; write relays carry
+ * only the authors who publish there.
  *
  * Per-relay routing means each relay gets a targeted author list instead of
  * the full 250+ author set, and each relay's EOSE is independent.
@@ -65,12 +66,16 @@ class OutboxRelayResolver @Inject constructor(
      * @param fallbackRelays Default relays for authors with no known write relays
      *                       (typically GLOBAL_RELAY_URLS).
      * @param blockedRelays Normalized URLs to exclude.
+     * @param healthyRelayUrls Snapshot of connected relays eligible for general REQs.
+     * Unknown/connecting relays conservatively leave their authors on fallback.
      */
     fun resolveFollowing(
         authors: Set<String>,
         fallbackRelays: List<String>,
         blockedRelays: Set<String>,
         config: Config,
+        healthyRelayUrls: Set<String> = emptySet(),
+        onFallbackDependencies: (Set<String>) -> Unit = {},
     ): List<SubRequest> {
         if (authors.isEmpty()) return emptyList()
 
@@ -94,14 +99,14 @@ class OutboxRelayResolver @Inject constructor(
             }
         }
 
-        // Fallback relays — always included, each as own SubRequest with ALL authors.
+        // Fallback URLs can also be declared writes; keep one request per URL.
         val baseUrlSet = fallbackRelays
             .mapNotNull { normalizeRelayUrl(it) }
             .filter { it !in blockedRelays }
             .distinct()
             .toSet()
 
-        // Write relays (exclude fallbacks — they already carry all authors).
+        // Fallback URLs retain their declared writers in the merged request below.
         val writeRelayUrls = relayCoverage.keys.filter { it !in baseUrlSet }
 
         // Coverage pruning: greedy set cover if >MAX_OUTBOX_RELAYS write relays.
@@ -138,14 +143,26 @@ class OutboxRelayResolver @Inject constructor(
 
         val subRequests = mutableListOf<SubRequest>()
 
-        // Fallback relays: each gets all authors. Always FAST tier — these
-        // are user read relays the client has to be connected to anyway.
+        val healthy = healthyRelayUrls.mapNotNull(::normalizeRelayUrl).toSet()
+        val covered = (selectedWriteRelays + baseUrlSet)
+            .asSequence()
+            .filter { it in healthy }
+            .flatMap { relayCoverage[it].orEmpty().asSequence() }
+            .toSet()
+        val uncovered = sortedAuthors.filterNot { it in covered }
+        onFallbackDependencies((selectedWriteRelays + baseUrlSet)
+            .filterTo(HashSet()) { it in healthy && !relayCoverage[it].isNullOrEmpty() })
+
+        // Only proven usable selected writes remove fallback coverage. A fallback
+        // that is itself a declared write still carries those authors, exactly once.
         for (url in baseUrlSet.sorted()) {
+            val fallbackAuthors = (uncovered + relayCoverage[url].orEmpty()).distinct().sorted()
+            if (fallbackAuthors.isEmpty()) continue
             subRequests.add(SubRequest(
                 urls = listOf(url),
                 filter = NostrFilter(
                     kinds = config.kinds,
-                    authors = sortedAuthors,
+                    authors = fallbackAuthors,
                     limit = config.limit,
                     since = config.since,
                     tags = config.tags,
