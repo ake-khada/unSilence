@@ -149,7 +149,7 @@ fun ProfileScreen(
     }
 
     val user            by viewModel.userFlow.collectAsStateWithLifecycle(initialValue = null)
-    val posts           by viewModel.tabPostsFlow.collectAsStateWithLifecycle(initialValue = emptyList())
+    val posts           by viewModel.tabPostsFlow.collectProfilePostsAsState()
     com.unsilence.app.ui.shared.ObserveDisplayWindowLifecycle(actionsViewModel)
 
     val engagementRetryRevision by actionsViewModel.engagementRetryRevision.collectAsStateWithLifecycle()

@@ -156,7 +156,7 @@ fun UserProfileScreen(
         pubkeyHex?.let(nip05Verifier::markProfileOpened)
     }
     val user            by viewModel.userFlow.collectAsStateWithLifecycle(initialValue = null)
-    val posts           by viewModel.tabPostsFlow.collectAsStateWithLifecycle(initialValue = emptyList())
+    val posts           by viewModel.tabPostsFlow.collectProfilePostsAsState()
     val sensitiveMode   by viewModel.sensitiveContentMode.collectAsStateWithLifecycle()
     val selectedTab     by viewModel.selectedTab.collectAsStateWithLifecycle()
     val isLoadingPosts  by viewModel.isLoadingPosts.collectAsStateWithLifecycle()
