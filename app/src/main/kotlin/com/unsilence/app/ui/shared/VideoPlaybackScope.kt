@@ -15,6 +15,7 @@ import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.lifecycle.compose.LocalLifecycleOwner
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.media3.common.MediaItem
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
@@ -25,6 +26,7 @@ import com.unsilence.app.data.model.Segment
 import com.unsilence.app.data.model.VideoRenderModel
 import com.unsilence.app.data.model.buildVideoRenderModels
 import com.unsilence.app.ui.feed.SharedPlayerHolder
+import com.unsilence.app.ui.feed.allowVideoPlayback
 import kotlin.math.abs
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.distinctUntilChanged
@@ -70,6 +72,8 @@ class VideoPlaybackScope internal constructor(
     var videoRenderModels by mutableStateOf<Map<String, List<VideoRenderModel>>>(emptyMap())
         internal set
     private var selectedVideoUrls by mutableStateOf<Map<String, String>>(emptyMap())
+    private var explicitVideoUrl: String? = null
+    internal fun isExplicitPlayback(url: String?): Boolean = url != null && url == explicitVideoUrl
     private var playbackRegistrations by mutableStateOf<Map<Any, VideoPlaybackRegistration>>(emptyMap())
     internal var playbackPermissionRevision by mutableStateOf(0L)
         private set
@@ -121,6 +125,7 @@ class VideoPlaybackScope internal constructor(
             // Re-hide/disposal revokes consent immediately, not after the scroll
             // detector's cooldown. Preserve codec retention and other scopes' ownership.
             if (activeVideoNoteId == noteId && holder.currentUrl != activeVideoUrl) {
+                explicitVideoUrl = null
                 holder.releaseOwnership(ownerId)
                 // Disposal and a new grant can occur in one Compose apply pass.
                 // Restart the effect even if the final allowed URL is unchanged.
@@ -160,11 +165,13 @@ class VideoPlaybackScope internal constructor(
         ) ?: return
         selectVideo(noteId, targetUrl)
         val decision = decideFullscreenPlayback(targetUrl, holder.currentUrl, exoPlayer.mediaItemCount)
+        explicitVideoUrl = targetUrl
         when (decision) {
             FullscreenPlaybackDecision.Ignore -> return
             FullscreenPlaybackDecision.Resume -> {
-                holder.claim(ownerId)
+                holder.claim(ownerId, explicitlyRequested = true)
                 exoPlayer.repeatMode = Player.REPEAT_MODE_ALL
+                holder.recoverPolicyStop()
                 exoPlayer.playWhenReady = true
             }
             FullscreenPlaybackDecision.Rebind -> {
@@ -172,8 +179,9 @@ class VideoPlaybackScope internal constructor(
                 // to a different scope's URL. Rebind before opening fullscreen:
                 // activeVideoNoteId may be unchanged, so LaunchedEffect(activeVideoUrl)
                 // will not necessarily run to repair this.
-                holder.claim(ownerId)
+                holder.claim(ownerId, explicitlyRequested = true)
                 exoPlayer.repeatMode = Player.REPEAT_MODE_ALL
+                holder.clearPolicyStop()
                 exoPlayer.stop()
                 exoPlayer.clearMediaItems()
                 exoPlayer.setMediaItem(MediaItem.fromUri(targetUrl))
@@ -192,6 +200,8 @@ class VideoPlaybackScope internal constructor(
         showFullscreenVideo = false
         isMuted = preFullscreenMuted
     }
+
+    internal fun clearExplicitPlayback() { explicitVideoUrl = null }
 }
 
 internal fun resolveSelectedVideoUrl(
@@ -305,6 +315,8 @@ fun rememberVideoPlaybackScope(
     additionalVideoSourceCandidateIds: ((FeedRow, EventModel?) -> List<String>)? = null,
 ): VideoPlaybackScope {
     val exoPlayer = holder.player
+    val autoplayBlocked by holder.autoplayBlocked.collectAsStateWithLifecycle()
+    val meteredRef = rememberUpdatedState(autoplayBlocked)
     val lifecycle = LocalLifecycleOwner.current.lifecycle
     val navigationGate = remember(ownerId, holder, lifecycle) {
         NavigationPlaybackGate(lifecycle) { resumed ->
@@ -466,11 +478,11 @@ fun rememberVideoPlaybackScope(
         onDispose { exoPlayer.removeListener(listener) }
     }
 
-    LaunchedEffect(scope, scope.canPlay, activeVideoUrl, scope.playbackPermissionRevision) {
+    LaunchedEffect(scope, scope.canPlay, activeVideoUrl, scope.playbackPermissionRevision, autoplayBlocked) {
         if (!scope.canPlay) return@LaunchedEffect
         // Read current live consent here, not a URL captured before a re-hide.
         val permittedUrl = scope.activeVideoUrl
-        if (permittedUrl != null) {
+        if (permittedUrl != null && allowVideoPlayback(autoplayBlocked, scope.isExplicitPlayback(permittedUrl))) {
             val retainedUrl = holder.currentUrl
             val wasRetained = holder.isRetained
             val activeId = scope.activeVideoNoteId
@@ -485,15 +497,18 @@ fun rememberVideoPlaybackScope(
                 "player request: id=${activeId?.take(8) ?: "none"} " +
                     "owner=$ownerId mode=$requestMode",
             )
-            holder.claim(ownerId)
+            holder.claim(ownerId, explicitlyRequested = scope.isExplicitPlayback(permittedUrl))
             exoPlayer.repeatMode = Player.REPEAT_MODE_ALL
             exoPlayer.volume = if (scope.isMuted) 0f else 1f
             if (retainedUrl != permittedUrl || exoPlayer.mediaItemCount == 0) {
                 // Different URL — full media swap (the one path where codec realloc is correct)
+                holder.clearPolicyStop()
                 exoPlayer.stop()
                 exoPlayer.clearMediaItems()
                 exoPlayer.setMediaItem(MediaItem.fromUri(permittedUrl))
                 exoPlayer.prepare()
+            } else {
+                holder.recoverPolicyStop()
             }
             // Same URL resumes without prepare or codec reallocation.
             exoPlayer.playWhenReady = true
@@ -527,8 +542,8 @@ fun rememberVideoPlaybackScope(
         // changes. Returning layoutInfo alone means a late-resolved nested video
         // can be observed but suppressed until the user scrolls and layoutInfo
         // changes. That is exactly the "video appears after sliding" failure.
-        snapshotFlow { scope.playableVideoModels.keys to listState.layoutInfo }
-            .map { (currentIds, layoutInfo) ->
+        snapshotFlow { Triple(scope.playableVideoModels.keys, listState.layoutInfo, meteredRef.value) }
+            .map { (currentIds, layoutInfo, isMetered) ->
                 scope.mapPasses += 1
 
                 val isScrolling = listState.isScrollInProgress
@@ -538,6 +553,7 @@ fun rememberVideoPlaybackScope(
 
                 // Fullscreen freeze
                 if (showFullscreenRef.value) return@map activeRef.value
+                if (!allowVideoPlayback(isMetered, scope.isExplicitPlayback(scope.activeVideoUrl))) return@map null
 
                 // Layout shift cooldown — only while stationary. During scroll,
                 // visible item count changes are expected (items of different
@@ -584,6 +600,7 @@ fun rememberVideoPlaybackScope(
                     ?.key as? String
 
                 when {
+                    !allowVideoPlayback(isMetered, false) -> currentActive.takeIf { currentStillVisible }
                     candidate != null -> candidate
                     currentStillVisible -> currentActive
                     else -> null
@@ -633,6 +650,9 @@ fun rememberVideoPlaybackScope(
             .distinctUntilChanged()
             .collect { newActiveId ->
                 if (!scope.canPlay) return@collect
+                if (newActiveId != null && !holder.canAutoplay &&
+                    (newActiveId != scope.activeVideoNoteId || !scope.isExplicitPlayback(scope.activeVideoUrl))
+                ) return@collect
                 // Consent may have been revoked during the confirmation delay.
                 if (newActiveId != null && newActiveId !in scope.playableVideoModels) return@collect
                 if (scope.activeVideoNoteId != newActiveId) {
@@ -650,6 +670,7 @@ fun rememberVideoPlaybackScope(
                     }
 
                     val oldId = scope.activeVideoNoteId
+                    scope.clearExplicitPlayback()
                     val modelsAgeMs = scope.modelsResolvedAtElapsedMs
                         .takeIf { it > 0L }
                         ?.let { SystemClock.elapsedRealtime() - it }

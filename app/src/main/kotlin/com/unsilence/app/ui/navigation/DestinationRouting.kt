@@ -12,6 +12,7 @@ internal fun articleDestination(row: FeedRow, focusedCommentId: String? = null) 
 
 internal fun settingsDestination(page: SettingsPage): AppDestination = when (page) {
     SettingsPage.RELAYS -> AppDestination.RelaySettings
+    SettingsPage.MEDIA_DATA -> AppDestination.MediaData
     SettingsPage.MEDIA_UPLOADS -> AppDestination.MediaUploads
     SettingsPage.ZAPS -> AppDestination.ZapSettings
     SettingsPage.FILTERS -> AppDestination.Filters

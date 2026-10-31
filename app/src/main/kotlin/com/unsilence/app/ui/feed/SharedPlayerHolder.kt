@@ -2,6 +2,7 @@ package com.unsilence.app.ui.feed
 
 import android.content.Context
 import android.util.Log
+import androidx.media3.common.Player
 import androidx.media3.common.MediaItem
 import androidx.media3.datasource.cache.CacheDataSource
 import androidx.media3.exoplayer.DefaultLoadControl
@@ -10,9 +11,19 @@ import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.exoplayer.source.preload.DefaultPreloadManager
 import androidx.media3.exoplayer.source.preload.TargetPreloadStatusControl
 import com.unsilence.app.data.model.VideoRenderModel
+import com.unsilence.app.data.relay.NetworkMonitor
+import com.unsilence.app.data.relay.RelayPreferencesStore
 import dagger.hilt.android.qualifiers.ApplicationContext
 import javax.inject.Inject
 import javax.inject.Singleton
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.flow.SharingStarted
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.stateIn
 
 private const val TAG = "SharedPlayerHolder"
 private const val IMMERSIVE_PRELOAD_DURATION_MS = 3_000L
@@ -23,12 +34,51 @@ private const val NO_PRELOAD_INDEX = -1
 class SharedPlayerHolder @Inject constructor(
     @ApplicationContext private val context: Context,
     private val mediaDataSourceFactory: CacheDataSource.Factory,
+    private val networkMonitor: NetworkMonitor,
+    relayPreferencesStore: RelayPreferencesStore,
 ) {
     private var _player: ExoPlayer? = null
     private var _preloadManager: DefaultPreloadManager? = null
     private var _currentOwner: String? = null
+    private var policyStoppedUrl: String? = null
     private var preloadCenterIndex = NO_PRELOAD_INDEX
     private val immersivePreloadEntries = linkedMapOf<String, PreloadEntry>()
+    private val networkScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+    val autoplayBlocked = combine(relayPreferencesStore.automaticMediaPreferences, networkMonitor.conditions) { preferences, conditions ->
+        preferences == null || videoAutoplayBlocked(preferences.video, conditions)
+    }.stateIn(
+        networkScope,
+        SharingStarted.Eagerly,
+        relayPreferencesStore.automaticMediaPreferences.value?.let {
+            videoAutoplayBlocked(it.video, networkMonitor.currentConditions)
+        } ?: true,
+    )
+    val canAutoplay get() = !autoplayBlocked.value
+    private var networkJob: Job? = null
+    private val networkPolicy = VideoNetworkPolicy(
+        stopUnrequested = {
+            if (_player?.playbackState != null && _player?.playbackState != Player.STATE_IDLE) {
+                policyStoppedUrl = currentUrl
+            }
+            _player?.playWhenReady = false
+            // stop cancels loading but retains the current item and position.
+            _player?.stop()
+        },
+        clearPreloads = ::clearImmersivePreloads,
+    )
+
+    /** Do not turn unrelated player errors into automatic retries in Always mode. */
+    fun recoverPolicyStop(): Boolean {
+        val player = _player ?: return false
+        val recover = shouldPrepareAfterPolicyStop(
+            player.playbackState == Player.STATE_IDLE, policyStoppedUrl, currentUrl,
+        )
+        policyStoppedUrl = null
+        if (recover) player.prepare()
+        return recover
+    }
+
+    fun clearPolicyStop() { policyStoppedUrl = null }
 
     private val loadControl = DefaultLoadControl.Builder()
         .setBufferDurationsMs(
@@ -45,7 +95,7 @@ class SharedPlayerHolder @Inject constructor(
         get() {
             if (_player == null) {
                 val targetControl = TargetPreloadStatusControl<Int> { index ->
-                    if (index == preloadCenterIndex + 1) {
+                    if (canAutoplay && index == preloadCenterIndex + 1) {
                         DefaultPreloadManager.Status(
                             DefaultPreloadManager.Status.STAGE_LOADED_FOR_DURATION_MS,
                             IMMERSIVE_PRELOAD_DURATION_MS,
@@ -62,6 +112,9 @@ class SharedPlayerHolder @Inject constructor(
                     repeatMode = ExoPlayer.REPEAT_MODE_ALL
                 }
                 _preloadManager = preloadBuilder.build()
+                networkJob = networkScope.launch {
+                    autoplayBlocked.collect { networkPolicy.networkChanged(it) }
+                }
             }
             return _player!!
         }
@@ -74,8 +127,9 @@ class SharedPlayerHolder @Inject constructor(
     val isRetained: Boolean
         get() = _currentOwner == null && _player?.currentMediaItem != null
 
-    fun claim(ownerId: String): ExoPlayer {
+    fun claim(ownerId: String, explicitlyRequested: Boolean = false): ExoPlayer {
         _currentOwner = ownerId
+        networkPolicy.claimed(explicitlyRequested)
         return player
     }
 
@@ -89,6 +143,7 @@ class SharedPlayerHolder @Inject constructor(
         if (_currentOwner == ownerId) {
             _player?.playWhenReady = false
             _currentOwner = null
+            networkPolicy.released()
             Log.d(TAG, "Released ownership ($ownerId) — codec retained for session")
         }
     }
@@ -101,6 +156,7 @@ class SharedPlayerHolder @Inject constructor(
      */
     fun setImmersiveMediaItem(eventId: String, video: VideoRenderModel) {
         val exoPlayer = player
+        clearPolicyStop()
         val mediaItem = immersivePreloadEntries[eventId]?.mediaItem
             ?: buildMediaItem(eventId, video)
         val preloadedSource = _preloadManager?.getMediaSource(mediaItem)
@@ -130,7 +186,7 @@ class SharedPlayerHolder @Inject constructor(
         preloadCenterIndex = currentIndex
 
         val desired = linkedMapOf<String, PreloadEntry>()
-        if (enabled) {
+        if (enabled && canAutoplay) {
             desired[currentEventId] = PreloadEntry(
                 mediaItem = buildMediaItem(currentEventId, currentVideo),
                 index = currentIndex,
@@ -174,9 +230,11 @@ class SharedPlayerHolder @Inject constructor(
      */
     fun releaseForLifecycle(reason: String) {
         _player?.stop()
+        policyStoppedUrl = null
         _player?.clearMediaItems()
         clearImmersivePreloads()
         _currentOwner = null
+        networkPolicy.released()
         Log.d(TAG, "Codec released — $reason")
     }
 
@@ -185,7 +243,10 @@ class SharedPlayerHolder @Inject constructor(
      * Called on logout and severe memory pressure.
      */
     fun release() {
+        networkJob?.cancel()
+        networkJob = null
         _player?.stop()
+        policyStoppedUrl = null
         _player?.clearMediaItems()
         _player?.release()
         _preloadManager?.release()
@@ -194,6 +255,7 @@ class SharedPlayerHolder @Inject constructor(
         _currentOwner = null
         preloadCenterIndex = NO_PRELOAD_INDEX
         immersivePreloadEntries.clear()
+        networkPolicy.released()
     }
 
     private fun buildMediaItem(eventId: String, video: VideoRenderModel): MediaItem =

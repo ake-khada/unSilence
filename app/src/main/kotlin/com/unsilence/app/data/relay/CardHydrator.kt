@@ -6,6 +6,7 @@ import coil3.SingletonImageLoader
 import coil3.request.ImageRequest
 import coil3.size.Dimension
 import coil3.size.Size
+import com.unsilence.app.data.media.MediaLoadingPolicy
 import com.unsilence.app.data.memory.FeedRow
 import com.unsilence.app.data.memory.MemoryEventStore
 import com.unsilence.app.data.memory.toEventModel
@@ -111,7 +112,8 @@ internal fun allowedImagePrefetchUrl(url: String?): String? =
     parseAllowedUntrustedHttpUrl(url)?.toString()
 
 /** Select and dispatch at most one OG warm-up; callback reports whether it spent budget. */
-internal fun warmOgCandidate(model: EventModel, warm: (String) -> Boolean): Boolean {
+internal fun warmOgCandidate(model: EventModel, allowed: Boolean = true, warm: (String) -> Boolean): Boolean {
+    if (!allowed) return false
     val index = firstOpenablePreviewIndex(model.segments)
     val link = model.segments.getOrNull(index) as? Segment.Link ?: return false
     return warm(link.url)
@@ -160,6 +162,7 @@ class CardHydrator @Inject constructor(
     private val outboxResolver: OutboxRelayResolver,
     private val networkMonitor: NetworkMonitor,
     private val relayCapabilitiesStore: RelayCapabilitiesStore,
+    private val mediaLoadingPolicy: MediaLoadingPolicy,
 ) {
     private val imageLoader by lazy { SingletonImageLoader.get(context) }
     private val hydrationScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
@@ -322,14 +325,14 @@ class CardHydrator @Inject constructor(
                 for (candidate in imageCandidates(model)) {
                     if (imagePrefetches >= budget.images) break
                     if (!candidate.dimensionsKnown) warmImageDimensions(candidate.url)
-                    if (prefetchSizedImage(candidate.url, cardWidthPx, candidate.aspectRatio)) {
+                    if (prefetchSizedImage(candidate.url, cardWidthPx, candidate.aspectRatio, preview = candidate.preview)) {
                         imagePrefetches++
                     }
                 }
             }
 
             if (ogFetches < budget.og) {
-                val countedAsFetch = warmOgCandidate(model) { url ->
+                val countedAsFetch = warmOgCandidate(model, allowed = mediaLoadingPolicy.current.previews) { url ->
                     warmOgMetadata(url = url, cardWidthPx = cardWidthPx)
                 }
                 if (countedAsFetch) ogFetches++
@@ -430,6 +433,7 @@ class CardHydrator @Inject constructor(
         val url: String,
         val aspectRatio: Float,
         val dimensionsKnown: Boolean,
+        val preview: Boolean = false,
     )
 
     private data class ReferenceCandidate(
@@ -476,18 +480,19 @@ class CardHydrator @Inject constructor(
                 "https://img.youtube.com/vi/${youtube.videoId}/hqdefault.jpg",
                 16f / 9f,
                 dimensionsKnown = true,
+                preview = true,
             ))
         }
     }
 
     private fun warmVideoThumbnails(model: EventModel, remaining: Int): Int {
-        if (remaining <= 0) return 0
+        if (remaining <= 0 || !mediaLoadingPolicy.current.images) return 0
         var warmed = 0
         for (video in model.media.videos.map { it.model }) {
             if (warmed >= remaining) break
             if (thumbnailCache.getCached(video.videoUrl) != null) continue
             warmed++
-            backfillScope.launch { thumbnailCache.warmThumbnail(video.videoUrl) }
+            backfillScope.launch { if (mediaLoadingPolicy.current.images) thumbnailCache.warmThumbnail(video.videoUrl) }
         }
         return warmed
     }
@@ -613,7 +618,7 @@ class CardHydrator @Inject constructor(
             for (candidate in imageCandidates(refModel)) {
                 if (imagePrefetches >= remainingImagePrefetches) break
                 if (!candidate.dimensionsKnown) warmImageDimensions(candidate.url)
-                if (prefetchSizedImage(candidate.url, cardWidthPx, candidate.aspectRatio)) {
+                if (prefetchSizedImage(candidate.url, cardWidthPx, candidate.aspectRatio, preview = candidate.preview)) {
                     imagePrefetches++
                 }
             }
@@ -762,12 +767,13 @@ class CardHydrator @Inject constructor(
     }
 
     private fun warmImageDimensions(url: String) {
+        if (!mediaLoadingPolicy.current.images) return
         val key = url.substringBefore('#')
         if (!markBounded(key, imageDimensionWarmed, imageDimensionWarmOrder, PREFETCH_KEY_CAP)) return
         if (imageDimensionCache.getCached(url) != null) return
         backfillScope.launch {
             try {
-                imageDimensionCache.resolve(url)
+                if (mediaLoadingPolicy.current.images) imageDimensionCache.resolve(url)
             } catch (_: Exception) {
                 currentCoroutineContext().ensureActive()
             }
@@ -777,7 +783,9 @@ class CardHydrator @Inject constructor(
     /**
      * @return true if this call consumed one image-prefetch budget slot.
      */
-    private fun prefetchSizedImage(url: String?, widthPx: Int, aspectRatio: Float): Boolean {
+    private fun prefetchSizedImage(url: String?, widthPx: Int, aspectRatio: Float, preview: Boolean = false): Boolean {
+        val permissions = mediaLoadingPolicy.current
+        if (if (preview) !permissions.previews else !permissions.images) return false
         val safeUrl = allowedImagePrefetchUrl(url) ?: return false
         val safeWidth = widthPx.coerceIn(1, MAX_PREFETCH_WIDTH_PX)
         val safeAspect = feedSafeAspect(aspectRatio)
@@ -802,6 +810,7 @@ class CardHydrator @Inject constructor(
         url: String,
         cardWidthPx: Int,
     ): Boolean {
+        if (!mediaLoadingPolicy.current.previews) return false
         val key = url.substringBefore('#')
         val cached = ogFetcher.hasCached(url)
         val isNewWarm = markBounded(key, ogWarmed, ogWarmOrder, PREFETCH_KEY_CAP)
@@ -810,9 +819,10 @@ class CardHydrator @Inject constructor(
         backfillScope.launch {
             ogWarmSemaphore.acquire()
             try {
+                if (!mediaLoadingPolicy.current.previews) return@launch
                 val metadata = ogFetcher.fetch(url)
                 val imageUrl = metadata?.imageUrl
-                if (!imageUrl.isNullOrBlank()) prefetchSizedImage(imageUrl, cardWidthPx, 16f / 9f)
+                if (!imageUrl.isNullOrBlank()) prefetchSizedImage(imageUrl, cardWidthPx, 16f / 9f, preview = true)
             } finally {
                 ogWarmSemaphore.release()
             }
@@ -836,7 +846,7 @@ class CardHydrator @Inject constructor(
     }
 
     suspend fun hydrateMedia(events: List<FeedRow>, mmrAllowed: Boolean = false, mmrCap: Int = 3) {
-        if (events.isEmpty()) return
+        if (events.isEmpty() || !mediaLoadingPolicy.current.images) return
         val novelEvents = filterAndMarkNovel(events, mediaHydrated)
         if (novelEvents.isEmpty()) return
 
@@ -848,13 +858,13 @@ class CardHydrator @Inject constructor(
             model.media.images.forEach { imageUrls.add(it.url) }
         }
         val uniqueImageUrls = imageUrls.distinct().filter { imageDimensionCache.getCached(it) == null }
-        if (uniqueImageUrls.isNotEmpty()) {
+        if (uniqueImageUrls.isNotEmpty() && mediaLoadingPolicy.current.images) {
             imageDimensionCache.resolveAll(uniqueImageUrls)
             Log.d(TAG, "Media: resolved ${uniqueImageUrls.size} image dims")
         }
 
         // Video thumbnails via bounded guarded MediaDataSource (REST-only, capped)
-        if (mmrAllowed) {
+        if (mmrAllowed && mediaLoadingPolicy.current.images) {
             var thumbnailCount = 0
             for (event in novelEvents) {
                 if (thumbnailCount >= mmrCap) break
@@ -870,7 +880,9 @@ class CardHydrator @Inject constructor(
                     // already cached.
                     if (thumbnailCache.getCached(model.videoUrl) != null) continue
                     try {
-                        withContext(Dispatchers.IO) { thumbnailCache.getThumbnail(model.videoUrl) }
+                        withContext(Dispatchers.IO) {
+                            if (mediaLoadingPolicy.current.images) thumbnailCache.getThumbnail(model.videoUrl)
+                        }
                         thumbnailCount++
                         Log.d(TAG, "Media: MMR thumbnail ${model.videoUrl.take(60)}")
                     } catch (e: kotlin.coroutines.cancellation.CancellationException) {

@@ -1,5 +1,6 @@
 package com.unsilence.app.ui.markdown
 
+import com.unsilence.app.ui.shared.AutomaticMediaGate
 import com.unsilence.app.ui.theme.AppTextStyles
 import androidx.compose.foundation.background
 import androidx.compose.foundation.horizontalScroll
@@ -177,14 +178,16 @@ private fun MdBlockView(
         }
 
         is MdBlock.Image -> {
-            SubcomposeAsyncImage(
-                model              = rememberFullWidthImageRequest(block.url),
-                contentDescription = block.alt,
-                contentScale       = ContentScale.FillWidth,
-                modifier           = Modifier
-                    .fillMaxWidth()
-                    .clip(RoundedCornerShape(Sizing.mediaCornerRadius)),
-            )
+            AutomaticMediaGate(contentKey = block.url) {
+                SubcomposeAsyncImage(
+                    model              = rememberFullWidthImageRequest(block.url),
+                    contentDescription = block.alt,
+                    contentScale       = ContentScale.FillWidth,
+                    modifier           = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(Sizing.mediaCornerRadius)),
+                )
+            }
         }
 
         is MdBlock.Table -> {

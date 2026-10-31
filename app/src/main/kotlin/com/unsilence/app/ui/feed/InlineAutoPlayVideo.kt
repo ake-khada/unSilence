@@ -1,5 +1,7 @@
 package com.unsilence.app.ui.feed
 
+import com.unsilence.app.ui.shared.LocalMediaLoadPermissions
+
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -43,6 +45,7 @@ import androidx.media3.ui.PlayerView
 import coil3.compose.AsyncImage
 import com.unsilence.app.ui.common.rememberFullWidthImageRequest
 import com.unsilence.app.data.model.VideoRenderModel
+import com.unsilence.app.ui.shared.rememberMediaAdmission
 import com.unsilence.app.ui.theme.Sizing
 import com.unsilence.app.ui.theme.Surface1
 
@@ -93,6 +96,7 @@ internal fun VideoThumbnailImage(
     requestAspectRatio: Float = model.aspectRatio,
     contentScale: ContentScale = ContentScale.Fit,
 ) {
+    if (!rememberMediaAdmission(model.videoUrl, LocalMediaLoadPermissions.current.images)) return
     val currentOnAspectRatioResolved by rememberUpdatedState(onAspectRatioResolved)
     var thumbnail by remember(model.videoUrl, thumbnailCache) {
         mutableStateOf(thumbnailCache?.getCached(model.videoUrl))

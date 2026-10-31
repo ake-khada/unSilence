@@ -717,6 +717,10 @@ fun AppNavigation(
                     onDismiss = navigator::pop,
                     navigationOwnsBack = true,
                 )
+                AppDestination.MediaData -> com.unsilence.app.ui.settings.MediaDataSettingsScreen(
+                    onDismiss = navigator::pop,
+                    navigationOwnsBack = true,
+                )
                 AppDestination.MediaUploads -> com.unsilence.app.ui.settings.MediaUploadSettingsScreen(
                     onDismiss = navigator::pop,
                     navigationOwnsBack = true,

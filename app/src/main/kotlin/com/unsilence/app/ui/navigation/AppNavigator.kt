@@ -33,6 +33,7 @@ internal sealed interface AppDestination {
     @Serializable data class EditRelaySet(val dTag: String) : AppDestination
     @Serializable data object Settings : AppDestination
     @Serializable data object EditProfile : AppDestination
+    @Serializable data object MediaData : AppDestination
     @Serializable data object MediaUploads : AppDestination
     @Serializable data object Filters : AppDestination
     @Serializable data object Keys : AppDestination

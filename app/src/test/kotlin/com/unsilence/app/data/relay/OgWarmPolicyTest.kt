@@ -42,6 +42,15 @@ class OgWarmPolicyTest {
         assertEquals(listOf(url), calls)
     }
 
+    @Test fun disabledPreviewNeverWarmsOrSpendsBudgetButBecomesEligibleWhenEnabled() {
+        val model = model("https://example.com/guide")
+        var calls = 0
+        assertFalse(warmOgCandidate(model, allowed = false) { calls++; true })
+        assertEquals(0, calls)
+        assertTrue(warmOgCandidate(model, allowed = true) { calls++; true })
+        assertEquals(1, calls)
+    }
+
     private fun model(content: String) = ContentParser.parse(
         id = "a".repeat(64), pubkey = "b".repeat(64), kind = 1,
         content = content, tagsJson = "[]", createdAt = 1L, relayUrl = "",

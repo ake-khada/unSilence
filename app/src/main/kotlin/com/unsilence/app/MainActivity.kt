@@ -7,6 +7,10 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.SystemBarStyle
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.runtime.getValue
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.unsilence.app.data.media.MediaLoadingPolicy
+import com.unsilence.app.ui.shared.LocalMediaLoadPermissions
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.fragment.app.FragmentActivity
@@ -34,6 +38,7 @@ import javax.inject.Inject
 class MainActivity : FragmentActivity() {
 
     @Inject lateinit var signingManager: SigningManager
+    @Inject lateinit var mediaLoadingPolicy: MediaLoadingPolicy
     @Inject lateinit var relayPreferencesStore: RelayPreferencesStore
     @Inject lateinit var appBootstrapper: AppBootstrapper
     @Inject lateinit var keyManager: KeyManager
@@ -122,7 +127,9 @@ class MainActivity : FragmentActivity() {
                     signingManager.registerLauncher(launcher)
                     onDispose { signingManager.unregisterLauncher(launcher) }
                 }
+                val mediaPermissions by mediaLoadingPolicy.permissions.collectAsStateWithLifecycle()
                 CompositionLocalProvider(
+                    LocalMediaLoadPermissions provides mediaPermissions,
                     LocalNip05VerificationController provides nip05Verifier,
                 ) {
                     ProvideMinuteClock { RootScreen() }

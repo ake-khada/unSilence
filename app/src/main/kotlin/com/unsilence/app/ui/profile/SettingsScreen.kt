@@ -73,7 +73,7 @@ import com.unsilence.app.ui.theme.Text3
 import com.unsilence.app.ui.theme.Text4
 import com.unsilence.app.ui.theme.TextSecondary
 
-enum class SettingsPage { RELAYS, MEDIA_UPLOADS, ZAPS, FILTERS, DRAFTS, EMOJIS, SOCIAL_GRAPH, KEYS, CONSOLE }
+enum class SettingsPage { RELAYS, MEDIA_UPLOADS, MEDIA_DATA, ZAPS, FILTERS, DRAFTS, EMOJIS, SOCIAL_GRAPH, KEYS, CONSOLE }
 
 @Composable
 fun SettingsScreen(
@@ -174,6 +174,7 @@ fun SettingsScreen(
                 // ── CONTENT & SAFETY ───────────────────────────────────────────
                 GroupLabel("Content & safety")
                 SettingsRow(Icons.Filled.Security, "Filters", "Mute words, hide unwanted content") { onOpen(SettingsPage.FILTERS) }
+                SettingsRow(Icons.Filled.PhotoLibrary, "Media & data", "Autoplay, images & link previews") { onOpen(SettingsPage.MEDIA_DATA) }
                 SettingsRow(
                     Icons.Filled.Drafts,
                     "Drafts",

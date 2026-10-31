@@ -1,5 +1,8 @@
 package com.unsilence.app.ui.feed
 
+import com.unsilence.app.ui.shared.LocalMediaLoadPermissions
+import com.unsilence.app.ui.shared.rememberMediaAdmission
+
 import com.unsilence.app.ui.theme.AppTextStyles
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -78,8 +81,9 @@ fun MinimalLinkCard(
     // Stay first-party even when a site's WAF blocks direct icon paths; a generic
     // icon is preferable to disclosing every viewed domain to a proxy.
     var iconStage by remember(url) { mutableStateOf(MinimalLinkIconStage.APPLE_TOUCH_ICON) }
-    val iconUrl = remember(host, iconStage, loadFavicon) {
-        minimalLinkIconUrl(host, iconStage, loadFavicon)
+    val allowFavicon = loadFavicon && rememberMediaAdmission(url, LocalMediaLoadPermissions.current.previews)
+    val iconUrl = remember(host, iconStage, allowFavicon) {
+        minimalLinkIconUrl(host, iconStage, allowFavicon)
     }
 
     Row(

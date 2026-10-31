@@ -38,7 +38,7 @@ class AppNavigatorTest {
             AppDestination.CreateRelaySet, AppDestination.EmojiSettings,
             AppDestination.ZapSettings, AppDestination.StartGraph,
             AppDestination.Settings, AppDestination.EditProfile,
-            AppDestination.MediaUploads, AppDestination.Filters, AppDestination.Keys,
+            AppDestination.MediaData, AppDestination.MediaUploads, AppDestination.Filters, AppDestination.Keys,
             AppDestination.Console, AppDestination.SocialGraph, AppDestination.Drafts,
             AppDestination.ResumeDraft("local-draft"), AppDestination.EditRelaySet("my-set"),
             AppDestination.Article("article", listOf("wss://article.example"), "focused-comment"),

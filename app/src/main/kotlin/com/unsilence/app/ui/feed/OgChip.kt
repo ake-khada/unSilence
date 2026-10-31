@@ -1,5 +1,7 @@
 package com.unsilence.app.ui.feed
 
+import com.unsilence.app.ui.shared.AutomaticMediaGate
+
 import com.unsilence.app.ui.theme.AppTextStyles
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -60,6 +62,23 @@ internal fun OgPreviewCard(
     onDirectImageClick: (() -> Unit)? = null,
     showMinimalFallback: Boolean = true,
     modifier: Modifier = Modifier,
+) {
+    if (!remember(url) { isOpenableContentLink(url) }) return
+    AutomaticMediaGate(contentKey = url, preview = true, label = remember(url) { previewHostLabel(url) ?: url }, modifier = modifier) {
+        OgPreviewCardContent(url, fetchOgMetadata, hasCachedOgMetadata, imageDimensionCache,
+            onDirectImageClick, showMinimalFallback, modifier)
+    }
+}
+
+@Composable
+private fun OgPreviewCardContent(
+    url: String,
+    fetchOgMetadata: (suspend (String) -> OgMetadata?)?,
+    hasCachedOgMetadata: ((String) -> Boolean)?,
+    imageDimensionCache: ImageDimensionCache?,
+    onDirectImageClick: (() -> Unit)?,
+    showMinimalFallback: Boolean,
+    modifier: Modifier,
 ) {
     if (!remember(url) { isOpenableContentLink(url) }) return
     val uriHandler = LocalUriHandler.current

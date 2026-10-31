@@ -1,5 +1,6 @@
 package com.unsilence.app.ui.feed
 
+import com.unsilence.app.ui.shared.AutomaticMediaGate
 import com.unsilence.app.ui.theme.AppTextStyles
 import com.unsilence.app.ui.shared.collectCardDataAsState
 
@@ -513,17 +514,19 @@ fun ArticleReaderScreen(
 
                         // ── Banner image — full image at natural aspect (no crop) ──
                         if (!image.isNullOrBlank()) {
-                            SubcomposeAsyncImage(
-                                model              = rememberFullWidthImageRequest(image, aspectRatio = 16f / 9f),
-                                contentDescription = null,
-                                contentScale       = ContentScale.FillWidth,
-                                modifier           = Modifier
-                                    .fillMaxWidth()
-                                    .clip(RoundedCornerShape(
-                                        bottomStart = Sizing.mediaCornerRadius,
-                                        bottomEnd   = Sizing.mediaCornerRadius,
-                                    )),
-                            )
+                            AutomaticMediaGate(contentKey = image) {
+                                SubcomposeAsyncImage(
+                                    model              = rememberFullWidthImageRequest(image, aspectRatio = 16f / 9f),
+                                    contentDescription = null,
+                                    contentScale       = ContentScale.FillWidth,
+                                    modifier           = Modifier
+                                        .fillMaxWidth()
+                                        .clip(RoundedCornerShape(
+                                            bottomStart = Sizing.mediaCornerRadius,
+                                            bottomEnd   = Sizing.mediaCornerRadius,
+                                        )),
+                                )
+                            }
                         }
 
                         // ── Title + reading time (centered; equal gap banner/body) ──

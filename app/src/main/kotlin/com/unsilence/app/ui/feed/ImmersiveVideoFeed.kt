@@ -55,6 +55,7 @@ import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
@@ -164,6 +165,8 @@ internal fun ImmersiveVideoFeed(
     }
 
     val player = holder.player
+    val autoplayBlocked by holder.autoplayBlocked.collectAsStateWithLifecycle()
+    var explicitVideoId by remember { mutableStateOf<String?>(null) }
     val pagerState = rememberPagerState(pageCount = { sessionItems.size })
     val flingBehavior = PagerDefaults.flingBehavior(
         state = pagerState,
@@ -211,6 +214,9 @@ internal fun ImmersiveVideoFeed(
     }
 
     val settledItem = sessionItems.getOrNull(pagerState.settledPage)
+    val blockedByMetered = !allowVideoPlayback(
+        autoplayBlocked, settledItem?.contentId == explicitVideoId && explicitVideoId != null,
+    )
     val settledItemBlocked = settledItem?.let { item ->
         sensitiveContentVisibility(
             mode = sensitiveMode,
@@ -229,10 +235,15 @@ internal fun ImmersiveVideoFeed(
         settledItem?.contentId,
         settledItem?.video?.videoUrl,
         settledItemBlocked,
+        autoplayBlocked,
+        explicitVideoId,
     ) {
         if (!navigationGate.canPlay) return@LaunchedEffect
         val item = settledItem ?: return@LaunchedEffect
-        if (anchoredContentId != item.contentId) paused = false
+        if (anchoredContentId != item.contentId) {
+            paused = false
+            explicitVideoId = null
+        }
         anchoredContentId = item.contentId
         onPageSettled(item.row)
         host.surface.onWotSubjectsVisible(setOf(item.authorPubkey))
@@ -242,7 +253,12 @@ internal fun ImmersiveVideoFeed(
             startupReadyEventId = null
             return@LaunchedEffect
         }
-        holder.claim(IMMERSIVE_OWNER_ID)
+        if (!allowVideoPlayback(autoplayBlocked, explicitVideoId == item.contentId)) {
+            holder.releaseOwnership(IMMERSIVE_OWNER_ID)
+            startupReadyEventId = null
+            return@LaunchedEffect
+        }
+        holder.claim(IMMERSIVE_OWNER_ID, explicitlyRequested = explicitVideoId == item.contentId)
         player.repeatMode = Player.REPEAT_MODE_ONE
         player.volume = if (muted) 0f else 1f
         val currentUrl = player.currentMediaItem?.localConfiguration?.uri?.toString()
@@ -255,9 +271,12 @@ internal fun ImmersiveVideoFeed(
             renderedVideoUrl = null
             startupReadyEventId = null
             player.playWhenReady = false
+            holder.clearPolicyStop()
             player.stop()
             player.clearMediaItems()
             holder.setImmersiveMediaItem(item.contentId, item.video)
+        } else if (holder.recoverPolicyStop()) {
+            startupReadyEventId = null
         }
         if (startupReadyEventId != item.contentId) {
             // Returning after an interrupted buffer wait still owes that wait,
@@ -297,11 +316,12 @@ internal fun ImmersiveVideoFeed(
         preloadIndex,
         preloadItem?.contentId,
         isPowerSaveMode,
+        autoplayBlocked,
     ) {
         val current = settledItem ?: return@ResumedEffect
         if (startupReadyEventId != current.contentId) return@ResumedEffect
         if (
-            !isPowerSaveMode &&
+            !isPowerSaveMode && holder.canAutoplay &&
             preloadItem != null &&
             shouldDeferImmersivePreload(current.video)
         ) {
@@ -323,7 +343,7 @@ internal fun ImmersiveVideoFeed(
             nextIndex = preloadIndex,
             nextEventId = preloadItem?.contentId,
             nextVideo = preloadItem?.video,
-            enabled = !isPowerSaveMode,
+            enabled = !isPowerSaveMode && holder.canAutoplay,
         )
     }
 
@@ -353,7 +373,7 @@ internal fun ImmersiveVideoFeed(
                 item = item,
                 player = player,
                 active = active,
-                paused = paused && active && !blocked,
+                paused = (paused || blockedByMetered) && active && !blocked,
                 frameReady = renderedVideoUrl == item.video.videoUrl,
                 sensitiveVisibility = visibility,
                 thumbnailCache = thumbnailCache,
@@ -361,14 +381,24 @@ internal fun ImmersiveVideoFeed(
                     if (active && navigationGate.canPlay) {
                         when (visibility) {
                             SensitiveContentVisibility.REVEALABLE -> {
+                                explicitVideoId = item.contentId
                                 paused = false
                                 revealedSensitiveIds = revealedSensitiveIds + item.contentId
                             }
                             SensitiveContentVisibility.HIDDEN -> Unit
                             SensitiveContentVisibility.VISIBLE -> {
-                                if (!holder.isOwner(IMMERSIVE_OWNER_ID)) return@ImmersiveVideoPage
-                                paused = !paused
-                                player.playWhenReady = !paused
+                                if (blockedByMetered) {
+                                    explicitVideoId = item.contentId
+                                    paused = false
+                                } else {
+                                    if (!holder.isOwner(IMMERSIVE_OWNER_ID)) return@ImmersiveVideoPage
+                                    if (paused) {
+                                        explicitVideoId = item.contentId
+                                        holder.claim(IMMERSIVE_OWNER_ID, explicitlyRequested = true)
+                                    }
+                                    paused = !paused
+                                    player.playWhenReady = !paused
+                                }
                             }
                         }
                     }
@@ -409,7 +439,7 @@ internal fun ImmersiveVideoFeed(
                 item = item,
                 host = host,
                 eventModelProvider = eventModelProvider,
-                playing = !paused && !settledItemBlocked,
+                playing = !paused && !settledItemBlocked && !blockedByMetered,
                 onOpenSheet = { sheetEventId = item.contentId },
                 modifier = Modifier.align(Alignment.BottomCenter),
             )

@@ -51,6 +51,8 @@ import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.unsilence.app.data.memory.MuteList
+import com.unsilence.app.ui.shared.SettingsSectionLabel
+import com.unsilence.app.ui.shared.SegmentedToggle
 import com.unsilence.app.data.memory.SensitiveContentMode
 import com.unsilence.app.data.memory.UserEntity
 import com.unsilence.app.data.repository.MuteSyncState
@@ -162,8 +164,17 @@ fun FiltersScreen(
                 // ── Sensitive content toggle ─────────────────────────
                 item {
                     HorizontalDivider(color = Color.White.copy(alpha = 0.08f))
-                    SectionLabel("SENSITIVE CONTENT")
-                    SegmentedToggle(sensitiveMode) { viewModel.setSensitiveContentMode(it) }
+                    SettingsSectionLabel("SENSITIVE CONTENT")
+                    SegmentedToggle(
+                        current = sensitiveMode,
+                        options = SensitiveContentMode.entries,
+                        label = { mode -> when (mode) {
+                            SensitiveContentMode.HIDE -> "Hide"
+                            SensitiveContentMode.BLUR -> "Tap to reveal"
+                            SensitiveContentMode.SHOW -> "Show"
+                        } },
+                        onSelect = viewModel::setSensitiveContentMode,
+                    )
                     Spacer(Modifier.height(Spacing.medium))
                     HashtagCapSelector(
                         current = hashtagCap,
@@ -348,58 +359,7 @@ private fun HashtagCapSelector(
 
 // ── Section label ────────────────────────────────────────────────────────
 
-@Composable
-private fun SectionLabel(title: String) {
-    Text(
-        text = title,
-        color = TextSecondary,
-        style = AppTextStyles.caption,
-        fontWeight = FontWeight.SemiBold,
-        letterSpacing = AppType.caption * 0.08f,
-        modifier = Modifier.padding(horizontal = Spacing.large, vertical = Spacing.small),
-    )
-}
-
 // ── Segmented toggle for sensitive content mode ─────────────────────────
-
-@Composable
-private fun SegmentedToggle(
-    current: SensitiveContentMode,
-    onSelect: (SensitiveContentMode) -> Unit,
-) {
-    val shape = RoundedCornerShape(8.dp)
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(horizontal = Spacing.large)
-            .clip(shape)
-            .border(1.dp, Color.White.copy(alpha = 0.15f), shape),
-    ) {
-        SensitiveContentMode.entries.forEach { mode ->
-            val selected = mode == current
-            val label = when (mode) {
-                SensitiveContentMode.HIDE -> "Hide"
-                SensitiveContentMode.BLUR -> "Tap to reveal"
-                SensitiveContentMode.SHOW -> "Show"
-            }
-            Box(
-                modifier = Modifier
-                    .weight(1f)
-                    .background(if (selected) Brand.copy(alpha = 0.15f) else Color.Transparent)
-                    .clickable { onSelect(mode) }
-                    .padding(vertical = Spacing.small),
-                contentAlignment = Alignment.Center,
-            ) {
-                Text(
-                    text = label,
-                    color = if (selected) Brand else TextSecondary,
-                    style = AppTextStyles.body,
-                    fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
-                )
-            }
-        }
-    }
-}
 
 // ── Mute tab row ────────────────────────────────────────────────────────
 

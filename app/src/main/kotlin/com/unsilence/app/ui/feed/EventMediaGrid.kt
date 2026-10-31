@@ -1,5 +1,6 @@
 package com.unsilence.app.ui.feed
 
+import com.unsilence.app.ui.shared.AutomaticMediaGate
 import com.unsilence.app.ui.theme.AppTextStyles
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
@@ -78,6 +79,21 @@ internal fun EventMediaGrid(
     imageDimensionCache: ImageDimensionCache? = null,
     onImageClick: ((Int) -> Unit)? = null,
     modifier: Modifier = Modifier,
+) {
+    if (images.isEmpty()) return
+    AutomaticMediaGate(contentKey = images.map { it.url }, modifier = modifier,
+        aspectRatio = feedImageAspectRatio(images.first().imetaAspect ?: imageDimensionCache?.getCached(images.first().url))) {
+        EventMediaGridContent(images, imageDimensionCache, onImageClick, modifier)
+    }
+}
+
+@Composable
+@OptIn(ExperimentalFoundationApi::class)
+private fun EventMediaGridContent(
+    images: List<Segment.Image>,
+    imageDimensionCache: ImageDimensionCache?,
+    onImageClick: ((Int) -> Unit)?,
+    modifier: Modifier,
 ) {
     if (images.isEmpty()) return
 

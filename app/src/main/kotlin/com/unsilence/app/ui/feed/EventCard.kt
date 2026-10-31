@@ -1,5 +1,6 @@
 package com.unsilence.app.ui.feed
 
+import com.unsilence.app.ui.shared.AutomaticMediaGate
 import com.unsilence.app.ui.theme.AppTextStyles
 import com.unsilence.app.ui.shared.collectCardDataAsState
 
@@ -516,17 +517,19 @@ private fun ArticleLayout(
         ) {
             // Banner image (16:9)
             if (!article?.image.isNullOrBlank()) {
-                BoxWithConstraints(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .aspectRatio(16f / 9f),
-                ) {
-                    AsyncImage(
-                        model              = rememberWidthImageRequest(article.image, maxWidth, aspectRatio = 16f / 9f, allowRgb565 = true),
-                        contentDescription = null,
-                        contentScale       = ContentScale.Crop,
-                        modifier           = Modifier.fillMaxSize(),
-                    )
+                AutomaticMediaGate(contentKey = article.image) {
+                    BoxWithConstraints(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .aspectRatio(16f / 9f),
+                    ) {
+                        AsyncImage(
+                            model              = rememberWidthImageRequest(article.image, maxWidth, aspectRatio = 16f / 9f, allowRgb565 = true),
+                            contentDescription = null,
+                            contentScale       = ContentScale.Crop,
+                            modifier           = Modifier.fillMaxSize(),
+                        )
+                    }
                 }
             }
 

@@ -1,5 +1,7 @@
 package com.unsilence.app.ui.feed
 
+import com.unsilence.app.ui.shared.AutomaticMediaGate
+
 import com.unsilence.app.ui.theme.AppTextStyles
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -53,6 +55,13 @@ internal fun YouTubeCard(
     segment: Segment.YouTube,
     modifier: Modifier = Modifier,
 ) {
+    AutomaticMediaGate(contentKey = segment.url, preview = true, label = "YouTube", modifier = modifier) {
+        YouTubeCardContent(segment, modifier)
+    }
+}
+
+@Composable
+private fun YouTubeCardContent(segment: Segment.YouTube, modifier: Modifier) {
     val context = LocalContext.current
     val thumbnailUrls = remember(segment.videoId) { youtubeThumbnailUrls(segment.videoId) }
     var thumbnailIndex by remember(segment.videoId) { mutableIntStateOf(0) }

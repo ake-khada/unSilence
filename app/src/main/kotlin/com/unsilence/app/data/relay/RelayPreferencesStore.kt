@@ -15,6 +15,8 @@ import com.unsilence.app.data.DEFAULT_WOT_PROVIDER_PUBKEY
 import com.unsilence.app.data.DEFAULT_WOT_RELAY
 import com.unsilence.app.data.memory.DEFAULT_HASHTAG_CAP
 import com.unsilence.app.data.memory.SensitiveContentMode
+import com.unsilence.app.domain.model.AutomaticMediaPreferences
+import com.unsilence.app.domain.model.AutomaticMediaMode
 import com.unsilence.app.domain.model.GlobalFeedLens
 import com.unsilence.app.domain.model.parseGlobalFeedLens
 import dagger.hilt.android.qualifiers.ApplicationContext
@@ -39,6 +41,9 @@ private val KEY_INDEXER_URLS = stringSetPreferencesKey("indexer_urls")
 private const val PINNED_PREFIX = "pinned_"
 private const val LAST_SEEN_PREFIX = "notif_last_seen_"
 private val KEY_LAST_MONITOR_FETCH = longPreferencesKey("last_monitor_fetch_at")
+private val KEY_IMAGE_LOADING_MODE = stringPreferencesKey("image_loading_mode")
+private val KEY_LINK_PREVIEW_MODE = stringPreferencesKey("link_preview_mode")
+private val KEY_VIDEO_AUTOPLAY_MODE = stringPreferencesKey("video_autoplay_mode")
 private val KEY_SENSITIVE_CONTENT_MODE = stringPreferencesKey("sensitive_content_mode")
 private val KEY_WOT_PROVIDER_PUBKEY = stringPreferencesKey("wot_provider_pubkey")
 private val KEY_WOT_PROVIDER_RELAY = stringPreferencesKey("wot_provider_relay")
@@ -278,6 +283,32 @@ class RelayPreferencesStore internal constructor(
 
     suspend fun setSensitiveContentMode(mode: SensitiveContentMode) {
         dataStore.edit { prefs -> prefs[KEY_SENSITIVE_CONTENT_MODE] = mode.name }
+    }
+
+    // Null means disk has not loaded: automatic requests must wait, not briefly
+    // use Always before discovering a persisted Never choice. Missing/unknown
+    // stored values still default to Always once the snapshot is available.
+    val automaticMediaPreferences: StateFlow<AutomaticMediaPreferences?> = dataStore.data
+        .map { prefs ->
+            AutomaticMediaPreferences(
+                video = AutomaticMediaMode.fromStoredName(prefs[KEY_VIDEO_AUTOPLAY_MODE]),
+                images = AutomaticMediaMode.fromStoredName(prefs[KEY_IMAGE_LOADING_MODE]),
+                previews = AutomaticMediaMode.fromStoredName(prefs[KEY_LINK_PREVIEW_MODE]),
+            )
+        }
+        .distinctUntilChanged()
+        .stateIn(scope, SharingStarted.Eagerly, null)
+
+    suspend fun setVideoAutoplayMode(mode: AutomaticMediaMode) {
+        dataStore.edit { prefs -> prefs[KEY_VIDEO_AUTOPLAY_MODE] = mode.name }
+    }
+
+    suspend fun setImageLoadingMode(mode: AutomaticMediaMode) {
+        dataStore.edit { prefs -> prefs[KEY_IMAGE_LOADING_MODE] = mode.name }
+    }
+
+    suspend fun setLinkPreviewMode(mode: AutomaticMediaMode) {
+        dataStore.edit { prefs -> prefs[KEY_LINK_PREVIEW_MODE] = mode.name }
     }
 
     fun hashtagCapFlow(): Flow<Int?> =
