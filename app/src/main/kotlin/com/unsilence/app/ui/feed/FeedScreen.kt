@@ -1,5 +1,7 @@
 package com.unsilence.app.ui.feed
 
+import com.unsilence.app.domain.model.quotedMediaPolicy
+
 import com.unsilence.app.ui.theme.AppTextStyles
 import androidx.compose.animation.animateContentSize
 import androidx.compose.animation.core.FastOutSlowInEasing
@@ -251,6 +253,7 @@ fun FeedScreen(
         )
     }
     val cardHost = remember(
+        currentFilter.showTypes,
         viewModel,
         actionsViewModel,
         pinnedEmojis,
@@ -291,6 +294,7 @@ fun FeedScreen(
             feedWotDisplayMode = feedWotDisplayMode,
             onWotSubjectsVisible = viewModel::requestWotHydration,
             pollActions = actionsViewModel.pollActionCallbacks(),
+            quotedMediaPolicy = currentFilter.quotedMediaPolicy(),
         )
     }
 

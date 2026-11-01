@@ -1,5 +1,7 @@
 package com.unsilence.app.ui.feed
 
+import com.unsilence.app.domain.model.quotedMediaPolicy
+
 import com.unsilence.app.ui.shared.CardDataFlow
 
 import android.os.Bundle
@@ -694,7 +696,7 @@ class FeedViewModel @Inject constructor(
 
     init {
         viewModelScope.launch(Dispatchers.Default) {
-            combine(feedRows, _hydrationViewport) { rows, viewport -> rows to viewport }
+            combine(feedRows, _hydrationViewport, _filter) { rows, viewport, _ -> rows to viewport }
                 .conflate()
                 .collectLatestWhileActive(screenActive) { (rows, viewport) ->
                     if (rows.isEmpty()) displayWindowReporter.report(emptyList(), emptySet())
@@ -726,6 +728,7 @@ class FeedViewModel @Inject constructor(
                         maxRows = ASSET_WARM_MAX_ROWS,
                         maxImagePrefetches = ASSET_WARM_IMAGE_CAP,
                         maxOgFetches = ASSET_WARM_OG_CAP,
+                        quotedMediaPolicy = { _filter.value.quotedMediaPolicy() },
                     )
                 }
         }

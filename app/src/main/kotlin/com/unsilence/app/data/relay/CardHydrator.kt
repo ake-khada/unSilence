@@ -6,6 +6,7 @@ import coil3.SingletonImageLoader
 import coil3.request.ImageRequest
 import coil3.size.Dimension
 import coil3.size.Size
+import com.unsilence.app.domain.model.QuotedMediaPolicy
 import com.unsilence.app.data.media.MediaLoadingPolicy
 import com.unsilence.app.data.memory.FeedRow
 import com.unsilence.app.data.memory.MemoryEventStore
@@ -64,7 +65,7 @@ private const val HYDRATED_CAP = 500
 
 private const val PREFETCH_KEY_CAP = 768
 private const val MAX_PREFETCH_WIDTH_PX = 1600
-private const val MAX_MEDIA_PER_CARD = 4
+internal const val MAX_MEDIA_PER_CARD = 4
 
 internal data class AssetWarmBudget(
     val rows: Int,
@@ -286,6 +287,7 @@ class CardHydrator @Inject constructor(
         maxProfileFetches: Int = 16,
         maxReferenceFetches: Int = 4,
         maxArticleFetches: Int = 2,
+        quotedMediaPolicy: () -> QuotedMediaPolicy = { QuotedMediaPolicy() },
     ) {
         if (events.isEmpty() || cardWidthPx <= 0) return
         val budget = assetWarmBudget(
@@ -356,6 +358,7 @@ class CardHydrator @Inject constructor(
                         remainingVideoThumbnails = budget.videoThumbnails - videoThumbnails,
                         remainingImagePrefetches = budget.images - imagePrefetches,
                         profileCandidates = profileCandidates,
+                        mediaPolicy = referenceAssetPolicy(ref.quoted, quotedMediaPolicy),
                     )
                     videoThumbnails += warmed.videoThumbnails
                     imagePrefetches += warmed.imagePrefetches
@@ -387,7 +390,7 @@ class CardHydrator @Inject constructor(
                 .take(budget.references)
                 .toList()
             if (missingRefs.isNotEmpty()) {
-                backfillScope.launch { warmReferencedEvents(missingRefs, cardWidthPx) }
+                backfillScope.launch { warmReferencedEvents(missingRefs, cardWidthPx, quotedMediaPolicy) }
             }
         }
 
@@ -429,17 +432,11 @@ class CardHydrator @Inject constructor(
         }
     }
 
-    private data class ImageCandidate(
-        val url: String,
-        val aspectRatio: Float,
-        val dimensionsKnown: Boolean,
-        val preview: Boolean = false,
-    )
-
     private data class ReferenceCandidate(
         val eventId: String,
         val hints: List<String>,
         val authorPubkey: String?,
+        val quoted: Boolean = false,
     )
 
     private data class ArticleCandidate(
@@ -454,45 +451,14 @@ class CardHydrator @Inject constructor(
         val videoThumbnails: Int,
     )
 
-    private fun imageCandidates(model: EventModel): List<ImageCandidate> = buildList {
-        val articleImage = model.article?.image
-        if (!articleImage.isNullOrBlank()) add(ImageCandidate(articleImage, 16f / 9f, dimensionsKnown = false))
-
-        for (image in model.media.images.take(MAX_MEDIA_PER_CARD)) {
-            val imetaKnown = hasUsableAspectMetadata(image.imetaAspect)
-            add(ImageCandidate(image.url, feedSafeAspect(image.imetaAspect), imetaKnown))
-        }
-
-        for (video in model.media.videos.take(MAX_MEDIA_PER_CARD).map { it.model }) {
-            val poster = video.posterUrl
-            if (!poster.isNullOrBlank()) {
-                // VideoRenderModel falls back to 16:9 when imeta dimensions are
-                // absent; only raw width/height make this authoritative enough
-                // to suppress the poster probe.
-                val aspectKnown = video.widthPx != null &&
-                    video.heightPx != null && video.heightPx > 0
-                add(ImageCandidate(poster, feedSafeAspect(video.aspectRatio), aspectKnown))
-            }
-        }
-
-        for (youtube in model.media.youtubes.take(MAX_MEDIA_PER_CARD)) {
-            add(ImageCandidate(
-                "https://img.youtube.com/vi/${youtube.videoId}/hqdefault.jpg",
-                16f / 9f,
-                dimensionsKnown = true,
-                preview = true,
-            ))
-        }
-    }
-
-    private fun warmVideoThumbnails(model: EventModel, remaining: Int): Int {
-        if (remaining <= 0 || !mediaLoadingPolicy.current.images) return 0
+    private fun warmVideoThumbnails(model: EventModel, remaining: Int, allowed: () -> Boolean = { true }): Int {
+        if (remaining <= 0 || !allowed() || !mediaLoadingPolicy.current.images) return 0
         var warmed = 0
         for (video in model.media.videos.map { it.model }) {
             if (warmed >= remaining) break
             if (thumbnailCache.getCached(video.videoUrl) != null) continue
             warmed++
-            backfillScope.launch { if (mediaLoadingPolicy.current.images) thumbnailCache.warmThumbnail(video.videoUrl) }
+            backfillScope.launch { if (allowed() && mediaLoadingPolicy.current.images) thumbnailCache.warmThumbnail(video.videoUrl) }
         }
         return warmed
     }
@@ -572,6 +538,7 @@ class CardHydrator @Inject constructor(
                             additionalRelays = segment.hints,
                         ),
                         authorPubkey = segment.author,
+                        quoted = true,
                     ),
                 )
                 is Segment.QuoteAddress -> {
@@ -601,6 +568,7 @@ class CardHydrator @Inject constructor(
         remainingVideoThumbnails: Int,
         remainingImagePrefetches: Int,
         profileCandidates: MutableMap<String, List<String>>? = null,
+        mediaPolicy: () -> QuotedMediaPolicy = { QuotedMediaPolicy() },
     ): WarmedReferenceAssets {
         val refEvent = memoryEventStore.getNostrEvent(eventId) ?: return WarmedReferenceAssets(0, 0)
         val refRow = memoryEventStore.synthesizeFeedRow(refEvent)
@@ -611,13 +579,16 @@ class CardHydrator @Inject constructor(
         val videoThumbnails = warmVideoThumbnails(
             model = refModel,
             remaining = remainingVideoThumbnails,
+            allowed = { mediaPolicy().videos },
         )
 
         var imagePrefetches = 0
         if (remainingImagePrefetches > 0) {
-            for (candidate in imageCandidates(refModel)) {
+            for (candidate in imageCandidates(refModel, mediaPolicy())) {
                 if (imagePrefetches >= remainingImagePrefetches) break
-                if (!candidate.dimensionsKnown) warmImageDimensions(candidate.url)
+                val allowed = { mediaPolicy().allows(candidate.showType) }
+                if (!allowed()) continue
+                if (!candidate.dimensionsKnown) warmImageDimensions(candidate.url, allowed)
                 if (prefetchSizedImage(candidate.url, cardWidthPx, candidate.aspectRatio, preview = candidate.preview)) {
                     imagePrefetches++
                 }
@@ -649,13 +620,18 @@ class CardHydrator @Inject constructor(
                 existing.copy(
                     hints = boundedSeenRelayHints(existing.hints + ref.hints),
                     authorPubkey = existing.authorPubkey ?: ref.authorPubkey,
+                    quoted = existing.quoted && ref.quoted,
                 )
             }
         }
         return merged.values.toList()
     }
 
-    private suspend fun warmReferencedEvents(refs: List<ReferenceCandidate>, cardWidthPx: Int) {
+    private suspend fun warmReferencedEvents(
+        refs: List<ReferenceCandidate>,
+        cardWidthPx: Int,
+        quotedMediaPolicy: () -> QuotedMediaPolicy,
+    ) {
         val noHintIds = mutableListOf<String>()
         val coalescedHintFetches = mutableListOf<Pair<String, List<String>>>()
         val awaitingIds = LinkedHashSet<String>()
@@ -668,6 +644,7 @@ class CardHydrator @Inject constructor(
                     cardWidthPx = cardWidthPx,
                     remainingVideoThumbnails = MAX_MEDIA_PER_CARD,
                     remainingImagePrefetches = MAX_MEDIA_PER_CARD,
+                    mediaPolicy = referenceAssetPolicy(ref.quoted, quotedMediaPolicy),
                 )
                 continue
             }
@@ -754,6 +731,7 @@ class CardHydrator @Inject constructor(
                             cardWidthPx = cardWidthPx,
                             remainingVideoThumbnails = MAX_MEDIA_PER_CARD,
                             remainingImagePrefetches = MAX_MEDIA_PER_CARD,
+                            mediaPolicy = referenceAssetPolicy(refsById[eventId]?.quoted == true, quotedMediaPolicy),
                         )
                     }
                 }
@@ -761,19 +739,14 @@ class CardHydrator @Inject constructor(
         }
     }
 
-    private fun feedSafeAspect(aspectRatio: Float?): Float {
-        val ratio = aspectRatio?.takeIf { it > 0f } ?: (16f / 9f)
-        return ratio.coerceIn(0.2f, 5f)
-    }
-
-    private fun warmImageDimensions(url: String) {
-        if (!mediaLoadingPolicy.current.images) return
+    private fun warmImageDimensions(url: String, allowed: () -> Boolean = { true }) {
+        if (!allowed() || !mediaLoadingPolicy.current.images) return
         val key = url.substringBefore('#')
         if (!markBounded(key, imageDimensionWarmed, imageDimensionWarmOrder, PREFETCH_KEY_CAP)) return
         if (imageDimensionCache.getCached(url) != null) return
         backfillScope.launch {
             try {
-                if (mediaLoadingPolicy.current.images) imageDimensionCache.resolve(url)
+                if (allowed() && mediaLoadingPolicy.current.images) imageDimensionCache.resolve(url)
             } catch (_: Exception) {
                 currentCoroutineContext().ensureActive()
             }

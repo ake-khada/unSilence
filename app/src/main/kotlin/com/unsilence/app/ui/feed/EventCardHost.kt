@@ -1,5 +1,7 @@
 package com.unsilence.app.ui.feed
 
+import com.unsilence.app.domain.model.QuotedMediaPolicy
+
 import com.unsilence.app.ui.shared.CardDataFlow
 
 import androidx.compose.runtime.Stable
@@ -78,6 +80,7 @@ data class EventCardSurface(
     val pollActions: PollActionCallbacks?,
     /** Notifications own the activity time; their entire preview subtree omits content times. */
     val showTimestamps: Boolean = true,
+    val quotedMediaPolicy: QuotedMediaPolicy = QuotedMediaPolicy(),
 )
 
 /**
@@ -166,6 +169,7 @@ internal fun NoteActionsViewModel.eventCardHost(
     onWotSubjectsVisible: (Collection<String>) -> Unit,
     pollActions: PollActionCallbacks?,
     showTimestamps: Boolean = true,
+    quotedMediaPolicy: QuotedMediaPolicy = QuotedMediaPolicy(),
 ): EventCardHost = EventCardHost(
     actions = actions,
     services = eventCardServices(),
@@ -183,6 +187,7 @@ internal fun NoteActionsViewModel.eventCardHost(
         onWotSubjectsVisible = onWotSubjectsVisible,
         pollActions = pollActions,
         showTimestamps = showTimestamps,
+        quotedMediaPolicy = quotedMediaPolicy,
     ),
 )
 

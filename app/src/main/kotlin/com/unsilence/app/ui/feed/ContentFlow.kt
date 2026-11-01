@@ -24,6 +24,7 @@ import androidx.compose.ui.platform.LocalWindowInfo
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.unsilence.app.domain.model.QuotedMediaPolicy
 import com.unsilence.app.data.model.EventModel
 import com.unsilence.app.data.model.PaymentTarget
 import com.unsilence.app.data.model.Segment
@@ -72,6 +73,22 @@ internal fun ContentFlow(
     val navigateId = model.navigateId
     val showVideo = role != CardRole.Article
     val isEmbedded = role == CardRole.Embedded
+    val quotedMedia = if (nestDepth > 0) surface.quotedMediaPolicy else QuotedMediaPolicy()
+    val mediaCaption = if (nestDepth > 0 && !model.truncated) remember(model.segments, quotedMedia) {
+        emptyQuoteMediaCaption(model.segments, quotedMedia)
+    } else null
+    if (mediaCaption != null) {
+        Text(
+            text = mediaCaption,
+            style = AppTextStyles.caption,
+            color = TextSecondary,
+            modifier = modifier
+                .clickable { actions.onNoteClick(navigateId) }
+                .padding(horizontal = if (isEmbedded) 0.dp else Spacing.medium)
+                .padding(bottom = Spacing.small),
+        )
+        return
+    }
 
     // Collapsed long-note budget: keep the whole card close to 80% of the
     // viewport, not just the text run. Reserve rough chrome for author header,
@@ -192,6 +209,10 @@ internal fun ContentFlow(
                                 else -> break
                             }
                         }
+                        if (!quotedMedia.images) {
+                            i = j
+                            continue@segmentLoop
+                        }
                         val images = model.segments.subList(i, j)
                             .filterIsInstance<Segment.Image>()
                         EventMediaGrid(
@@ -218,6 +239,10 @@ internal fun ContentFlow(
                                 is Segment.Text -> if (segment.text.isBlank()) j++ else break
                                 else -> break
                             }
+                        }
+                        if (!quotedMedia.videos) {
+                            i = j
+                            continue@segmentLoop
                         }
                         val videos = model.segments.subList(i, j)
                             .filterIsInstance<Segment.Video>()
@@ -290,7 +315,7 @@ internal fun ContentFlow(
                     }
                     is Segment.YouTube -> {
                         val seg = model.segments[i] as Segment.YouTube
-                        YouTubeCard(
+                        if (quotedMedia.videos) YouTubeCard(
                             segment  = seg,
                             modifier = Modifier.padding(
                                 horizontal = hPad,
@@ -381,4 +406,23 @@ private fun Segment.isInlineContent(knownLightningAddress: String?): Boolean = w
 private fun Segment.asInlineContent(): Segment = when (this) {
     is Segment.Payment -> Segment.Text(target.displayValue)
     else -> this
+}
+
+/** A single neutral navigation caption only when excluding media would empty the body. */
+private fun emptyQuoteMediaCaption(segments: List<Segment>, policy: QuotedMediaPolicy): String? {
+    var hasImage = false
+    var hasVideo = false
+    for (segment in segments) {
+        when (segment) {
+            is Segment.Image -> if (policy.images) return null else hasImage = true
+            is Segment.Video, is Segment.YouTube -> if (policy.videos) return null else hasVideo = true
+            is Segment.Text -> if (segment.text.isNotBlank()) return null
+            else -> return null // Links, nested quotes and other content remain useful on their own.
+        }
+    }
+    return when {
+        hasVideo -> "Video"
+        hasImage -> "Image"
+        else -> null
+    }
 }
