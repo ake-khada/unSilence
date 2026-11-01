@@ -1,5 +1,8 @@
 package com.unsilence.app.data.relay
 
+import com.unsilence.app.data.blossom.AvatarFallbackPreferences
+import com.unsilence.app.data.blossom.AvatarFallbackPolicy
+import androidx.datastore.preferences.core.booleanPreferencesKey
 import android.content.Context
 import androidx.datastore.core.DataStore
 import androidx.datastore.preferences.core.MutablePreferences
@@ -41,6 +44,8 @@ private val KEY_INDEXER_URLS = stringSetPreferencesKey("indexer_urls")
 private const val PINNED_PREFIX = "pinned_"
 private const val LAST_SEEN_PREFIX = "notif_last_seen_"
 private val KEY_LAST_MONITOR_FETCH = longPreferencesKey("last_monitor_fetch_at")
+private val KEY_AVATAR_FALLBACK_ENABLED = booleanPreferencesKey("avatar_fallback_enabled")
+private val KEY_AVATAR_FALLBACK_SERVERS = stringPreferencesKey("avatar_fallback_servers")
 private val KEY_IMAGE_LOADING_MODE = stringPreferencesKey("image_loading_mode")
 private val KEY_LINK_PREVIEW_MODE = stringPreferencesKey("link_preview_mode")
 private val KEY_VIDEO_AUTOPLAY_MODE = stringPreferencesKey("video_autoplay_mode")
@@ -298,6 +303,24 @@ class RelayPreferencesStore internal constructor(
         }
         .distinctUntilChanged()
         .stateIn(scope, SharingStarted.Eagerly, null)
+
+    val avatarFallbackPreferences: StateFlow<AvatarFallbackPreferences> = dataStore.data
+        .map { prefs -> AvatarFallbackPreferences(
+            enabled = prefs[KEY_AVATAR_FALLBACK_ENABLED] ?: false,
+            servers = prefs[KEY_AVATAR_FALLBACK_SERVERS]?.split('\n')?.asSequence()
+                ?.mapNotNull(AvatarFallbackPolicy::server)?.distinct()?.take(AvatarFallbackPolicy.MAX_SERVERS)?.toList()
+                ?: AvatarFallbackPreferences().servers,
+        ) }.distinctUntilChanged().stateIn(scope, SharingStarted.Eagerly, AvatarFallbackPreferences())
+
+    suspend fun setAvatarFallbackEnabled(enabled: Boolean) {
+        dataStore.edit { it[KEY_AVATAR_FALLBACK_ENABLED] = enabled }
+    }
+
+    suspend fun setAvatarFallbackServers(servers: List<String>) {
+        val safe = servers.asSequence().mapNotNull(AvatarFallbackPolicy::server).distinct()
+            .take(AvatarFallbackPolicy.MAX_SERVERS).toList()
+        dataStore.edit { it[KEY_AVATAR_FALLBACK_SERVERS] = safe.joinToString("\n") }
+    }
 
     suspend fun setVideoAutoplayMode(mode: AutomaticMediaMode) {
         dataStore.edit { prefs -> prefs[KEY_VIDEO_AUTOPLAY_MODE] = mode.name }

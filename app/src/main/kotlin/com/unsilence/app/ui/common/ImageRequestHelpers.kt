@@ -2,6 +2,11 @@ package com.unsilence.app.ui.common
 
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.compositionLocalOf
+import com.unsilence.app.data.blossom.AvatarFallbackPreferences
+import com.unsilence.app.data.blossom.AvatarFallbackPolicy
+import com.unsilence.app.data.blossom.AvatarRequest
+import com.unsilence.app.data.blossom.AvatarRequestKey
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalWindowInfo
@@ -10,6 +15,8 @@ import coil3.request.ImageRequest
 import coil3.request.allowRgb565
 import coil3.size.Dimension
 import coil3.size.Size
+
+internal val LocalAvatarFallbackPreferences = compositionLocalOf { AvatarFallbackPreferences() }
 
 /**
  * Build an ImageRequest with an explicit pixel-size resolver. Coil will decode
@@ -67,10 +74,24 @@ fun rememberWidthImageRequest(
 fun rememberAvatarImageRequest(
     url: String?,
     sizeDp: Dp,
+    pubkey: String? = null,
 ): ImageRequest {
     val density = LocalDensity.current
     val px = with(density) { sizeDp.roundToPx() }
-    return rememberSizedImageRequest(url, px, px)
+    val blob = remember(pubkey, url) { if (pubkey != null && url != null) AvatarFallbackPolicy.blob(url) else null }
+    if (pubkey == null || url == null || blob == null) return rememberSizedImageRequest(url, px, px)
+    val context = LocalContext.current
+    val preferences = LocalAvatarFallbackPreferences.current
+    val session = LocalAppSessionKey.current
+    return remember(context, url, px, pubkey, preferences, session) {
+        ImageRequest.Builder(context)
+            .data(url)
+            .diskCacheKey(url)
+            .memoryCacheKeyExtra("avatar-owner", "$session|$pubkey|$preferences")
+            .size(px, px)
+            .apply { extras[AvatarRequestKey] = AvatarRequest(pubkey, url) }
+            .build()
+    }
 }
 
 /**

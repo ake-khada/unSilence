@@ -13,6 +13,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -42,12 +43,15 @@ fun MediaDataSettingsScreen(
     viewModel: MediaDataSettingsViewModel = hiltViewModel(key = "media-data-${LocalAppSessionKey.current}"),
 ) {
     rememberWriteAwareDismiss(viewModel.pendingEdits, navigationOwnsBack, onDismiss)
+    val avatarPreferences by viewModel.avatarPreferences.collectAsStateWithLifecycle()
     val preferences by viewModel.mediaPreferences.collectAsStateWithLifecycle()
     MediaDataSettingsContent(
         preferences = preferences ?: AutomaticMediaPreferences(),
         onVideoMode = viewModel::setVideoAutoplayMode,
         onImageMode = viewModel::setImageLoadingMode,
         onPreviewMode = viewModel::setLinkPreviewMode,
+        avatarFallbackEnabled = avatarPreferences.enabled,
+        onAvatarFallback = viewModel::setAvatarFallbackEnabled,
     )
 }
 
@@ -57,6 +61,8 @@ internal fun MediaDataSettingsContent(
     onVideoMode: (AutomaticMediaMode) -> Unit,
     onImageMode: (AutomaticMediaMode) -> Unit,
     onPreviewMode: (AutomaticMediaMode) -> Unit,
+    avatarFallbackEnabled: Boolean = false,
+    onAvatarFallback: (Boolean) -> Unit = {},
 ) {
     Column(Modifier.fillMaxSize().background(Black)) {
         Row(Modifier.fillMaxWidth().statusBarsPadding().height(Sizing.topBarHeight).padding(horizontal = Spacing.medium),
@@ -70,6 +76,12 @@ internal fun MediaDataSettingsContent(
                 "Content images and video posters. Avatars and profile banners are unchanged.", onImageMode)
             MediaModeSelector("Load link previews automatically", preferences.previews,
                 "Tap to load a preview in any mode.", onPreviewMode)
+            Row(Modifier.fillMaxWidth().padding(Spacing.large), verticalAlignment = Alignment.CenterVertically) {
+                Text("Use avatar fallback servers", color = Color.White, modifier = Modifier.weight(1f))
+                Switch(checked = avatarFallbackEnabled, onCheckedChange = onAvatarFallback)
+            }
+            Text(AVATAR_FALLBACK_DESCRIPTION, style = AppTextStyles.bodySmall, color = TextSecondary,
+                modifier = Modifier.padding(horizontal = Spacing.large))
             Spacer(Modifier.height(Spacing.large))
         }
     }
@@ -100,3 +112,5 @@ private fun MediaModeSelector(
             modifier = Modifier.padding(horizontal = Spacing.large).padding(top = Spacing.small))
     }
 }
+
+internal const val AVATAR_FALLBACK_DESCRIPTION = "If the original host and the author’s servers fail, try your selected fallback servers. They receive your IP address and the requested image hash."

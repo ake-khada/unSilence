@@ -172,7 +172,7 @@ private fun SingleNotificationRow(
                 IdentIcon(pubkey = row.actorPubkey, modifier = Modifier.fillMaxSize())
                 if (!row.actorPicture.isNullOrBlank()) {
                     AvatarAsyncImage(
-                        model = rememberAvatarImageRequest(row.actorPicture, Sizing.avatar),
+                        model = rememberAvatarImageRequest(row.actorPicture, Sizing.avatar, row.actorPubkey),
                         contentDescription = null,
                         modifier = Modifier.fillMaxSize(),
                     )
@@ -325,7 +325,7 @@ private fun ActorStrip(
                     IdentIcon(pubkey = pk, modifier = Modifier.fillMaxSize())
                     if (!actor.picture.isNullOrBlank()) {
                         AvatarAsyncImage(
-                            model = rememberAvatarImageRequest(actor.picture, 27.dp),
+                            model = rememberAvatarImageRequest(actor.picture, 27.dp, pk),
                             contentDescription = null,
                             modifier = Modifier.fillMaxSize(),
                         )

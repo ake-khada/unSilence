@@ -602,7 +602,7 @@ fun AppNavigation(
                                                     .clip(CircleShape),
                                             ) {
                                                 AsyncImage(
-                                                    model = rememberAvatarImageRequest(userAvatarUrl, iconSize),
+                                                    model = rememberAvatarImageRequest(userAvatarUrl, iconSize, ownPubkey),
                                                     transform = rememberAvatarAnimationTransform(bottomBarShown),
                                                     contentDescription = "Profile",
                                                     contentScale = ContentScale.Crop,

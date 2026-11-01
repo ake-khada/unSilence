@@ -127,9 +127,11 @@ class MainActivity : FragmentActivity() {
                     signingManager.registerLauncher(launcher)
                     onDispose { signingManager.unregisterLauncher(launcher) }
                 }
+                val avatarPreferences by relayPreferencesStore.avatarFallbackPreferences.collectAsStateWithLifecycle()
                 val mediaPermissions by mediaLoadingPolicy.permissions.collectAsStateWithLifecycle()
                 CompositionLocalProvider(
                     LocalMediaLoadPermissions provides mediaPermissions,
+                    com.unsilence.app.ui.common.LocalAvatarFallbackPreferences provides avatarPreferences,
                     LocalNip05VerificationController provides nip05Verifier,
                 ) {
                     ProvideMinuteClock { RootScreen() }

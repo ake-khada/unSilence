@@ -158,7 +158,7 @@ private fun ActorSheetRow(
                 IdentIcon(pubkey = pk, modifier = Modifier.fillMaxSize())
                 if (!actor.picture.isNullOrBlank()) {
                     AvatarAsyncImage(
-                        model = rememberAvatarImageRequest(actor.picture, 36.dp),
+                        model = rememberAvatarImageRequest(actor.picture, 36.dp, pk),
                         contentDescription = null,
                         modifier = Modifier.fillMaxSize(),
                     )

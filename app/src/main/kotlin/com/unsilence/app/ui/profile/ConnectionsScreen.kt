@@ -288,7 +288,7 @@ private fun ConnectionPersonRow(row: ConnectionRow, onClick: () -> Unit) {
             IdentIcon(pubkey = row.pubkey, modifier = Modifier.fillMaxSize())
             if (!row.user.picture.isNullOrBlank()) {
                 AsyncImage(
-                    model = rememberAvatarImageRequest(row.user.picture, Sizing.avatar),
+                    model = rememberAvatarImageRequest(row.user.picture, Sizing.avatar, row.user.pubkey),
                     contentDescription = null,
                     modifier = Modifier.fillMaxSize(),
                 )

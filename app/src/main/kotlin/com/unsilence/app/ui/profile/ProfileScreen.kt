@@ -746,7 +746,7 @@ private fun ProfileAvatar(
         }
         if (!pictureUrl.isNullOrBlank()) {
             AvatarAsyncImage(
-                model              = rememberAvatarImageRequest(pictureUrl, 85.dp),
+                model              = rememberAvatarImageRequest(pictureUrl, 85.dp, pubkeyHex),
                 contentDescription = null,
                 contentScale       = ContentScale.Crop,
                 modifier           = Modifier.fillMaxSize(),

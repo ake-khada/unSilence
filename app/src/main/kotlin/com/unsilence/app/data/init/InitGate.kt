@@ -58,6 +58,8 @@ class InitGate @Inject constructor() {
         _phase.value = Phase.CONNECTING
     }
 
+    internal val currentSession: InitSession get() = state.token
+
     fun isCurrent(session: InitSession, owner: String? = null): Boolean {
         val current = state
         return current.token == session && (owner == null || current.owner == owner)

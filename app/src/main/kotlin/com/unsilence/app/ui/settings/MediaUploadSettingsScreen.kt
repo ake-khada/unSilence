@@ -72,6 +72,7 @@ fun MediaUploadSettingsScreen(
 ) {
     rememberWriteAwareDismiss(viewModel.pendingEdits, navigationOwnsBack, onDismiss)
 
+    val avatarPreferences by viewModel.avatarPreferences.collectAsStateWithLifecycle()
     val servers by viewModel.servers.collectAsStateWithLifecycle()
     val imageUploadTier by viewModel.imageUploadTier.collectAsStateWithLifecycle()
     val videoQuality by viewModel.videoQuality.collectAsStateWithLifecycle()
@@ -160,6 +161,9 @@ fun MediaUploadSettingsScreen(
 
                 Spacer(Modifier.height(Spacing.large))
                 HorizontalDivider(color = MaterialTheme.colorScheme.surfaceVariant)
+                Spacer(Modifier.height(Spacing.large))
+
+                AvatarFallbackServersSection(avatarPreferences.servers, servers.map { it.url }, viewModel::setAvatarServers)
                 Spacer(Modifier.height(Spacing.large))
 
                 // ── Image upload section ─────────────────────────────────────

@@ -439,7 +439,7 @@ fun UserProfileScreen(
                         }
                         if (!user?.picture.isNullOrBlank()) {
                             AvatarAsyncImage(
-                                model              = rememberAvatarImageRequest(user?.picture, 85.dp),
+                                model              = rememberAvatarImageRequest(user?.picture, 85.dp, pubkey),
                                 contentDescription = null,
                                 contentScale       = ContentScale.Crop,
                                 modifier           = Modifier.fillMaxSize(),

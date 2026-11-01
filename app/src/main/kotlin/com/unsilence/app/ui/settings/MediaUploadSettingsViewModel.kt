@@ -25,10 +25,16 @@ data class ServerRow(
 
 @HiltViewModel
 class MediaUploadSettingsViewModel @Inject constructor(
+    private val preferences: com.unsilence.app.data.relay.RelayPreferencesStore,
     private val blossomServersStore: BlossomServersStore,
 ) : ViewModel() {
     internal val pendingEdits = PendingEdits(viewModelScope)
 
+
+    val avatarPreferences = preferences.avatarFallbackPreferences
+    fun setAvatarServers(servers: List<String>) {
+        pendingEdits.launch { preferences.setAvatarFallbackServers(servers) }
+    }
 
     val servers: StateFlow<List<ServerRow>> = combine(
         blossomServersStore.configuredServers,

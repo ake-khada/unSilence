@@ -859,7 +859,7 @@ private fun ProfileCard(
             IdentIcon(pubkey = user.pubkey, modifier = Modifier.fillMaxSize())
             if (!user.picture.isNullOrBlank()) {
                 AvatarAsyncImage(
-                    model              = rememberAvatarImageRequest(user.picture, Sizing.avatar + 8.dp),
+                    model              = rememberAvatarImageRequest(user.picture, Sizing.avatar + 8.dp, user.pubkey),
                     contentDescription = null,
                     modifier           = Modifier.fillMaxSize(),
                 )
@@ -1181,7 +1181,7 @@ private fun TrendingUserRow(
             IdentIcon(pubkey = user.pubkey, modifier = Modifier.fillMaxSize())
             if (!user.picture.isNullOrBlank()) {
                 AvatarAsyncImage(
-                    model              = rememberAvatarImageRequest(user.picture, Sizing.avatar),
+                    model              = rememberAvatarImageRequest(user.picture, Sizing.avatar, user.pubkey),
                     contentDescription = null,
                     modifier           = Modifier.fillMaxSize(),
                 )

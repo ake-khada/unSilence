@@ -262,7 +262,7 @@ internal fun AvatarImage(
         }
         if (!effectivePicture.isNullOrBlank()) {
             AvatarAsyncImage(
-                model              = rememberAvatarImageRequest(effectivePicture, sizeDp),
+                model              = rememberAvatarImageRequest(effectivePicture, sizeDp, pubkey),
                 contentDescription = null,
                 modifier           = Modifier.fillMaxSize(),
                 contentScale        = ContentScale.Crop,

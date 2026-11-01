@@ -13,6 +13,10 @@ class MediaDataSettingsViewModel @Inject constructor(
     private val preferences: RelayPreferencesStore,
 ) : ViewModel() {
     internal val pendingEdits = PendingEdits(viewModelScope)
+    val avatarPreferences = preferences.avatarFallbackPreferences
+    fun setAvatarFallbackEnabled(enabled: Boolean) {
+        pendingEdits.launch { preferences.setAvatarFallbackEnabled(enabled) }
+    }
     val mediaPreferences = preferences.automaticMediaPreferences
 
     fun setVideoAutoplayMode(mode: AutomaticMediaMode) {

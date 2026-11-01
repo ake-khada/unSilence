@@ -299,7 +299,7 @@ fun EditProfileScreen(
                     }
                     if (picture.isNotBlank()) {
                         AsyncImage(
-                            model              = rememberAvatarImageRequest(picture, EDIT_AVATAR_SIZE),
+                            model              = rememberAvatarImageRequest(picture, EDIT_AVATAR_SIZE, viewModel.pubkeyHex),
                             contentDescription = null,
                             contentScale       = ContentScale.Crop,
                             modifier           = Modifier.fillMaxSize(),

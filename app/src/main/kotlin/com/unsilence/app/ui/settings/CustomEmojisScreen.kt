@@ -593,7 +593,7 @@ private fun AuthorChip(profile: UserEntity?, pubkey: String) {
         val picUrl = profile?.picture
         if (picUrl != null) {
             AsyncImage(
-                model = rememberAvatarImageRequest(picUrl, 14.dp),
+                model = rememberAvatarImageRequest(picUrl, 14.dp, pubkey),
                 contentDescription = null,
                 contentScale = ContentScale.Crop,
                 modifier = Modifier

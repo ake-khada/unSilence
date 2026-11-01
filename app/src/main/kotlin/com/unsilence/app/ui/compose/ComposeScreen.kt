@@ -356,7 +356,7 @@ fun ComposeScreen(
                         IdentIcon(pubkey = parentPubkey, modifier = Modifier.size(24.dp))
                         if (rowDescribesParent && !replyToRow.authorPicture.isNullOrBlank()) {
                             AsyncImage(
-                                model              = rememberAvatarImageRequest(replyToRow.authorPicture, 24.dp),
+                                model              = rememberAvatarImageRequest(replyToRow.authorPicture, 24.dp, parentPubkey),
                                 contentDescription = null,
                                 contentScale       = ContentScale.Crop,
                                 modifier           = Modifier.fillMaxSize(),
@@ -406,7 +406,7 @@ fun ComposeScreen(
                             }
                             if (!userAvatarUrl.isNullOrBlank()) {
                                 AsyncImage(
-                                    model              = rememberAvatarImageRequest(userAvatarUrl, Sizing.avatar),
+                                    model              = rememberAvatarImageRequest(userAvatarUrl, Sizing.avatar, pubkeyHex),
                                     contentDescription = null,
                                     contentScale       = ContentScale.Crop,
                                     modifier           = Modifier.fillMaxSize(),
@@ -545,7 +545,7 @@ fun ComposeScreen(
                                     IdentIcon(pubkey = quotePubkey, modifier = Modifier.size(24.dp))
                                     if (rowDescribesQuoteAuthor && !quoteRow.authorPicture.isNullOrBlank()) {
                                         AsyncImage(
-                                            model              = rememberAvatarImageRequest(quoteRow.authorPicture, 24.dp),
+                                            model              = rememberAvatarImageRequest(quoteRow.authorPicture, 24.dp, quotePubkey),
                                             contentDescription = null,
                                             contentScale       = ContentScale.Crop,
                                             modifier           = Modifier.fillMaxSize(),
@@ -1158,7 +1158,7 @@ private fun NotifyChip(
             IdentIcon(pubkey = candidate.pubkey, modifier = Modifier.size(20.dp))
             if (!candidate.picture.isNullOrBlank()) {
                 AsyncImage(
-                    model = rememberAvatarImageRequest(candidate.picture, 20.dp),
+                    model = rememberAvatarImageRequest(candidate.picture, 20.dp, candidate.pubkey),
                     contentDescription = null,
                     contentScale = ContentScale.Crop,
                     modifier = Modifier

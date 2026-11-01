@@ -96,6 +96,22 @@ class RelayPreferencesStoreTest {
         assertEquals(accountA, dataStore.data.first()[stringPreferencesKey("wot_prefs_owner")])
     }
 
+    @Test fun `avatar fallback defaults off persists locally and bounds selected servers`() = runTest {
+        val data = newDataStore()
+        val store = RelayPreferencesStore(data, backgroundScope)
+        assertFalse(store.avatarFallbackPreferences.value.enabled)
+        store.setAvatarFallbackServers(listOf("https://chosen.example/", "https://127.0.0.1", "https://chosen.example", "https://two.example", "https://three.example", "https://four.example"))
+        store.setAvatarFallbackEnabled(true)
+        val result = store.avatarFallbackPreferences.first { it.enabled }
+        assertEquals(listOf("https://chosen.example", "https://two.example", "https://three.example"), result.servers)
+        val restored = RelayPreferencesStore(data, backgroundScope).avatarFallbackPreferences.first { it.enabled }
+        assertEquals(result, restored)
+        store.setAvatarFallbackServers(emptyList())
+        assertTrue(store.avatarFallbackPreferences.first { it.servers.isEmpty() }.enabled)
+        store.setAvatarFallbackEnabled(false)
+        assertFalse(store.avatarFallbackPreferences.first { !it.enabled }.enabled)
+    }
+
     private fun kotlinx.coroutines.test.TestScope.newDataStore() =
         PreferenceDataStoreFactory.create(
             scope = backgroundScope,

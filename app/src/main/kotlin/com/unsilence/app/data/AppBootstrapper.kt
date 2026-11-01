@@ -121,6 +121,7 @@ class AppBootstrapper @Inject constructor(
     private val snapshotScheduler: SnapshotScheduler,
     private val memoryEventStore: MemoryEventStore,
     private val initGate: InitGate,
+    private val avatarRecovery: dagger.Lazy<com.unsilence.app.data.blossom.AvatarRecovery>,
     private val muteListRepository: MuteListRepository,
     private val cardHydrator: CardHydrator,
     private val profilePipeline: com.unsilence.app.data.relay.ProfilePipeline,
@@ -706,6 +707,7 @@ class AppBootstrapper @Inject constructor(
         val jobToCancel = bootstrapJob
         val tornGen = sessionGen.incrementAndGet()
         initGate.invalidateSession()
+        avatarRecovery.get().clear()
         jobToCancel?.cancel()
 
         bootstrapMutex.withLock {

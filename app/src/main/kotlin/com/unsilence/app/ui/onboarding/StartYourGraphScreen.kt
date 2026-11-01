@@ -442,7 +442,7 @@ private fun GraphAvatar(
         IdentIcon(pubkey = person.pubkey, modifier = Modifier.fillMaxSize())
         if (!person.user.picture.isNullOrBlank()) {
             AsyncImage(
-                model = rememberAvatarImageRequest(person.user.picture, size.dp),
+                model = rememberAvatarImageRequest(person.user.picture, size.dp, person.pubkey),
                 contentDescription = null,
                 contentScale = ContentScale.Crop,
                 modifier = Modifier.fillMaxSize(),

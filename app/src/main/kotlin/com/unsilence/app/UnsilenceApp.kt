@@ -13,7 +13,10 @@ import androidx.lifecycle.ProcessLifecycleOwner
 import coil3.ImageLoader
 import coil3.SingletonImageLoader
 import coil3.memory.MemoryCache
-import coil3.network.okhttp.OkHttpNetworkFetcherFactory
+import coil3.network.NetworkFetcher
+import coil3.network.okhttp.asNetworkClient
+import com.unsilence.app.data.blossom.AvatarRecovery
+import com.unsilence.app.data.blossom.AvatarNetworkClient
 import coil3.gif.GifDecoder
 import coil3.video.VideoFrameDecoder
 import coil3.bitmapFactoryMaxParallelism
@@ -45,6 +48,7 @@ class UnsilenceApp : Application(), SingletonImageLoader.Factory, androidx.work.
     @InstallIn(SingletonComponent::class)
     interface ImageClientEntryPoint {
         @ImageClient fun imageClient(): OkHttpClient
+        fun avatarRecovery(): AvatarRecovery
     }
 
     @Inject lateinit var workerFactory: HiltWorkerFactory
@@ -119,10 +123,11 @@ class UnsilenceApp : Application(), SingletonImageLoader.Factory, androidx.work.
         get() = androidx.work.Configuration.Builder()
             .setWorkerFactory(workerFactory)
             .build()
+    @OptIn(coil3.annotation.ExperimentalCoilApi::class)
     override fun newImageLoader(context: coil3.PlatformContext): ImageLoader {
-        val imageClient = EntryPointAccessors
+        val entryPoint = EntryPointAccessors
             .fromApplication(this, ImageClientEntryPoint::class.java)
-            .imageClient()
+        val imageClient = entryPoint.imageClient()
         return ImageLoader.Builder(context)
             .memoryCache {
                 MemoryCache.Builder()
@@ -138,7 +143,9 @@ class UnsilenceApp : Application(), SingletonImageLoader.Factory, androidx.work.
             .allowRgb565(false)
             .crossfade(120)
             .components {
-                add(OkHttpNetworkFetcherFactory(callFactory = { imageClient }))
+                add(NetworkFetcher.Factory(networkClient = {
+                    AvatarNetworkClient(imageClient.asNetworkClient(), entryPoint.avatarRecovery()::recover)
+                }))
                 if (Build.VERSION.SDK_INT >= 28) {
                     add(DirectBufferAnimatedImageDecoderFactory())
                 } else {

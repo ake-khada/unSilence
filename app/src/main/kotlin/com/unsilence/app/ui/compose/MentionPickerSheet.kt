@@ -113,7 +113,7 @@ private fun UserRow(
             IdentIcon(pubkey = user.pubkey, modifier = Modifier.size(36.dp))
             if (!user.picture.isNullOrBlank()) {
                 AsyncImage(
-                    model = rememberAvatarImageRequest(user.picture, 36.dp),
+                    model = rememberAvatarImageRequest(user.picture, 36.dp, user.pubkey),
                     contentDescription = null,
                     contentScale = ContentScale.Crop,
                     modifier = Modifier.fillMaxSize(),
