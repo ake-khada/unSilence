@@ -89,6 +89,8 @@ class RelayConnection(
     private val _messages = Channel<String>(capacity = Channel.BUFFERED)
     val messages: ReceiveChannel<String> get() = _messages
 
+    internal val requests = RelayRequestAdmission()
+
     /** Channel.close alone does not release an already suspended sender. */
     private val terminated = CompletableDeferred<Unit>()
 
@@ -134,12 +136,15 @@ class RelayConnection(
     }
 
     fun send(text: String): Boolean {
-        val accepted = ws?.send(text) == true
+        // Process local CLOSE even after remote termination: it must revoke any
+        // still-buffered frames although there is no longer a usable socket.
+        val accepted = requests.send(text) { !terminated.isCompleted && ws?.send(text) == true }
         if (accepted && text.startsWith("[\"REQ\"")) trafficMetrics.reqAccepted()
         return accepted
     }
 
     fun close() {
+        requests.clear()
         val wasConnecting = _state.value == RelayState.CONNECTING
         _state.value = RelayState.DISCONNECTED
         connected.set(false)

@@ -1822,13 +1822,13 @@ class RelayPool @Inject constructor(
                     conn.messages.consumeEach { raw ->
                         when {
                             raw.startsWith("[\"EVENT\"") -> {
-                                processor.process(raw, url)
+                                processor.process(raw, conn)
                             }
                             raw.startsWith("[\"EOSE\"") -> {
                                 // Keep ephemeral and pooled relay delivery equivalent:
                                 // registered taps need the real EOSE to distinguish a
                                 // completed query from a failed/closed socket.
-                                processor.process(raw, url)
+                                if (!processor.process(raw, conn)) return@consumeEach
                                 val eoseSubId = extractEoseSubId(raw)
                                 if (eoseSubId != null && eoseSubId in pendingSubs) {
                                     idRequestBackoff.onEose(conn, eoseSubId)
@@ -1840,7 +1840,7 @@ class RelayPool @Inject constructor(
                                 }
                             }
                             raw.startsWith("[\"CLOSED\"") -> {
-                                processor.process(raw, url)
+                                if (!processor.process(raw, conn)) return@consumeEach
                                 val closed = runCatching {
                                     val arr = NostrJson.parseToJsonElement(raw).jsonArray
                                     val subId = arr.getOrNull(1)?.jsonPrimitive?.content
@@ -1960,7 +1960,8 @@ class RelayPool @Inject constructor(
                 // Subscription taps demux by subId and need EOSE/CLOSED delivery.
                 // For non-EVENT, EventProcessor fires taps then returns early.
                 // For EVENT, it also handles dedup + MES routing.
-                processor.process(raw, conn.url)
+                if (connections[conn.url] !== conn) return@consumeEach
+                if (!processor.process(raw, conn)) return@consumeEach
                 if (raw.startsWith("[\"EOSE\"")) {
                     val eoseSubId = extractEoseSubId(raw)
                     if (eoseSubId != null && eoseSubId.startsWith("search-")) {
@@ -2116,6 +2117,8 @@ class RelayPool @Inject constructor(
         }
         } finally {
             notificationReplay.cancel()
+            // Remote termination drains buffered frames first; now release socket contracts.
+            conn.requests.clear()
             // Skip the reconnect decision if we're being cancelled (scope teardown).
             // A `return` here would swallow the propagating CancellationException, so
             // gate with `if (isActive)` and use NO `return` statements in this block.
@@ -3460,7 +3463,7 @@ class RelayPool @Inject constructor(
                     val raw = conn.messages.receive()
                     when {
                         raw.startsWith("[\"EVENT\"") -> {
-                            processor.parseAndVerify(raw, relayUrl)
+                            processor.parseAndVerify(raw, conn)
                                 ?.takeIf { it.kind == FOLLOW_PACK_KIND }
                                 ?.let(events::add)
                         }
@@ -4018,9 +4021,9 @@ class RelayPool @Inject constructor(
                 conn.messages.consumeEach { raw ->
                     when {
                         raw.startsWith("[\"EVENT\"") -> {
-                            val ev = processor.parseAndVerify(raw, url)
+                            val ev = processor.parseAndVerify(raw, conn) { verifyFailed++ }
                             when {
-                                ev == null -> verifyFailed++   // forged/malformed — dropped + counted (A1)
+                                ev == null -> Unit // Request mismatch is not a signature failure.
                                 ev.kind == 30166 && ev.pubkey in DIRECTORY_MONITOR_PUBKEYS -> {
                                     collected.add(ev)
                                     pageCount++

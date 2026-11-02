@@ -295,26 +295,33 @@ class EventProcessor @Inject constructor(
      *   3. seenIds cache hit    — ConcurrentHashMap lookup, returns immediately for verified dups
      *   4. Streaming JSON decode — only for novel EVENT messages
      */
-    suspend fun process(raw: String, rawRelayUrl: String) {
-        val relayUrl = normalizeRelayUrl(rawRelayUrl) ?: rawRelayUrl
+    internal suspend fun process(raw: String, connection: RelayConnection): Boolean {
+        val relayUrl = normalizeRelayUrl(connection.url) ?: connection.url
+        val requests = connection.requests
 
         // ── Early return for non-EVENT messages (existing behavior) ────────────
         if (!raw.startsWith("[\"EVENT\"")) {
+            if (raw.startsWith("[\"EOSE\"") || raw.startsWith("[\"CLOSED\"")) {
+                val subId = extractSubscriptionIdFromRaw(raw) ?: return false
+                val request = requests.request(subId) ?: return false
+                // Remove before callbacks, which may issue a replacement REQ.
+                if (raw.startsWith("[\"CLOSED\"")) requests.close(request)
+            }
             dispatchToTaps(RelayTapMessage.Control(raw, relayUrl))
-            return
+            return true
         }
 
         // ── Dedup by event ID, extracted without JSON parsing ──────────────────
-        val eventId = extractEventIdFromRaw(raw) ?: return
-        val subscriptionId = extractSubscriptionIdFromRaw(raw)
+        val subscriptionId = extractSubscriptionIdFromRaw(raw) ?: return false
+        val request = requests.request(subscriptionId) ?: return false
+        val eventId = extractEventIdFromRaw(raw) ?: return false
 
         // Global dedup must not suppress a second matching subscription. Reuse
         // the already-verified object and let Subscription apply its own knownIds.
         verifiedEvents[eventId]?.let { cached ->
+            if (!request.matches(cached) || !requests.isCurrent(request)) return false
             val relayed = cached.forRelay(relayUrl)
-            if (subscriptionId != null) {
-                dispatchToTaps(RelayTapMessage.VerifiedEvent(subscriptionId, relayed))
-            }
+            dispatchToTaps(RelayTapMessage.VerifiedEvent(subscriptionId, relayed))
             // Kind-10040 is account-scoped control state and intentionally
             // re-enters MES: it can first arrive before the owner is established.
             if (cached.kind != 10040 && seenIds.containsKey(eventId) &&
@@ -324,10 +331,10 @@ class EventProcessor @Inject constructor(
             ) {
                 trafficMetrics.processorDuplicate()
                 memoryEventStore.addRelaySeen(eventId, relayUrl)
-                return
+                return true
             }
             handleVerifiedEvent(relayed)
-            return
+            return true
         }
 
         // Only novel EVENT messages reach here (~20 % of total messages).
@@ -339,23 +346,28 @@ class EventProcessor @Inject constructor(
         // drove the 85MB GC cycles every 30-60s.
         val eventJsonStart = findEventObjectStart(raw)
         val eventJsonEnd = if (eventJsonStart >= 0) findMatchingBraceEnd(raw, eventJsonStart) else -1
-        if (eventJsonStart < 0 || eventJsonEnd < 0) return
+        if (eventJsonStart < 0 || eventJsonEnd < 0) return false
         val eventJson = raw.substring(eventJsonStart, eventJsonEnd + 1)
         val dto = try {
             NostrJson.decodeFromString<EventDto>(eventJson)
         } catch (_: Exception) {
-            return  // malformed event object — skip silently
+            return false  // malformed event object — skip silently
         }
         // Sanity: the precomputed eventId must match the decoded id. If a
         // relay returned a tampered or mis-aligned message, refuse it now
         // before we touch MES state.
-        if (dto.id != eventId) return
+        if (dto.id != eventId) return false
         val event = dto.toNostrEvent(relayUrl)
+
+        // Reject deterministic filter mismatches before crypto, caching or provenance.
+        if (!request.matches(event) || !requests.isCurrent(request)) return false
 
         // Schnorr signature + id-hash verification happens before either
         // consumer sees the event. A bad copy cannot poison the cache or dedup.
-        if (!verifySig(event)) return
+        if (!verifySig(event)) return false
         val trustedEvent = event.withParsedRepostMetadata()
+        // Verification can race cancellation/replay. Do not admit an obsolete request.
+        if (!requests.isCurrent(request)) return false
 
         // Deletions replay bounded tombstones; retaining their arbitrary payloads
         // here would undo MES's derived-only retention policy. Verify every arrival.
@@ -363,10 +375,9 @@ class EventProcessor @Inject constructor(
         else verifiedEvents.putIfAbsent(trustedEvent.id, trustedEvent) ?: trustedEvent
         trimVerifiedCacheIfNeeded()
         val relayed = canonical.forRelay(relayUrl)
-        if (subscriptionId != null) {
-            dispatchToTaps(RelayTapMessage.VerifiedEvent(subscriptionId, relayed))
-        }
+        dispatchToTaps(RelayTapMessage.VerifiedEvent(subscriptionId, relayed))
         handleVerifiedEvent(relayed)
+        return true
     }
 
     private fun dispatchToTaps(message: RelayTapMessage) {
@@ -385,23 +396,33 @@ class EventProcessor @Inject constructor(
      * inserting into MES. For the relay-directory firehose (A1): the ephemeral collector
      * bypasses [process]/[handleVerifiedEvent], so the SAME id-hash + Schnorr verification must be
      * re-applied before any directory parse — a forgeable directory is an attack surface.
-     * Returns null on malformed JSON, id-mismatch, or invalid signature. Author allow-listing
-     * (event.pubkey ∈ trusted monitors) is the caller's responsibility — verification proves
-     * authenticity of event.pubkey, not that it is a monitor we trust.
+     * Returns null on an inactive/mismatched request or invalid event. [onInvalidEvent]
+     * keeps malformed/id/signature diagnostics separate from request rejection.
+     * The caller still controls its trusted-monitor allowlist through the sent filter.
      */
-    fun parseAndVerify(raw: String, relayUrl: String): NostrEvent? {
-        val eventId = extractEventIdFromRaw(raw) ?: return null
+    internal fun parseAndVerify(
+        raw: String,
+        connection: RelayConnection,
+        onInvalidEvent: () -> Unit = {},
+    ): NostrEvent? {
+        fun invalid(): NostrEvent? { onInvalidEvent(); return null }
+        val relayUrl = normalizeRelayUrl(connection.url) ?: connection.url
+        val request = connection.requests.request(extractSubscriptionIdFromRaw(raw) ?: return null) ?: return null
+        val eventId = extractEventIdFromRaw(raw) ?: return invalid()
         val start = findEventObjectStart(raw)
         val end = if (start >= 0) findMatchingBraceEnd(raw, start) else -1
-        if (start < 0 || end < 0) return null
+        if (start < 0 || end < 0) return invalid()
         val dto = try {
             NostrJson.decodeFromString<EventDto>(raw.substring(start, end + 1))
         } catch (_: Exception) {
-            return null
+            return invalid()
         }
-        if (dto.id != eventId) return null
+        if (dto.id != eventId) return invalid()
         val event = dto.toNostrEvent(relayUrl)
-        return if (verifySig(event)) event.withParsedRepostMetadata() else null
+        if (!request.matches(event) || !connection.requests.isCurrent(request)) return null
+        if (!verifySig(event)) return invalid()
+        val trusted = event.withParsedRepostMetadata()
+        return trusted.takeIf { connection.requests.isCurrent(request) }
     }
 
     // ── Dedup helpers ─────────────────────────────────────────────────────────
