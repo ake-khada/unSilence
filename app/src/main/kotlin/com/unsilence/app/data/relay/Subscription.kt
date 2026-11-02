@@ -489,7 +489,7 @@ class Subscription @Inject constructor(
         // Reject future-dated events — prevents a poisoned since cursor. Signature
         // and id-hash validity are guaranteed by RelayTapMessage.VerifiedEvent.
         val nowSec = System.currentTimeMillis() / 1000L
-        if (event.createdAt > nowSec + 60L) return
+        if (!isTimelineTimestampAllowed(event.createdAt, nowSec)) return
         val url = event.relayUrl
         if (url !in state.urls) return
         val page = state.pages.computeIfAbsent(url) { RelayPage() }
@@ -676,3 +676,7 @@ class Subscription @Inject constructor(
         }
     }
 }
+
+/** Shared by live subscriptions and bounded, verified history pages. */
+internal fun isTimelineTimestampAllowed(createdAt: Long, nowSec: Long): Boolean =
+    createdAt <= nowSec + 60L

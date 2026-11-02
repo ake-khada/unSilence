@@ -1727,6 +1727,57 @@ class RelayPool @Inject constructor(
         admissionTimeoutMs = ENGAGEMENT_ADMISSION_TIMEOUT_MS,
     )
 
+    /** One bounded page, owned by the caller's Following lifecycle. No new sockets
+     * outside the existing shared temporary budget, AUTH rules or admission path. */
+    internal suspend fun fetchFollowingHistoryPage(url: String, filter: NostrFilter): FollowingHistoryPage {
+        val normalized = normalizeRelayUrl(url) ?: return FollowingHistoryPage()
+        if (socketTransportSuspended.get()) return FollowingHistoryPage(deferred = true)
+        if (normalized in blockedUrls || isAuthUnavailable(normalized) || isRateLimited(normalized) ||
+            relayCapabilitiesStore.shouldSkipRequest(normalized, RelayRequestClass.GENERAL)
+        ) return FollowingHistoryPage()
+        val limit = minOf(filter.limit ?: FOLLOWING_HISTORY_LIMIT, FOLLOWING_HISTORY_LIMIT).coerceAtLeast(1)
+        val subId = "following-history-${java.util.UUID.randomUUID()}"
+        val req = buildJsonArray {
+            add(JsonPrimitive("REQ")); add(JsonPrimitive(subId)); add(filter.copy(limit = limit).toWireJsonObject())
+        }.toString()
+        val buffer = LinkedHashMap<String, com.unsilence.app.data.memory.NostrEvent>()
+        var accepting = true
+        val admitted = java.util.concurrent.atomic.AtomicBoolean(false)
+        val dispatched = java.util.concurrent.atomic.AtomicBoolean(false)
+        val tap = RelayMessageTap { message ->
+            if (message is RelayTapMessage.Control && message.relayUrl == normalized &&
+                (message.raw.startsWith("[\"EOSE\"") || message.raw.startsWith("[\"CLOSED\"")) &&
+                extractEoseSubId(message.raw) == subId
+            ) synchronized(buffer) { accepting = false }
+            if (message is RelayTapMessage.VerifiedEvent && message.subscriptionId == subId &&
+                message.event.relayUrl == normalized &&
+                isTimelineTimestampAllowed(message.event.createdAt, System.currentTimeMillis() / 1000)
+            ) synchronized(buffer) {
+                if (accepting && buffer.size < limit) buffer.putIfAbsent(message.event.id, message.event)
+            }
+        }
+        processor.registerTap(tap)
+        try {
+            val outcomes = oneShotOutcomes.fetch(subId, listOf(normalized), 8_000,
+                dispatch = { onAdmitted ->
+                    dispatched.set(true)
+                    sendOneShotBatch(listOf(normalized), listOf(req), listOf(subId),
+                        onAdmitted = { admitted.set(true); onAdmitted(it) })
+                }, cleanup = { cleanupOneShotSub(subId) },
+                admissionTimeoutMs = ENGAGEMENT_ADMISSION_TIMEOUT_MS)
+            currentCoroutineContext().ensureActive()
+            val outcome = outcomes[normalized] ?: OneShotOutcome.SKIPPED
+            // EVENT verification/tap delivery is synchronous on the socket consumer;
+            // a real EOSE follows every accepted event in this request's page.
+            val events = synchronized(buffer) { accepting = false; TimelineMerge.sort(buffer.values.toList()) }
+            return FollowingHistoryPage(events, outcome,
+                deferred = !dispatched.get() || socketTransportSuspended.get() || (outcome == OneShotOutcome.TIMEOUT && !admitted.get()))
+        } finally {
+            synchronized(buffer) { accepting = false }
+            processor.unregisterTap(tap)
+        }
+    }
+
     /**
      * Open an ephemeral WebSocket, send REQs, collect events until all sub-IDs
      * receive EOSE or timeout, then close. Never touches [connections],

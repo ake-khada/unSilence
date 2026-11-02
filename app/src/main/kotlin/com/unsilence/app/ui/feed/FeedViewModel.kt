@@ -24,6 +24,10 @@ import com.unsilence.app.data.memory.RelaySet
 import com.unsilence.app.data.memory.UserEntity
 import com.unsilence.app.data.memory.WotLookup
 import com.unsilence.app.data.memory.ZapDetail
+import com.unsilence.app.data.relay.FollowingHistoryPlan
+import com.unsilence.app.data.relay.FollowingHistoryRouting
+import com.unsilence.app.data.relay.FollowingHistoryScope
+import com.unsilence.app.data.relay.NostrFilter
 import com.unsilence.app.data.relay.followingCoverageLosses
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.flatMapLatest
@@ -500,6 +504,14 @@ class FeedViewModel @Inject constructor(
      * migrations reroute; unrelated/read-only updates do not rebuild Following.
      */
     private val screenActive = MutableStateFlow(false)
+    private class FollowingHistoryContext(
+        val scope: FollowingHistoryScope,
+        val routing: FollowingHistoryRouting,
+        val filter: NostrFilter,
+    )
+    private val followingHistoryContext = MutableStateFlow<FollowingHistoryContext?>(null)
+    private val followingHistoryReady = MutableStateFlow(false)
+
     private val followingFallbackDependencies = MutableStateFlow<Set<String>>(emptySet())
     @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
     private val relayMetadataVersion: StateFlow<Int> = run {
@@ -678,6 +690,35 @@ class FeedViewModel @Inject constructor(
     fun retryVisibleEngagement(revision: Long) { engagementRetryRevision.value = revision }
 
     init {
+        // One finite plan survives ordinary handle replacement/cover/uncover.
+        // It is cancelled while Following is not the interactive surface.
+        viewModelScope.launch {
+            var plan: FollowingHistoryPlan? = null
+            combine(followingHistoryContext, followingHistoryReady, _feedType) { context, ready, type ->
+                context.takeIf { ready && type is FeedType.Following }
+            }.distinctUntilChanged().collectLatestWhileActive(screenActive) { context ->
+                if (context == null) return@collectLatestWhileActive
+                val current = plan?.takeIf { it.scope == context.scope } ?: FollowingHistoryPlan(
+                    context.scope, context.routing.candidates, context.filter, System.currentTimeMillis() / 1000,
+                ).also { plan = it }
+                current.updateCandidates(context.routing.candidates)
+                fun isCurrent() = screenActive.value && _feedType.value is FeedType.Following &&
+                    followingHistoryContext.value === context &&
+                    keyManager.getPublicKeyHex() == current.scope.account && _filter.value == current.scope.filter
+                withContext(Dispatchers.Default) {
+                    timelineService.catchUpFollowing(current, relayPool::fetchFollowingHistoryPage,
+                        onHistory = { history ->
+                            // Recheck inside CAS as setup can retire the context
+                            // before collectLatest processes its cancellation.
+                            _timeline.update { old ->
+                                if (isCurrent() && old.source is FeedType.Following && old.filter == current.scope.filter)
+                                    old.merge(history) else old
+                            }
+                        }, isCurrent = ::isCurrent)
+                }
+            }
+        }
+
         viewModelScope.launch(Dispatchers.Default) {
             combine(feedRows, _hydrationViewport, _filter) { rows, viewport, _ -> rows to viewport }
                 .conflate()
@@ -767,6 +808,8 @@ class FeedViewModel @Inject constructor(
      * widen relay coverage without re-injecting relay-agnostic cached events mid-session.
      */
     private suspend fun setupSubscription(key: ResubKey, resetView: Boolean) {
+        followingHistoryReady.value = false
+        followingHistoryContext.value = null
         refreshTimeoutJob?.cancel()
         cancelLoadMore()
         lastFeedType = key.type
@@ -846,6 +889,7 @@ class FeedViewModel @Inject constructor(
         val since: Long? = if (resetView) null else _timeline.value.events.firstOrNull()?.createdAt
             ?.coerceAtMost(System.currentTimeMillis() / 1000L)
 
+        val historyContext = followingHistoryContext.value
         currentHandle = timelineService.subscribeTimeline(
             subRequests = subRequests,
             onEvents = { batch, eosed ->
@@ -854,6 +898,9 @@ class FeedViewModel @Inject constructor(
                     refreshTimeoutJob?.cancel()
                 }
                 handleBatch(batch, eosed, since)
+                if ((batch.isNotEmpty() || eosed) && followingHistoryContext.value === historyContext) {
+                    followingHistoryReady.value = true
+                }
             },
             onNew    = { event -> handleNew(event) },
             seedHead = _timeline.value.events.firstOrNull()?.createdAt,
@@ -1334,7 +1381,7 @@ class FeedViewModel @Inject constructor(
                     ?.let { memoryEventStore.getFollows(it) }
                     ?: emptySet()
                 if (follows.isEmpty()) return emptyList()
-                outboxResolver.resolveFollowing(
+                val live = outboxResolver.resolveFollowing(
                     authors = follows,
                     fallbackRelays = readRelays.ifEmpty { GLOBAL_RELAY_URLS },
                     blockedRelays = blockedRelays,
@@ -1342,6 +1389,12 @@ class FeedViewModel @Inject constructor(
                     healthyRelayUrls = withContext(Dispatchers.Default) { relayPool.healthyReadRelayUrls() },
                     onFallbackDependencies = { followingFallbackDependencies.value = it },
                 )
+                val routing = outboxResolver.resolveFollowingHistory(follows, live, blockedRelays)
+                if (ownPubkey != null) followingHistoryContext.value = FollowingHistoryContext(
+                    FollowingHistoryScope(ownPubkey, routing.writes, filter), routing,
+                    NostrFilter(kinds = kinds, limit = config.limit, since = filterSince, tags = config.tags),
+                )
+                live
             }
             is FeedType.Global -> outboxResolver.resolveGlobal(
                 readRelays = readRelays,

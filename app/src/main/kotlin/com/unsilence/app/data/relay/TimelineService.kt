@@ -376,6 +376,15 @@ class TimelineService @Inject constructor(
         return synchronized(live) { ArrayList(live) }
     }
 
+    /** Targeted omitted-author pages use the same history delivery as gap recovery.
+     * They neither seed MES nor certify/modify live TimelineCoverage. */
+    internal suspend fun catchUpFollowing(
+        plan: FollowingHistoryPlan,
+        fetch: suspend (String, NostrFilter) -> FollowingHistoryPage,
+        onHistory: (List<NostrEvent>) -> Unit,
+        isCurrent: () -> Boolean = { true },
+    ) = plan.run(fetch, onHistory, isCurrent)
+
     interface TimelineHandle {
         val timelineKey: String
         fun close()

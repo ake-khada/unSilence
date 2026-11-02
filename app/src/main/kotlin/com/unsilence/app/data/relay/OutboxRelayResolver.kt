@@ -204,6 +204,28 @@ class OutboxRelayResolver @Inject constructor(
         return subRequests
     }
 
+    /** Finite history candidates outside the live declared-write routes. */
+    internal fun resolveFollowingHistory(
+        authors: Set<String>,
+        liveRequests: List<SubRequest>,
+        blockedRelays: Set<String>,
+    ): FollowingHistoryRouting {
+        val writes = authors.sorted().associateWith { author ->
+            metadata.writeRelaysFor(author).mapNotNull(::normalizeRelayUrl).distinct().sorted()
+        }
+        val liveUrls = liveRequests.flatMap { it.urls }.mapNotNull(::normalizeRelayUrl).toSet()
+        val blocked = blockedRelays.mapNotNull(::normalizeRelayUrl).toSet()
+        val quality = relayLatencyOrder()
+        val candidates = writes.mapNotNull { (author, urls) ->
+            if (urls.any { it in liveUrls }) null else {
+                val eligible = urls.filterNot { it in blocked }.sortedWith(quality)
+                    .take(FOLLOWING_HISTORY_CANDIDATES)
+                if (eligible.isEmpty()) null else author to eligible
+            }
+        }.toMap()
+        return FollowingHistoryRouting(writes, candidates)
+    }
+
     /**
      * Builds a single SubRequest for the Global feed — one filter against
      * the user's read relays (or fallback if none configured).

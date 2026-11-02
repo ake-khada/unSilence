@@ -28,6 +28,7 @@ object SubscriptionRules {
         "search-",
         "older-",
         "relay-ecosystem-",
+        "following-history-",
         "thread-event-",
         "thread-replies-",
         "thread-reactions-",
