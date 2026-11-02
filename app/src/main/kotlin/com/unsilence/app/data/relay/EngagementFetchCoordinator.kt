@@ -47,7 +47,8 @@ internal class EngagementFetchCoordinator(
         val retryAt: Long = 0L,
     ) {
         fun due(now: Long, createdAt: Long, own: Boolean): Boolean {
-            if (failures > 0) return now >= retryAt
+            if (now < retryAt) return false
+            if (failures > 0) return true
             val success = succeededAt ?: return true
             val interval = if (own) Long.MAX_VALUE else engagementFreshnessInterval(now / 1000L - createdAt)
             return interval != Long.MAX_VALUE && now - success >= interval * 1_000L
@@ -58,6 +59,7 @@ internal class EngagementFetchCoordinator(
         var coordinate: String? = null
         var missingRelaysRetryAt = 0L
         var attempt: Attempt? = null
+        var retentionGeneration = 0L
     }
     private class Attempt(
         val key: TargetKey,
@@ -66,6 +68,7 @@ internal class EngagementFetchCoordinator(
         val requestedRelays: Set<String>,
     ) {
         val pendingRelays = requestedRelays.toMutableSet()
+        val retentionGeneration = entry.retentionGeneration
     }
 
     private val entries = LinkedHashMap<TargetKey, Entry>(16, 0.75f, true)
@@ -75,6 +78,26 @@ internal class EngagementFetchCoordinator(
     fun clear() {
         entries.clear()
         changes.value += 1
+    }
+
+    /** Eviction invalidates retained query data, without bypassing failure backoff. */
+    @Synchronized
+    fun invalidateRetainedTargets(ids: Collection<String>, ownPubkey: String? = null) {
+        val keys = ids.asSequence().flatMap { id ->
+            sequenceOf(TargetKey(id, null), ownPubkey?.let { TargetKey(id, it) }).filterNotNull()
+        }
+        var changed = false
+        for (key in keys) {
+            val entry = entries[key] ?: continue
+            entry.retentionGeneration++
+            entry.coverage.replaceAll { _, coverage ->
+                coverage.succeededAt?.let { success ->
+                    changed = true
+                    coverage.copy(succeededAt = null, retryAt = maxOf(coverage.retryAt, success + ENGAGEMENT_RETRY_MS, nowMs() + 1))
+                } ?: coverage
+            }
+        }
+        if (changed) changes.value += 1
     }
 
     /**
@@ -90,7 +113,7 @@ internal class EngagementFetchCoordinator(
                     .filter { it.attempt == null }
                     .flatMap { entry ->
                         sequenceOf(entry.missingRelaysRetryAt) + entry.coverage.values.asSequence()
-                            .filter { it.failures > 0 }.map { it.retryAt }
+                            .map { it.retryAt }
                     }
                     .filter { it > 0L && it > announcedThrough }
                     .minOrNull()
@@ -101,7 +124,7 @@ internal class EngagementFetchCoordinator(
                     changes.first { it != revision }
                 } == null
             ) {
-                announcedThrough = deadline
+                announcedThrough = maxOf(deadline, nowMs())
                 emit(Unit)
             }
         }
@@ -231,7 +254,8 @@ internal class EngagementFetchCoordinator(
         for (key in scopes) {
             val previous = entry.coverage[key] ?: Coverage()
             entry.coverage[key] = if (outcome == OneShotOutcome.EOSE) {
-                Coverage(succeededAt = now)
+                if (entry.retentionGeneration == attempt.retentionGeneration) Coverage(succeededAt = now)
+                else Coverage(failures = previous.failures, retryAt = now + ENGAGEMENT_RETRY_MS)
             } else {
                 val failures = (previous.failures + 1).coerceAtMost(5)
                 previous.copy(

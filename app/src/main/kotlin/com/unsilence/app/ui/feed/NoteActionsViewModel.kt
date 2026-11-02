@@ -77,7 +77,7 @@ import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.put
 import javax.inject.Inject
 
-private const val CARD_WINDOW_WARM_ABOVE = 2
+private const val CARD_WINDOW_WARM_ABOVE = com.unsilence.app.ui.shared.DISPLAY_WINDOW_ABOVE
 private const val CARD_WINDOW_WARM_LOOKAHEAD = 12
 private const val CARD_WINDOW_WARM_MAX_ROWS = 18
 private const val CARD_WINDOW_IMAGE_CAP = 4
@@ -86,7 +86,7 @@ private const val CARD_WINDOW_VIDEO_THUMB_CAP = 8
 private const val CARD_WINDOW_PROFILE_CAP = 16
 private const val CARD_WINDOW_REFERENCE_CAP = 4
 private const val CARD_WINDOW_ARTICLE_CAP = 2
-private const val CARD_WINDOW_ENGAGEMENT_LOOKAHEAD = 6
+private const val CARD_WINDOW_ENGAGEMENT_LOOKAHEAD = com.unsilence.app.data.relay.ENGAGEMENT_LOOKAHEAD
 private const val CARD_WINDOW_ENGAGEMENT_DEBOUNCE_MS = 250L
 private const val ENGAGEMENT_PUBLISH_MAX_OWN_WRITE = 4
 private const val ENGAGEMENT_PUBLISH_MAX_AUTHOR_READ = 4
@@ -303,17 +303,15 @@ class NoteActionsViewModel @Inject constructor(
         visibleIds: Set<String>? = null,
         contextRows: List<FeedRow> = emptyList(),
     ) {
-        if (rows.isEmpty()) displayWindowReporter.report(contextRows, visibleIds.orEmpty())
-        if (rows.isEmpty() || cardWidthPx <= 0) return
+        val displayed = visibleIds ?: if (rows.isEmpty()) emptySet() else
+            rows.subList(first.coerceIn(0, rows.lastIndex), last.coerceIn(first.coerceIn(0, rows.lastIndex), rows.lastIndex) + 1)
+                .mapTo(HashSet()) { it.id }
+        if (!displayWindowReporter.prepareWarmWindow(rows, first, last, displayed, cardWidthPx, contextRows)) return
         val safeFirst = first.coerceIn(0, rows.lastIndex)
         val safeLast = last.coerceAtLeast(safeFirst).coerceAtMost(rows.lastIndex)
         val warmStart = (safeFirst - CARD_WINDOW_WARM_ABOVE).coerceAtLeast(0)
         val warmEnd = (safeLast + 1 + CARD_WINDOW_WARM_LOOKAHEAD).coerceAtMost(rows.size)
         if (warmStart >= warmEnd) return
-
-        val viewportRows = rows.subList(safeFirst, safeLast + 1)
-        displayWindowReporter.report((viewportRows + contextRows).distinctBy { it.id },
-            visibleIds ?: viewportRows.mapTo(HashSet()) { it.id })
 
         val key = CardWindowWarmKey(
             rowCount = rows.size,

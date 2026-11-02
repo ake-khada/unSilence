@@ -699,8 +699,9 @@ class FeedViewModel @Inject constructor(
             combine(feedRows, _hydrationViewport, _filter) { rows, viewport, _ -> rows to viewport }
                 .conflate()
                 .collectLatestWhileActive(screenActive) { (rows, viewport) ->
-                    if (rows.isEmpty()) displayWindowReporter.report(emptyList(), emptySet())
-                    if (rows.isEmpty() || viewport.cardWidthPx <= 0) return@collectLatestWhileActive
+                    if (!displayWindowReporter.prepareWarmWindow(
+                        rows, viewport.first, viewport.last, viewport.visibleIds, viewport.cardWidthPx,
+                    )) return@collectLatestWhileActive
                     val first = viewport.first.coerceIn(0, rows.lastIndex)
                     val last = viewport.last.coerceAtLeast(first).coerceAtMost(rows.lastIndex)
                     val lookahead = if (_feedType.value is FeedType.Following) {
@@ -718,10 +719,6 @@ class FeedViewModel @Inject constructor(
                         if (start < first) addAll(rows.subList(start, first))
                         if (visibleEnd < end) addAll(rows.subList(visibleEnd, end))
                     }
-                    displayWindowReporter.report(
-                        rows.subList(first, last + 1),
-                        viewport.visibleIds,
-                    )
                     cardHydrator.warmUpcomingAssets(
                         events = warmRows,
                         cardWidthPx = viewport.cardWidthPx,
@@ -1588,7 +1585,7 @@ class FeedViewModel @Inject constructor(
         const val WARM_ZONE_BELOW = 50
         /** Churny feeds (Global, SingleRelay) — narrower warm zone to reduce speculative fetches. */
         const val WARM_ZONE_BELOW_CHURNY = 30
-        const val ASSET_WARM_ABOVE = 2
+        const val ASSET_WARM_ABOVE = com.unsilence.app.ui.shared.DISPLAY_WINDOW_ABOVE
         const val ASSET_WARM_LOOKAHEAD = 12
         const val ASSET_WARM_LOOKAHEAD_CHURNY = 8
         const val ASSET_WARM_MAX_ROWS = 16

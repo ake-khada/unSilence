@@ -236,6 +236,12 @@ class CardHydrator @Inject constructor(
     //   <1h→2min, <6h→10min, <24h→1h, <7d→6h, ≥7d→fetch once.
 
     private val engagementFetches = EngagementFetchCoordinator(relayPool::fetchOneShotOutcomes)
+
+    init {
+        memoryEventStore.engagementEvicted = { ids ->
+            engagementFetches.invalidateRetainedTargets(ids, memoryEventStore.ownPubkey)
+        }
+    }
     private val retryRevision = AtomicLong()
 
     /** One deadline signal shared by lifecycle-aware screen collectors; never a per-card fetch. */
@@ -1009,7 +1015,7 @@ class CardHydrator @Inject constructor(
      */
     private suspend fun dispatchOwnEngagement(ownPk: String) {
         // Drain pending buffer
-        val targets = pendingBackfillTargets.values.toList()
+        val targets = prioritizeEngagementTargets(pendingBackfillTargets.values.toList(), memoryEventStore.displayPriorities())
         targets.forEach { pendingBackfillTargets.remove(it.id, it) }
         if (targets.isEmpty()) return
         val batch = targets.map { it.id }
@@ -1065,7 +1071,8 @@ class CardHydrator @Inject constructor(
      * The coordinator records real EOSE per relay and requested filter scope.
      */
     private suspend fun dispatchEngagement() {
-        val targets = pendingEngagementTargets.values.toList()
+        val priorities = memoryEventStore.displayPriorities()
+        val targets = prioritizeEngagementTargets(pendingEngagementTargets.values.toList(), priorities)
         targets.forEach { pendingEngagementTargets.remove(it.id, it) }
         if (targets.isEmpty()) return
         val batch = targets.map { it.id }
@@ -1098,7 +1105,9 @@ class CardHydrator @Inject constructor(
         }
 
         // 2. Invert → one chunked REQ per relay (coverage-ranked, capped).
-        val relayBatches = coalesceByRelay(idToRelays, MAX_ENGAGEMENT_RELAYS, ENGAGEMENT_BATCH_CHUNK)
+        val relayBatches = prioritizeEngagementBatches(
+            coalesceByRelay(idToRelays, MAX_ENGAGEMENT_RELAYS, ENGAGEMENT_BATCH_CHUNK), priorities,
+        )
         engagementFetches.fetch(targets, relayBatches)
 
         Log.d(TAG, "Engagement: ${batch.size} posts → ${relayBatches.size} REQ(s) across " +
@@ -1352,4 +1361,15 @@ fun extractPTagPubkeys(tagsJson: String): List<String> {
             .filter { it.jsonArray.getOrNull(0)?.jsonPrimitive?.content == "p" }
             .mapNotNull { it.jsonArray.getOrNull(1)?.jsonPrimitive?.content }
     } catch (_: Exception) { emptyList() }
+}
+
+/** Stable ordering over a captured viewport: visible, nearby, then older queued work. */
+internal fun prioritizeEngagementTargets(
+    targets: List<CardHydrator.EngagementTarget>, priorities: Map<String, Int>,
+): List<CardHydrator.EngagementTarget> = targets.sortedBy { priorities[it.id] ?: 2 }
+
+internal fun prioritizeEngagementBatches(
+    batches: List<Pair<String, List<String>>>, priorities: Map<String, Int>,
+): List<Pair<String, List<String>>> = batches.sortedBy { (_, ids) ->
+    ids.minOfOrNull { priorities[it] ?: 2 } ?: 2
 }

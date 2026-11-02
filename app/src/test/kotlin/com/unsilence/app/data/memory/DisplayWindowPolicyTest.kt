@@ -26,18 +26,21 @@ class DisplayWindowPolicyTest {
     }
 
     @Test
-    fun `only genuinely visible rows are protected`() {
+    fun `visible and reported nearby rows are protected but unreported rows are evicted`() {
         val store = store()
         store.insert(note("visible"))
         store.insert(note("lookahead"))
+        store.insert(note("outside"))
         store.openDisplayWindow().use { window ->
             window.update(listOf("visible" to "visible", "lookahead" to "lookahead"), setOf("visible"))
             store.evictOldContentEventsForTest(mapOf(1 to 0))
             assertNotNull(store.getNostrEvent("visible"))
-            assertNull(store.getNostrEvent("lookahead"))
+            assertNotNull(store.getNostrEvent("lookahead"))
+            assertNull(store.getNostrEvent("outside"))
         }
         store.evictOldContentEventsForTest(mapOf(1 to 0))
         assertNull(store.getNostrEvent("visible"))
+        assertNull(store.getNostrEvent("lookahead"))
     }
 
     @Test
@@ -121,6 +124,37 @@ class DisplayWindowPolicyTest {
         window.close()
         store.evictOldContentEventsForTest(mapOf(kind to 0))
         assertNull("Same repost is evictable after release", store.getNostrEvent(repost.id))
+    }
+
+    @Test
+    fun `evicting reaction and repost payloads preserves retained counts without target recovery`() {
+        for (kind in listOf(7, 6, 16)) {
+            val store = store()
+            val target = note("target")
+            val engagement = note("engagement-$kind").copy(
+                kind = kind, content = if (kind == 7) "+" else "",
+                rootId = if (kind == 7) null else target.id,
+                tags = listOf(listOf("e", target.id), listOf("p", target.pubkey)),
+            )
+            store.insert(target)
+            assertTrue(store.insert(engagement))
+            val lost = mutableSetOf<String>()
+            store.engagementEvicted = { lost += it }
+            store.evictOldContentEventsForTest(mapOf(kind to 0))
+            assertNull(store.getNostrEvent(engagement.id))
+            assertFalse("Retained aggregate is not missing data: kind $kind", target.id in lost)
+            val count = { if (kind == 7) store.reactionCount(target.id) else store.repostCount(target.id) }
+            assertEquals(1, count())
+            // The same actor state remains usable after raw payload eviction.
+            // Set owner after eviction; own-authored raw events are cap-exempt.
+            store.ownPubkey = engagement.pubkey
+            assertTrue(store.isOwnEngaged(target.id))
+            val ids = if (kind == 7) store.reactionEventIdsForTarget(engagement.pubkey, target.id)
+                else store.repostEventIdsForTarget(engagement.pubkey, target.id)
+            assertEquals(setOf(engagement.id), ids)
+            assertTrue(store.insert(engagement))
+            assertEquals("Reinsertion must not inflate displayed counts", 1, count())
+        }
     }
 
     private fun store() = MemoryEventStore(object : MuteKeyProvider {}, stubTimelineServiceProvider())

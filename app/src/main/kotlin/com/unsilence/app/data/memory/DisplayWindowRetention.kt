@@ -4,19 +4,22 @@ package com.unsilence.app.data.memory
 internal const val DISPLAY_WINDOW_ROW_LIMIT = 32
 
 internal class DisplayWindowRetention(private val lock: Any) {
-    private class Entry(var ids: Set<String> = emptySet())
+    private class Entry(var ids: Set<String> = emptySet(), var visibleIds: Set<String> = emptySet())
     private val entries = HashMap<Any, Entry>()
     private val owners = HashMap<String, Int>()
 
     inner class Lease internal constructor(private val key: Any) : AutoCloseable {
-        fun update(ids: Collection<String>): Boolean = synchronized(lock) {
+        fun update(ids: Collection<String>, visibleIds: Set<String> = ids.toSet()): Boolean = synchronized(lock) {
             val entry = entries[key] ?: return@synchronized false
             val limit = DISPLAY_WINDOW_ROW_LIMIT * 2
             val next = ids.asSequence().filter { it.isNotBlank() }.distinct().take(limit).toSet()
+            val nextVisible = visibleIds.intersect(next)
+            if (entry.ids == next && entry.visibleIds == nextVisible) return@synchronized true
             val removed = entry.ids - next
             (next - entry.ids).forEach { owners[it] = (owners[it] ?: 0) + 1 }
             removed.forEach(::releaseId)
             entry.ids = next
+            entry.visibleIds = nextVisible
             true
         }
 
@@ -37,9 +40,17 @@ internal class DisplayWindowRetention(private val lock: Any) {
 
     fun contains(id: String): Boolean = synchronized(lock) { id in owners }
 
+    /** Snapshot before sorting: never consult moving viewport state in a comparator. */
+    fun priorities(): Map<String, Int> = synchronized(lock) {
+        buildMap {
+            owners.keys.forEach { put(it, 1) }
+            this@DisplayWindowRetention.entries.values.forEach { entry -> entry.visibleIds.forEach { put(it, 0) } }
+        }
+    }
+
     fun forget(id: String) = synchronized(lock) {
         if (owners.remove(id) != null) {
-            entries.values.forEach { it.ids = it.ids - id }
+            entries.values.forEach { it.ids = it.ids - id; it.visibleIds = it.visibleIds - id }
         }
     }
 

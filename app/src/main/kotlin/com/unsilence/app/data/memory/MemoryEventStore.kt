@@ -642,11 +642,17 @@ class MemoryEventStore @Inject constructor(
     inner class DisplayWindow internal constructor() : AutoCloseable {
         private val lease = displayWindows.acquire()
 
-        fun update(rows: List<Pair<String, String>>, visibleRowIds: Set<String>) = synchronized(contentPolicyLock) {
-            val ids = rows.asSequence().filter { it.first in visibleRowIds }
-                .take(DISPLAY_WINDOW_ROW_LIMIT).flatMap { sequenceOf(it.first, it.second) }.toSet()
-            if (lease.update(ids)) {
-                markTouched(ids.filter { eventsById.containsKey(it) })
+        fun update(
+            rows: List<Pair<String, String>>,
+            visibleRowIds: Set<String>,
+        ) = synchronized(contentPolicyLock) {
+            val selected = rows.asSequence()
+                .take(DISPLAY_WINDOW_ROW_LIMIT).toList()
+            val ids = selected.flatMap { listOf(it.first, it.second) }.toSet()
+            val visibleIds = selected.filter { it.first in visibleRowIds }
+                .flatMap { listOf(it.first, it.second) }.toSet()
+            if (lease.update(ids, visibleIds)) {
+                markTouched(visibleIds.filter { eventsById.containsKey(it) })
             }
         }
 
@@ -654,6 +660,11 @@ class MemoryEventStore @Inject constructor(
     }
 
     fun openDisplayWindow(): DisplayWindow = DisplayWindow()
+
+    internal fun displayPriorities(): Map<String, Int> = displayWindows.priorities()
+
+    /** One existing hydration coordinator; IDs only, no retained eviction journal. */
+    @Volatile internal var engagementEvicted: ((Set<String>) -> Unit)? = null
 
     private fun isDisplayProtected(event: NostrEvent): Boolean {
         if (displayWindows.contains(event.id)) return true
@@ -3301,10 +3312,13 @@ class MemoryEventStore @Inject constructor(
         lastTouchedAt.remove(event.id)
         displayWindows.forget(event.id)
         forEachReplyIndexTarget(event) { targetId ->
-            if (removeReplyIndexEntry(targetId, event.id)) {
+            if (removeReplyIndexEntry(targetId, event.id) && (event.kind == 1 || event.kind == 1111)) {
                 invalidatedReplyTargets += targetId
             }
         }
+        // Reaction/repost contributor aggregates survive payload eviction. Their
+        // targets lost no displayed engagement and need neither recovery nor a
+        // stats refresh. Replies and authenticated receipts above are different.
         // Article comment index: drop this id from each coord it referenced.
         if (event.kind == 1 || event.kind == 1111) {
             for (tag in event.tags) {
@@ -3347,6 +3361,11 @@ class MemoryEventStore @Inject constructor(
         removedIds: Set<String>,
         dirty: InsertDirty? = null,
     ) {
+        // Removal and final display checks have released contentPolicyLock.
+        // One bounded batch, before dropping removed IDs from UI invalidations.
+        if (invalidatedReplyTargets.isNotEmpty() || removedIds.isNotEmpty()) {
+            engagementEvicted?.invoke(invalidatedReplyTargets + removedIds)
+        }
         invalidatedReplyTargets.removeAll(removedIds)
         if (invalidatedReplyTargets.isEmpty()) return
         val updatedAt = System.currentTimeMillis()

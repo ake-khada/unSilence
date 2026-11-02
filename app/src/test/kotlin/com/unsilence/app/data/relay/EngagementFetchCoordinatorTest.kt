@@ -489,6 +489,158 @@ class EngagementFetchCoordinatorTest(mode: String) {
         observer.cancel()
     }
 
+    @Test
+    fun `real store eviction makes only affected successful coverage retryable`() = runTest {
+        val h = Harness(this)
+        val other = old.copy(id = "d".repeat(64))
+        h.dispatch = { h.reply(it, OneShotOutcome.EOSE); it.relays.toSet() }
+        h.fetch(listOf(old, other))
+        assertFalse(h.due(old))
+        assertFalse(h.due(other))
+        val store = MemoryEventStore(object : MuteKeyProvider {}, stubTimelineServiceProvider())
+        store.engagementEvicted = { ids -> h.coordinator.invalidateRetainedTargets(ids, ownPubkey) }
+        store.insert(retainedEvent(old.id))
+        store.insert(retainedEvent("reply").copy(rootId = old.id, replyToId = old.id,
+            tags = listOf(listOf("e", old.id, "", "root"))))
+        store.openDisplayWindow().use { window ->
+            window.update(listOf(old.id to old.id), setOf(old.id))
+            store.evictOldContentEventsForTest(mapOf(1 to 0))
+            assertEquals(0, store.replyCount(old.id))
+            assertTrue(store.getNostrEvent(old.id) != null)
+        }
+        assertFalse("Eviction retry is spaced after the last successful query", h.due(old))
+        advanceTimeBy(29_000)
+        h.coordinator.invalidateRetainedTargets(listOf(old.id), ownPubkey)
+        assertFalse(h.due(old))
+        advanceTimeBy(1_000)
+        assertTrue("Repeated invalidation must not extend the recovery deadline", h.due(old))
+        assertFalse("Unrelated coverage remains reusable", h.due(other))
+        assertEquals("Eviction alone must not send offscreen requests", 2, h.requests.size)
+        h.fetch(listOf(old))
+        assertEquals(4, h.requests.size)
+        assertFalse(h.due(old))
+    }
+
+    @Test
+    fun `late EOSE after retention loss cannot certify the missing data`() = runTest {
+        val h = Harness(this)
+        val pending = launch { h.fetch() }
+        runCurrent()
+        h.coordinator.invalidateRetainedTargets(listOf(old.id), ownPubkey)
+        h.requests.toList().forEach { h.reply(it, OneShotOutcome.EOSE) }
+        pending.join()
+        assertFalse("Avoid an immediate eviction and refetch loop", h.due())
+        advanceTimeBy(30_000)
+        assertTrue("Late completion must not freeze old posts as fresh", h.due())
+        h.dispatch = { h.reply(it, OneShotOutcome.EOSE); it.relays.toSet() }
+        h.fetch()
+        assertFalse(h.due())
+    }
+
+    @Test
+    fun `retention invalidation preserves failed relay backoff`() = runTest {
+        val h = Harness(this)
+        h.dispatch = { h.reply(it, OneShotOutcome.CLOSED); it.relays.toSet() }
+        h.fetch()
+        h.coordinator.invalidateRetainedTargets(listOf(old.id), ownPubkey)
+        assertFalse(h.due())
+        advanceTimeBy(30_000)
+        assertTrue(h.due())
+    }
+
+    @Test
+    fun `repeated retention loss during genuine EOSE never escalates transport backoff`() = runTest {
+        val h = Harness(this)
+        repeat(4) {
+            val fetch = launch { h.fetch(relays = listOf(first)) }
+            runCurrent()
+            h.coordinator.invalidateRetainedTargets(listOf(old.id), ownPubkey)
+            h.reply(h.requests.last(), OneShotOutcome.EOSE)
+            fetch.join()
+            advanceTimeBy(29_000)
+            assertFalse(h.due())
+            advanceTimeBy(1_000)
+            assertTrue("Each retention retry is 30s, never an escalating relay failure", h.due())
+        }
+        assertEquals(4, h.requests.size)
+    }
+
+    @Test
+    fun `stationary visible demand recovers invalidated success once without polling`() = runTest {
+        val h = Harness(this)
+        h.dispatch = { h.reply(it, OneShotOutcome.EOSE); it.relays.toSet() }
+        h.fetch()
+        var wakeups = 0
+        val observer = backgroundScope.launch {
+            h.coordinator.retrySignals().collect { wakeups++; h.fetch() }
+        }
+        runCurrent()
+        h.coordinator.invalidateRetainedTargets(listOf("unknown"), ownPubkey)
+        h.coordinator.invalidateRetainedTargets(listOf(old.id), ownPubkey)
+        advanceTimeBy(29_000)
+        h.coordinator.invalidateRetainedTargets(listOf(old.id), ownPubkey)
+        assertEquals(0, wakeups)
+        advanceTimeBy(1_000)
+        runCurrent()
+        assertEquals(1, wakeups)
+        assertEquals(4, h.requests.size)
+        advanceTimeBy(300_000)
+        assertEquals(1, wakeups)
+        observer.cancel()
+    }
+
+    @Test
+    fun `returning viewport coalesces several overdue retention deadlines`() = runTest {
+        val h = Harness(this)
+        h.dispatch = { h.reply(it, OneShotOutcome.EOSE); it.relays.toSet() }
+        repeat(3) { index ->
+            val target = old.copy(id = "target-$index")
+            h.fetch(listOf(target))
+            h.coordinator.invalidateRetainedTargets(listOf(target.id), ownPubkey)
+            advanceTimeBy(5_000)
+        }
+        advanceTimeBy(60_000)
+        var wakeups = 0
+        val observer = backgroundScope.launch { h.coordinator.retrySignals().collect { wakeups++ } }
+        runCurrent()
+        advanceTimeBy(1)
+        runCurrent()
+        assertEquals("One window refresh covers every already-due target", 1, wakeups)
+        observer.cancel()
+    }
+
+    @Test
+    fun `old success evicted after another retry signal still wakes a stationary viewport`() = runTest {
+        val h = Harness(this)
+        val other = old.copy(id = "d".repeat(64))
+        h.dispatch = { h.reply(it, OneShotOutcome.EOSE); it.relays.toSet() }
+        h.fetch(listOf(old, other))
+        var wakeups = 0
+        val observer = backgroundScope.launch {
+            h.coordinator.retrySignals().collect { wakeups++; h.fetch(listOf(old, other)) }
+        }
+        runCurrent()
+        advanceTimeBy(70_000)
+        h.coordinator.invalidateRetainedTargets(listOf(old.id), ownPubkey)
+        advanceTimeBy(2)
+        runCurrent()
+        assertEquals(1, wakeups)
+        advanceTimeBy(1_000)
+        h.coordinator.invalidateRetainedTargets(listOf(other.id), ownPubkey)
+        advanceTimeBy(2)
+        runCurrent()
+        assertEquals("Older coverage must not disappear behind another target's announced deadline", 2, wakeups)
+        assertFalse(h.due(other))
+        observer.cancel()
+    }
+
+    private fun retainedEvent(id: String) = NostrEvent(
+        id = id, pubkey = "unfollowed", kind = 1, content = "fixture", createdAt = 1L,
+        tags = emptyList(), sig = "", relayUrl = first, replyToId = null, rootId = null,
+        hasContentWarning = false, contentWarningReason = null, firstSeenAt = 1L,
+        relaysSeen = mutableSetOf(first),
+    )
+
     companion object {
         @JvmStatic
         @Parameterized.Parameters(name = "{0}")
