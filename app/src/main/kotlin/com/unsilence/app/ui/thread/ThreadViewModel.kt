@@ -162,6 +162,11 @@ class ThreadViewModel @Inject constructor(
 
     private val _uiState = MutableStateFlow(ThreadUiState())
     val uiState: StateFlow<ThreadUiState> = _uiState.asStateFlow()
+
+    internal fun presentation(eventId: String): CardDataFlow<ThreadUiState> =
+        threadPresentation(eventId, uiState, memoryEventStore::cachedFeedRow) { id ->
+            memoryEventStore.feedRowsByIds(setOf(id))
+        }
     private val _baseUiState = MutableStateFlow(ThreadUiState())
     private val _wotSubjects = MutableStateFlow<Set<String>>(emptySet())
     val wotLookups: StateFlow<Map<String, WotLookup>> =

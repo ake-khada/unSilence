@@ -4,6 +4,7 @@ import com.unsilence.app.ui.theme.AppTextStyles
 import androidx.lifecycle.compose.LifecycleResumeEffect
 import androidx.compose.runtime.saveable.rememberSaveable
 import com.unsilence.app.ui.shared.ResumedEffect
+import com.unsilence.app.ui.shared.collectCardDataAsState
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -99,7 +100,8 @@ fun ThreadScreen(
         viewModel.loadThread(eventId, relayHints)
         onPauseOrDispose { viewModel.setScreenActive(false) }
     }
-    val state           by viewModel.uiState.collectAsStateWithLifecycle()
+    val presentation = remember(viewModel, eventId) { viewModel.presentation(eventId) }
+    val state           by presentation.collectCardDataAsState()
     val sensitiveMode   by viewModel.sensitiveContentMode.collectAsStateWithLifecycle()
     val wotLookup = rememberCardWotLookup(viewModel.wotLookups)
     val feedWotDisplayMode by viewModel.feedWotDisplayMode.collectAsStateWithLifecycle()

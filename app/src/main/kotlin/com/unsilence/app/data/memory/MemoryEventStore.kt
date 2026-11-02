@@ -4953,6 +4953,10 @@ class MemoryEventStore @Inject constructor(
         )
     }
 
+    /** Presentation-only peek: never synthesize rows, scan a thread or retain evicted payloads. */
+    internal fun cachedFeedRow(eventId: String): FeedRow? =
+        feedRowCache[eventId]?.row?.takeIf { eventsById.containsKey(eventId) }
+
     /** Exact ID lookup returning FeedRows, sorted by createdAt DESC. */
     fun feedRowsByIds(ids: Set<String>): List<FeedRow> =
         ids.mapNotNull { eventsById[it] }
