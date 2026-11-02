@@ -67,7 +67,10 @@ internal fun parseNip51RelayTags(tags: List<List<String>>): List<String> =
 internal fun shouldAcceptProfileRelayEvent(
     storedCreatedAt: Long?,
     incomingCreatedAt: Long,
-): Boolean = storedCreatedAt == null || incomingCreatedAt > storedCreatedAt
+    storedId: String? = null,
+    incomingId: String? = null,
+): Boolean = storedCreatedAt == null || incomingCreatedAt > storedCreatedAt ||
+    (incomingCreatedAt == storedCreatedAt && storedId != null && incomingId != null && incomingId < storedId)
 
 internal fun deriveProfileRelayCount(
     relayListPublished: Boolean,

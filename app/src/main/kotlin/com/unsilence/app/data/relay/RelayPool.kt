@@ -764,6 +764,8 @@ class RelayPool @Inject constructor(
 
     /** Active one-shot subscriptions in flight (tracked by unique sub-ID, not per-relay). */
     private val _activeOneShotSubs = ConcurrentHashMap.newKeySet<String>()
+    private val relayListRefresh = RelayListRefresh()
+    private var relayListRefreshJob: Job? = null
 
     // ── Persistent own-mute-list subscription ─────────────────────────
     // Keeps a live tail on own kind-10000 so cross-client mute changes
@@ -1050,7 +1052,7 @@ class RelayPool @Inject constructor(
     ) {
         synchronized(socketLifecycleLock) {
             val threadSubId = extractReqSubId(req)
-            if (threadSubId != null && isOwnedThreadRequest(threadSubId) && !oneShotOutcomes.isActive(threadSubId)) {
+            if (threadSubId != null && isOwnedOneShotRequest(threadSubId) && !oneShotOutcomes.isActive(threadSubId)) {
                 return@synchronized
             }
             // A replacement can win after the caller reads the map. Retarget to
@@ -1153,7 +1155,7 @@ class RelayPool @Inject constructor(
                    isRelayOutOfCooldown(conn.url)) {
                 val queued = queue.poll() ?: break
                 val queuedSubId = extractReqSubId(queued.payload)
-                if (queuedSubId != null && isOwnedThreadRequest(queuedSubId) && !oneShotOutcomes.isActive(queuedSubId)) {
+                if (queuedSubId != null && isOwnedOneShotRequest(queuedSubId) && !oneShotOutcomes.isActive(queuedSubId)) {
                     continue
                 }
                 if (relayCapabilitiesStore.shouldSkipRequest(
@@ -1952,7 +1954,7 @@ class RelayPool @Inject constructor(
             conn.messages.consumeEach { raw ->
                 connectionLastActivity[conn.url] = System.currentTimeMillis()
                 val eventSubId = if (raw.startsWith("[\"EVENT\"")) extractEventSubId(raw) else null
-                if (eventSubId != null && isOwnedThreadRequest(eventSubId) &&
+                if (eventSubId != null && isOwnedOneShotRequest(eventSubId) &&
                     (!oneShotOutcomes.isActive(eventSubId) ||
                         relayOneShotOwners[RelayOneShotOwnerKey(eventSubId, conn.url)] !== conn)
                 ) return@consumeEach
@@ -2211,7 +2213,7 @@ class RelayPool @Inject constructor(
      */
     private fun handleEose(conn: RelayConnection, raw: String) {
         val subId = extractEoseSubId(raw) ?: return
-        if (isOwnedThreadRequest(subId) && !oneShotOutcomes.isActive(subId)) return
+        if (isOwnedOneShotRequest(subId) && !oneShotOutcomes.isActive(subId)) return
         // This handler receives real wire EOSE only, never watchdog/CLOSED/skip.
         idRequestBackoff.onEose(conn, subId)
         val isTrackedRequest = _activePages.containsKey(subId) || subId in _activeOneShotSubs
@@ -2660,25 +2662,30 @@ class RelayPool @Inject constructor(
      */
     fun fetchRelayLists(pubkeys: List<String>) {
         if (pubkeys.isEmpty()) return
-        // Send to indexer relays only (not all connections) to avoid broadcast storm
-        val indexerUrls = relayPreferencesStore.get().indexerRelayUrlsSnapshot()
-        val indexerConns = indexerUrls.mapNotNull { connections[it] }
-        val targets = indexerConns.ifEmpty { connections.values.take(3) }
-        // Chunk to keep individual filters under 500 authors
-        pubkeys.chunked(500).forEach { chunk ->
-            val subId = "kind10002-${System.nanoTime()}"
-            _activeOneShotSubs.add(subId)
-            val req = buildJsonArray {
-                add(JsonPrimitive("REQ"))
-                add(JsonPrimitive(subId))
-                add(buildJsonObject {
-                    put("kinds", buildJsonArray { add(JsonPrimitive(10002)) })
-                    put("authors", buildJsonArray { chunk.forEach { add(JsonPrimitive(it)) } })
-                })
-            }.toString()
-            targets.forEach { sendOneShotToRelay(it, req) }
+        synchronized(socketLifecycleLock) {
+            if (socketTransportSuspended.get() || relayListRefreshJob?.isActive == true) return
+            relayListRefreshJob = scope.launch {
+                relayListRefresh.refresh(pubkeys, { memoryEventStore.get().getReadWriteRelayConfigs(it).isNotEmpty() }) { chunk ->
+                    // Preserve the existing startup indexer path; do not discover or
+                    // open extra relay destinations. Chunks run sequentially.
+                    val indexers = relayPreferencesStore.get().indexerRelayUrlsSnapshot()
+                    val indexerConns = indexers.mapNotNull { connections[it] }
+                    val targets = indexerConns.ifEmpty { connections.values.take(3) }
+                        .map { it.url }.filter { it !in blockedUrls }
+                    if (targets.isEmpty()) return@refresh false
+                    val subId = "kind10002-${java.util.UUID.randomUUID()}"
+                    val req = buildJsonArray {
+                        add(JsonPrimitive("REQ"))
+                        add(JsonPrimitive(subId))
+                        add(buildJsonObject {
+                            put("kinds", buildJsonArray { add(JsonPrimitive(10002)) })
+                            put("authors", buildJsonArray { chunk.forEach { add(JsonPrimitive(it)) } })
+                        })
+                    }.toString()
+                    fetchOwnedRequest(subId, targets, req, pooledOnly = true)
+                }
+            }
         }
-        Log.d(TAG, "Fetching kind 10002 for ${pubkeys.size} pubkey(s) from ${targets.size} relay(s)")
     }
 
     /** Fetch one profile's published relay facts without opening a live subscription. */
@@ -5062,7 +5069,7 @@ class RelayPool @Inject constructor(
             eventId, java.util.UUID.randomUUID().toString(), relayUrls, completed,
             fetch = { subId, pending, req, onEose ->
                 val replies = subId.startsWith("thread-replies-")
-                fetchOwnedThreadRequest(subId, pending, req, pooledOnly = !replies,
+                fetchOwnedRequest(subId, pending, req, pooledOnly = !replies,
                     includeActiveFeedRelay = replies, onEose = onEose)
             },
             onCompleted = onCompleted,
@@ -5071,7 +5078,7 @@ class RelayPool @Inject constructor(
         )
     }
 
-    private suspend fun fetchOwnedThreadRequest(
+    private suspend fun fetchOwnedRequest(
         subId: String,
         relays: List<String>,
         req: String,
@@ -5084,7 +5091,7 @@ class RelayPool @Inject constructor(
         relays = relays,
         dispatch = { admitted ->
             if (pooledOnly) {
-                // Root, reaction and receipt compatibility queries retain their pooled path.
+                // Metadata and thread compatibility queries retain their pooled path.
                 synchronized(socketLifecycleLock) {
                     val targets = relays.mapNotNull { connections[it] }
                     val urls = targets.mapTo(HashSet()) { it.url }
@@ -5132,7 +5139,7 @@ class RelayPool @Inject constructor(
             })
         }.toString()
 
-        return fetchOwnedThreadRequest(subId, relayUrls, req)
+        return fetchOwnedRequest(subId, relayUrls, req)
     }
 
     /**
@@ -5200,7 +5207,7 @@ class RelayPool @Inject constructor(
                 put("limit", JsonPrimitive(200))
             })
         }.toString()
-        return fetchOwnedThreadRequest(subId, relayUrls, req)
+        return fetchOwnedRequest(subId, relayUrls, req)
     }
 
     /**
@@ -5214,7 +5221,7 @@ class RelayPool @Inject constructor(
         if (relayUrls.isEmpty()) return false
         val subId = "comment-parents-${java.util.UUID.randomUUID()}"
         val req = buildCommentParentsReq(subId, parentIds)
-        return fetchOwnedThreadRequest(subId, relayUrls, req)
+        return fetchOwnedRequest(subId, relayUrls, req)
     }
 
     /**
@@ -5690,6 +5697,9 @@ class RelayPool @Inject constructor(
         // Map-before-close: snapshot then clear under the same lock used by
         // send/install/remove so no one-shot can attach during teardown.
         val (snapshot, ephemeralSnapshot) = synchronized(socketLifecycleLock) {
+            relayListRefreshJob?.cancel()
+            relayListRefreshJob = null
+            relayListRefresh.clear()
             val pooled = connectionRegistry.clear()
             val ephemeral = ArrayList(activeEphemeralConnections)
             pendingReconnect.clear()

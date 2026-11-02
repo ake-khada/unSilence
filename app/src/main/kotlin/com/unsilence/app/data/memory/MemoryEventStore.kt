@@ -1050,6 +1050,9 @@ class MemoryEventStore @Inject constructor(
     /** Tracks createdAt of the latest accepted replaceable event per pubkey+kind.
      *  Key: "$pubkey:$kind". Used for replaceable dedup without scanning eventsById. */
     private val relayKindCreatedAt = ConcurrentHashMap<String, Long>()
+    /** NIP-01 tie identity for materialized kind-10002/10006/10007 revisions. */
+    private val profileRelayEventIds = HashMap<String, String>()
+    private val profileRelayStateLock = Any()
 
     // ─── Follower count cache (NIP-45 COUNT results) ─────────────────────────
     // Key: pubkey → (count, updatedAtSeconds)
@@ -2590,16 +2593,17 @@ class MemoryEventStore @Inject constructor(
         }
     }
 
-    private fun handleRelayList(event: NostrEvent, dirty: InsertDirty? = null) {
+    private fun handleRelayList(event: NostrEvent, dirty: InsertDirty? = null) = synchronized(profileRelayStateLock) {
         val key = "${event.pubkey}:10002"
         val existingTs = relayKindCreatedAt[key]
-        if (!shouldAcceptProfileRelayEvent(existingTs, event.createdAt)) return
+        if (!shouldAcceptProfileRelayEvent(existingTs, event.createdAt, profileRelayEventIds[key], event.id)) return@synchronized
 
         val configs = parseNip65RelayTags(event.tags)
         val readRelays = configs.filter { it.marker != "write" }.map(RelayConfig::url)
         val writeRelays = configs.filter { it.marker != "read" }.map(RelayConfig::url)
 
         relayKindCreatedAt[key] = event.createdAt
+        profileRelayEventIds[key] = event.id
         relayListsByPubkey[event.pubkey] = RelayList(readRelays, writeRelays)
 
         val existingConfigs = readWriteRelayConfigsByPubkey[event.pubkey]
@@ -2610,14 +2614,15 @@ class MemoryEventStore @Inject constructor(
         }
     }
 
-    private fun handleBlocked(event: NostrEvent, dirty: InsertDirty? = null) {
+    private fun handleBlocked(event: NostrEvent, dirty: InsertDirty? = null) = synchronized(profileRelayStateLock) {
         val key = "${event.pubkey}:10006"
         val existingTs = relayKindCreatedAt[key]
-        if (!shouldAcceptProfileRelayEvent(existingTs, event.createdAt)) return
+        if (!shouldAcceptProfileRelayEvent(existingTs, event.createdAt, profileRelayEventIds[key], event.id)) return@synchronized
 
         val urls = parseNip51RelayTags(event.tags)
 
         relayKindCreatedAt[key] = event.createdAt
+        profileRelayEventIds[key] = event.id
         val existing = blockedRelaysByPubkey[event.pubkey]
         if (existing != urls) {
             blockedRelaysByPubkey[event.pubkey] = urls
@@ -2626,14 +2631,15 @@ class MemoryEventStore @Inject constructor(
         }
     }
 
-    private fun handleSearchRelays(event: NostrEvent, dirty: InsertDirty? = null) {
+    private fun handleSearchRelays(event: NostrEvent, dirty: InsertDirty? = null) = synchronized(profileRelayStateLock) {
         val key = "${event.pubkey}:10007"
         val existingTs = relayKindCreatedAt[key]
-        if (!shouldAcceptProfileRelayEvent(existingTs, event.createdAt)) return
+        if (!shouldAcceptProfileRelayEvent(existingTs, event.createdAt, profileRelayEventIds[key], event.id)) return@synchronized
 
         val urls = parseNip51RelayTags(event.tags)
 
         relayKindCreatedAt[key] = event.createdAt
+        profileRelayEventIds[key] = event.id
         val existing = searchRelaysByPubkey[event.pubkey]
         if (existing != urls) {
             searchRelaysByPubkey[event.pubkey] = urls
@@ -5227,6 +5233,10 @@ class MemoryEventStore @Inject constructor(
     override fun readRelaysFor(pubkey: String): List<String> =
         relayListsByPubkey[pubkey]?.read ?: emptyList()
 
+    fun writeRelaysFlow(pubkey: String): Flow<List<String>> =
+        _relayConfigSignal.map { writeRelaysFor(pubkey) }
+            .distinctUntilChanged().flowOn(Dispatchers.Default)
+
     /** Snapshot of all relay lists (pubkey → RelayList). Used by OutboxRelayResolver. */
     fun allRelayListsSnapshot(): Map<String, RelayList> =
         HashMap(relayListsByPubkey)
@@ -7650,6 +7660,7 @@ class MemoryEventStore @Inject constructor(
         favoritesByPubkey.clear()
         readWriteRelayConfigsByPubkey.clear()
         relayKindCreatedAt.clear()
+        synchronized(profileRelayStateLock) { profileRelayEventIds.clear() }
         relaySetsByCoordinate.clear()
         deletedRelaySetTombstones.clear()
         blossomServersByPubkey.clear()
@@ -7730,6 +7741,7 @@ class MemoryEventStore @Inject constructor(
         favoritesByPubkey.clear()
         readWriteRelayConfigsByPubkey.clear()
         relayKindCreatedAt.clear()
+        synchronized(profileRelayStateLock) { profileRelayEventIds.clear() }
         replaceableByCoordinate.clear()
         reactedTargetsByActor.clear()
         repostedTargetsByActor.clear()

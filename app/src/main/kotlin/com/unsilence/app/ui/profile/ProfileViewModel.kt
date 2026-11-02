@@ -19,7 +19,6 @@ import com.unsilence.app.data.memory.UserEntity
 import com.unsilence.app.data.memory.MemoryEventStore
 import com.unsilence.app.data.memory.WotLookup
 import com.unsilence.app.data.memory.ZapDetail
-import com.unsilence.app.data.relay.GLOBAL_RELAY_URLS
 import com.unsilence.app.data.relay.NostrFilter
 import com.unsilence.app.data.relay.RelayPool
 import com.unsilence.app.data.relay.SubRequest
@@ -223,10 +222,12 @@ class ProfileViewModel @Inject constructor(
                 }
             }
             viewModelScope.launch {
-                selectedTab.map(::subGroupFor).distinctUntilChanged()
-                    .collectLatestWhileActive(screenActive) { group ->
-                        collectProfileSubscription(pubkeyHex, group)
-                    }
+                com.unsilence.app.data.relay.profileRelayRoutes(
+                    kotlinx.coroutines.flow.flowOf(pubkeyHex), selectedTab.map(::subGroupFor).distinctUntilChanged(),
+                    memoryEventStore::writeRelaysFlow,
+                ).collectLatestWhileActive(screenActive) { route ->
+                    collectProfileSubscription(route.pubkey, route.group, route.urls)
+                }
             }
 
             // Fetch the integrity-checked follower count (MES-cached and pipeline-deduped).
@@ -340,14 +341,13 @@ class ProfileViewModel @Inject constructor(
 
     // ── Tab → subscription logic ─────────────────────────────────────────
 
-    private suspend fun collectProfileSubscription(pubkey: String, group: SubGroup) {
+    private suspend fun collectProfileSubscription(pubkey: String, group: SubGroup, writeRelays: List<String>) {
         val sameTimeline = lastSubGroup == group
         val tab = if (group == SubGroup.LONGFORM) ProfileTab.LONGFORM else ProfileTab.NOTES
         val generation = ++subscriptionGeneration
         fun acceptsEvents() = screenActive.value && subscriptionGeneration == generation
 
         val kinds = profileKindsForTab(tab)
-        val writeRelays = memoryEventStore.writeRelaysFor(pubkey).ifEmpty { GLOBAL_RELAY_URLS }
         val limit = if (tab == ProfileTab.LONGFORM) 100 else 300
         // Cover/uncover keeps loaded pages. Only a user-selected group seeds a new timeline.
         if (!sameTimeline) {

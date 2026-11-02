@@ -227,8 +227,8 @@ class ThreadOneShotTest {
         runCurrent()
         assertEquals(1, cleanups)
         assertFalse(outcomes.contains("thread-event-visit"))
-        assertFalse(isOwnedThreadRequest("engagement-shared"))
-        assertFalse(isOwnedThreadRequest("feed-live"))
+        assertFalse(isOwnedOneShotRequest("engagement-shared"))
+        assertFalse(isOwnedOneShotRequest("feed-live"))
     }
 
 

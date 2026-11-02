@@ -395,15 +395,9 @@ class AppBootstrapper @Inject constructor(
         // globally — one REQ with 251 authors returns all relay lists.
         val followsToFetchRelayLists = follows?.toList().orEmpty()
         if (followsToFetchRelayLists.isNotEmpty()) {
-            val staleAuthors = followsToFetchRelayLists.filter { author ->
-                memoryEventStore.getReadWriteRelayConfigs(author).isEmpty()
-            }
-            if (staleAuthors.isNotEmpty()) {
-                Log.d(TAG, "Phase2: fetching kind-10002 for ${staleAuthors.size}/${followsToFetchRelayLists.size} follows")
-                relayPool.fetchRelayLists(staleAuthors)
-            } else {
-                Log.d(TAG, "Phase2: kind-10002 cached for all ${followsToFetchRelayLists.size} follows")
-            }
+            // Lookup freshness is memory-only and checked by the existing pooled
+            // indexer fetch. A restored list is useful routing, not a recent lookup.
+            relayPool.fetchRelayLists(followsToFetchRelayLists)
             // Build the coverage-ranked outbox allowlist. Ephemeral connections
             // to relays outside this set are skipped to shrink the DNS failure
             // surface. Must run AFTER kind-10002 is fetched/cached so

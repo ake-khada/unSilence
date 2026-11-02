@@ -23,7 +23,6 @@ import com.unsilence.app.data.relay.ProtectedProfile
 import com.unsilence.app.data.relay.detectImpersonationRisk
 import com.unsilence.app.data.relay.isProtectedWotLookup
 import com.unsilence.app.data.relay.protectedProfileFor
-import com.unsilence.app.data.relay.GLOBAL_RELAY_URLS
 import com.unsilence.app.data.relay.NostrFilter
 import com.unsilence.app.data.relay.RelayPool
 import com.unsilence.app.data.relay.SubRequest
@@ -322,13 +321,12 @@ class UserProfileViewModel @Inject constructor(
         // Notes/Replies share a subscription. Covering stops it; returning retains
         // loaded pages and subscribes anew. The handle cannot outlive this collector.
         viewModelScope.launch {
-            combine(
-                _pubkeyHex.filterNotNull(),
-                selectedTab.map(::subGroupFor).distinctUntilChanged(),
-            ) { pk, group -> pk to group }
-                .collectLatestWhileActive(screenActive) { (pk, group) ->
-                    collectProfileSubscription(pk, group)
-                }
+            com.unsilence.app.data.relay.profileRelayRoutes(
+                _pubkeyHex.filterNotNull(), selectedTab.map(::subGroupFor).distinctUntilChanged(),
+                memoryEventStore::writeRelaysFlow,
+            ).collectLatestWhileActive(screenActive) { route ->
+                collectProfileSubscription(route.pubkey, route.group, route.urls)
+            }
         }
     }
 
@@ -468,15 +466,13 @@ class UserProfileViewModel @Inject constructor(
 
     // ── Tab → subscription logic ─────────────────────────────────────────
 
-    private suspend fun collectProfileSubscription(pubkey: String, group: SubGroup) {
+    private suspend fun collectProfileSubscription(pubkey: String, group: SubGroup, writeRelays: List<String>) {
         val sameTimeline = lastSubPubkey == pubkey && lastSubGroup == group
         val tab = if (group == SubGroup.LONGFORM) ProfileTab.LONGFORM else ProfileTab.NOTES
         val generation = ++subscriptionGeneration
         fun acceptsEvents() = screenActive.value && subscriptionGeneration == generation
 
         val kinds = profileKindsForTab(tab)
-        val writeRelays = memoryEventStore.writeRelaysFor(pubkey)
-            .ifEmpty { GLOBAL_RELAY_URLS }
         val limit = if (tab == ProfileTab.LONGFORM) 100 else 300
 
         // Pre-seed with MES-cached events for instant tab switching;

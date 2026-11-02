@@ -85,7 +85,8 @@ internal fun threadRequestPayloads(eventId: String, token: String): List<String>
     return listOf(eventReq, repliesReq, reactionsReq, zapsReq)
 }
 
-/** These prefixes are exclusively owned by the cancellable thread/comment fetch path. */
-internal fun isOwnedThreadRequest(subId: String): Boolean =
+/** Prefixes owned by cancellable, outcome-tracked one-shots (including startup metadata). */
+internal fun isOwnedOneShotRequest(subId: String): Boolean =
     subId.startsWith("thread-") || subId.startsWith("article-comments-") ||
-        subId.startsWith("comment-replies-") || subId.startsWith("comment-parents-")
+        subId.startsWith("comment-replies-") || subId.startsWith("comment-parents-") ||
+        subId.startsWith("kind10002-")

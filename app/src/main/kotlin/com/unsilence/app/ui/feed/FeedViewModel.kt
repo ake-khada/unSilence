@@ -25,7 +25,6 @@ import com.unsilence.app.data.memory.UserEntity
 import com.unsilence.app.data.memory.WotLookup
 import com.unsilence.app.data.memory.ZapDetail
 import com.unsilence.app.data.relay.followingCoverageLosses
-import com.unsilence.app.data.relay.RELAY_METADATA_DEBOUNCE_MS
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.merge
@@ -497,36 +496,20 @@ class FeedViewModel @Inject constructor(
     // -- Relay-metadata version (triggers resubscribe on kind-10002 arrival) ---
 
     /**
-     * Coarse milestone signal. Bumps when relay-list coverage crosses 25%, 50%,
-     * 75%, 90% of follows. Avoids the per-relay-list trickle that produced
-     * 6+ resubscribes per cold start.
+     * Relevant write-set revisions, coalesced with the existing debounce. Same-size
+     * migrations reroute; unrelated/read-only updates do not rebuild Following.
      */
     private val screenActive = MutableStateFlow(false)
     private val followingFallbackDependencies = MutableStateFlow<Set<String>>(emptySet())
     @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
     private val relayMetadataVersion: StateFlow<Int> = run {
         val ownPubkey = keyManager.getPublicKeyHex()
-        val milestones = if (ownPubkey == null) {
+        val revisions = if (ownPubkey == null) {
             MutableStateFlow(0).asStateFlow()
         } else {
-            combine(
-                memoryEventStore.allRelayListsFlow().map { it.size },
-                memoryEventStore.followsFlow(ownPubkey).map { it.size },
-            ) { listsCount, followsCount ->
-                if (followsCount == 0) 0
-                else {
-                    val pct = (listsCount * 100) / followsCount
-                    when {
-                        pct >= 90 -> 4
-                        pct >= 75 -> 3
-                        pct >= 50 -> 2
-                        pct >= 25 -> 1
-                        else -> 0
-                    }
-                }
-            }
-                .distinctUntilChanged()
-                .debounce(RELAY_METADATA_DEBOUNCE_MS) // coalesce kind-10002 bursts here
+            com.unsilence.app.data.relay.followingRelayMetadataRevision(
+                memoryEventStore.allRelayListsFlow(), memoryEventStore.followsFlow(ownPubkey),
+            ).flowOn(Dispatchers.Default)
                 .stateIn(viewModelScope, SharingStarted.Eagerly, 0)
         }
         val watched = combine(screenActive, followingFallbackDependencies) { active, dependencies ->
@@ -540,7 +523,7 @@ class FeedViewModel @Inject constructor(
             ).map { relayPool.healthyReadRelayUrls() }.distinctUntilChanged()
         }.flowOn(Dispatchers.Default)
         merge(
-            milestones.drop(1).map { Unit },
+            revisions.drop(1).map { Unit },
             followingCoverageLosses(watched, healthy),
         ).runningFold(0) { version, _ -> version + 1 }
             .stateIn(viewModelScope, SharingStarted.Eagerly, 0)
