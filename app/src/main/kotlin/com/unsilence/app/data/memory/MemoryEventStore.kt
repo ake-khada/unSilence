@@ -5224,7 +5224,7 @@ class MemoryEventStore @Inject constructor(
         relayListsByPubkey[pubkey]?.write
             ?: profileDerivedLookupRelaysByPubkey[pubkey].orEmpty()
 
-    fun readRelaysFor(pubkey: String): List<String> =
+    override fun readRelaysFor(pubkey: String): List<String> =
         relayListsByPubkey[pubkey]?.read ?: emptyList()
 
     /** Snapshot of all relay lists (pubkey → RelayList). Used by OutboxRelayResolver. */

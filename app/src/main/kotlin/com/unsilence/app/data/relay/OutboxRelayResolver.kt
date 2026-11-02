@@ -25,6 +25,7 @@ private const val FAST_WRITE_RELAYS = 3
 /** Treat unknown RTTs as median. Picked so that monitored low-RTT relays
  *  beat unknown ones, and unknown relays beat monitored high-RTT ones. */
 private const val DEFAULT_RTT_MS = 250
+internal const val MAX_THREAD_REPLY_RELAYS = 4 + MAX_SEEN_RELAY_HINTS + 6
 
 /**
  * Read-only relay metadata source. Implemented by [com.unsilence.app.data.memory.MemoryEventStore]
@@ -33,6 +34,8 @@ private const val DEFAULT_RTT_MS = 250
  */
 interface RelayMetadataSource {
     fun writeRelaysFor(pubkey: String): List<String>
+    /** Signed kind-10002 inboxes already held locally; no discovery side effect. */
+    fun readRelaysFor(pubkey: String): List<String> = emptyList()
     /** NIP-66 RTT data per relay (kind-30166 monitor events). Empty until
      *  [com.unsilence.app.data.relay.RelayPool.fetchRelayMonitors] populates MES. */
     fun getRelayMonitors(): Map<String, RelayMonitorEntity> = emptyMap()
@@ -250,14 +253,12 @@ class OutboxRelayResolver @Inject constructor(
     }
 
     /**
-     * Resolve relays to query for engagement (replies/reactions/reposts/zaps)
+     * Resolve the existing compatibility relays for engagement
      * on a post authored by [authorPubkey].
      *
-     * NIP-65 reactors fan their kind-7/9735 broadcasts to the post author's
-     * write relays — that's where engagement on a post propagates. User's
-     * read relays catch the subset of reactions from people in the user's
-     * own relay network. GLOBAL fallback handles the case where neither
-     * kind-10002 is known.
+     * Receipt relay tags mirror this write/read route. Other engagement may
+     * also live on the author's inbox; thread replies use their own resolver.
+     * GLOBAL fallback handles the case where neither kind-10002 is known.
      *
      * @param authorPubkey  hex pubkey of the post author whose engagement
      *                      we're querying. Required.
@@ -293,6 +294,42 @@ class OutboxRelayResolver @Inject constructor(
 
         val combined = (rankedAuthorWrite + rankedOwnRead).distinct()
         return combined.ifEmpty { GLOBAL_RELAY_URLS.filter { it !in blockedRelays } }
+    }
+
+    /**
+     * Explicit thread replies: four signed inbox targets shared across the root,
+     * tapped and parent authors, three locality hints, then the existing bounded
+     * write/read compatibility route. These targets may disclose reading interest
+     * to additional relays; callers must use the shared one-shot transport.
+     */
+    fun resolveThreadReplyRelays(
+        rootAuthor: String?,
+        relatedAuthors: List<String>,
+        ownReadRelays: List<String>,
+        hints: List<String>,
+        blockedRelays: Set<String> = emptySet(),
+    ): List<String> {
+        val blocked = blockedRelays.mapNotNull(::normalizeRelayUrl).toSet()
+        fun eligible(urls: List<String>) = urls.mapNotNull(::normalizeRelayUrl)
+            .filter { it !in blocked }.distinct()
+        val quality = relayLatencyOrder()
+        val authors = (listOfNotNull(rootAuthor) + relatedAuthors).distinct().take(3)
+        val inboxes = authors.map { eligible(metadata.readRelaysFor(it)).sortedWith(quality).take(4) }
+        val selected = LinkedHashSet<String>()
+        for (index in 0 until 4) {
+            for (inbox in inboxes) {
+                inbox.getOrNull(index)?.let(selected::add)
+                if (selected.size == 4) break
+            }
+            if (selected.size == 4) break
+        }
+        val compatibility = if (rootAuthor != null) {
+            resolveEngagementRelays(rootAuthor, ownReadRelays, blocked)
+        } else {
+            eligible(ownReadRelays).sortedWith(quality).take(MAX_OWN_READ_RELAYS_FOR_ENGAGEMENT)
+                .ifEmpty { eligible(GLOBAL_RELAY_URLS) }
+        }
+        return (selected + eligible(hints).take(MAX_SEEN_RELAY_HINTS) + compatibility.take(6)).distinct()
     }
 
     /**

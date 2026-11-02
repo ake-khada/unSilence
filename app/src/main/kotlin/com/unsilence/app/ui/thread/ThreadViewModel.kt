@@ -8,7 +8,6 @@ import com.unsilence.app.data.auth.KeyManager
 import com.unsilence.app.data.memory.EventEntity
 import com.unsilence.app.data.memory.FeedRow
 import com.unsilence.app.data.memory.MemoryEventStore
-import com.unsilence.app.data.relay.GLOBAL_RELAY_URLS
 import com.unsilence.app.data.relay.CardHydrator
 import com.unsilence.app.data.relay.OutboxRelayResolver
 import com.unsilence.app.data.relay.RelayPool
@@ -26,7 +25,6 @@ import com.unsilence.app.data.relay.wotSubjectsForFeedRows
 import com.unsilence.app.ui.shared.TimelineCardData
 import com.unsilence.app.ui.shared.collectLatestWhileActive
 import kotlinx.coroutines.flow.channelFlow
-import kotlinx.coroutines.flow.emptyFlow
 import com.unsilence.app.ui.shared.ModeratedReplyRow
 import com.unsilence.app.ui.shared.markLikelyCoordinatedSpam
 import com.unsilence.app.ui.shared.mutedTimelineRowIds
@@ -174,7 +172,7 @@ class ThreadViewModel @Inject constructor(
             wotLookupSnapshot(subjects, memoryEventStore::wotFor)
         }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyMap())
 
-    private val eventIdFlow = MutableStateFlow<String?>(null)
+    private val routeFlow = MutableStateFlow<ThreadRelayRoute?>(null)
     // Non-navigation clients (e.g. the immersive engagement sheet) remain active
     // until clearThread; navigation explicitly supplies its resumed lifecycle.
     private val screenActive = MutableStateFlow(false)
@@ -182,7 +180,7 @@ class ThreadViewModel @Inject constructor(
     fun setScreenActive(active: Boolean) {
         screenActive.value = active
         if (!active) loadJob?.cancel()
-        retainRoot(eventIdFlow.value.takeIf { active })
+        retainRoot(routeFlow.value?.rootId.takeIf { active })
         if (active) wotHydrationCoalescer.requestHydration(_wotSubjects.value)
     }
 
@@ -209,7 +207,7 @@ class ThreadViewModel @Inject constructor(
         if (screenActive.value) wotHydrationCoalescer.requestHydration(pubkeys)
     }
     @Volatile private var articleCommentRelays: List<String> = emptyList()
-    private var threadRelayUrls: List<String> = emptyList()
+    private var visitRelayHints: List<String> = emptyList()
     private val completedThreadQueries = HashSet<Pair<String, String>>()
     private val fetchedArticleCoords = HashSet<String>()
     private val fetchedReplyDescendants = HashSet<String>()
@@ -227,17 +225,16 @@ class ThreadViewModel @Inject constructor(
 
     init {
         viewModelScope.launch {
-            eventIdFlow
-                .flatMapLatest { id ->
-                    if (id == null) return@flatMapLatest emptyFlow()
-                    // A repost target can arrive after the drawer opens. Re-evaluate
-                    // its coordinate on every feed insert so the thread promotes from
-                    // #e lookup to #A lookup without requiring a page-away/page-back.
-                    memoryEventStore.feedSignalFlow
-                        .map { id to memoryEventStore.articleCoordForEvent(id) }
-                        .distinctUntilChanged()
-                }
-                .flatMapLatest { (id, coord) ->
+            routeFlow
+                // Late article targets and same-root author discovery both refresh
+                // owned work, without discarding the current presentation.
+                .withThreadCoordinate(
+                    memoryEventStore.feedSignalFlow, memoryEventStore::articleCoordForEvent,
+                    rootIsKnown = { memoryEventStore.getEventEntity(it) != null },
+                    refreshMissingRoot = { route -> routeFor(route.rootId, tappedId ?: route.rootId, visitRelayHints) },
+                )
+                .flatMapLatest { (route, coord) ->
+                    val id = route.rootId
                     // Children belong to this active root/coordinate observation.
                     // Hiding, replacing or clearing it cancels their one-shots too.
                     channelFlow {
@@ -245,19 +242,19 @@ class ThreadViewModel @Inject constructor(
                         val parents = HashSet<String>()
                         val rowsFlow = if (coord != null) {
                             val relays = (
-                                articleCommentRelays +
+                                route.compatibilityRelays +
                                     memoryEventStore.getNostrEvent(id)?.relaysSeen.orEmpty() +
                                     memoryEventStore.relayHintsForEvent(id)
                                 ).distinct()
                             articleCommentRelays = relays
                             if (coord !in fetchedArticleCoords && relays.isNotEmpty()) launch {
-                                if (relayPool.fetchArticleComments(relays, coord) && eventIdFlow.value == id) fetchedArticleCoords.add(coord)
+                                if (relayPool.fetchArticleComments(relays, coord) && routeFlow.value?.rootId == id) fetchedArticleCoords.add(coord)
                             }
                             memoryEventStore.articleCommentsFlow(coord)
                         } else {
                             launch {
-                                relayPool.fetchThread(threadRelayUrls, id, completedThreadQueries) { query, relay ->
-                                    if (eventIdFlow.value == id) completedThreadQueries.add(query to relay)
+                                relayPool.fetchThread(route.compatibilityRelays, id, completedThreadQueries, route.replyRelays) { query, relay ->
+                                    if (routeFlow.value?.rootId == id) completedThreadQueries.add(query to relay)
                                 }
                             }
                             memoryEventStore.threadFeedRowFlow(id)
@@ -273,12 +270,12 @@ class ThreadViewModel @Inject constructor(
                                     .filter { it !in fetchedMissingParents && parents.add(it) }
                                     .toList()
                                 if (missing.isNotEmpty()) launch {
-                                    if (relayPool.fetchCommentParents(relays, missing) && eventIdFlow.value == id) fetchedMissingParents.addAll(missing.take(200))
+                                    if (relayPool.fetchCommentParents(relays, missing) && routeFlow.value?.rootId == id) fetchedMissingParents.addAll(missing.take(200))
                                 }
                                 val novel = rows.map { it.id }
                                     .filter { it !in fetchedReplyDescendants && descendants.add(it) }
                                 if (novel.isNotEmpty()) launch {
-                                    if (relayPool.fetchCommentReplies(relays, novel) && eventIdFlow.value == id) fetchedReplyDescendants.addAll(novel.take(200))
+                                    if (relayPool.fetchCommentReplies(relays, novel) && routeFlow.value?.rootId == id) fetchedReplyDescendants.addAll(novel.take(200))
                                 }
                             }
                             send(Triple(id, coord != null, rows))
@@ -394,9 +391,9 @@ class ThreadViewModel @Inject constructor(
         retainRoot(null)
         loadJob?.cancel()
         loadJob = null
-        eventIdFlow.value = null
+        routeFlow.value = null
         articleCommentRelays = emptyList()
-        threadRelayUrls = emptyList()
+        visitRelayHints = emptyList()
         completedThreadQueries.clear()
         fetchedArticleCoords.clear()
         fetchedReplyDescendants.clear()
@@ -408,13 +405,14 @@ class ThreadViewModel @Inject constructor(
     }
 
     /**
-     * Point the thread at [rootId]. Supported addressable content switches to
+     * Point the thread at [route]. Supported addressable content switches to
      * coordinate-aware comments; anything else uses the standard #e thread fetch.
      */
-    private suspend fun applyRoot(rootId: String, urls: List<String>) {
+    private fun applyRoot(route: ThreadRelayRoute) {
+        val rootId = route.rootId
+        val urls = route.compatibilityRelays
         retainRoot(rootId.takeIf { screenActive.value })
-        threadRelayUrls = urls
-        if (eventIdFlow.value != rootId) {
+        if (routeFlow.value?.rootId != rootId) {
             completedThreadQueries.clear()
             fetchedArticleCoords.clear()
             fetchedReplyDescendants.clear()
@@ -432,27 +430,23 @@ class ThreadViewModel @Inject constructor(
         }
         // Set last: the reactive collector observes a fully registered coordinate
         // and complete relay set on its first emission.
-        eventIdFlow.value = rootId
+        routeFlow.value = route
     }
 
     fun loadThread(eventId: String, relayHints: List<String> = emptyList()) {
         setScreenActive(true)
         // A saved navigation entry is resumed, not loaded as a new visit. Preserve
         // its refined root and reply focus, and avoid another ancestor walk.
-        if (tappedId == eventId && (eventIdFlow.value != null || loadJob?.isActive == true)) return
+        if (tappedId == eventId && (routeFlow.value != null || loadJob?.isActive == true)) return
         loadJob?.cancel()
         tappedId = eventId
         // Protect the cold entry before its first hinted lookup, not only after
         // applyRoot. It will be replaced by the resolved conversation root.
         retainRoot(eventId)
         loadJob = viewModelScope.launch {
-            val ownPubkey = pubkeyHex ?: ""
-            val ownReadRelays = memoryEventStore.readRelaysFor(ownPubkey)
-            val blockedRelays = memoryEventStore.getBlockedRelayUrls(ownPubkey).toSet()
-
             // External nevent hints are load-bearing when the event is absent from
-            // MES: fetchEventById can open an ephemeral hinted connection, while the
-            // broader thread fetch below only uses already-pooled connections.
+            // MES: fetchEventById can open an ephemeral hinted connection before
+            // the reply query uses the bounded inbox/locality route.
             var event = memoryEventStore.getEventEntity(eventId)
             val effectiveHints = boundedSeenRelayHints(
                 seenRelays = relayHints +
@@ -470,64 +464,42 @@ class ThreadViewModel @Inject constructor(
             // Best-guess root from local MES — instant for normal in-app taps.
             val bestGuessRoot = event?.rootId ?: event?.replyToId ?: eventId
 
-            // Resolve relays based on the thread root's author. If we don't
-            // have the event yet (cold tap), fall back to own read + GLOBAL.
-            val rootAuthorPubkey = event?.pubkey
-                ?: memoryEventStore.getEventEntity(bestGuessRoot)?.pubkey
-
-            val resolvedUrls = if (rootAuthorPubkey != null) {
-                (
-                    memoryEventStore.lookupWriteRelaysFor(rootAuthorPubkey) +
-                        outboxResolver.resolveEngagementRelays(
-                            authorPubkey = rootAuthorPubkey,
-                            ownReadRelays = ownReadRelays,
-                            blockedRelays = blockedRelays,
-                        )
-                    ).distinct()
-            } else {
-                ownReadRelays.ifEmpty { GLOBAL_RELAY_URLS }
+            visitRelayHints = effectiveHints
+            val initialRoute = routeFor(bestGuessRoot, eventId, effectiveHints)
+            // Route-only refinement must preserve the visible thread and its genuine
+            // per-query/per-relay completion. A different thread resets presentation.
+            if (routeFlow.value?.rootId != bestGuessRoot) {
+                _baseUiState.value = ThreadUiState(loading = true)
+                _uiState.value = ThreadUiState(loading = true)
             }
-            val urls = (effectiveHints + resolvedUrls).distinct()
-
-            if (eventIdFlow.value == bestGuessRoot) {
-                retainRoot(bestGuessRoot.takeIf { screenActive.value })
-                return@launch
-            }
-
-            // Clear stale state only after confirming this is a different thread.
-            // Clearing before the same-root early return strands the drawer in Loading.
-            _baseUiState.value = ThreadUiState(loading = true)
-            _uiState.value = ThreadUiState(loading = true)
-
-            applyRoot(bestGuessRoot, urls)
+            applyRoot(initialRoute)
 
             // Refine root in background — walk UP the reply chain fetching ancestors
             launch {
                 val trueRoot = resolveThreadRoot(
                     startId = eventId,
                     initialHints = effectiveHints,
-                    fallbackRelays = resolvedUrls,
+                    fallbackRelays = initialRoute.compatibilityRelays,
                 )
-                if (trueRoot != bestGuessRoot && eventIdFlow.value == bestGuessRoot) {
-                    // Re-resolve relays for the true root's author — may differ
-                    // from the tapped event's author.
-                    val trueRootEvent = memoryEventStore.getEventEntity(trueRoot)
-                    val trueRootAuthor = trueRootEvent?.pubkey
-                    val refinedUrls = if (trueRootAuthor != null && trueRootAuthor != rootAuthorPubkey) {
-                        (
-                            memoryEventStore.lookupWriteRelaysFor(trueRootAuthor) +
-                                outboxResolver.resolveEngagementRelays(
-                                    authorPubkey = trueRootAuthor,
-                                    ownReadRelays = ownReadRelays,
-                                    blockedRelays = blockedRelays,
-                                )
-                            ).distinct()
-                    } else urls
-
-                    applyRoot(trueRoot, refinedUrls)
+                if (tappedId == eventId && routeFlow.value?.rootId == bestGuessRoot) {
+                    // The walk may learn the root's author without changing its ID.
+                    // Publishing the whole route restarts pending work in that case.
+                    applyRoot(routeFor(trueRoot, eventId, effectiveHints))
                 }
             }
         }
+    }
+
+    private suspend fun routeFor(rootId: String, tappedId: String, hints: List<String>): ThreadRelayRoute = withContext(Dispatchers.Default) {
+        resolveThreadRelayRoute(
+            rootId, tappedId, memoryEventStore::getEventEntity,
+            memoryEventStore::lookupWriteRelaysFor, outboxResolver,
+            memoryEventStore.readRelaysFor(pubkeyHex.orEmpty()),
+            memoryEventStore.getBlockedRelayUrls(pubkeyHex.orEmpty()).toSet(),
+            boundedSeenRelayHints(hints, emptyList(),
+                memoryEventStore.getNostrEvent(rootId)?.relaysSeen.orEmpty() +
+                    memoryEventStore.relayHintsForEvent(rootId)),
+        )
     }
 
     /**

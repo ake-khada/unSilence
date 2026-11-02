@@ -5052,6 +5052,7 @@ class RelayPool @Inject constructor(
         rawRelayUrls: List<String>,
         eventId: String,
         completed: Set<Pair<String, String>> = emptySet(),
+        replyRelayUrls: List<String>? = null,
         onCompleted: (String, String) -> Unit = { _, _ -> },
     ) {
         val hintUrls = memoryEventStore.get().relayHintsForEvent(eventId)
@@ -5060,9 +5061,13 @@ class RelayPool @Inject constructor(
         fetchThreadRequests(
             eventId, java.util.UUID.randomUUID().toString(), relayUrls, completed,
             fetch = { subId, pending, req, onEose ->
-                fetchOwnedThreadRequest(subId, pending, req, pooledOnly = true, onEose = onEose)
+                val replies = subId.startsWith("thread-replies-")
+                fetchOwnedThreadRequest(subId, pending, req, pooledOnly = !replies,
+                    includeActiveFeedRelay = replies, onEose = onEose)
             },
             onCompleted = onCompleted,
+            replyRelays = (replyRelayUrls ?: relayUrls).mapNotNull(::normalizeRelayUrl)
+                .filter { it !in blockedUrls }.distinct().take(MAX_THREAD_REPLY_RELAYS),
         )
     }
 
@@ -5071,6 +5076,7 @@ class RelayPool @Inject constructor(
         relays: List<String>,
         req: String,
         pooledOnly: Boolean = false,
+        includeActiveFeedRelay: Boolean = false,
         onEose: (String) -> Unit = {},
     ): Boolean = awaitThreadOneShot(
         outcomes = oneShotOutcomes,
@@ -5078,7 +5084,7 @@ class RelayPool @Inject constructor(
         relays = relays,
         dispatch = { admitted ->
             if (pooledOnly) {
-                // Keep current routing: unpooled reply recovery is a separate correction.
+                // Root, reaction and receipt compatibility queries retain their pooled path.
                 synchronized(socketLifecycleLock) {
                     val targets = relays.mapNotNull { connections[it] }
                     val urls = targets.mapTo(HashSet()) { it.url }
@@ -5088,7 +5094,11 @@ class RelayPool @Inject constructor(
                     urls
                 }
             } else {
-                sendOneShotBatch(relays, listOf(req), listOf(subId), onAdmitted = admitted)
+                // The single-request helper's Following allowlist excludes declared
+                // inboxes. Explicit reply requests use this existing bounded transport,
+                // including a selected browse relay, without bypassing block/AUTH gates.
+                sendOneShotBatch(relays, listOf(req), listOf(subId),
+                    includeActiveFeedRelay = includeActiveFeedRelay, onAdmitted = admitted)
             }
         },
         cleanup = { cleanupOneShotSub(subId) },

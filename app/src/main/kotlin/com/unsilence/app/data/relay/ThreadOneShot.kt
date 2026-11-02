@@ -31,11 +31,13 @@ internal suspend fun fetchThreadRequests(
     completed: Set<Pair<String, String>>,
     fetch: suspend (subId: String, relays: List<String>, req: String, onEose: (String) -> Unit) -> Unit,
     onCompleted: (query: String, relay: String) -> Unit,
+    replyRelays: List<String> = relays,
 ) = coroutineScope {
     for (req in threadRequestPayloads(eventId, token)) {
         val subId = NostrJson.parseToJsonElement(req).jsonArray[1].jsonPrimitive.content
         val query = subId.removeSuffix("-$token")
-        val pending = relays.mapNotNull(::normalizeRelayUrl).distinct()
+        val targets = if (query == "thread-replies") replyRelays else relays
+        val pending = targets.mapNotNull(::normalizeRelayUrl).distinct()
             .filter { (query to it) !in completed }
         if (pending.isNotEmpty()) launch {
             fetch(subId, pending, req) { relay -> onCompleted(query, relay) }
