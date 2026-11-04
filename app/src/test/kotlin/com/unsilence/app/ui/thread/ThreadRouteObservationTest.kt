@@ -177,7 +177,7 @@ class ThreadRouteObservationTest {
             fetch = { id, targets, req, _ -> sent[id] = targets to req }, onCompleted = { _, _ -> },
             replyRelays = listOf(inbox, write))
         val expected = listOf(
-            """["REQ","thread-event-visit",{"ids":["root"]}]""",
+            """["REQ","thread-event-visit",{"ids":["root"],"kinds":[0,1,6,7,16,20,21,22,34235,34236,1068,1111,30023,1018,9734,9735]}]""",
             """["REQ","thread-replies-visit",{"kinds":[1,1111],"#e":["root"],"limit":200},{"kinds":[1111],"#E":["root"],"limit":200}]""",
             """["REQ","thread-reactions-visit",{"kinds":[7],"#e":["root"],"limit":100}]""",
             """["REQ","thread-zaps-visit",{"kinds":[9735],"#e":["root"],"limit":100}]""",

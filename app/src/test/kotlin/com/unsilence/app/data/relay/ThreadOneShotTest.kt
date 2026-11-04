@@ -90,7 +90,9 @@ class ThreadOneShotTest {
         assertEquals(listOf("thread-event-visit", "thread-replies-visit", "thread-reactions-visit", "thread-zaps-visit"),
             requests.map { it[1].jsonPrimitive.content })
         assertEquals(listOf(3, 4, 3, 3), requests.map { it.size })
-        assertEquals(setOf("ids"), requests[0][2].jsonObject.keys)
+        assertEquals(setOf("ids", "kinds"), requests[0][2].jsonObject.keys)
+        assertEquals((EVENT_REFERENCE_FETCH_KINDS + listOf(1018, 9734, 9735)).map(Int::toString),
+            requests[0][2].jsonObject.getValue("kinds").jsonArray.map { it.jsonPrimitive.content })
         assertEquals(listOf("root"), requests[0][2].jsonObject.getValue("ids").jsonArray.map { it.jsonPrimitive.content })
         val replies = requests[1].drop(2).map { it.jsonObject }
         assertEquals(listOf("1", "1111"), replies[0].getValue("kinds").jsonArray.map { it.jsonPrimitive.content })

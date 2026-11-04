@@ -6,6 +6,8 @@ import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.add
 import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.jsonArray
+import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -130,6 +132,9 @@ class Subscription @Inject constructor(
     private val seqCounter = AtomicLong(0)
     private val watchdogScopes = ConcurrentHashMap<String, CoroutineScope>()
     private val reconnectScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+    private val replayLock = Any()
+    // Demand-driven, at most one cooldown wake for each active subscription relay.
+    private val deferredReplays = mutableMapOf<String, Job>()
     private val lastReplayAt = ConcurrentHashMap<String, Long>()
     private val rateLimitSkipLogged: MutableSet<String> = ConcurrentHashMap.newKeySet()
     private val replayEpochs = ConcurrentHashMap<String, AtomicLong>()
@@ -304,6 +309,7 @@ class Subscription @Inject constructor(
      * ProcessLifecycleOwner.onStop when app is backgrounded.
      */
     fun pauseAll() {
+        cancelPendingReplays()
         var count = 0
         for ((subId, state) in subs) {
             if (state.isPaused) continue
@@ -366,6 +372,7 @@ class Subscription @Inject constructor(
         val normalized = normalizeRelayUrl(url) ?: return
         if (transport.isAuthUnavailable(normalized)) return
         if (transport.isRateLimited(normalized)) {
+            deferReplay(normalized)
             if (rateLimitSkipLogged.add(normalized)) {
                 Log.w(TAG, "resumeRelay $normalized: skipped during rate-limit cooldown")
             }
@@ -384,6 +391,7 @@ class Subscription @Inject constructor(
             return
         }
         if (!claimReplayWindow(normalized, nowMs)) return
+        synchronized(replayLock) { deferredReplays.remove(normalized)?.cancel() }
         if (matching.any { (_, state) -> state.eosedRelays.size >= state.urls.size }) {
             replayEpochs.computeIfAbsent(normalized) { AtomicLong() }.incrementAndGet()
         }
@@ -413,6 +421,38 @@ class Subscription @Inject constructor(
             }
         }
         Log.d(TAG, "resumeRelay $normalized: replayed $count sub(s)")
+    }
+
+    override fun onRateLimitedClosed(url: String, subId: String) {
+        val state = subs[subId] ?: return
+        if (!state.isPaused && state.replayable && url in state.urls) deferReplay(url)
+    }
+
+    private fun deferReplay(url: String) = synchronized(replayLock) {
+        if (deferredReplays.containsKey(url) ||
+            subs.values.none { !it.isPaused && it.replayable && url in it.urls }
+        ) return@synchronized
+        val job = reconnectScope.launch(start = CoroutineStart.LAZY) {
+            // The pool marks cooldown before the CLOSED handoff. The extra ms
+            // avoids waking before its floored monotonic deadline.
+            delay(transport.rateLimitRemainingMs(url) + 1L)
+            val owned = synchronized(replayLock) {
+                (deferredReplays[url] === coroutineContext[Job]).also {
+                    if (it) deferredReplays.remove(url)
+                }
+            }
+            // No callbacks or sends under the timer lock. Re-evaluate current
+            // ownership, filters, auth and capabilities; an extended cooldown
+            // re-arms once through resumeRelay.
+            if (owned) resumeRelay(url)
+        }
+        deferredReplays[url] = job
+        job.start()
+    }
+
+    override fun cancelPendingReplays() = synchronized(replayLock) {
+        deferredReplays.values.forEach { it.cancel() }
+        deferredReplays.clear()
     }
 
     /** Resolve only an actual replay attempt; initial dispatch and retries keep reqPayload. */
@@ -645,6 +685,7 @@ class Subscription @Inject constructor(
 
     /** Test-only: drop all subs and unregister tap. */
     internal fun resetForTest() {
+        cancelPendingReplays()
         subs.clear()
         replayEpochs.clear()
         watchdogScopes.values.forEach { it.cancel() }

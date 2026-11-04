@@ -37,6 +37,8 @@ class FakeRelayTransport : RelayTransport {
         return ok
     }
 
+    override fun rateLimitRemainingMs(url: String): Long = if (isRateLimited(url)) 30_000L else 0L
+
     override fun isRateLimited(url: String): Boolean = url in rateLimitedUrls
 }
 

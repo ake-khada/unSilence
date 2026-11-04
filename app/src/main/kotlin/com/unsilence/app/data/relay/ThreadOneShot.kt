@@ -47,12 +47,15 @@ internal suspend fun fetchThreadRequests(
 
 /** Keep ID backoff and reply-filter rejection separate from reaction/receipt queries. */
 internal fun threadRequestPayloads(eventId: String, token: String): List<String> {
+    // Deep links can also open poll responses and zap events retained by MES.
+    val rootKinds = EVENT_REFERENCE_FETCH_KINDS + listOf(1018, 9734, 9735)
     // The event itself
     val eventReq = buildJsonArray {
         add(JsonPrimitive("REQ"))
         add(JsonPrimitive("thread-event-$token"))
         add(buildJsonObject {
             put("ids", buildJsonArray { add(JsonPrimitive(eventId)) })
+            put("kinds", buildJsonArray { rootKinds.forEach { add(JsonPrimitive(it)) } })
         })
     }.toString()
 

@@ -452,6 +452,10 @@ internal fun canMaterializeEmptyContactList(
 interface ActiveSubsSource {
     fun activeRelayUrls(): Set<String>
     fun activeSubIds(): Set<String>
+
+    /** Called only after an admitted CLOSED has established the transport cooldown. */
+    fun onRateLimitedClosed(url: String, subId: String) = Unit
+    fun cancelPendingReplays() = Unit
 }
 
 /**
@@ -1009,6 +1013,13 @@ class RelayPool @Inject constructor(
     override fun isRateLimited(url: String): Boolean {
         val normalized = normalizeRelayUrl(url) ?: return false
         return !isRelayOutOfCooldown(normalized)
+    }
+
+    override fun rateLimitRemainingMs(url: String): Long {
+        val normalized = normalizeRelayUrl(url) ?: return 0L
+        val until = rateLimiters[normalized]?.cooldownUntil?.get() ?: return 0L
+        val now = relayRateLimitNowMs()
+        return if (until > now) until - now else 0L
     }
 
     private fun canSendToRelay(url: String): Boolean {
@@ -2188,6 +2199,12 @@ class RelayPool @Inject constructor(
                         // Subscription.resumeRelay re-issues the REQ. Skip one-shot and
                         // auth-required (already handled above).
                         val isOneShot = isOneShotSubscription(closedSubId)
+                        if (!isOneShot && isRateLimitedClosedReason(reason) &&
+                            !reason.trimStart().startsWith("auth-required", ignoreCase = true)
+                        ) {
+                            runCatching { activeSubsSource.get().onRateLimitedClosed(conn.url, closedSubId) }
+                                .onFailure { Log.w(TAG, "Unable to defer live replay after cooldown", it) }
+                        }
                         if (shouldResubAfterClosed(reason, isOneShot)) {
                             val activeIds = runCatching { activeSubsSource.get().activeSubIds() }
                                 .getOrDefault(emptySet())
@@ -5822,6 +5839,8 @@ class RelayPool @Inject constructor(
     }
 
     fun disconnectAll() {
+        // Retire pending subscription timers before clearing the transport session.
+        activeSubsSource.get().cancelPendingReplays()
         // Map-before-close: snapshot then clear under the same lock used by
         // send/install/remove so no one-shot can attach during teardown.
         val (snapshot, ephemeralSnapshot) = synchronized(socketLifecycleLock) {
