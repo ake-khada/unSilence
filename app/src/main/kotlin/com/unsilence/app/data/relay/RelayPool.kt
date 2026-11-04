@@ -1,6 +1,7 @@
 package com.unsilence.app.data.relay
 
 import android.util.Log
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -72,6 +73,10 @@ private const val PROFILE_RELAY_FACTS_INDEXER_LIMIT = 4
 private const val PROFILE_RELAY_FACTS_AUTHOR_RELAY_LIMIT = 3
 private const val PROFILE_RELAY_FACTS_TIMEOUT_MS = 8_000L
 private const val EVENT_REFERENCE_PHASE_TIMEOUT_MS = 4_000L
+private const val EVENT_LOOKUP_TIMEOUT_MS = 30_000L
+
+/** Elapsed time only: user/network wall-clock corrections must not stall queued REQs. */
+private fun relayRateLimitNowMs(): Long = System.nanoTime() / 1_000_000
 private const val EVENT_PROCESSOR_SETTLE_MS = 200L
 private const val BRIDGE_EVENT_FETCH_TTL_MS = 5 * 60_000L
 internal const val MAX_EPHEMERAL_CONNECTIONS = 4
@@ -594,6 +599,8 @@ class RelayPool @Inject constructor(
         val ephemeral: List<RelayConnection>
         synchronized(socketLifecycleLock) {
             if (!socketTransportSuspended.compareAndSet(false, true)) return
+            relayQueueWakes.values.forEach { it.job.cancel() }
+            relayQueueWakes.clear()
             pooled = connections.values.toList()
             ephemeral = activeEphemeralConnections.toList()
             pooled.forEach { it.close() }
@@ -847,7 +854,7 @@ class RelayPool @Inject constructor(
         scope.launch {
             try {
                 val mes = memoryEventStore.get()
-                val result = withTimeoutOrNull(30_000L) {
+                val result = withTimeoutOrNull(EVENT_LOOKUP_TIMEOUT_MS) {
                     while (true) {
                         mes.getNostrEvent(eventId)?.let { return@withTimeoutOrNull it }
                         delay(500)
@@ -903,7 +910,13 @@ class RelayPool @Inject constructor(
         val payload: String,
         val requestClass: RelayRequestClass,
         val bypassCooldown: Boolean,
+        val subId: String?,
+        val queuedAtNanos: Long = System.nanoTime(),
     )
+
+    private data class RelayQueueWake(val owner: RelayConnection, val dueAtNanos: Long, val job: Job)
+    // Guarded by socketLifecycleLock; one demand-driven wake per pooled socket.
+    private val relayQueueWakes = mutableMapOf<String, RelayQueueWake>()
 
     private val relayReqQueue =
         ConcurrentHashMap<String, java.util.concurrent.ConcurrentLinkedQueue<QueuedRelayReq>>()
@@ -914,6 +927,7 @@ class RelayPool @Inject constructor(
 
     /** One-shot state is owned by the current WebSocket instance, never by a URL forever. */
     private fun resetConnectionScopedState(url: String) {
+        relayQueueWakes.remove(url)?.job?.cancel()
         resetRelayOneShotOwners(url, relayOneShotOwners)
         resetRelayOneShotBookkeeping(url, relayOneShotCount, relayReqQueue)
     }
@@ -979,19 +993,17 @@ class RelayPool @Inject constructor(
     // ── Per-relay rate limiter (token bucket + cooldown) ──────────────
     private data class RateLimitState(
         val tokens: AtomicInteger = AtomicInteger(RATE_LIMIT_MAX_TOKENS),
-        val lastRefill: AtomicLong = AtomicLong(System.currentTimeMillis()),
-        val cooldownUntil: AtomicLong = AtomicLong(0),
+        val lastRefill: AtomicLong = AtomicLong(relayRateLimitNowMs()),
+        val cooldownUntil: AtomicLong = AtomicLong(Long.MIN_VALUE),
     )
     private val rateLimiters = ConcurrentHashMap<String, RateLimitState>()
     /** Log cooldown drops once per relay per cooldown window. */
     private val cooldownLogged = ConcurrentHashMap<String, Long>()
 
-    /** True when the relay is NOT in a CLOSED-triggered cooldown window.
-     *  Unlike [canSendToRelay], this does NOT consume a rate-limit token — used by
-     *  [flushRelayQueue] where REQs were already rate-gated on entry. */
+    /** Cooldown observation only; each actual one-shot dispatch must also acquire a token. */
     private fun isRelayOutOfCooldown(url: String): Boolean {
         val state = rateLimiters[url] ?: return true
-        return System.currentTimeMillis() >= state.cooldownUntil.get()
+        return relayRateLimitNowMs() >= state.cooldownUntil.get()
     }
 
     override fun isRateLimited(url: String): Boolean {
@@ -1001,7 +1013,7 @@ class RelayPool @Inject constructor(
 
     private fun canSendToRelay(url: String): Boolean {
         val state = rateLimiters.getOrPut(url) { RateLimitState() }
-        val now = System.currentTimeMillis()
+        val now = relayRateLimitNowMs()
         // Cooldown check
         if (now < state.cooldownUntil.get()) return false
         // Refill tokens
@@ -1022,13 +1034,13 @@ class RelayPool @Inject constructor(
 
     private fun markRelayRateLimited(url: String) {
         val state = rateLimiters.getOrPut(url) { RateLimitState() }
-        val now = System.currentTimeMillis()
+        val now = relayRateLimitNowMs()
         while (true) {
             val existingUntil = state.cooldownUntil.get()
             if (now < existingUntil) return
             val until = now + RATE_LIMIT_COOLDOWN_MS
             if (state.cooldownUntil.compareAndSet(existingUntil, until)) {
-                Log.w(TAG, "Relay $url marked for cooldown until ${java.util.Date(until)} (rate-limited)")
+                Log.w(TAG, "Relay $url marked for cooldown until ${java.util.Date(System.currentTimeMillis() + RATE_LIMIT_COOLDOWN_MS)} (rate-limited)")
                 return
             }
         }
@@ -1036,7 +1048,8 @@ class RelayPool @Inject constructor(
 
     /**
      * Send a one-shot REQ to a relay, queuing if the relay is at its concurrent sub limit.
-     * Drops REQs when the relay is in rate-limit cooldown or token-starved.
+     * Caller cleanup controls owned requests; unowned queued work expires after
+     * the existing lookup timeout. Refill/cooldown wakes do not need an EOSE.
      * Call this instead of conn.send(req) for all one-shot subscription REQs.
      *
      * Prefetch subs (sub-ID starting with "prefetch-") are capped at 8 slots,
@@ -1058,7 +1071,7 @@ class RelayPool @Inject constructor(
             // A replacement can win after the caller reads the map. Retarget to
             // the current owner while holding the same lock used by install/remove.
             val current = connections[conn.url]
-            if (current == null) {
+            if (current == null || socketTransportSuspended.get()) {
                 extractReqSubId(req)?.let { subId -> recordOneShotRelayCoverage(subId, conn.url, OneShotOutcome.SKIPPED) }
                 return@synchronized
             }
@@ -1073,10 +1086,13 @@ class RelayPool @Inject constructor(
             val isPrefetch = req.contains("\"prefetch-")
             val effectiveCap = if (isPrefetch) MAX_CONCURRENT_REQS_PER_RELAY - 2 else MAX_CONCURRENT_REQS_PER_RELAY
             // Queue when at sub cap OR rate-limited (don't drop — flush will retry later)
-            if (count.get() >= effectiveCap || !canSendToRelay(current.url)) {
+            if (relayReqQueue[current.url]?.isNotEmpty() == true ||
+                count.get() >= effectiveCap || !canSendToRelay(current.url)
+            ) {
                 val queue = relayReqQueue.computeIfAbsent(current.url) { java.util.concurrent.ConcurrentLinkedQueue() }
-                queue.add(QueuedRelayReq(req, requestClass, bypassCooldown))
+                queue.add(QueuedRelayReq(req, requestClass, bypassCooldown, threadSubId))
                 Log.d(TAG, "Queued REQ for ${current.url} (${count.get()}/$MAX_CONCURRENT_REQS_PER_RELAY active)")
+                flushRelayQueue(current)
                 return@synchronized
             }
             count.incrementAndGet()
@@ -1147,30 +1163,43 @@ class RelayPool @Inject constructor(
      */
     private fun flushRelayQueue(conn: RelayConnection) {
         synchronized(socketLifecycleLock) {
-            if (connections[conn.url] !== conn) return@synchronized
+            if (connections[conn.url] !== conn || socketTransportSuspended.get()) return@synchronized
             val count = relayOneShotCount[conn.url] ?: return@synchronized
             val queue = relayReqQueue[conn.url] ?: return@synchronized
-            while (count.get() < MAX_CONCURRENT_REQS_PER_RELAY &&
-                   queue.isNotEmpty() &&
-                   isRelayOutOfCooldown(conn.url)) {
-                val queued = queue.poll() ?: break
-                val queuedSubId = extractReqSubId(queued.payload)
-                if (queuedSubId != null && isOwnedOneShotRequest(queuedSubId) && !oneShotOutcomes.isActive(queuedSubId)) {
-                    continue
-                }
-                if (relayCapabilitiesStore.shouldSkipRequest(
-                        conn.url,
-                        queued.requestClass,
-                        queued.bypassCooldown,
-                    ) || idRequestBackoff.shouldSkip(conn.url, queued.payload)
+            val nowNanos = System.nanoTime()
+            // Inspect the entire queue even when all slots are occupied. Some legacy
+            // callers have no cleanup owner; never retain/send their lookups indefinitely.
+            queue.removeIf { queued ->
+                val subId = queued.subId
+                val expired = (subId == null || !oneShotSubTargets.containsKey(subId)) &&
+                    nowNanos - queued.queuedAtNanos >= EVENT_LOOKUP_TIMEOUT_MS * 1_000_000
+                val cancelled = subId != null && isOwnedOneShotRequest(subId) && !oneShotOutcomes.isActive(subId)
+                if (expired && subId != null) _activeOneShotSubs.remove(subId)
+                expired || cancelled
+            }
+            var waitingForToken = false
+            var dispatchFailed = false
+            val iterator = queue.iterator()
+            while (iterator.hasNext()) {
+                val queued = iterator.next()
+                val cap = if (queued.subId?.startsWith("prefetch-") == true) MAX_CONCURRENT_REQS_PER_RELAY - 2
+                    else MAX_CONCURRENT_REQS_PER_RELAY
+                // Preserve the prefetch reservation without blocking eligible foreground work.
+                if (count.get() >= cap) continue
+                if (relayCapabilitiesStore.shouldSkipRequest(conn.url, queued.requestClass, queued.bypassCooldown) ||
+                    idRequestBackoff.shouldSkip(conn.url, queued.payload)
                 ) {
-                    extractReqSubId(queued.payload)?.let { subId ->
-                        recordOneShotRelayCoverage(subId, conn.url, OneShotOutcome.SKIPPED)
-                    }
+                    iterator.remove()
+                    queued.subId?.let { recordOneShotRelayCoverage(it, conn.url, OneShotOutcome.SKIPPED) }
                     continue
                 }
+                if (!canSendToRelay(conn.url)) {
+                    waitingForToken = true
+                    break
+                }
+                iterator.remove()
                 count.incrementAndGet()
-                val ownerKey = extractReqSubId(queued.payload)?.let { RelayOneShotOwnerKey(it, conn.url) }
+                val ownerKey = queued.subId?.let { RelayOneShotOwnerKey(it, conn.url) }
                 if (ownerKey != null) relayOneShotOwners[ownerKey] = conn
                 val outcome = idRequestBackoff.send(conn, conn.url, queued.payload) { conn.send(queued.payload) }
                 if (outcome == null) {
@@ -1179,15 +1208,60 @@ class RelayPool @Inject constructor(
                     count.decrementAndGet()
                     if (ownerKey != null) relayOneShotOwners.remove(ownerKey, conn)
                     if (outcome == OneShotOutcome.SKIPPED) {
-                        extractReqSubId(queued.payload)?.let { recordOneShotRelayCoverage(it, conn.url, outcome) }
+                        queued.subId?.let { recordOneShotRelayCoverage(it, conn.url, outcome) }
                     } else {
                         queue.add(queued)
+                        dispatchFailed = true
                         Log.w(TAG, "Queued REQ send failed for ${conn.url}; slot released")
                         break
                     }
                 }
             }
+            if (queue.isEmpty()) {
+                relayReqQueue.remove(conn.url, queue)
+                relayQueueWakes.remove(conn.url)?.job?.cancel()
+                return@synchronized
+            }
+            // Owner-managed requests keep their original cleanup deadline; the age
+            // ceiling only supplies missing cleanup for legacy fire-and-forget work.
+            val expiryMs = queue.minOfOrNull { queued ->
+                if (queued.subId?.let(oneShotSubTargets::containsKey) == true) Long.MAX_VALUE
+                else (EVENT_LOOKUP_TIMEOUT_MS - (System.nanoTime() - queued.queuedAtNanos) / 1_000_000).coerceAtLeast(1)
+            }?.takeUnless { it == Long.MAX_VALUE }
+            if (dispatchFailed) relayQueueWakes.remove(conn.url)?.job?.cancel()
+            val tokenMs = if (waitingForToken) nextRelayTokenDelayMs(conn.url) else null
+            val waitMs = if (expiryMs != null && tokenMs != null) minOf(expiryMs, tokenMs) else expiryMs ?: tokenMs
+            if (waitMs != null) scheduleRelayQueueWake(conn, waitMs)
+            else relayQueueWakes.remove(conn.url)?.job?.cancel()
         }
+    }
+
+    private fun nextRelayTokenDelayMs(url: String): Long {
+        val state = rateLimiters[url] ?: return RATE_LIMIT_REFILL_MS
+        val now = relayRateLimitNowMs()
+        val refill = if (state.tokens.get() > 0) 1L
+            else (RATE_LIMIT_REFILL_MS - (now - state.lastRefill.get())).coerceIn(1, RATE_LIMIT_REFILL_MS)
+        val until = state.cooldownUntil.get()
+        val cooldown = if (until > now) (until - now).coerceAtMost(RATE_LIMIT_COOLDOWN_MS) else 0L
+        return maxOf(refill, cooldown)
+    }
+
+    /** Called under socketLifecycleLock. No periodic worker or wake for an empty queue. */
+    private fun scheduleRelayQueueWake(conn: RelayConnection, delayMs: Long) {
+        val dueAt = System.nanoTime() + delayMs * 1_000_000
+        val existing = relayQueueWakes[conn.url]
+        if (existing?.owner === conn && existing.dueAtNanos <= dueAt) return
+        existing?.job?.cancel()
+        val job = scope.launch(start = CoroutineStart.LAZY) {
+            delay(delayMs)
+            synchronized(socketLifecycleLock) {
+                if (relayQueueWakes[conn.url]?.job !== coroutineContext[Job]) return@synchronized
+                relayQueueWakes.remove(conn.url)
+                if (connections[conn.url] === conn && !socketTransportSuspended.get()) flushRelayQueue(conn)
+            }
+        }
+        relayQueueWakes[conn.url] = RelayQueueWake(conn, dueAt, job)
+        job.start()
     }
 
     /** Safety rail, with an explicit priority escape hatch for critical callers. */
@@ -2300,8 +2374,9 @@ class RelayPool @Inject constructor(
         // via the oneShotReleased guard. Only un-released relays get CLOSE + decrement.
         for (url in targets) {
             synchronized(socketLifecycleLock) {
-                relayReqQueue[url]?.removeIf { extractReqSubId(it.payload) == subId }
+                relayReqQueue[url]?.removeIf { it.subId == subId }
                 releaseOneShotForRelay(subId, url)
+                connections[url]?.let(::flushRelayQueue)
             }
         }
 
@@ -5777,6 +5852,8 @@ class RelayPool @Inject constructor(
             authUnavailableRelays.clear()
             authSessionPolicy.clear()
             integralRelayUrls = emptySet()
+            relayQueueWakes.values.forEach { it.job.cancel() }
+            relayQueueWakes.clear()
             relayOneShotOwners.clear()
             relayOneShotCount.clear()
             relayReqQueue.clear()
