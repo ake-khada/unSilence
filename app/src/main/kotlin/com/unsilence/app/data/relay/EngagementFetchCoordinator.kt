@@ -34,7 +34,7 @@ private val engagementAttemptIds = AtomicLong()
  * are retained here. Entries retain only their current bounded relay coverage.
  */
 internal class EngagementFetchCoordinator(
-    private val fetchRequest: suspend (String, List<String>, String, Long) -> Map<String, OneShotOutcome>,
+    private val fetchRequest: suspend (String, List<String>, String, Long, Boolean) -> Map<String, OneShotOutcome>,
     private val nowMs: () -> Long = System::currentTimeMillis,
     private val maxEntries: Int = ENGAGEMENT_FRESHNESS_CAP,
 ) {
@@ -174,7 +174,10 @@ internal class EngagementFetchCoordinator(
                             else buildOwnEngagementReq(subId, ownPubkey, eventIds, coordinates)
                         launch {
                             val outcome = try {
-                                fetchRequest(subId, listOf(relay), req, ENGAGEMENT_FETCH_TIMEOUT_MS)[relay]
+                                // Every target must have been observed at this relay; hints
+                                // and author-list membership alone cannot opt into the feed relay.
+                                val fromSource = ownPubkey == null && covered.all { relay in it.target.observedRelays }
+                                fetchRequest(subId, listOf(relay), req, ENGAGEMENT_FETCH_TIMEOUT_MS, fromSource)[relay]
                                     ?: OneShotOutcome.SKIPPED
                             } catch (e: CancellationException) {
                                 throw e

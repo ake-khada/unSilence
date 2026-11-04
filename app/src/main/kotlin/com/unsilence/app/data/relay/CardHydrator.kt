@@ -941,9 +941,11 @@ class CardHydrator @Inject constructor(
         val coord: String?,
         val authorPubkey: String?,
         val createdAt: Long,
-        /** Where this event was actually seen — current NIP-65 write relays
-         *  may not cover where an old article or its zap receipts live. */
+        /** Candidate locations, including protocol hints as well as observed sources.
+         *  Hints alone do not qualify for the active feed-relay exception. */
         val sourceRelays: List<String> = emptyList(),
+        /** Actual target provenance only; protocol hints and repost wrapper origins are excluded. */
+        val observedRelays: Set<String> = emptySet(),
     )
 
     private fun engagementTargetFor(row: FeedRow): EngagementTarget {
@@ -956,9 +958,11 @@ class CardHydrator @Inject constructor(
             34235, 34236 -> memoryEventStore.articleCoordForEvent(model.engagementId)
             else -> null
         }?.also { memoryEventStore.registerArticleCoord(model.engagementId, it) }
+        val targetRelays = memoryEventStore.getNostrEvent(model.engagementId)?.relaysSeen.orEmpty()
+        val observed = observedEngagementRelays(row.id, model.engagementId, row.relayUrl, targetRelays)
         val source = buildList {
             if (row.relayUrl.isNotBlank()) add(row.relayUrl)
-            memoryEventStore.getNostrEvent(model.engagementId)?.relaysSeen?.let { addAll(it) }
+            addAll(targetRelays)
             addAll(memoryEventStore.relayHintsForEvent(model.engagementId))
         }.mapNotNull { normalizeRelayUrl(it) }.distinct()
         return EngagementTarget(
@@ -967,6 +971,7 @@ class CardHydrator @Inject constructor(
             authorPubkey = model.pubkey,
             createdAt = model.createdAt,
             sourceRelays = source,
+            observedRelays = observed,
         )
     }
 
@@ -1101,7 +1106,8 @@ class CardHydrator @Inject constructor(
             }
             // Merge the event's own source/seen relays — covers old articles whose
             // engagement isn't on the author's current write relays.
-            (base + (target?.sourceRelays ?: emptyList())).distinct()
+            engagementRelayTargets(base + target?.sourceRelays.orEmpty(),
+                target?.observedRelays.orEmpty(), relayPool.activeSingleRelayFeedUrl)
         }
 
         // 2. Invert → one chunked REQ per relay (coverage-ranked, capped).
@@ -1184,13 +1190,10 @@ internal fun engagementFreshnessInterval(postAgeSec: Long): Long = when {
 }
 
 private const val MAX_ENGAGEMENT_RELAYS = 12
-// per-post engagement budget = ENGAGEMENT_BATCH_LIMIT / ENGAGEMENT_BATCH_CHUNK.
-// 500 / 5 = 100 events/post/relay — identical to the pre-Sprint-C per-post limit.
-// DO NOT raise this without raising the limit proportionally, or posts in a chunk
-// starve each other (counts silently drop to 0). Relays widely honor limit=500 but
-// often cap higher values, so the budget is tuned via chunk size, not limit.
-// internal: ProfilePipeline reuses this as the single source of truth for its
-// engagement chunk size, so the two paths can't drift apart.
+// Each relay filter shares 500 results across at most 5 posts AND all requested kinds.
+// This bounds work; it does not reserve 100 results per post or guarantee complete
+// counts. Busy posts/kinds can consume the window. ProfilePipeline shares this
+// chunk size so profile and viewport query budgets stay aligned.
 internal const val ENGAGEMENT_BATCH_CHUNK = 5
 private const val ENGAGEMENT_BATCH_LIMIT = 500
 
@@ -1372,4 +1375,19 @@ internal fun prioritizeEngagementBatches(
     batches: List<Pair<String, List<String>>>, priorities: Map<String, Int>,
 ): List<Pair<String, List<String>>> = batches.sortedBy { (_, ids) ->
     ids.minOfOrNull { priorities[it] ?: 2 } ?: 2
+}
+
+/** A wrapper's origin does not establish where its referenced target was observed. */
+internal fun observedEngagementRelays(
+    rowId: String, targetId: String, rowRelay: String, targetRelays: Collection<String>,
+): Set<String> = normalizedRelayTargets(
+    targetRelays + if (rowId == targetId) listOf(rowRelay) else emptyList(),
+).toSet()
+
+/** Exclude unrelated targets before batching so one source target cannot opt in its neighbours. */
+internal fun engagementRelayTargets(
+    candidates: List<String>, observedRelays: Set<String>, activeFeedRelay: String?,
+): List<String> {
+    val active = activeFeedRelay?.let(::normalizeRelayUrl)
+    return normalizedRelayTargets(candidates).filter { relay -> relay != active || relay in observedRelays }
 }

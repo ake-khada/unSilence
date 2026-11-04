@@ -21,6 +21,8 @@ object SubscriptionRules {
         "kind3-",
         "kind10002-",
         "profiles-",
+        "prof-eng-",
+        "prof-own-eng-",
         "hint-profiles-",
         "src-profiles-",
         "hint-event-",

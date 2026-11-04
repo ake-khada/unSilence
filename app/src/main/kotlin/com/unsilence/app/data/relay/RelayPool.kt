@@ -1716,12 +1716,14 @@ class RelayPool @Inject constructor(
         relays: List<String>,
         req: String,
         timeoutMs: Long,
+        includeActiveFeedRelay: Boolean = false,
     ): Map<String, OneShotOutcome> = oneShotOutcomes.fetch(
         subId = subId,
         relays = relays,
         timeoutMs = timeoutMs,
         dispatch = { onAdmitted ->
-            sendOneShotBatch(relays, listOf(req), listOf(subId), timeoutMs, onAdmitted = onAdmitted)
+            sendOneShotBatch(relays, listOf(req), listOf(subId), timeoutMs,
+                includeActiveFeedRelay = includeActiveFeedRelay, onAdmitted = onAdmitted)
         },
         cleanup = { cleanupOneShotSub(subId) },
         admissionTimeoutMs = ENGAGEMENT_ADMISSION_TIMEOUT_MS,

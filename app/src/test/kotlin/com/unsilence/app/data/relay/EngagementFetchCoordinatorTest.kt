@@ -54,7 +54,7 @@ class EngagementFetchCoordinatorTest(mode: String) {
         val cleaned = mutableListOf<String>()
         var dispatch: suspend (Request) -> Set<String> = { it.relays.toSet() }
         val coordinator = EngagementFetchCoordinator(
-            fetchRequest = { subId, relays, json, timeout ->
+            fetchRequest = { subId, relays, json, timeout, _ ->
                 outcomes.fetch(subId, relays, timeout, {
                     val request = Request(subId, relays, json)
                     requests += request
@@ -219,7 +219,7 @@ class EngagementFetchCoordinatorTest(mode: String) {
     fun `backstop bounds an unresponsive fetch adapter without marking success`() = runTest {
         var cancelled = false
         val coordinator = EngagementFetchCoordinator(
-            fetchRequest = { _, _, _, _ ->
+            fetchRequest = { _, _, _, _, _ ->
                 try {
                     delay(60_000) // Ignores the passed request deadline; coordinator must own its backstop.
                     mapOf(first to OneShotOutcome.EOSE)
@@ -242,7 +242,7 @@ class EngagementFetchCoordinatorTest(mode: String) {
         val newResponse = CompletableDeferred<Map<String, OneShotOutcome>>()
         var calls = 0
         val coordinator = EngagementFetchCoordinator(
-            fetchRequest = { _, _, _, _ ->
+            fetchRequest = { _, _, _, _, _ ->
                 if (++calls == 1) withContext(NonCancellable) {
                     oldMayFinish.await()
                     mapOf(first to OneShotOutcome.EOSE)
@@ -385,7 +385,7 @@ class EngagementFetchCoordinatorTest(mode: String) {
         var started = 0
         var cleaned = 0
         val coordinator = EngagementFetchCoordinator(
-            fetchRequest = { subId, urls, _, timeout ->
+            fetchRequest = { subId, urls, _, timeout, _ ->
                 requested++
                 outcomes.fetch(subId, urls, timeout, { admitted ->
                     slots.withPermit {

@@ -105,12 +105,9 @@ class ProfilePipeline @Inject constructor(
         /** Kinds fetched for profile content, including NIP-22 comments for the Replies tab. */
         val PROFILE_KINDS = PROFILE_NOTE_REPLY_EVENT_KIND_SET + 30023
         /**
-         * Posts per engagement REQ. MUST track buildBatchedEngagementReq's invariant:
-         * limit=ENGAGEMENT_BATCH_LIMIT(500) ÷ chunk = per-post event budget. At 5 →
-         * 100 events/post; a larger chunk (the old 50 → ~10/post) lets a few popular
-         * longforms consume the relay's limit before later articles in the chunk
-         * return anything ("some hydrated, some missing"). Bound to the feed path's
-         * ENGAGEMENT_BATCH_CHUNK so the two can't drift.
+         * Share the viewport's bounded chunk size. A relay filter's 500 results
+         * are shared across posts and kinds, not reserved per post; even a small
+         * chunk can return incomplete counts for a busy target.
          */
         private const val PROFILE_ENGAGEMENT_CHUNK_SIZE = ENGAGEMENT_BATCH_CHUNK
         private const val ENGAGEMENT_TIMEOUT_MS = 10_000L
@@ -682,7 +679,7 @@ class ProfilePipeline @Inject constructor(
         if (targetUrls.isEmpty()) return
         Log.d(TAG, "Step4: relay fan-out capped to ${targetUrls.size}/$MAX_PROFILE_ENGAGEMENT_RELAYS")
 
-        // Chunk small (per-post budget invariant) — REQ via the shared builder so
+        // Keep the shared bounded chunk size — REQ via the shared builder so
         // profile and feed paths emit identical #e + #a + #A filters (incl. kind 16).
         val chunks = targets.chunked(PROFILE_ENGAGEMENT_CHUNK_SIZE)
         Log.d(TAG, "Step4: ${noteEvents.size} notes → ${chunks.size} chunks")
