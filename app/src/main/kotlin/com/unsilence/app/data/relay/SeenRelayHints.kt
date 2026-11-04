@@ -1,5 +1,10 @@
 package com.unsilence.app.data.relay
 
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.buildJsonArray
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
+
 private val NORMALIZED_BRIDGE_FALLBACK_RELAYS = normalizedRelayTargets(BRIDGE_FALLBACK_RELAY_URLS)
 private val NORMALIZED_BRIDGE_FALLBACK_RELAY_SET = NORMALIZED_BRIDGE_FALLBACK_RELAYS.toSet()
 
@@ -116,14 +121,41 @@ internal fun profileDerivedBridgeOutbox(nip05: String?): List<String> =
         emptyList()
     }
 
-/** Group profile authors by their bounded locality target set for one wire REQ. */
+/** Shared with ProfileResolver's collection window; each wire REQ stays bounded. */
+internal const val MAX_PROFILE_AUTHORS_PER_REQ = 100
+
+/**
+ * Invert row hints within one pass so a shared relay receives its authors together.
+ * Every author keeps exactly its normalized, bounded destinations. This does not
+ * coalesce concurrent passes or change profile freshness/negative caching.
+ */
 internal fun groupProfileHintFetches(
     pubkeys: Collection<String>,
     relayHintsByPubkey: Map<String, List<String>>,
-): Map<List<String>, List<String>> = pubkeys.mapNotNull { pubkey ->
-    val hints = canonicalRelayHints(relayHintsByPubkey[pubkey].orEmpty())
-    hints.takeIf { it.isNotEmpty() }?.let { it to pubkey }
-}.groupBy(
-    keySelector = { it.first },
-    valueTransform = { it.second },
-)
+): Map<List<String>, List<String>> {
+    val authorsByRelay = linkedMapOf<String, MutableList<String>>()
+    for (pubkey in pubkeys.distinct()) {
+        for (relay in canonicalRelayHints(relayHintsByPubkey[pubkey].orEmpty())) {
+            authorsByRelay.getOrPut(relay) { mutableListOf() }.add(pubkey)
+        }
+    }
+    return authorsByRelay.mapKeys { (relay, _) -> listOf(relay) }
+}
+
+/** Submit all chunks together to reuse one ephemeral connection per target relay. */
+internal fun profileRequestPayloads(
+    pubkeys: List<String>,
+    subIdBase: String,
+    kinds: List<Int>,
+): Map<String, String> = pubkeys.distinct().chunked(MAX_PROFILE_AUTHORS_PER_REQ)
+    .mapIndexed { index, authors ->
+        val subId = if (index == 0) subIdBase else "$subIdBase-$index"
+        subId to buildJsonArray {
+            add(JsonPrimitive("REQ"))
+            add(JsonPrimitive(subId))
+            add(buildJsonObject {
+                put("kinds", buildJsonArray { kinds.forEach { add(JsonPrimitive(it)) } })
+                put("authors", buildJsonArray { authors.forEach { add(JsonPrimitive(it)) } })
+            })
+        }.toString()
+    }.toMap()

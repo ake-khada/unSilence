@@ -126,6 +126,117 @@ class RelayRequestPacingTest {
         withTimeout(5_000) { f.pool.connectionStates.first { it[url] == RelayState.CONNECTED } }
     }
 
+    private suspend fun profilePhase(f: Fixture, url: String, authors: List<String>): Unit =
+        kotlin.coroutines.intrinsics.suspendCoroutineUninterceptedOrReturn { continuation ->
+            RelayPool::class.java.getDeclaredMethod(
+                "fetchProfilePhase", List::class.java, List::class.java, String::class.java,
+                Boolean::class.javaPrimitiveType, kotlin.coroutines.Continuation::class.java,
+            ).apply { isAccessible = true }.invoke(f.pool, authors, listOf(url), "hint-profiles", true, continuation)
+        }
+
+    @Test fun `cancelling queued profile chunks spends available token only on unrelated work`() = runBlocking {
+        Fixture().use { f ->
+            val url = "wss://profile-cancel-token.test"
+            exhaust(f, url)
+            val phase = async { profilePhase(f, url, (1..201).map { it.toString(16).padStart(64, '0') }) }
+            f.until { queued(f, url).size == 3 }
+            send(f, url, "hint-batch-unrelated")
+            tokens(f, url).set(1)
+            phase.cancelAndJoin()
+            f.until { f.requests.size == 6 }
+            assertEquals("hint-batch-unrelated", f.requests.last().second[1].jsonPrimitive.content)
+            assertTrue(queued(f, url).isEmpty())
+            assertTrue(f.pool.oneShotEoseCallbacks.keys.none { it.startsWith("hint-profiles-") })
+        }
+    }
+
+    @Test fun `cancelling inflight profile chunk cannot flush its queued siblings`() = runBlocking {
+        Fixture().use { f ->
+            val url = "wss://profile-cancel-mixed.test"
+            exhaust(f, url)
+            tokens(f, url).set(1)
+            val phase = async { profilePhase(f, url, (1..201).map { it.toString(16).padStart(64, '0') }) }
+            f.until { f.requests.size == 6 && queued(f, url).size == 2 }
+            tokens(f, url).set(1)
+            phase.cancelAndJoin()
+            assertEquals("cancelled sibling must not spend a token", 1, tokens(f, url).get())
+            assertTrue(queued(f, url).isEmpty())
+            assertTrue(f.pool.oneShotEoseCallbacks.keys.none { it.startsWith("hint-profiles-") })
+            assertEquals("only the original five plus one started chunk", 6, f.requests.size)
+            assertEquals("started chunk releases its slot", 5, count(f, url).get())
+        }
+    }
+
+    @Test fun `profile phase awaits every chunk and preserves metadata kinds`() = runBlocking {
+        Fixture().use { f ->
+            val url = "wss://profile-phase.test"
+            prepare(f, url)
+            val authors = (1..201).map { it.toString(16).padStart(64, '0') }
+            val phase = async { profilePhase(f, url, authors) }
+            f.until { f.requests.size == 3 }
+            f.requests.forEach { (_, req) ->
+                assertEquals(listOf(0, 10002), req[2].jsonObject.getValue("kinds").jsonArray.map { it.jsonPrimitive.int })
+                assertTrue(req[2].jsonObject.getValue("authors").jsonArray.size <= 100)
+            }
+            val ids = f.requests.map { it.second[1].jsonPrimitive.content }
+            release(f, url, ids[0]); release(f, url, ids[1])
+            assertTrue("remaining chunk still owns the phase", phase.isActive)
+            release(f, url, ids[2])
+            withTimeout(2_000) { phase.await() }
+            assertTrue(ids.none(f.pool.oneShotEoseCallbacks::containsKey))
+        }
+    }
+
+    @Test fun `cancelled profile phase removes all queued chunks and callbacks`() = runBlocking {
+        Fixture().use { f ->
+            val url = "wss://profile-cancel.test"
+            exhaust(f, url)
+            val phase = async { profilePhase(f, url, (1..201).map { it.toString(16).padStart(64, '0') }) }
+            f.until { queued(f, url).size == 3 }
+            phase.cancelAndJoin()
+            assertTrue(queued(f, url).isEmpty())
+            assertTrue(f.pool.oneShotEoseCallbacks.keys.none { it.startsWith("hint-profiles-") })
+            assertEquals(5, f.requests.size)
+        }
+    }
+
+    @Test fun `profile hints sharing an unpooled relay send all authors once on one socket`() = runBlocking {
+        Fixture().use { f ->
+            val shared = "wss://shared.test"
+            val a = "a".repeat(64)
+            val b = "b".repeat(64)
+            f.pool.fetchProfilesFromHints(mapOf(
+                a to listOf(shared, "wss://a.test"),
+                b to listOf(shared, "wss://b.test"),
+            ))
+            f.until { f.requests.any { it.first == shared } }
+            val sharedReq = f.requests.first { it.first == shared }.second
+            assertEquals(setOf(a, b), sharedReq[2].jsonObject.getValue("authors").jsonArray.map { it.jsonPrimitive.content }.toSet())
+            f.until { f.requests.map { it.first }.toSet().size == 3 && f.active.get() == 0 }
+            assertEquals(3, f.requests.size)
+            assertEquals(listOf(0), sharedReq[2].jsonObject.getValue("kinds").jsonArray.map { it.jsonPrimitive.int })
+            val pairs = f.requests.flatMap { (url, req) -> req[2].jsonObject.getValue("authors").jsonArray.map { it.jsonPrimitive.content to url } }
+            assertEquals(setOf(a to shared, a to "wss://a.test", b to shared, b to "wss://b.test"), pairs.toSet())
+            assertEquals(4, pairs.size)
+        }
+    }
+
+    @Test fun `large hinted profile pass preserves every author in bounded requests on one ephemeral socket`() = runBlocking {
+        Fixture().use { f ->
+            val url = "wss://large-profile.test"
+            val authors = (1..201).map { it.toString(16).padStart(64, '0') }
+            f.pool.fetchProfilesFromHints(authors.associateWith { listOf(url) })
+            f.until { f.requests.isNotEmpty() }
+            assertTrue("existing 100-author batch bound applies to each wire filter",
+                f.requests.all { it.second[2].jsonObject.getValue("authors").jsonArray.size <= 100 })
+            f.until { f.requests.size == 3 && f.active.get() == 0 }
+            assertEquals(listOf(100, 100, 1), f.requests.map { it.second[2].jsonObject.getValue("authors").jsonArray.size })
+            assertEquals(authors, f.requests.flatMap { it.second[2].jsonObject.getValue("authors").jsonArray.map { value -> value.jsonPrimitive.content } })
+            assertEquals(3, f.requests.map { it.second[1].jsonPrimitive.content }.distinct().size)
+            assertEquals(1, f.peak.get())
+        }
+    }
+
     @Test fun `EOSE drain cannot spend tokens that queued requests never acquired`() = runBlocking {
         Fixture().use { f ->
             val url = "wss://pacing.test"

@@ -53,7 +53,6 @@ class ProfileResolver @Inject constructor(
         private const val IN_FLIGHT_TTL_MS = 15_000L
         private const val STALE_THRESHOLD_SECONDS = 6 * 3600L
         private const val BATCH_WINDOW_MS = 300L
-        private const val MAX_BATCH_SIZE = 100
         private const val DEFAULT_SCROLL_RELAYS = 3
     }
 
@@ -161,7 +160,7 @@ class ProfileResolver @Inject constructor(
             val deadlineNs = startNs + BATCH_WINDOW_MS * 1_000_000L
 
             // Accumulate until deadline or max batch size
-            while (batch.size < MAX_BATCH_SIZE) {
+            while (batch.size < MAX_PROFILE_AUTHORS_PER_REQ) {
                 val remainingNs = deadlineNs - System.nanoTime()
                 if (remainingNs <= 0) break
                 val next = withTimeoutOrNull(remainingNs / 1_000_000L) {

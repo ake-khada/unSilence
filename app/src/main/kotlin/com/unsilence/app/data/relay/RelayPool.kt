@@ -4279,8 +4279,8 @@ class RelayPool @Inject constructor(
 
         scope.launch {
             // Phase 1: the relays where the feed rows were actually seen. Groups
-            // retain per-pubkey locality instead of broadcasting every author to
-            // the union of every row's hints.
+            // combine authors per relay without broadcasting any author beyond
+            // that author's own row hints.
             coroutineScope {
                 hintGroups.map { (hintUrls, hintedPubkeys) ->
                     async {
@@ -4389,30 +4389,27 @@ class RelayPool @Inject constructor(
         includeActiveFeedRelay: Boolean = false,
     ) {
         if (pubkeys.isEmpty() || targetUrls.isEmpty()) return
-        val subId = "$subIdPrefix-${System.nanoTime()}"
-        val req = buildJsonArray {
-            add(JsonPrimitive("REQ"))
-            add(JsonPrimitive(subId))
-            add(buildJsonObject {
-                put("kinds", buildJsonArray {
-                    add(JsonPrimitive(0))
-                    add(JsonPrimitive(10002))
-                })
-                put("authors", buildJsonArray { pubkeys.forEach { add(JsonPrimitive(it)) } })
-            })
-        }.toString()
-        val eoseDeferred = CompletableDeferred<Unit>()
-        oneShotEoseCallbacks[subId] = eoseDeferred
+        val requests = profileRequestPayloads(pubkeys, "$subIdPrefix-${System.nanoTime()}", listOf(0, 10002))
+        val completions = requests.keys.map { subId ->
+            CompletableDeferred<Unit>().also { oneShotEoseCallbacks[subId] = it }
+        }
         try {
             sendOneShotBatch(
                 targetUrls,
-                listOf(req),
-                listOf(subId),
+                requests.values.toList(),
+                requests.keys.toList(),
                 includeActiveFeedRelay = includeActiveFeedRelay,
             )
-            withTimeoutOrNull(5_000L) { eoseDeferred.await() }
+            withTimeoutOrNull(5_000L) { completions.awaitAll() }
         } finally {
-            cleanupOneShotSub(subId)
+            // Cleanup can flush a relay as it releases slots. Remove every queued
+            // sibling first, so cancellation/timeout cannot dispatch another chunk.
+            synchronized(socketLifecycleLock) {
+                requests.keys.flatMap { oneShotSubTargets[it].orEmpty() }.distinct().forEach { url ->
+                    relayReqQueue[url]?.removeIf { it.subId in requests }
+                }
+            }
+            requests.keys.forEach(::cleanupOneShotSub)
         }
     }
 
@@ -4435,26 +4432,17 @@ class RelayPool @Inject constructor(
         pubkeys.forEach { hintedProfileFetchAttempted[it] = now }
         val groups = groupProfileHintFetches(pubkeys, novel)
         for ((targetUrls, groupedPubkeys) in groups) {
-            val subId = "hint-profiles-${System.nanoTime()}"
-            val req = buildJsonArray {
-                add(JsonPrimitive("REQ"))
-                add(JsonPrimitive(subId))
-                add(buildJsonObject {
-                    put("kinds", buildJsonArray { add(JsonPrimitive(0)) })
-                    put("authors", buildJsonArray {
-                        groupedPubkeys.forEach { add(JsonPrimitive(it)) }
-                    })
-                })
-            }.toString()
+            val requests = profileRequestPayloads(groupedPubkeys, "hint-profiles-${System.nanoTime()}", listOf(0))
             scope.launch {
                 sendOneShotBatch(
                     targetUrls,
-                    listOf(req),
-                    listOf(subId),
+                    requests.values.toList(),
+                    requests.keys.toList(),
                     includeActiveFeedRelay = true,
                 )
             }
         }
+
         Log.d(TAG, "fetchProfilesFromHints: ${pubkeys.size} profiles → ${groups.size} hint group(s)")
     }
 
