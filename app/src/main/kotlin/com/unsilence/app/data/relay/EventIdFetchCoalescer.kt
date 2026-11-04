@@ -24,7 +24,7 @@ internal class EventIdFetchCoalescer(
     private val scope: CoroutineScope,
     private val windowMs: Long = EVENT_ID_FETCH_WINDOW_MS,
     private val maxBatchSize: Int = MAX_EVENT_IDS_PER_REQ,
-    private val dispatch: suspend (EventIdFetchBatch) -> Unit,
+    private val dispatch: suspend (List<EventIdFetchBatch>, (Int, Throwable?) -> Unit) -> Unit,
 ) {
     private data class Pending(
         val eventId: String,
@@ -90,17 +90,21 @@ internal class EventIdFetchCoalescer(
             selected
         }
 
-        windows.forEach { window ->
-            val failure = try {
-                dispatch(window.batch)
-                null
-            } catch (cancelled: CancellationException) {
-                completeWindow(window, cancelled)
-                throw cancelled
-            } catch (error: Exception) {
-                error
+        var failure: Throwable? = null
+        try {
+            dispatch(windows.map { it.batch }) { index, error ->
+                completeWindow(windows[index], error)
             }
-            completeWindow(window, failure)
+        } catch (cancelled: CancellationException) {
+            failure = cancelled
+            throw cancelled
+        } catch (error: Exception) {
+            failure = error
+        } finally {
+            // A cancelled dispatcher may never start some groups. Settle every
+            // selected caller; already-completed groups and newer Pending IDs
+            // are safe because completeWindow is idempotent and identity-checked.
+            windows.forEach { completeWindow(it, failure) }
         }
     }
 

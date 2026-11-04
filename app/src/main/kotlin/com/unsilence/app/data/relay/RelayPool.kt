@@ -714,13 +714,7 @@ class RelayPool @Inject constructor(
     private val bridgeEventFetchAttempted = ConcurrentHashMap<String, Long>()
     private val MISSING_REF_TTL_MS = 5 * 60 * 1000L // 5 minutes
     private val missingRefCacheHits = AtomicLong(0)
-    private val eventIdFetchCoalescer = EventIdFetchCoalescer(scope) { batch ->
-        if (batch.relayHints.isEmpty()) {
-            fetchEventsByIds(batch.eventIds)
-        } else {
-            fetchEventsByIdsWithHints(batch.eventIds, batch.relayHints, bypassDedup = false)
-        }
-    }
+    private val eventIdFetchCoalescer = EventIdFetchCoalescer(scope, dispatch = ::fetchCoalescedEventReferences)
 
     // ── Ephemeral WebSocket rate limiting ─────────────────────────────────
     /** Per-URL last-open timestamp (nanos) for ephemeral connections — min 50ms gap. */
@@ -804,7 +798,7 @@ class RelayPool @Inject constructor(
     )
     private val _activePages = ConcurrentHashMap<String, PageState>()
 
-    /** Number of in-flight one-shot subscriptions — used by HydrationFrontier for priority shedding. */
+    /** Number of tracked one-shot subscriptions, including queued and ephemeral requests. */
     fun activeOneShotCount(): Int = _activeOneShotSubs.size
 
     // ── Negative cache API ───────────────────────────────────────────
@@ -1057,6 +1051,12 @@ class RelayPool @Inject constructor(
         }
     }
 
+    private fun isTerminalConnection(conn: RelayConnection): Boolean = when (conn.state.value) {
+        RelayState.DISCONNECTED, RelayState.FAILED -> true
+        // OkHttp still accepts queued sends while the handshake is pending.
+        RelayState.CONNECTING, RelayState.CONNECTED -> false
+    }
+
     /**
      * Send a one-shot REQ to a relay, queuing if the relay is at its concurrent sub limit.
      * Caller cleanup controls owned requests; unowned queued work expires after
@@ -1082,7 +1082,7 @@ class RelayPool @Inject constructor(
             // A replacement can win after the caller reads the map. Retarget to
             // the current owner while holding the same lock used by install/remove.
             val current = connections[conn.url]
-            if (current == null || socketTransportSuspended.get()) {
+            if (current == null || socketTransportSuspended.get() || isTerminalConnection(current)) {
                 extractReqSubId(req)?.let { subId -> recordOneShotRelayCoverage(subId, conn.url, OneShotOutcome.SKIPPED) }
                 return@synchronized
             }
@@ -1191,7 +1191,9 @@ class RelayPool @Inject constructor(
             var waitingForToken = false
             var dispatchFailed = false
             val iterator = queue.iterator()
-            while (iterator.hasNext()) {
+            // Background close leaves the old socket mapped until replacement.
+            // Keep expiry/cleanup alive, but never spend tokens on that transport.
+            while (iterator.hasNext() && !isTerminalConnection(conn)) {
                 val queued = iterator.next()
                 val cap = if (queued.subId?.startsWith("prefetch-") == true) MAX_CONCURRENT_REQS_PER_RELAY - 2
                     else MAX_CONCURRENT_REQS_PER_RELAY
@@ -2202,8 +2204,14 @@ class RelayPool @Inject constructor(
                         if (!isOneShot && isRateLimitedClosedReason(reason) &&
                             !reason.trimStart().startsWith("auth-required", ignoreCase = true)
                         ) {
-                            runCatching { activeSubsSource.get().onRateLimitedClosed(conn.url, closedSubId) }
-                                .onFailure { Log.w(TAG, "Unable to defer live replay after cooldown", it) }
+                            synchronized(socketLifecycleLock) {
+                                // Teardown retires this identity under the same lock, then
+                                // cancels timers. A delayed CLOSED cannot re-arm afterwards.
+                                if (connections[conn.url] === conn) {
+                                    runCatching { activeSubsSource.get().onRateLimitedClosed(conn.url, closedSubId) }
+                                        .onFailure { Log.w(TAG, "Unable to defer live replay after cooldown", it) }
+                                }
+                            }
                         }
                         if (shouldResubAfterClosed(reason, isOneShot)) {
                             val activeIds = runCatching { activeSubsSource.get().activeSubIds() }
@@ -2399,6 +2407,16 @@ class RelayPool @Inject constructor(
 
         // Final cleanup of the released tracking set
         oneShotReleased.remove(subId)
+    }
+
+    /** Remove every sibling before any slot release can flush another one. */
+    private fun cleanupOneShotSubs(subIds: Set<String>) {
+        synchronized(socketLifecycleLock) {
+            subIds.flatMap { oneShotSubTargets[it].orEmpty() }.distinct().forEach { url ->
+                relayReqQueue[url]?.removeIf { it.subId in subIds }
+            }
+        }
+        subIds.forEach(::cleanupOneShotSub)
     }
 
     /**
@@ -4402,14 +4420,7 @@ class RelayPool @Inject constructor(
             )
             withTimeoutOrNull(5_000L) { completions.awaitAll() }
         } finally {
-            // Cleanup can flush a relay as it releases slots. Remove every queued
-            // sibling first, so cancellation/timeout cannot dispatch another chunk.
-            synchronized(socketLifecycleLock) {
-                requests.keys.flatMap { oneShotSubTargets[it].orEmpty() }.distinct().forEach { url ->
-                    relayReqQueue[url]?.removeIf { it.subId in requests }
-                }
-            }
-            requests.keys.forEach(::cleanupOneShotSub)
+            cleanupOneShotSubs(requests.keys)
         }
     }
 
@@ -4915,15 +4926,11 @@ class RelayPool @Inject constructor(
         }
     }
 
-    private suspend fun fetchEventsByIdsWithHintsBatch(
+    private fun admitReferenceIds(
         eventIds: List<String>,
-        relayHints: List<String>,
         bypassDedup: Boolean,
-        excludedRelayUrls: Collection<String>,
-        capToHintBudget: Boolean,
-        includeBridgeMissTier: Boolean,
         ignoreNegativeCache: Boolean = false,
-    ) {
+    ): List<String> {
         val novel = mutableListOf<String>()
         for (eventId in eventIds) {
             if (!ignoreNegativeCache && isEventUnresolved(eventId)) continue
@@ -4938,67 +4945,128 @@ class RelayPool @Inject constructor(
                 launchFetchMonitor(eventId, deferred)
             }
         }
+        if (novel.isNotEmpty()) trackInFlightPeak()
+        return novel
+    }
+
+    private fun referenceHintTargets(
+        hints: List<String>, excluded: Set<String>, capToHintBudget: Boolean,
+    ): List<String> = (if (capToHintBudget) canonicalRelayHints(hints) else normalizedRelayTargets(hints))
+        .filter { it !in excluded && it !in blockedUrls && !relayCapabilitiesStore.shouldSkip(it) && !idRequestBackoff.shouldSkip(it) }
+
+    private fun referenceFallbackTargets(excluded: Set<String>): List<String> {
+        val indexerUrls = relayPreferencesStore.get().indexerRelayUrlsSnapshot()
+            .mapNotNull(::normalizeRelayUrl).toSet()
+        val eligible = connections.values.filter {
+            it.url !in excluded && !relayCapabilitiesStore.shouldSkip(it.url) && !idRequestBackoff.shouldSkip(it.url)
+        }
+        return (eligible.filter { it.url !in indexerUrls }.shuffled() + eligible.filter { it.url in indexerUrls })
+            .take(6).map { it.url }
+    }
+
+    private fun eventReferenceRequest(subId: String, ids: List<String>): String = buildJsonArray {
+        add(JsonPrimitive("REQ")); add(JsonPrimitive(subId))
+        add(buildJsonObject {
+            put("ids", buildJsonArray { ids.forEach { add(JsonPrimitive(it)) } })
+            put("kinds", buildJsonArray { EVENT_REFERENCE_FETCH_KINDS.forEach { add(JsonPrimitive(it)) } })
+        })
+    }.toString()
+
+    /** One admission per ID, then one bounded transport batch per actual relay.
+     * Only this existing 150ms window is combined; no cross-window cache or worker.
+     */
+    private suspend fun fetchCoalescedEventReferences(
+        batches: List<EventIdFetchBatch>,
+        complete: (Int, Throwable?) -> Unit,
+    ) {
+        val idsByRelay = linkedMapOf<String, MutableList<String>>()
+        val dependencies = linkedMapOf<Int, List<String>>()
+        for ((index, batch) in batches.withIndex()) {
+            if (batch.relayHints.isEmpty()) {
+                // Preserve the existing fire-and-forget broadcast and scheduled bridge tier.
+                fetchEventsByIds(batch.eventIds)
+                complete(index, null)
+                continue
+            }
+            val hints = referenceHintTargets(batch.relayHints, emptySet(), capToHintBudget = true)
+            val resolved = hints.ifEmpty { referenceFallbackTargets(emptySet()) }
+            val novel = admitReferenceIds(batch.eventIds, bypassDedup = false)
+            if (novel.isEmpty() || resolved.isEmpty()) {
+                complete(index, null)
+                continue
+            }
+            // Preserve the ordinary fallback's active-feed exclusion BEFORE merging;
+            // hinted IDs may use that relay, but must not carry fallback-only IDs to it.
+            val targets = oneShotRelayTargets(resolved, activeSingleRelayFeedUrl, includeActiveFeedRelay = hints.isNotEmpty())
+            dependencies[index] = targets
+            targets.forEach { idsByRelay.getOrPut(it) { mutableListOf() }.addAll(novel) }
+        }
+        val base = "hint-batch-${System.nanoTime()}"
+        val requestsByRelay = idsByRelay.entries.mapIndexed { relayIndex, (url, ids) ->
+            url to ids.distinct().chunked(MAX_EVENT_IDS_PER_REQ).mapIndexed { chunkIndex, chunk ->
+                val subId = "$base-$relayIndex-$chunkIndex"
+                subId to eventReferenceRequest(subId, chunk)
+            }.toMap()
+        }.toMap()
+        val completions = requestsByRelay.values.flatMap { it.keys }.associateWith { subId ->
+            CompletableDeferred<Unit>().also { oneShotEoseCallbacks[subId] = it }
+        }
+        _activeOneShotSubs.addAll(completions.keys)
+        try {
+            coroutineScope {
+                val relays = requestsByRelay.mapValues { (url, requests) ->
+                    async {
+                        try {
+                            sendOneShotBatch(listOf(url), requests.values.toList(), requests.keys.toList(),
+                                timeoutMs = EVENT_REFERENCE_PHASE_TIMEOUT_MS, includeActiveFeedRelay = true)
+                            withTimeoutOrNull(EVENT_REFERENCE_PHASE_TIMEOUT_MS) {
+                                requests.keys.map { completions.getValue(it) }.awaitAll()
+                            }
+                            null
+                        } catch (cancelled: CancellationException) {
+                            throw cancelled
+                        } catch (error: Exception) {
+                            error
+                        }
+                    }
+                }
+                dependencies.forEach { (index, targets) ->
+                    launch {
+                        val errors = targets.map { relays.getValue(it) }.awaitAll()
+                        delay(EVENT_PROCESSOR_SETTLE_MS)
+                        complete(index, errors.firstOrNull { it != null })
+                    }
+                }
+            }
+        } finally {
+            // Child dispatches have stopped before cleanup. A cancelled window
+            // cannot flush its still-queued siblings while releasing earlier slots.
+            cleanupOneShotSubs(completions.keys)
+        }
+    }
+
+    private suspend fun fetchEventsByIdsWithHintsBatch(
+        eventIds: List<String>,
+        relayHints: List<String>,
+        bypassDedup: Boolean,
+        excludedRelayUrls: Collection<String>,
+        capToHintBudget: Boolean,
+        includeBridgeMissTier: Boolean,
+        ignoreNegativeCache: Boolean = false,
+    ) {
+        val novel = admitReferenceIds(eventIds, bypassDedup, ignoreNegativeCache)
         if (novel.isEmpty()) return
-        trackInFlightPeak()
         // bypassDedup callers (outbox phases) send REQs without registering in the map.
         // If a monitor is already running for an ID (from the initial broadcast),
         // the event arrival will still complete that Deferred.
 
         val subId = "hint-batch-${System.nanoTime()}"
         _activeOneShotSubs.add(subId)
-        val req = buildJsonArray {
-            add(JsonPrimitive("REQ"))
-            add(JsonPrimitive(subId))
-            add(buildJsonObject {
-                put("ids", buildJsonArray { novel.forEach { add(JsonPrimitive(it)) } })
-                // Include kinds so relays that require them don't reject with
-                // "filters must specify at least one kind" (purplepag.es, others).
-                put("kinds", buildJsonArray {
-                    EVENT_REFERENCE_FETCH_KINDS.forEach { add(JsonPrimitive(it)) }
-                })
-            })
-        }.toString()
-
-        val indexerUrls = relayPreferencesStore.get().indexerRelayUrlsSnapshot()
-            .mapNotNull { normalizeRelayUrl(it) }.toSet()
+        val req = eventReferenceRequest(subId, novel)
         val excluded = excludedRelayUrls.mapNotNull(::normalizeRelayUrl).toSet()
+        val targetUrls = referenceHintTargets(relayHints, excluded, capToHintBudget)
+        val resolvedTargets = targetUrls.ifEmpty { referenceFallbackTargets(excluded) }
 
-        val targetUrls = if (relayHints.isNotEmpty()) {
-            // Hints-first: dispatch to hint relays via pooled reuse or ephemeral.
-            // No connectAndAwait — transient hints must not occupy pool slots.
-            // NOTE: do NOT exclude activeSingleRelayFeedUrl — a targeted ids fetch
-            // never overlaps the feed filter, and the target may live only there
-            // (bridged Ditto reposts). The one-shot sub uses a distinct subId.
-            val hintTargets = (if (capToHintBudget) {
-                canonicalRelayHints(relayHints)
-            } else {
-                normalizedRelayTargets(relayHints)
-            })
-                .filter {
-                    it !in excluded && it !in blockedUrls && !relayCapabilitiesStore.shouldSkip(it) &&
-                        !idRequestBackoff.shouldSkip(it)
-                }
-            if (hintTargets.isNotEmpty()) {
-                hintTargets
-            } else {
-                emptyList()
-            }
-        } else {
-            emptyList()
-        }
-
-        // No usable hints — broadened fallback.
-        val resolvedTargets = targetUrls.ifEmpty {
-            val nonIndexer = connections.values.filter {
-                it.url !in indexerUrls && it.url !in excluded && !relayCapabilitiesStore.shouldSkip(it.url) &&
-                    !idRequestBackoff.shouldSkip(it.url)
-            }.shuffled()
-            val indexer = connections.values.filter {
-                it.url in indexerUrls && it.url !in excluded && !relayCapabilitiesStore.shouldSkip(it.url) &&
-                    !idRequestBackoff.shouldSkip(it.url)
-            }
-            (nonIndexer + indexer).take(6).map { it.url }
-        }
         if (resolvedTargets.isEmpty()) {
             Log.d(TAG, "fetchEventsByIds: ${novel.size} events → 0 targets (pool empty)")
             if (includeBridgeMissTier) {
@@ -5827,8 +5895,6 @@ class RelayPool @Inject constructor(
     }
 
     fun disconnectAll() {
-        // Retire pending subscription timers before clearing the transport session.
-        activeSubsSource.get().cancelPendingReplays()
         // Map-before-close: snapshot then clear under the same lock used by
         // send/install/remove so no one-shot can attach during teardown.
         val (snapshot, ephemeralSnapshot) = synchronized(socketLifecycleLock) {
@@ -5867,6 +5933,9 @@ class RelayPool @Inject constructor(
             connectionLastActivity.clear()
             pooled to ephemeral
         }
+        // All admitted cooldown handoffs finished before the identity clear;
+        // later ones are rejected. Cancel outside the socket lock, before close.
+        activeSubsSource.get().cancelPendingReplays()
         // Close after all maps are cleared
         snapshot.forEach { it.close() }
         ephemeralSnapshot.forEach { it.close() }

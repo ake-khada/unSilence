@@ -17,13 +17,18 @@ import okhttp3.mockwebserver.MockWebServer
 import okhttp3.mockwebserver.RecordedRequest
 import org.junit.Assert.*
 import org.junit.Test
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.atomic.AtomicInteger
 
 /** Real loopback CLOSED frames, production pool and Subscription replay. */
 class RelayLiveRecoveryTest {
-    private class Fixture : AutoCloseable {
+    private class Fixture(
+        val beforeReplayHandoff: (() -> Unit)? = null,
+        val afterReplayHandoff: (() -> Unit)? = null,
+    ) : AutoCloseable {
         val requests = CopyOnWriteArrayList<Pair<String, JsonArray>>()
         val closes = CopyOnWriteArrayList<Pair<String, String>>()
         val sockets = ConcurrentHashMap<String, WebSocket>()
@@ -68,7 +73,15 @@ class RelayLiveRecoveryTest {
             RelayConnectionFactory(client, capabilities, RelayTrafficMetrics()), processor,
             Lazy { error("No AUTH or preference discovery in fixture") },
             SigningManager(keys, object : ContentResolver(context) {}), keys, Lazy { store }, capabilities,
-            Lazy { subscription }, monitor, Nip11Fetcher(client, Lazy { store }),
+            Lazy {
+                object : ActiveSubsSource by subscription {
+                    override fun onRateLimitedClosed(url: String, subId: String) {
+                        beforeReplayHandoff?.invoke()
+                        subscription.onRateLimitedClosed(url, subId)
+                        afterReplayHandoff?.invoke()
+                    }
+                }
+            }, monitor, Nip11Fetcher(client, Lazy { store }),
         )
         init {
             runBlocking { processor.setTestScope(scope) }
@@ -213,6 +226,62 @@ class RelayLiveRecoveryTest {
             assertEquals(1, f.requests.size)
         }
     }
+    @Test fun `teardown cancels an already armed cooldown replay`() = runBlocking {
+        val armed = CountDownLatch(1)
+        Fixture(afterReplayHandoff = { armed.countDown() }).use { f ->
+            val url = "wss://armed-teardown.test"
+            subscribe(f, url)
+            cooldown(f, url, 300)
+            closed(f, url, id(f, url))
+            assertTrue(withContext(Dispatchers.IO) { armed.await(5, TimeUnit.SECONDS) })
+            assertEquals(1, (field(f.subscription, "deferredReplays") as Map<*, *>).size)
+            f.pool.disconnectAll()
+            assertTrue((field(f.subscription, "deferredReplays") as Map<*, *>).isEmpty())
+            delay(600)
+            assertEquals(1, f.requests.size)
+        }
+    }
+
+    @Test fun `teardown cannot be overtaken by an admitted cooldown handoff`() = runBlocking {
+        val entered = CountDownLatch(1)
+        val proceed = CountDownLatch(1)
+        val returned = CountDownLatch(1)
+        Fixture(
+            beforeReplayHandoff = {
+                entered.countDown()
+                check(proceed.await(5, TimeUnit.SECONDS))
+            },
+            afterReplayHandoff = { returned.countDown() },
+        ).use { f ->
+            val url = "wss://teardown-handoff.test"
+            subscribe(f, url)
+            cooldown(f, url, 10_000)
+            closed(f, url, id(f, url))
+            assertTrue(withContext(Dispatchers.IO) { entered.await(5, TimeUnit.SECONDS) })
+            val finished = CompletableDeferred<Unit>()
+            val teardown = Thread {
+                try {
+                    f.pool.disconnectAll()
+                    finished.complete(Unit)
+                } catch (error: Throwable) { finished.completeExceptionally(error) }
+            }.apply { isDaemon = true; start() }
+            try {
+                // Either teardown completes (the old race), or it blocks on the
+                // socket lock held by the admitted handoff (the required ordering).
+                f.until { finished.isCompleted || teardown.state == Thread.State.BLOCKED }
+                proceed.countDown()
+                withTimeout(5_000) { finished.await() }
+                assertTrue(withContext(Dispatchers.IO) { returned.await(5, TimeUnit.SECONDS) })
+                assertTrue("no timer may be armed after teardown", (field(f.subscription, "deferredReplays") as Map<*, *>).isEmpty())
+                assertTrue(f.pool.connectedRelayUrls().isEmpty())
+                assertEquals(1, f.requests.size)
+            } finally {
+                proceed.countDown()
+                withContext(Dispatchers.IO) { teardown.join(5_000) }
+            }
+        }
+    }
+
     @Test fun `real refusal sets deadline before scheduling and emits no generic reconnect`() = runBlocking {
         Fixture().use { f ->
             val url = "wss://deadline.test"

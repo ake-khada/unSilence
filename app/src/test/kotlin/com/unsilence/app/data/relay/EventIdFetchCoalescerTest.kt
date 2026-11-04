@@ -1,6 +1,11 @@
 package com.unsilence.app.data.relay
 
 import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.awaitCancellation
+import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.runCurrent
@@ -13,10 +18,22 @@ import org.junit.Test
 @OptIn(ExperimentalCoroutinesApi::class)
 class EventIdFetchCoalescerTest {
 
+    // Collection tests keep their original per-group assertions. Production
+    // dispatch/completion concurrency is exercised through RelayPool loopback tests.
+    private fun collectingCoalescer(
+        scope: CoroutineScope,
+        collect: suspend (EventIdFetchBatch) -> Unit,
+    ) = EventIdFetchCoalescer(scope) { batches, complete ->
+        batches.forEachIndexed { index, batch ->
+            collect(batch)
+            complete(index, null)
+        }
+    }
+
     @Test
     fun `quote-heavy screenful collapses thirty ids into one request`() = runTest {
         val batches = mutableListOf<EventIdFetchBatch>()
-        val coalescer = EventIdFetchCoalescer(this) { batches += it }
+        val coalescer = collectingCoalescer(this) { batches += it }
         val completions = (1..30).map { coalescer.enqueue("event-$it", emptyList()) }
 
         advanceTimeBy(EVENT_ID_FETCH_WINDOW_MS - 1)
@@ -34,7 +51,7 @@ class EventIdFetchCoalescerTest {
     @Test
     fun `cap overflow rolls into the next window`() = runTest {
         val batches = mutableListOf<EventIdFetchBatch>()
-        val coalescer = EventIdFetchCoalescer(this) { batches += it }
+        val coalescer = collectingCoalescer(this) { batches += it }
         val completions = (1..51).map { coalescer.enqueue("event-$it", emptyList()) }
 
         advanceTimeBy(EVENT_ID_FETCH_WINDOW_MS)
@@ -50,7 +67,7 @@ class EventIdFetchCoalescerTest {
     @Test
     fun `ids sharing canonical hints group while hintless ids use the default batch`() = runTest {
         val batches = mutableListOf<EventIdFetchBatch>()
-        val coalescer = EventIdFetchCoalescer(this) { batches += it }
+        val coalescer = collectingCoalescer(this) { batches += it }
 
         coalescer.enqueue("a", listOf("wss://two.example/", "wss://one.example"))
         coalescer.enqueue("b", listOf("one.example", "wss://two.example"))
@@ -73,7 +90,7 @@ class EventIdFetchCoalescerTest {
     @Test
     fun `hydrator row provenance reaches the coalesced ids batch`() = runTest {
         val batches = mutableListOf<EventIdFetchBatch>()
-        val coalescer = EventIdFetchCoalescer(this) { batches += it }
+        val coalescer = collectingCoalescer(this) { batches += it }
         val rowHints = feedRowRelayHints(
             primaryRelay = "wss://relay.divine.video/",
             relaysSeen = listOf("wss://relay.divine.video", "wss://seen.example/"),
@@ -98,7 +115,7 @@ class EventIdFetchCoalescerTest {
     @Test
     fun `duplicate id shares one dispatch and both callers complete`() = runTest {
         val batches = mutableListOf<EventIdFetchBatch>()
-        val coalescer = EventIdFetchCoalescer(this) { batches += it }
+        val coalescer = collectingCoalescer(this) { batches += it }
 
         val first = coalescer.enqueue("same-id", listOf("wss://first.example"))
         val duplicate = coalescer.enqueue("same-id", listOf("wss://second.example"))
@@ -115,7 +132,7 @@ class EventIdFetchCoalescerTest {
     @Test
     fun `straggler after a closed window starts a new window`() = runTest {
         val batches = mutableListOf<EventIdFetchBatch>()
-        val coalescer = EventIdFetchCoalescer(this) { batches += it }
+        val coalescer = collectingCoalescer(this) { batches += it }
 
         coalescer.enqueue("first", emptyList())
         advanceTimeBy(EVENT_ID_FETCH_WINDOW_MS)
@@ -133,4 +150,21 @@ class EventIdFetchCoalescerTest {
         assertEquals(2, batches.size)
         assertEquals(listOf("second"), batches.last().eventIds)
     }
+    @Test
+    fun `cancelling a dispatch window settles every selected caller`() = runTest {
+        val owner = CoroutineScope(SupervisorJob() + StandardTestDispatcher(testScheduler))
+        val coalescer = EventIdFetchCoalescer(owner) { _, _ -> awaitCancellation() }
+        val first = coalescer.enqueue("first", listOf("wss://one.example"))
+        val duplicate = coalescer.enqueue("first", listOf("wss://one.example"))
+        val second = coalescer.enqueue("second", listOf("wss://two.example"))
+        advanceTimeBy(EVENT_ID_FETCH_WINDOW_MS)
+        runCurrent()
+        owner.cancel()
+        runCurrent()
+        assertTrue(first.isCancelled)
+        assertTrue(duplicate.isCancelled)
+        assertTrue("selected groups must not leave callers suspended after owner cancellation", second.isCancelled)
+    }
+
+
 }

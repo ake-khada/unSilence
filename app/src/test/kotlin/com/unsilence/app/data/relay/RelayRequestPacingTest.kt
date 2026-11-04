@@ -2,6 +2,10 @@ package com.unsilence.app.data.relay
 
 import android.content.ContentResolver
 import android.content.ContextWrapper
+import androidx.datastore.core.DataStore
+import androidx.datastore.preferences.core.Preferences
+import androidx.datastore.preferences.core.emptyPreferences
+import kotlinx.coroutines.flow.MutableStateFlow
 import com.unsilence.app.data.auth.*
 import com.unsilence.app.data.memory.MemoryEventStore
 import com.unsilence.app.data.memory.NostrEvent
@@ -19,28 +23,37 @@ import okhttp3.mockwebserver.MockWebServer
 import okhttp3.mockwebserver.RecordedRequest
 import org.junit.Assert.*
 import org.junit.Test
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.atomic.AtomicInteger
 
 /** Exercises production pooled admission/draining with held loopback requests. */
 class RelayRequestPacingTest {
-    private class Fixture : AutoCloseable {
+    private class Fixture(
+        private val bridgeLoopback: Boolean = false,
+        private val handshakeGate: CountDownLatch? = null,
+    ) : AutoCloseable {
         val remote = ConcurrentHashMap<String, List<EventDto>>()
         val held = ConcurrentHashMap.newKeySet<String>()
         val closed = ConcurrentHashMap.newKeySet<String>()
         val requests = CopyOnWriteArrayList<Pair<String, JsonArray>>()
         val closes = CopyOnWriteArrayList<Pair<String, String>>()
         val sockets = ConcurrentHashMap<String, WebSocket>()
+        val opens = ConcurrentHashMap<String, AtomicInteger>()
         val active = AtomicInteger()
         val peak = AtomicInteger()
         val server = MockWebServer().apply {
             dispatcher = object : ServerDispatcher() {
                 override fun dispatch(request: RecordedRequest): MockResponse {
                     val relay = requireNotNull(request.getHeader("X-Fixture-Relay"))
+                    check(handshakeGate?.await(5, TimeUnit.SECONDS) != false)
                     return MockResponse().withWebSocketUpgrade(object : WebSocketListener() {
                         override fun onOpen(webSocket: WebSocket, response: Response) {
                             sockets[relay] = webSocket
+                            opens.computeIfAbsent(relay) { AtomicInteger() }.incrementAndGet()
                             peak.accumulateAndGet(active.incrementAndGet(), ::maxOf)
                         }
                         override fun onMessage(webSocket: WebSocket, text: String) {
@@ -66,7 +79,7 @@ class RelayRequestPacingTest {
         }
         val client = OkHttpClient.Builder().addInterceptor { chain ->
             val request = chain.request()
-            check(request.url.host.endsWith(".test")) { "External network forbidden" }
+            check(request.url.host.endsWith(".test") || (bridgeLoopback && isBridgeFallbackRelay("wss://${request.url.host}"))) { "External network forbidden" }
             chain.proceed(request.newBuilder().header("X-Fixture-Relay", "wss://${request.url.host}").url(server.url("/")).build())
         }.build()
         val context = object : ContextWrapper(null) {}
@@ -76,10 +89,15 @@ class RelayRequestPacingTest {
         val store = MemoryEventStore(object : MuteKeyProvider {}, stubTimelineServiceProvider())
         val processor = EventProcessor(store, SignatureVerifier())
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        val preferences = RelayPreferencesStore(object : DataStore<Preferences> {
+            override val data = MutableStateFlow(emptyPreferences())
+            override suspend fun updateData(transform: suspend (Preferences) -> Preferences): Preferences =
+                transform(data.value).also { data.value = it }
+        }, scope)
         lateinit var subscription: Subscription
         val pool = RelayPool(
             RelayConnectionFactory(client, capabilities, RelayTrafficMetrics()), processor,
-            Lazy { error("No AUTH or preference discovery in fixture") },
+            Lazy { preferences },
             SigningManager(keys, object : ContentResolver(context) {}), keys, Lazy { store }, capabilities,
             Lazy { subscription }, monitor, Nip11Fetcher(client, Lazy { store }),
         )
@@ -133,6 +151,286 @@ class RelayRequestPacingTest {
                 Boolean::class.javaPrimitiveType, kotlin.coroutines.Continuation::class.java,
             ).apply { isAccessible = true }.invoke(f.pool, authors, listOf(url), "hint-profiles", true, continuation)
         }
+
+    @Test fun `overlapping reference hints reach a shared unpooled relay in one request`() = runBlocking {
+        Fixture().use { f ->
+            val shared = "wss://shared-ref.test"
+            val a = "a".repeat(64)
+            val b = "b".repeat(64)
+            val first = async(start = CoroutineStart.UNDISPATCHED) {
+                f.pool.fetchEventById(a, listOf(shared, "wss://left-ref.test"))
+            }
+            val second = async(start = CoroutineStart.UNDISPATCHED) {
+                f.pool.fetchEventById(b, listOf(shared, "wss://right-ref.test"))
+            }
+            try {
+                f.until { f.requests.any { it.first == shared } }
+                val req = f.requests.first { it.first == shared }.second
+                assertEquals(setOf(a, b), req[2].jsonObject.getValue("ids").jsonArray.map { it.jsonPrimitive.content }.toSet())
+                withTimeout(3_000) { awaitAll(first, second) }
+                val pairs = f.requests.flatMap { (url, frame) -> frame[2].jsonObject.getValue("ids").jsonArray.map { it.jsonPrimitive.content to url } }
+                assertEquals(setOf(a to shared, a to "wss://left-ref.test", b to shared, b to "wss://right-ref.test"), pairs.toSet())
+                assertEquals(4, pairs.size)
+                assertEquals(3, f.requests.size)
+            } finally { first.cancel(); second.cancel() }
+        }
+    }
+
+    @Test fun `ready reference finishes before an unrelated held relay completes`() = runBlocking {
+        Fixture().use { f ->
+            val slow = "wss://slow-ref.test"
+            val ready = "wss://ready-ref.test"
+            prepare(f, slow)
+            prepare(f, ready)
+            f.held.remove(ready)
+            val first = async(start = CoroutineStart.UNDISPATCHED) {
+                f.pool.fetchEventById("a".repeat(64), listOf(slow))
+            }
+            val second = async(start = CoroutineStart.UNDISPATCHED) {
+                f.pool.fetchEventById("b".repeat(64), listOf(ready))
+            }
+            try {
+                withTimeout(2_000) { second.await() }
+                assertFalse("unrelated slow relay still has not completed", first.isCompleted)
+                val slowReq = f.requests.single { it.first == slow }.second
+                release(f, slow, slowReq[1].jsonPrimitive.content)
+                withTimeout(2_000) { first.await() }
+            } finally { first.cancel(); second.cancel() }
+        }
+    }
+
+    @Suppress("PLATFORM_CLASS_MAPPED_TO_KOTLIN")
+    private suspend fun referenceWindow(f: Fixture, batches: List<EventIdFetchBatch>): Unit =
+        kotlin.coroutines.intrinsics.suspendCoroutineUninterceptedOrReturn { continuation ->
+            RelayPool::class.java.getDeclaredMethod(
+                "fetchCoalescedEventReferences", List::class.java, kotlin.jvm.functions.Function2::class.java,
+                kotlin.coroutines.Continuation::class.java,
+            ).apply { isAccessible = true }.invoke(f.pool, batches, { _: Int, _: Throwable? -> Unit }, continuation)
+        }
+
+    @Test fun `reference group awaits every destination before completing`() = runBlocking {
+        Fixture().use { f ->
+            val ready = "wss://ready-all.test"
+            val held = "wss://held-all.test"
+            prepare(f, ready); prepare(f, held)
+            f.held.remove(ready)
+            val lookup = async { f.pool.fetchEventById("a".repeat(64), listOf(ready, held)) }
+            try {
+                f.until { f.requests.size == 2 }
+                delay(350) // The ready relay has EOSE and the processor settle interval has elapsed.
+                assertFalse("one relay's EOSE must not finish the original group", lookup.isCompleted)
+                release(f, held, f.requests.single { it.first == held }.second[1].jsonPrimitive.content)
+                withTimeout(2_000) { lookup.await() }
+            } finally { lookup.cancel() }
+        }
+    }
+
+    @Test fun `merged reference relay chunks stay bounded and use one unpooled socket`() = runBlocking {
+        Fixture().use { f ->
+            val shared = "wss://many-shared.test"
+            val expected = (1..120).associate { n ->
+                n.toString(16).padStart(64, '0') to listOf(shared, "wss://group-${(n - 1) / 40}.test")
+            }
+            val lookups = expected.map { (id, hints) ->
+                async(start = CoroutineStart.UNDISPATCHED) { f.pool.fetchEventById(id, hints) }
+            }
+            try {
+                withTimeout(5_000) { lookups.awaitAll() }
+                val sharedRequests = f.requests.filter { it.first == shared }
+                assertEquals(3, sharedRequests.size)
+                assertEquals(1, f.opens[shared]?.get())
+                val actual = f.requests.flatMap { (url, frame) ->
+                    val filter = frame[2].jsonObject
+                    assertEquals(EVENT_REFERENCE_FETCH_KINDS.toSet(), filter.getValue("kinds").jsonArray.map { it.jsonPrimitive.int }.toSet())
+                    val ids = filter.getValue("ids").jsonArray
+                    assertTrue(ids.size in 1..MAX_EVENT_IDS_PER_REQ)
+                    ids.map { it.jsonPrimitive.content to url }
+                }
+                assertEquals(expected.flatMap { (id, urls) -> urls.map { id to it } }.toSet(), actual.toSet())
+                assertEquals(240, actual.size)
+                assertEquals(6, f.requests.size)
+                assertTrue("existing four-connection budget", f.peak.get() <= 4)
+            } finally { lookups.forEach { it.cancel() } }
+        }
+    }
+
+    @Test fun `cancelled reference window removes every queued chunk before releasing a slot`() = runBlocking {
+        Fixture().use { f ->
+            val url = "wss://reference-cancel.test"
+            exhaust(f, url)
+            tokens(f, url).set(1)
+            val batches = (0..2).map { group ->
+                val blocked = "wss://blocked-$group.test"
+                f.pool.onBlockedRelaysChanged(f.pool.getBlockedUrls() + blocked)
+                EventIdFetchBatch((1..40).map { (group * 40 + it).toString(16).padStart(64, '0') }, listOf(url, blocked))
+            }
+            val window = async { referenceWindow(f, batches) }
+            f.until { f.requests.size == 6 && queued(f, url).size == 2 }
+            send(f, url, "hint-batch-unrelated")
+            tokens(f, url).set(1)
+            window.cancelAndJoin()
+            f.until { f.requests.size == 7 }
+            assertEquals("hint-batch-unrelated", f.requests.last().second[1].jsonPrimitive.content)
+            assertTrue(queued(f, url).isEmpty())
+            assertTrue(f.pool.oneShotEoseCallbacks.isEmpty())
+            assertEquals(6, count(f, url).get()) // Five held requests plus the unrelated request.
+        }
+    }
+
+    @Test fun `filtered hints fall back once and await fallback EOSE without a second admission`() = runBlocking {
+        Fixture().use { f ->
+            val blocked = "wss://blocked-hint.test"
+            val fallback = "wss://fallback-ref.test"
+            val id = "a".repeat(64)
+            prepare(f, fallback)
+            f.pool.onBlockedRelaysChanged(setOf(blocked))
+            val lookup = async { f.pool.fetchEventById(id, listOf(blocked)) }
+            try {
+                f.until { f.requests.size == 1 }
+                val monitors = field(f.pool, "eventFetchInFlight") as Map<*, *>
+                val originalMonitor = requireNotNull(monitors[id])
+                assertEquals(fallback, f.requests.single().first)
+                assertEquals(listOf(id), f.requests.single().second[2].jsonObject.getValue("ids").jsonArray.map { it.jsonPrimitive.content })
+                delay(350)
+                assertFalse(lookup.isCompleted)
+                release(f, fallback, f.requests.single().second[1].jsonPrimitive.content)
+                withTimeout(2_000) { lookup.await() }
+                assertSame(originalMonitor, monitors[id])
+                assertEquals(1, f.requests.size)
+                assertTrue((field(f.pool, "bridgeEventFetchAttempted") as Map<*, *>).isEmpty())
+            } finally { lookup.cancel() }
+        }
+    }
+
+    @Test fun `hinted IDs do not carry fallback only IDs onto the active feed relay`() = runBlocking {
+        Fixture().use { f ->
+            val feed = "wss://active-ref.test"
+            val other = "wss://other-ref.test"
+            val blocked = "wss://blocked-ref.test"
+            prepare(f, feed); prepare(f, other)
+            f.held.clear()
+            f.pool.activeSingleRelayFeedUrl = feed
+            f.pool.onBlockedRelaysChanged(setOf(blocked))
+            val a = "a".repeat(64); val b = "b".repeat(64)
+            val first = async(start = CoroutineStart.UNDISPATCHED) { f.pool.fetchEventById(a, listOf(feed)) }
+            val second = async(start = CoroutineStart.UNDISPATCHED) { f.pool.fetchEventById(b, listOf(blocked)) }
+            withTimeout(3_000) { awaitAll(first, second) }
+            val pairs = f.requests.flatMap { (url, frame) -> frame[2].jsonObject.getValue("ids").jsonArray.map { it.jsonPrimitive.content to url } }
+            assertEquals(setOf(a to feed, b to other), pairs.toSet())
+            assertEquals(2, pairs.size)
+        }
+    }
+
+    @Test fun `ordinary duplicate skips dispatch while explicit retry retains the existing monitor`() = runBlocking {
+        Fixture().use { f ->
+            val url = "wss://dedup-ref.test"
+            prepare(f, url); f.held.clear()
+            val id = "a".repeat(64)
+            f.pool.fetchEventById(id, listOf(url))
+            val monitors = field(f.pool, "eventFetchInFlight") as Map<*, *>
+            val originalMonitor = requireNotNull(monitors[id])
+            f.pool.fetchEventById(id, listOf(url))
+            assertEquals(1, f.requests.size)
+            assertSame(originalMonitor, monitors[id])
+            f.pool.fetchEventById(id, listOf(url), bypassDedup = true)
+            assertEquals(2, f.requests.size)
+            assertSame(originalMonitor, monitors[id])
+        }
+    }
+
+    @Test fun `negative cached ordinary lookup stays suppressed but timeline repair delivers signed event`() = runBlocking {
+        Fixture().use { f ->
+            val url = "wss://repair-ref.test"
+            f.processor.start()
+            val crypto = ZapCryptoTestFixture()
+            val event = crypto.signedEvent(crypto.sender, 1, emptyList(), "reference repair control")
+            f.remote[url] = listOf(event)
+            prepare(f, url); f.held.clear()
+            f.pool.markEventUnresolved(event.id)
+            f.pool.fetchEventById(event.id, listOf(url))
+            f.pool.fetchEventById(event.id, listOf(url), bypassDedup = true)
+            assertTrue(f.requests.isEmpty())
+            assertTrue((field(f.pool, "eventFetchInFlight") as Map<*, *>).isEmpty())
+            withTimeout(3_000) { f.pool.fetchTimelineEventsByIds(listOf(event.id), listOf(url)) }
+            assertEquals(event.content, f.store.getNostrEvent(event.id)?.content)
+            assertEquals(1, f.requests.size)
+            assertFalse(f.pool.isEventUnresolved(event.id))
+        }
+    }
+
+    @Test fun `held ephemeral reference chunks are tracked until completion or cancellation`() = runBlocking {
+        Fixture().use { f ->
+            val url = "wss://tracked-ephemeral.test"
+            f.held += url
+            for ((pass, cancel) in listOf(false, true).withIndex()) {
+                val batches = (0..1).map { group ->
+                    EventIdFetchBatch((1..35).map { (pass * 100 + group * 35 + it).toString(16).padStart(64, '0') }, listOf(url))
+                }
+                val baseline = f.pool.activeOneShotCount()
+                val window = async { referenceWindow(f, batches) }
+                try {
+                    f.until { f.requests.size == (pass + 1) * 2 }
+                    assertEquals(baseline + 2, f.pool.activeOneShotCount())
+                    if (cancel) window.cancelAndJoin() else {
+                        f.requests.takeLast(2).forEach { (_, frame) ->
+                            f.sockets.getValue(url).send("""["EOSE",${frame[1]}]""")
+                        }
+                        withTimeout(2_000) { window.await() }
+                    }
+                    assertEquals(baseline, f.pool.activeOneShotCount())
+                    assertTrue(f.pool.oneShotEoseCallbacks.isEmpty())
+                } finally { window.cancelAndJoin() }
+            }
+        }
+    }
+
+    @Test fun `reference completion waits for all chunks on its relay`() = runBlocking {
+        Fixture().use { f ->
+            val url = "wss://chunk-completion.test"
+            prepare(f, url)
+            val batches = (0..2).map { group ->
+                EventIdFetchBatch((1..40).map { (group * 40 + it).toString(16).padStart(64, '0') }, listOf(url))
+            }
+            val window = async { referenceWindow(f, batches) }
+            try {
+                f.until { f.requests.size == 3 }
+                val subIds = f.requests.map { it.second[1].jsonPrimitive.content }
+                subIds.take(2).forEach { release(f, url, it) }
+                delay(350)
+                assertFalse(window.isCompleted)
+                release(f, url, subIds.last())
+                withTimeout(2_000) { window.await() }
+                assertTrue(f.pool.oneShotEoseCallbacks.isEmpty())
+            } finally { window.cancel() }
+        }
+    }
+
+    @Test fun `empty hint miss keeps the scheduled single bridge attempt`() = runBlocking {
+        Fixture(bridgeLoopback = true).use { f ->
+            val url = "wss://broadcast-miss.test"
+            prepare(f, url)
+            val id = "a".repeat(64)
+            withTimeout(1_000) { f.pool.fetchEventById(id, emptyList()) }
+            f.until { f.requests.any { isBridgeFallbackRelay(it.first) } }
+            val bridgeRequests = f.requests.filter { isBridgeFallbackRelay(it.first) }
+            assertEquals(1, bridgeRequests.size)
+            assertEquals(listOf(id), bridgeRequests.single().second[2].jsonObject.getValue("ids").jsonArray.map { it.jsonPrimitive.content })
+            assertEquals(setOf(id), (field(f.pool, "bridgeEventFetchAttempted") as Map<*, *>).keys)
+            assertEquals(1, (field(f.pool, "eventFetchInFlight") as Map<*, *>).size)
+        }
+    }
+
+    @Test fun `empty hints retain immediate broadcast completion without awaiting relay EOSE`() = runBlocking {
+        Fixture().use { f ->
+            val url = "wss://empty-ref.test"
+            prepare(f, url)
+            withTimeout(1_000) { f.pool.fetchEventById("a".repeat(64), emptyList()) }
+            f.until { f.requests.size == 1 }
+            assertTrue(f.requests.single().second[1].jsonPrimitive.content.startsWith("batch-events-"))
+            assertTrue(f.pool.oneShotEoseCallbacks.isEmpty())
+            assertEquals(1, (field(f.pool, "eventFetchInFlight") as Map<*, *>).size)
+        }
+    }
 
     @Test fun `cancelling queued profile chunks spends available token only on unrelated work`() = runBlocking {
         Fixture().use { f ->
@@ -407,6 +705,130 @@ class RelayRequestPacingTest {
             f.until { f.requests.any { it.first == ready } }
             assertEquals(1, queued(f, slow).size)
             assertEquals(5, f.requests.count { it.first == slow })
+        }
+    }
+
+    private fun sendDirect(f: Fixture, url: String, id: String) {
+        RelayPool::class.java.getDeclaredMethod(
+            "sendOneShotToRelay", RelayConnection::class.java, String::class.java,
+            RelayRequestClass::class.java, Boolean::class.javaPrimitiveType,
+        ).apply { isAccessible = true }.invoke(
+            f.pool, connection(f, url), """["REQ","$id",{"kinds":[1],"limit":1}]""",
+            RelayRequestClass.GENERAL, false,
+        )
+    }
+
+    /** Hold the real resume interval before reconnectAll's asynchronous replacements. */
+    private fun <T> beforeReplacement(f: Fixture, action: () -> T): T = synchronized(field(f.pool, "socketLifecycleLock")) {
+        f.pool.suspendSocketsForBackground()
+        val suspended = field(f.pool, "socketTransportSuspended") as AtomicBoolean
+        suspended.set(false)
+        try { action() } finally { suspended.set(true) }
+    }
+
+    @Test fun `resumed closed mapped socket cannot spend queued tokens before replacement`() = runBlocking {
+        Fixture().use { f ->
+            val url = "wss://resume-queue.test"
+            exhaust(f, url)
+            send(f, url, "hint-batch-stale")
+            f.pool.addPurpose(url, ConnectionPurpose.PERSISTENT)
+            val old = connection(f, url)
+            beforeReplacement(f) {
+                assertSame(old, connection(f, url))
+                assertEquals(RelayState.DISCONNECTED, old.state.value)
+                tokens(f, url).set(2)
+                val originalQueue = queued(f, url)
+                drain(f, url)
+                assertEquals("closed transport must not consume a token", 2, tokens(f, url).get())
+                assertEquals(originalQueue, queued(f, url))
+                assertEquals(5, count(f, url).get())
+                assertEquals(5, f.requests.size)
+                assertTrue("legacy expiry still has a wake", wakes(f).containsKey(url))
+            }
+            f.pool.resumeSocketsForForeground()
+            f.until { connection(f, url) !== old && connection(f, url).isConnected }
+            assertTrue(queued(f, url).isEmpty())
+            tokens(f, url).set(1)
+            send(f, url, "hint-batch-replacement")
+            f.until { f.requests.size == 6 }
+            assertEquals("hint-batch-replacement", f.requests.last().second[1].jsonPrimitive.content)
+            assertFalse(f.requests.any { it.second[1].jsonPrimitive.content == "hint-batch-stale" })
+        }
+    }
+
+    @Test fun `terminal direct lookup is skipped without tokens slots or queue`() = runBlocking {
+        for (terminal in listOf(RelayState.DISCONNECTED, RelayState.FAILED)) {
+            Fixture().use { f ->
+                val url = "wss://terminal-direct.test"
+                exhaust(f, url)
+                val id = "hint-batch-terminal"
+                val outcomes = (field(f.pool, "oneShotOutcomes") as OneShotOutcomes).fetch(
+                    id, listOf(url), 1_000,
+                    dispatch = {
+                        beforeReplacement(f) {
+                            // The socket is really closed; only its terminal classification differs.
+                            @Suppress("UNCHECKED_CAST")
+                            (field(connection(f, url), "_state") as MutableStateFlow<RelayState>).value = terminal
+                            tokens(f, url).set(2)
+                            sendDirect(f, url, id)
+                            assertEquals(2, tokens(f, url).get())
+                            assertEquals(5, count(f, url).get())
+                            assertTrue(queued(f, url).isEmpty())
+                            assertNull(connection(f, url).requests.request(id))
+                        }
+                        setOf(url)
+                    }, cleanup = {},
+                )
+                assertEquals(mapOf(url to OneShotOutcome.SKIPPED), outcomes)
+                assertEquals(5, f.requests.size)
+            }
+        }
+    }
+
+    @Test fun `terminal queue still expires legacy requests without spending tokens`() = runBlocking {
+        Fixture().use { f ->
+            val url = "wss://terminal-expiry.test"
+            exhaust(f, url)
+            send(f, url, "hint-batch-expired")
+            val entry = queued(f, url).single()!!
+            entry.javaClass.getDeclaredField("queuedAtNanos").apply { isAccessible = true }
+                .setLong(entry, System.nanoTime() - 31_000_000_000L)
+            beforeReplacement(f) {
+                tokens(f, url).set(1)
+                drain(f, url)
+                assertTrue(queued(f, url).isEmpty())
+                assertTrue(wakes(f).isEmpty())
+                assertEquals(1, tokens(f, url).get())
+            }
+            assertEquals(5, f.requests.size)
+        }
+    }
+
+    @Test fun `connecting transport preserves direct and drained pre handshake requests`() = runBlocking {
+        val handshake = CountDownLatch(1)
+        Fixture(handshakeGate = handshake).use { f ->
+            val url = "wss://connecting-queue.test"
+            f.held += url
+            try {
+                f.pool.connect(listOf(url))
+                assertEquals(RelayState.CONNECTING, connection(f, url).state.value)
+                sendDirect(f, url, "hint-batch-direct")
+                freezeRefill(f, url)
+                tokens(f, url).set(0)
+                sendDirect(f, url, "hint-batch-queued")
+                assertEquals(1, queued(f, url).size)
+                tokens(f, url).set(1)
+                drain(f, url)
+                assertTrue(queued(f, url).isEmpty())
+                assertEquals(2, count(f, url).get())
+                assertEquals(0, tokens(f, url).get())
+                assertNotNull(connection(f, url).requests.request("hint-batch-direct"))
+                assertNotNull(connection(f, url).requests.request("hint-batch-queued"))
+                assertTrue(f.requests.isEmpty())
+                handshake.countDown()
+                f.until { f.requests.size == 2 }
+                assertEquals(listOf("hint-batch-direct", "hint-batch-queued"), f.requests.map { it.second[1].jsonPrimitive.content })
+            } finally { handshake.countDown() }
         }
     }
 
