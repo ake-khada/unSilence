@@ -2887,20 +2887,30 @@ class RelayPool @Inject constructor(
                     put("limit", JsonPrimitive(3))
                 })
             }.toString()
-            val eose = CompletableDeferred<Unit>()
-            oneShotEoseCallbacks[subId] = eose
-            return try {
-                sendOneShotBatch(
-                    urls = urls,
-                    reqs = listOf(request),
-                    subIds = listOf(subId),
+            val selected = oneShotRelayTargets(urls, activeSingleRelayFeedUrl, includeActiveFeedRelay)
+            if (selected.isEmpty()) return false
+            val outcomes = withTimeoutOrNull(PROFILE_RELAY_FACTS_TIMEOUT_MS) {
+                oneShotOutcomes.fetch(
+                    subId = subId,
+                    relays = selected,
                     timeoutMs = PROFILE_RELAY_FACTS_TIMEOUT_MS,
-                    includeActiveFeedRelay = includeActiveFeedRelay,
+                    admissionTimeoutMs = PROFILE_RELAY_FACTS_TIMEOUT_MS,
+                    dispatch = { onAdmitted ->
+                        sendOneShotBatch(
+                            urls = selected,
+                            reqs = listOf(request),
+                            subIds = listOf(subId),
+                            timeoutMs = PROFILE_RELAY_FACTS_TIMEOUT_MS,
+                            includeActiveFeedRelay = includeActiveFeedRelay,
+                            onAdmitted = onAdmitted,
+                        )
+                    },
+                    cleanup = { cleanupOneShotSub(subId) },
                 )
-                withTimeoutOrNull(PROFILE_RELAY_FACTS_TIMEOUT_MS) { eose.await() } != null
-            } finally {
-                cleanupOneShotSub(subId)
-            }
+            } ?: return false
+            // The caller TTL-caches successful coverage. Termination alone,
+            // including a rejected or skipped target, must not suppress a retry.
+            return outcomes.isNotEmpty() && outcomes.values.all { it == OneShotOutcome.EOSE }
         }
 
         val standardCovered = fetchPhase(targets, "profile-relays")

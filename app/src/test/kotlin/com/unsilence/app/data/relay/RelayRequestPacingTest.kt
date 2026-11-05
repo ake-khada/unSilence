@@ -144,13 +144,337 @@ class RelayRequestPacingTest {
         withTimeout(5_000) { f.pool.connectionStates.first { it[url] == RelayState.CONNECTED } }
     }
 
-    private suspend fun profilePhase(f: Fixture, url: String, authors: List<String>): Unit =
+    private suspend fun profilePhase(
+        f: Fixture, url: String, authors: List<String>,
+        prefix: String = "hint-profiles", urls: List<String> = listOf(url),
+    ): Unit =
         kotlin.coroutines.intrinsics.suspendCoroutineUninterceptedOrReturn { continuation ->
             RelayPool::class.java.getDeclaredMethod(
                 "fetchProfilePhase", List::class.java, List::class.java, String::class.java,
                 Boolean::class.javaPrimitiveType, kotlin.coroutines.Continuation::class.java,
-            ).apply { isAccessible = true }.invoke(f.pool, authors, listOf(url), "hint-profiles", true, continuation)
+            ).apply { isAccessible = true }.invoke(f.pool, authors, urls, prefix, true, continuation)
         }
+
+    @Test fun `author fallback phase settles both pooled relays on wire EOSE`() = runBlocking {
+        pooledProfilePhase("prof-fb")
+    }
+
+    @Test fun `bridge profile phase settles both pooled relays on wire EOSE`() = runBlocking {
+        pooledProfilePhase("bridge-profiles")
+    }
+
+    @Test fun `fallback phase releases a CLOSED target without replaying it`() = runBlocking {
+        pooledProfilePhase("prof-fb", lastClosed = true)
+    }
+
+    private suspend fun pooledProfilePhase(prefix: String, lastClosed: Boolean = false) = coroutineScope {
+        Fixture().use { f ->
+            val urls = listOf("wss://profile-a.test", "wss://profile-b.test")
+            urls.forEach { prepare(f, it) }
+            val authors = listOf("a".repeat(64))
+            val phase = async { profilePhase(f, urls.first(), authors, prefix, urls) }
+            try {
+                f.until { f.requests.size == 2 }
+                val id = f.requests.first().second[1].jsonPrimitive.content
+                assertTrue(id.startsWith("$prefix-"))
+                assertEquals(urls.toSet(), f.requests.map { it.first }.toSet())
+                f.requests.forEach { (_, req) ->
+                    assertEquals(id, req[1].jsonPrimitive.content)
+                    assertEquals(buildJsonObject {
+                        put("kinds", buildJsonArray { add(0); add(10002) })
+                        put("authors", buildJsonArray { add(authors.single()) })
+                    }, req[2])
+                }
+                assertTrue(f.sockets.getValue(urls[0]).send("""["EOSE","$id"]"""))
+                withTimeout(2_000) { f.until { (urls[0] to id) in f.closes } }
+                assertFalse("the silent relay still owns this phase", phase.isCompleted)
+                assertEquals(0, count(f, urls[0]).get())
+                assertEquals(1, count(f, urls[1]).get())
+                val terminal = if (lastClosed) """["CLOSED","$id","blocked: fixture"]"""
+                    else """["EOSE","$id"]"""
+                assertTrue(f.sockets.getValue(urls[1]).send(terminal))
+                withTimeout(2_000) { phase.await() }
+                // A later frame received by each server is a wire-order barrier for
+                // CLOSEs enqueued by the EOSE handler and the phase's finally cleanup.
+                urls.forEach { url ->
+                    assertTrue(f.pool.sendToRelay(url, """["REQ","feed-barrier",{"kinds":[1]}]"""))
+                }
+                f.until { f.requests.count { it.second[1].jsonPrimitive.content == "feed-barrier" } == 2 }
+                urls.forEach { url ->
+                    assertEquals(1, f.closes.count { it == url to id })
+                    assertEquals(0, count(f, url).get())
+                }
+                assertFalse(f.pool.oneShotEoseCallbacks.containsKey(id))
+                assertEquals("no closed profile request is replayed", 2,
+                    f.requests.count { it.second[1].jsonPrimitive.content == id })
+            } finally { phase.cancelAndJoin() }
+        }
+    }
+
+    @Test fun `indexer profile relay facts complete on pooled wire EOSE`() = runBlocking {
+        pooledProfileFacts(indexer = true)
+    }
+
+    @Test fun `bridge profile relay facts complete on pooled wire EOSE`() = runBlocking {
+        pooledProfileFacts(indexer = false)
+    }
+
+    @Test fun `indexer relay facts CLOSED does not certify successful coverage`() = runBlocking {
+        pooledProfileFacts(indexer = true, closed = true)
+    }
+
+    @Test fun `bridge relay facts CLOSED does not certify successful coverage`() = runBlocking {
+        pooledProfileFacts(indexer = false, closed = true)
+    }
+
+    private suspend fun pooledProfileFacts(indexer: Boolean, closed: Boolean = false) = coroutineScope {
+        Fixture(bridgeLoopback = true).use { f ->
+            val url = BRIDGE_FALLBACK_RELAY_URLS.single()
+            prepare(f, url)
+            // Using the bridge as the explicit indexer prevents a second miss
+            // phase, while the empty configuration exercises the real bridge path.
+            if (indexer) {
+                f.preferences.setIndexerUrls(listOf(url))
+                f.preferences.indexerRelayUrlsFlow().first { it == listOf(url) }
+            }
+            val author = "a".repeat(64)
+            val lookup = async { f.pool.fetchProfileRelayFacts(author) }
+            try {
+                f.until { f.requests.size == 1 }
+                val (target, req) = f.requests.single()
+                val id = req[1].jsonPrimitive.content
+                assertEquals(url, target)
+                assertTrue(id.startsWith(if (indexer) "profile-relays-" else "bridge-profile-relays-"))
+                assertEquals(buildJsonObject {
+                    put("kinds", buildJsonArray { add(10002); add(10006); add(10007) })
+                    put("authors", buildJsonArray { add(author) })
+                    put("limit", 3)
+                }, req[2])
+                val terminal = if (closed) """["CLOSED","$id","blocked: fixture"]"""
+                    else """["EOSE","$id"]"""
+                assertTrue(f.sockets.getValue(url).send(terminal))
+                assertEquals("CLOSED is completion, not successful coverage", !closed,
+                    withTimeout(2_000) { lookup.await() })
+                f.until { (url to id) in f.closes }
+                assertEquals(0, count(f, url).get())
+                assertFalse(f.pool.oneShotEoseCallbacks.containsKey(id))
+                assertEquals(1, f.requests.size)
+                assertEquals(1, f.opens.getValue(url).get())
+            } finally { lookup.cancelAndJoin() }
+        }
+    }
+
+    @Test fun `relay facts require EOSE from every selected relay`() = runBlocking {
+        mixedProfileFacts(lastClosed = false)
+    }
+
+    @Test fun `partial relay facts EOSE plus CLOSED is not successful coverage`() = runBlocking {
+        mixedProfileFacts(lastClosed = true)
+    }
+
+    private suspend fun mixedProfileFacts(lastClosed: Boolean) = coroutineScope {
+        Fixture(bridgeLoopback = true).use { f ->
+            val urls = listOf(BRIDGE_FALLBACK_RELAY_URLS.single(), "wss://facts-second.test")
+            urls.forEach { prepare(f, it) }
+            f.preferences.setIndexerUrls(urls)
+            f.preferences.indexerRelayUrlsFlow().first { it.toSet() == urls.toSet() }
+            val lookup = async { f.pool.fetchProfileRelayFacts("a".repeat(64)) }
+            try {
+                f.until { f.requests.size == 2 }
+                val id = f.requests.first().second[1].jsonPrimitive.content
+                assertTrue(f.sockets.getValue(urls[0]).send("""["EOSE","$id"]"""))
+                f.until { (urls[0] to id) in f.closes }
+                assertFalse(lookup.isCompleted)
+                val terminal = if (lastClosed) """["CLOSED","$id","blocked: fixture"]"""
+                    else """["EOSE","$id"]"""
+                assertTrue(f.sockets.getValue(urls[1]).send(terminal))
+                assertEquals(!lastClosed, withTimeout(2_000) { lookup.await() })
+                f.until { (urls[1] to id) in f.closes }
+                urls.forEach { assertEquals(0, count(f, it).get()) }
+            } finally { lookup.cancelAndJoin() }
+        }
+    }
+
+    @Test fun `skipped relay facts do not certify successful coverage`() = runBlocking {
+        Fixture(bridgeLoopback = true).use { f ->
+            val url = BRIDGE_FALLBACK_RELAY_URLS.single()
+            f.preferences.setIndexerUrls(listOf(url))
+            f.preferences.indexerRelayUrlsFlow().first { it == listOf(url) }
+            f.pool.suspendSocketsForBackground()
+            assertFalse(withTimeout(2_000) { f.pool.fetchProfileRelayFacts("a".repeat(64)) })
+            assertTrue(f.requests.isEmpty())
+            assertTrue(f.opens.isEmpty())
+        }
+    }
+
+    @Test fun `relay facts pipeline retries CLOSED and caches only successful coverage`() = runBlocking {
+        Fixture(bridgeLoopback = true).use { f ->
+            val url = BRIDGE_FALLBACK_RELAY_URLS.single()
+            prepare(f, url)
+            f.preferences.setIndexerUrls(listOf(url))
+            f.preferences.indexerRelayUrlsFlow().first { it == listOf(url) }
+            val resolver = ProfileResolver(f.store, Lazy { f.pool })
+            val pipeline = ProfilePipeline(f.pool, f.store,
+                com.unsilence.app.data.repository.UserRepository(f.store, resolver),
+                f.preferences, f.capabilities, f.monitor, PrimalCacheClient(f.client))
+            val author = "a".repeat(64)
+            try {
+                for (reject in listOf(true, false)) {
+                    val before = f.requests.size
+                    val lookup = async { pipeline.fetchProfileRelayFacts(author) }
+                    try {
+                        withTimeout(2_000) { f.until { f.requests.size == before + 1 } }
+                        val id = f.requests.last().second[1].jsonPrimitive.content
+                        assertTrue(f.sockets.getValue(url).send(if (reject)
+                            """["CLOSED","$id","blocked: fixture"]""" else """["EOSE","$id"]"""))
+                        assertEquals(!reject, withTimeout(2_000) { lookup.await() })
+                    } finally { lookup.cancelAndJoin() }
+                }
+                assertTrue(withTimeout(2_000) { pipeline.fetchProfileRelayFacts(author) })
+                assertEquals("successful coverage is reused without a third REQ", 2, f.requests.size)
+            } finally {
+                (field(pipeline, "pipelineScope") as CoroutineScope).cancel()
+                (field(resolver, "scope") as CoroutineScope).cancel()
+            }
+        }
+    }
+
+    @Test fun `deliberately excluded feed relay is not a failed facts target`() = runBlocking {
+        Fixture(bridgeLoopback = true).use { f ->
+            val queried = BRIDGE_FALLBACK_RELAY_URLS.single()
+            val excluded = "wss://active-feed.test"
+            prepare(f, queried)
+            f.pool.activeSingleRelayFeedUrl = excluded
+            f.preferences.setIndexerUrls(listOf(queried, excluded))
+            f.preferences.indexerRelayUrlsFlow().first { it.size == 2 }
+            val lookup = async { f.pool.fetchProfileRelayFacts("a".repeat(64)) }
+            try {
+                f.until { f.requests.size == 1 }
+                val (url, req) = f.requests.single()
+                assertEquals(queried, url)
+                assertTrue(f.sockets.getValue(url).send("""["EOSE",${req[1]}]"""))
+                assertTrue(withTimeout(2_000) { lookup.await() })
+                assertEquals(setOf(queried), f.opens.keys)
+            } finally { lookup.cancelAndJoin() }
+        }
+    }
+
+    @Test fun `queued then silent relay facts retain the overall deadline`() = runBlocking {
+        Fixture(bridgeLoopback = true).use { f ->
+            val url = BRIDGE_FALLBACK_RELAY_URLS.single()
+            exhaust(f, url)
+            f.preferences.setIndexerUrls(listOf(url))
+            f.preferences.indexerRelayUrlsFlow().first { it == listOf(url) }
+            withTimeout(10_000) {
+                val lookup = async { f.pool.fetchProfileRelayFacts("a".repeat(64)) }
+                try {
+                    f.until { queued(f, url).size == 1 }
+                    delay(3_000) // Spend part of the phase budget waiting for a token.
+                    tokens(f, url).set(1)
+                    drain(f, url)
+                    f.until { f.requests.size == 6 }
+                    assertFalse(lookup.await()) // No response after dispatch.
+                    assertTrue(queued(f, url).isEmpty())
+                    assertEquals(5, count(f, url).get())
+                } finally { lookup.cancelAndJoin() }
+            }
+        }
+    }
+
+    @Test fun `silent relay facts expire without successful coverage`() = runBlocking {
+        Fixture(bridgeLoopback = true).use { f ->
+            val url = BRIDGE_FALLBACK_RELAY_URLS.single()
+            prepare(f, url)
+            f.preferences.setIndexerUrls(listOf(url))
+            f.preferences.indexerRelayUrlsFlow().first { it == listOf(url) }
+            val lookup = async { f.pool.fetchProfileRelayFacts("a".repeat(64)) }
+            try {
+                f.until { f.requests.size == 1 }
+                val id = f.requests.single().second[1].jsonPrimitive.content
+                assertFalse(withTimeout(10_000) { lookup.await() })
+                f.until { (url to id) in f.closes }
+                assertEquals(0, count(f, url).get())
+            } finally { lookup.cancelAndJoin() }
+        }
+    }
+
+    @Test fun `cancelled relay facts remove queued work before tokens become available`() = runBlocking {
+        Fixture(bridgeLoopback = true).use { f ->
+            val url = BRIDGE_FALLBACK_RELAY_URLS.single()
+            exhaust(f, url)
+            f.preferences.setIndexerUrls(listOf(url))
+            f.preferences.indexerRelayUrlsFlow().first { it == listOf(url) }
+            val lookup = async { f.pool.fetchProfileRelayFacts("a".repeat(64)) }
+            f.until { queued(f, url).size == 1 }
+            lookup.cancelAndJoin()
+            assertTrue(queued(f, url).isEmpty())
+            tokens(f, url).set(1)
+            drain(f, url)
+            assertEquals(1, tokens(f, url).get())
+            assertEquals(5, f.requests.size)
+            assertEquals(5, count(f, url).get())
+        }
+    }
+
+    @Test fun `cancelled bridge profile phase cannot dispatch queued siblings`() = runBlocking {
+        Fixture().use { f ->
+            val url = "wss://bridge-cancel.test"
+            exhaust(f, url)
+            val phase = async { profilePhase(f, url,
+                (1..201).map { it.toString(16).padStart(64, '0') }, "bridge-profiles") }
+            f.until { queued(f, url).size == 3 }
+            phase.cancelAndJoin()
+            assertTrue(queued(f, url).isEmpty())
+            assertTrue(f.pool.oneShotEoseCallbacks.keys.none { it.startsWith("bridge-profiles-") })
+            assertEquals(5, f.requests.size)
+            assertEquals(5, count(f, url).get())
+        }
+    }
+
+    @Test fun `profile CLOSED remains a distinct outcome with no live replay`() = runBlocking {
+        Fixture().use { f ->
+            val url = "wss://profile-closed.test"
+            prepare(f, url)
+            val id = "bridge-profile-relays-fixture"
+            val lookup = async { f.pool.fetchOneShotOutcomes(id, listOf(url),
+                """["REQ","$id",{"kinds":[10002,10006,10007],"authors":["${"a".repeat(64)}"],"limit":3}]""", 5_000) }
+            try {
+                f.until { f.requests.size == 1 }
+                assertTrue(f.sockets.getValue(url).send("""["CLOSED","$id","blocked: fixture"]"""))
+                assertEquals(mapOf(url to OneShotOutcome.CLOSED), withTimeout(2_000) { lookup.await() })
+                f.until { (url to id) in f.closes }
+                assertEquals(0, count(f, url).get())
+                assertEquals(1, f.requests.size)
+            } finally { lookup.cancelAndJoin() }
+        }
+    }
+
+    @Test fun `persistent EOSE stays open and page EOSE remains owned by pagination`() = runBlocking {
+        Fixture().use { f ->
+            val url = "wss://profile-controls.test"
+            prepare(f, url)
+            val liveEose = CompletableDeferred<Unit>()
+            val live = f.subscription.subscribe(listOf(url), NostrFilter(kinds = listOf(1)),
+                onevent = {}, oneose = { if (it) liveEose.complete(Unit) })
+            try {
+                f.until { f.requests.size == 1 }
+                val liveId = f.requests.single().second[1].jsonPrimitive.content
+                assertTrue(f.sockets.getValue(url).send("""["EOSE","$liveId"]"""))
+                withTimeout(2_000) { liveEose.await() }
+                val page = async { f.pool.fetchPaginatedEvents(listOf(url),
+                    buildJsonObject { put("kinds", buildJsonArray { add(10002) }) },
+                    subIdPrefix = "profile-relays", maxPages = 1) }
+                f.until { f.requests.size == 2 }
+                val pageId = f.requests.last().second[1].jsonPrimitive.content
+                assertTrue(f.sockets.getValue(url).send("""["EOSE","$pageId"]"""))
+                assertEquals(1, withTimeout(2_000) { page.await() }.single().totalPages)
+                f.until { (url to pageId) in f.closes }
+                assertEquals(1, f.closes.count { it == url to pageId })
+                assertFalse((url to liveId) in f.closes)
+                assertTrue(liveId in f.subscription.activeSubIds())
+            } finally { live.close() }
+        }
+    }
 
     @Test fun `overlapping reference hints reach a shared unpooled relay in one request`() = runBlocking {
         Fixture().use { f ->
