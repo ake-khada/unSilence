@@ -451,17 +451,13 @@ class UserProfileViewModel @Inject constructor(
     }
 
     fun loadMore() {
-        val handle = currentHandle ?: return
-        // _events is the contiguous mixed-kind timeline. Paginating from its tail
-        // avoids re-requesting filtered-out replies between the last visible note
-        // and the actual cache boundary.
-        val until = _events.value.lastOrNull()?.createdAt ?: return
-        viewModelScope.launch {
-            val older = timelineService.fetchOlderTimeline(handle.timelineKey, until, 100)
-            if (older.isNotEmpty()) {
-                _events.update { current -> TimelineMerge.merge(current, older, capTail = false) }
-            }
-        }
+        val generation = subscriptionGeneration
+        viewModelScope.loadOlderProfilePage(
+            currentHandle?.timelineKey,
+            _events,
+            acceptsPage = { screenActive.value && subscriptionGeneration == generation },
+            fetchOlder = timelineService::fetchOlderTimeline,
+        )
     }
 
     // ── Tab → subscription logic ─────────────────────────────────────────
