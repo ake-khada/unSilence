@@ -170,6 +170,14 @@ internal fun replyListItems(
     }
 }
 
+/** Rows whose bodies are rendered, for the existing bounded display window. */
+internal fun displayedReplyRows(items: List<ReplyListItem>): List<FeedRow> =
+    items.mapNotNull { item ->
+        (item as? ReplyListItem.Reply)?.depthRow
+            ?.takeUnless { it.muted }
+            ?.row
+    }
+
 private data class ParentKey(val id: String, val depth: Int)
 
 private data class ShapeCandidate(val index: Int, val parent: ParentKey)

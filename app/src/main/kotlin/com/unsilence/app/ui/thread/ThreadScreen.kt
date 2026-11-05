@@ -159,6 +159,10 @@ fun ThreadScreen(
             .filterNot { it.muted || it.spamClusterId != null }
             .map { it.row }
     }
+    // Revealed bodies join the display window; playback selection above is unchanged.
+    val displayedRows = remember(state.focusedNote, threadItems) {
+        listOfNotNull(state.focusedNote) + com.unsilence.app.ui.shared.displayedReplyRows(threadItems)
+    }
     val videoScope = rememberVideoPlaybackScope(
         ownerId            = "thread-$entryId",
         holder             = actionsViewModel.sharedPlayerHolder,
@@ -215,9 +219,9 @@ fun ThreadScreen(
 
     val engagementRetryRevision by actionsViewModel.engagementRetryRevision.collectAsStateWithLifecycle()
     @OptIn(FlowPreview::class)
-    ResumedEffect(allThreadRows, state.focusedNote?.id, cardWidthPx, engagementRetryRevision) {
-        if (allThreadRows.isEmpty()) { actionsViewModel.clearDisplayWindow(); return@ResumedEffect }
-        val rowIndexById = allThreadRows.withIndex().associate { it.value.id to it.index }
+    ResumedEffect(displayedRows, state.focusedNote?.id, cardWidthPx, engagementRetryRevision) {
+        if (displayedRows.isEmpty()) { actionsViewModel.clearDisplayWindow(); return@ResumedEffect }
+        val rowIndexById = displayedRows.withIndex().associate { it.value.id to it.index }
         fun visibleRowsFromLayout(): List<Int> =
             listState.layoutInfo.visibleItemsInfo.mapNotNull { item ->
                 (item.key as? String)?.let(rowIndexById::get)
@@ -228,7 +232,7 @@ fun ThreadScreen(
             val last = visibleRows.maxOrNull() ?: first
             actionsViewModel.warmCardWindow(
                 visibleIds = listState.layoutInfo.visibleItemsInfo.mapNotNull { it.key as? String }.toSet(),
-                rows = allThreadRows,
+                rows = displayedRows,
                 first = first,
                 last = last,
                 cardWidthPx = cardWidthPx,
@@ -238,7 +242,7 @@ fun ThreadScreen(
 
         if (cardWidthPx > 0) {
             val initialRows = visibleRowsFromLayout().ifEmpty {
-                listOf(0, allThreadRows.lastIndex.coerceAtMost(8))
+                listOf(0, displayedRows.lastIndex.coerceAtMost(8))
             }
             warmVisibleRows(initialRows)
         }

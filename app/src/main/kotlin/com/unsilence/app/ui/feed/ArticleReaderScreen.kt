@@ -199,6 +199,10 @@ fun ArticleReaderScreen(
             .filterNot { it.muted || it.spamClusterId != null }
             .map { it.row }
     }
+    // Use the rendered projection for protection, preserving eager hydration/video selection.
+    val displayedCommentRows = remember(commentItems) {
+        com.unsilence.app.ui.shared.displayedReplyRows(commentItems)
+    }
     ResumedEffect(articleCoord) {
         if (articleCoord != null) {
             articleReaderVm.fetchComments(articleCoord, model.engagementId, model.pubkey, row.relayUrl)
@@ -407,16 +411,16 @@ fun ArticleReaderScreen(
     }
 
     @OptIn(FlowPreview::class)
-    ResumedEffect(commentRows, cardWidthPx) {
-        val rowIndexById = commentRows.withIndex().associate { it.value.id to it.index }
+    ResumedEffect(displayedCommentRows, cardWidthPx) {
+        val rowIndexById = displayedCommentRows.withIndex().associate { it.value.id to it.index }
         commentActionsVm.warmCardWindow(
             contextRows = listOf(row),
             visibleIds = listState.layoutInfo.visibleItemsInfo.mapNotNull {
                 (it.key as? String)?.let { key -> if (key == "article") row.id else key }
             }.toSet(),
-            rows = commentRows,
+            rows = displayedCommentRows,
             first = 0,
-            last = commentRows.lastIndex.coerceAtMost(8),
+            last = displayedCommentRows.lastIndex.coerceAtMost(8),
             cardWidthPx = cardWidthPx,
             hydrateEngagement = false,
         )
@@ -429,7 +433,7 @@ fun ArticleReaderScreen(
             commentActionsVm.warmCardWindow(
                 contextRows = listOf(row),
                 visibleIds = visibleKeys.mapTo(HashSet()) { if (it == "article") row.id else it },
-                rows = commentRows,
+                rows = displayedCommentRows,
                 first = first,
                 last = last,
                 cardWidthPx = cardWidthPx,

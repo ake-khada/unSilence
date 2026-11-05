@@ -11,9 +11,14 @@ import com.unsilence.app.ui.feed.NoteActionsViewModel
 
 @Composable
 internal fun ObserveDisplayWindowLifecycle(actions: NoteActionsViewModel) {
-    LifecycleResumeEffect(actions) {
-        actions.setDisplayWindowActive(true)
-        onPauseOrDispose { actions.setDisplayWindowActive(false) }
+    ObserveDisplayWindowLifecycle(actions.displayWindowReporter)
+}
+
+@Composable
+internal fun ObserveDisplayWindowLifecycle(reporter: DisplayWindowReporter) {
+    LifecycleResumeEffect(reporter) {
+        reporter.setActive(true)
+        onPauseOrDispose { reporter.setActive(false) }
     }
 }
 

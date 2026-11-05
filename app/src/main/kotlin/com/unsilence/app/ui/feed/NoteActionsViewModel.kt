@@ -283,9 +283,8 @@ class NoteActionsViewModel @Inject constructor(
      * The feed ViewModel has its own high-frequency lane because it owns the
      * subscription window. Other screens call this from LazyList viewport samples.
      */
-    private val displayWindowReporter = com.unsilence.app.ui.shared.DisplayWindowReporter(memoryEventStore)
+    internal val displayWindowReporter = com.unsilence.app.ui.shared.DisplayWindowReporter(memoryEventStore)
 
-    fun setDisplayWindowActive(active: Boolean) = displayWindowReporter.setActive(active)
     fun clearDisplayWindow() = displayWindowReporter.report(emptyList(), emptySet())
 
     override fun onCleared() {
