@@ -13,6 +13,7 @@ import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.withTimeoutOrNull
 import okhttp3.OkHttpClient
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.TimeUnit
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -28,12 +29,19 @@ internal const val RECONNECT_HANDSHAKE_TIMEOUT_MS = 15_000L
  */
 @Singleton
 class RelayConnectionFactory @Inject constructor(
-    private val client: OkHttpClient,
+    client: OkHttpClient,
     private val capabilitiesStore: RelayCapabilitiesStore,
     private val trafficMetrics: RelayTrafficMetrics,
 ) {
+    // Shares transport resources with HTTP clients, but bounds only relay upgrades.
+    // OkHttp exits this timeout after HTTP 101; established sockets stay long-lived.
+    // Dispatcher queue time is separate, so retain the registry's owner deadline.
+    private val relayClient = client.newBuilder()
+        .callTimeout(RECONNECT_HANDSHAKE_TIMEOUT_MS, TimeUnit.MILLISECONDS)
+        .build()
+
     fun create(url: String): RelayConnection =
-        RelayConnection(url, client, capabilitiesStore, trafficMetrics)
+        RelayConnection(url, relayClient, capabilitiesStore, trafficMetrics)
 }
 
 internal data class RelayConnectionClaim(

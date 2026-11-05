@@ -21,6 +21,7 @@ import okhttp3.mockwebserver.Dispatcher as ServerDispatcher
 import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
 import okhttp3.mockwebserver.RecordedRequest
+import okhttp3.mockwebserver.SocketPolicy
 import org.junit.Assert.*
 import org.junit.Test
 import java.util.concurrent.CountDownLatch
@@ -35,6 +36,7 @@ class RelayRequestPacingTest {
     private class Fixture(
         private val bridgeLoopback: Boolean = false,
         private val handshakeGate: CountDownLatch? = null,
+        private val stallFirstUpgrade: Boolean = false,
     ) : AutoCloseable {
         val remote = ConcurrentHashMap<String, List<EventDto>>()
         val held = ConcurrentHashMap.newKeySet<String>()
@@ -43,12 +45,17 @@ class RelayRequestPacingTest {
         val closes = CopyOnWriteArrayList<Pair<String, String>>()
         val sockets = ConcurrentHashMap<String, WebSocket>()
         val opens = ConcurrentHashMap<String, AtomicInteger>()
+        val attempts = ConcurrentHashMap<String, AtomicInteger>()
         val active = AtomicInteger()
         val peak = AtomicInteger()
         val server = MockWebServer().apply {
             dispatcher = object : ServerDispatcher() {
                 override fun dispatch(request: RecordedRequest): MockResponse {
                     val relay = requireNotNull(request.getHeader("X-Fixture-Relay"))
+                    val attempt = attempts.computeIfAbsent(relay) { AtomicInteger() }.incrementAndGet()
+                    if (stallFirstUpgrade && attempt == 1) {
+                        return MockResponse().setSocketPolicy(SocketPolicy.NO_RESPONSE)
+                    }
                     check(handshakeGate?.await(5, TimeUnit.SECONDS) != false)
                     return MockResponse().withWebSocketUpgrade(object : WebSocketListener() {
                         override fun onOpen(webSocket: WebSocket, response: Response) {
@@ -77,7 +84,9 @@ class RelayRequestPacingTest {
             }
             start()
         }
-        val client = OkHttpClient.Builder().addInterceptor { chain ->
+        val client = OkHttpClient.Builder()
+            .readTimeout(if (stallFirstUpgrade) 0 else 10, TimeUnit.SECONDS)
+            .addInterceptor { chain ->
             val request = chain.request()
             check(request.url.host.endsWith(".test") || (bridgeLoopback && isBridgeFallbackRelay("wss://${request.url.host}"))) { "External network forbidden" }
             chain.proceed(request.newBuilder().header("X-Fixture-Relay", "wss://${request.url.host}").url(server.url("/")).build())
@@ -124,6 +133,102 @@ class RelayRequestPacingTest {
 
     private fun connection(f: Fixture, url: String): RelayConnection =
         (field(field(f.pool, "connectionRegistry"), "pooled") as Map<*, *>)[url] as RelayConnection
+
+    @Test fun `stalled upgrades recover all pooled entry paths and replay a buffered live request once`() = runBlocking {
+        Fixture(stallFirstUpgrade = true).use { f ->
+            val urls = listOf("connect", "await", "lookup", "reconnect").map { "wss://$it.test" }
+            urls.forEach { f.pool.addPurpose(it, ConnectionPurpose.PERSISTENT) }
+            f.processor.start()
+            val crypto = ZapCryptoTestFixture()
+            val event = crypto.signedEvent(crypto.sender, 1, emptyList(), "recovered live frame")
+            f.remote[urls[0]] = listOf(event)
+            f.pool.connect(listOf(urls[0]))
+            val awaiting = async { f.pool.connectAndAwait(listOf(urls[1]), 100, false, RelayRequestClass.GENERAL) }
+            val lookup = async {
+                kotlin.coroutines.intrinsics.suspendCoroutineUninterceptedOrReturn<RelayConnection?> { continuation ->
+                    RelayPool::class.java.getDeclaredMethod("getOrCreateConnection", String::class.java,
+                        RelayRequestClass::class.java, kotlin.coroutines.Continuation::class.java)
+                        .apply { isAccessible = true }
+                        .invoke(f.pool, urls[2], RelayRequestClass.GENERAL, continuation)
+                }
+            }
+            RelayPool::class.java.getDeclaredMethod("reconnectWithBackoff", String::class.java, Int::class.javaPrimitiveType)
+                .apply { isAccessible = true }.invoke(f.pool, urls[3], 0)
+            f.until { f.attempts.size == 4 }
+            val original = urls.associateWith { connection(f, it) }
+            assertEquals(0, awaiting.await())
+            // A second caller shares the same attempt; cancellation must not close it.
+            val joined = launch { f.pool.connectAndAwait(listOf(urls[0]), 30_000, false, RelayRequestClass.GENERAL) }
+            yield()
+            joined.cancelAndJoin()
+            assertSame(original.getValue(urls[0]), connection(f, urls[0]))
+            assertEquals(RelayState.CONNECTING, connection(f, urls[0]).state.value)
+            val delivered = CopyOnWriteArrayList<String>()
+            val eose = CompletableDeferred<Unit>()
+            val handle = f.subscription.subscribe(listOf(urls[0]), NostrFilter(kinds = listOf(1)),
+                onevent = { delivered += it.id }, oneose = { if (it) eose.complete(Unit) })
+            try {
+                assertNull(lookup.await()) // Its five-second caller wait leaves the shared socket intact.
+                val liveId = f.subscription.activeSubIds().single()
+                assertNotNull(original.getValue(urls[0]).requests.request(liveId))
+                assertTrue(f.requests.isEmpty()) // Accepted locally, never reached the silent server.
+                sendDirect(f, urls[1], "hint-batch-stalled")
+                assertEquals(1, count(f, urls[1]).get())
+                withTimeout(20_000) {
+                    f.pool.connectionStates.first { states -> urls.all { states[it] == RelayState.CONNECTED } }
+                    eose.await()
+                    f.until { delivered.isNotEmpty() }
+                }
+                urls.forEach { url ->
+                    assertNotSame(original.getValue(url), connection(f, url))
+                    assertEquals(2, f.attempts.getValue(url).get())
+                    assertEquals(1, f.opens.getValue(url).get())
+                }
+                assertEquals(0, (field(f.pool, "relayOneShotCount") as Map<*, *>)[urls[1]].let { (it as? AtomicInteger)?.get() ?: 0 })
+                assertNull(connection(f, urls[1]).requests.request("hint-batch-stalled"))
+                assertEquals(listOf(event.id), delivered)
+                assertEquals(listOf(liveId), f.requests.map { it.second[1].jsonPrimitive.content })
+                // Ordered barrier: duplicate replay would have arrived ahead of this frame.
+                assertTrue(f.pool.sendToRelay(urls[0], """["REQ","feed-barrier",{"kinds":[1]}]"""))
+                f.until { f.requests.size >= 2 }
+                assertEquals(1, f.requests.count { it.second[1].jsonPrimitive.content == liveId })
+            } finally { handle.close(); awaiting.cancelAndJoin(); lookup.cancelAndJoin() }
+        }
+    }
+
+    @Test fun `finite request waiting for a pooled upgrade keeps its shorter owner deadline`() = runBlocking {
+        Fixture(stallFirstUpgrade = true).use { f ->
+            val url = "wss://finite-upgrade.test"
+            f.pool.connect(listOf(url))
+            f.until { f.attempts.containsKey(url) }
+            val result = withTimeout(3_000) { f.pool.fetchOneShotOutcomes("hint-batch-upgrade", listOf(url),
+                """["REQ","hint-batch-upgrade",{"kinds":[1]}]""", 30_000) }
+            assertEquals(mapOf(url to OneShotOutcome.TIMEOUT), result)
+            assertEquals(RelayState.CONNECTING, connection(f, url).state.value)
+            assertTrue(f.requests.isEmpty())
+            assertEquals(0, (field(f.pool, "relayOneShotCount") as Map<*, *>)[url].let { (it as? AtomicInteger)?.get() ?: 0 })
+        }
+    }
+
+    @Test fun `background and account teardown cancel pending upgrades without new attempts`() = runBlocking {
+        Fixture(stallFirstUpgrade = true).use { f ->
+            val url = "wss://background-upgrade.test"
+            f.pool.addPurpose(url, ConnectionPurpose.PERSISTENT)
+            f.pool.connect(listOf(url))
+            f.until { f.attempts.containsKey(url) }
+            val original = connection(f, url)
+            f.pool.suspendSocketsForBackground()
+            assertFalse(original.isConnected)
+            f.pool.disconnectAll()
+            f.until { f.client.dispatcher.runningCallsCount() == 0 }
+            assertTrue((field(f.pool, "reconnecting") as Map<*, *>).isEmpty())
+            assertTrue((field(f.pool, "reconnectAttempts") as Map<*, *>).isEmpty())
+            assertTrue((field(f.pool, "pendingReconnect") as Set<*>).isEmpty())
+            assertTrue((field(field(f.pool, "connectionRegistry"), "pooled") as Map<*, *>).isEmpty())
+            assertTrue(f.requests.isEmpty())
+            assertEquals(1, f.attempts.getValue(url).get())
+        }
+    }
 
     private fun release(f: Fixture, url: String, id: String) {
         RelayPool::class.java.getDeclaredMethod("handleEose", RelayConnection::class.java, String::class.java)
