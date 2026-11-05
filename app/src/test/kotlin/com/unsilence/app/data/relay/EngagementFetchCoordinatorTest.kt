@@ -500,14 +500,22 @@ class EngagementFetchCoordinatorTest(mode: String) {
         val store = MemoryEventStore(object : MuteKeyProvider {}, stubTimelineServiceProvider())
         store.engagementEvicted = { ids -> h.coordinator.invalidateRetainedTargets(ids, ownPubkey) }
         store.insert(retainedEvent(old.id))
+        // Keep the parent independently while exercising eviction after its
+        // reading window closes; visible reply bodies now remain resident.
+        store.profileAnchoredIds.add(old.id)
         store.insert(retainedEvent("reply").copy(rootId = old.id, replyToId = old.id,
             tags = listOf(listOf("e", old.id, "", "root"))))
         store.openDisplayWindow().use { window ->
             window.update(listOf(old.id to old.id), setOf(old.id))
             store.evictOldContentEventsForTest(mapOf(1 to 0))
-            assertEquals(0, store.replyCount(old.id))
+            assertEquals(1, store.replyCount(old.id))
+            assertTrue(store.getNostrEvent("reply") != null)
             assertTrue(store.getNostrEvent(old.id) != null)
         }
+        store.evictOldContentEventsForTest(mapOf(1 to 0))
+        assertEquals(0, store.replyCount(old.id))
+        assertTrue(store.getNostrEvent("reply") == null)
+        assertTrue(store.getNostrEvent(old.id) != null)
         assertFalse("Eviction retry is spaced after the last successful query", h.due(old))
         advanceTimeBy(29_000)
         h.coordinator.invalidateRetainedTargets(listOf(old.id), ownPubkey)

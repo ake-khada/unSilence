@@ -102,7 +102,7 @@ class DisplayedConversationAdmissionTest {
     }
 
     @Test
-    fun `oversized thread does not block unrelated note admission`() = runTest {
+    fun `full displayed conversation refuses unrelated admission until release`() = runTest {
         val store = store()
         val root = note("root")
         store.insert(root)
@@ -113,14 +113,17 @@ class DisplayedConversationAdmissionTest {
             window.update(listOf(root.id to root.id, "reply-0" to "reply-0"), setOf(root.id, "reply-0"))
             store.threadFeedRowFlow(root.id).test(timeout = 20.seconds) {
                 assertEquals(5_000, awaitItem().size)
-                assertTrue(store.insert(note("unrelated-new")))
+                assertFalse(store.insert(note("unrelated-new")))
                 assertNotNull(store.getNostrEvent(root.id))
                 assertNotNull(store.getNostrEvent("reply-0"))
                 assertEquals(5_000, store.snapshotSize().eventsByKind[1])
-                assertEquals("Off-window replies remain evictable", 4_998, store.replyCount(root.id))
+                assertEquals("Background work cannot erase the displayed total", 4_999, store.replyCount(root.id))
+                assertTrue((0 until 4_999).all { store.getNostrEvent("reply-$it") != null })
                 cancelAndIgnoreRemainingEvents()
             }
         }
+        assertTrue("Released conversation must not leave stale protection", store.insert(note("unrelated-new")))
+        assertEquals(5_000, store.snapshotSize().eventsByKind[1])
     }
 
     private fun store() = MemoryEventStore(object : MuteKeyProvider {}, stubTimelineServiceProvider()).apply {

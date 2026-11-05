@@ -1,15 +1,29 @@
 package com.unsilence.app.ui.shared
 
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListState
+import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.ui.test.assertIsDisplayed
+import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithText
+import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.onNodeWithTag
+import androidx.compose.ui.test.performScrollToIndex
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.unit.dp
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.LifecycleRegistry
@@ -24,6 +38,9 @@ import com.unsilence.app.ui.navigation.AppNavigator
 import com.unsilence.app.ui.navigation.rememberAppNavigator
 import com.unsilence.app.ui.theme.UnsilenceTheme
 import javax.inject.Provider
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.awaitCancellation
+import kotlinx.coroutines.withContext
 import org.junit.Assert.*
 import org.junit.Rule
 import org.junit.Test
@@ -44,6 +61,71 @@ class ReplyDisplayLifecycleTest {
     )
     private val store = MemoryEventStore(object : MuteKeyProvider {}, Provider { timeline })
     private val reporter = DisplayWindowReporter(store)
+
+    @Test fun openingUnderAdmissionPressureRendersBodiesAndBackKeepsTheReadingAnchor() {
+        store.ownPubkey = "owner"
+        store.updateFollows("owner", setOf("followed"), 1L)
+        val root = event("reading-root").copy(pubkey = "owner")
+        store.insert(root)
+        store.insertBatch((0 until 5_000).map { event("history-$it").copy(pubkey = "followed") })
+        val replies = (0 until 3).map {
+            event("reading-reply-$it").copy(replyToId = root.id, content = "Reply body $it")
+        }
+        lateinit var feedState: LazyListState
+        compose.setContent {
+            UnsilenceTheme {
+                val nav = rememberAppNavigator("reading-pressure")
+                AppNavDisplay(nav) { entry ->
+                    val surface = remember { DisplayWindowReporter(store) }
+                    ObserveDisplayWindowLifecycle(surface)
+                    if (entry.destination is AppDestination.Thread) {
+                        val flow = remember { store.threadFeedRowFlow(root.id) }
+                        val rows by flow.collectAsState(initial = emptyList())
+                        // The production thread owns its requested root before the response arrives.
+                        // This offline boundary supplies verified bodies, without relay/network work.
+                        ResumedEffect(root.id) {
+                            store.retainRequestedEvent(root.id).use {
+                                withContext(Dispatchers.Default) { store.insertBatch(replies) }
+                                awaitCancellation()
+                            }
+                        }
+                        ResumedEffect(rows) {
+                            surface.prepareWarmWindow(rows, 0, rows.lastIndex, rows.map { it.id }.toSet(), 0)
+                        }
+                        Column {
+                            TextButton(onClick = { nav.pop() }) { Text("Back to reading position") }
+                            rows.forEach { row -> Text(store.getNostrEvent(row.id)?.content.orEmpty()) }
+                        }
+                    } else {
+                        val state = rememberLazyListState()
+                        SideEffect { feedState = state }
+                        val rootRow = remember { store.synthesizeFeedRow(root) }
+                        ResumedEffect(root.id) {
+                            surface.prepareWarmWindow(listOf(rootRow), 0, 0, setOf(root.id), 0)
+                        }
+                        Column {
+                            TextButton(onClick = { nav.push(AppDestination.Thread(root.id)) }) { Text("Open reading thread") }
+                            LazyColumn(state = state, modifier = Modifier.testTag("reading-feed")) {
+                                items(30, key = { it }) { Text("Feed row $it", Modifier.height(64.dp)) }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        compose.onNodeWithTag("reading-feed").performScrollToIndex(12)
+        compose.runOnIdle { assertEquals(12, feedState.firstVisibleItemIndex) }
+        compose.onNodeWithText("Open reading thread").performClick()
+        compose.waitUntil(5_000) {
+            compose.onAllNodesWithText("Reply body 0").fetchSemanticsNodes().isNotEmpty()
+        }
+        replies.indices.forEach { compose.onNodeWithText("Reply body $it").assertIsDisplayed() }
+        store.insertBatch((0 until 1_000).map { event("burst-$it").copy(pubkey = "followed") })
+        replies.indices.forEach { compose.onNodeWithText("Reply body $it").assertIsDisplayed() }
+        compose.onNodeWithText("Back to reading position").performClick()
+        compose.onNodeWithText("Open reading thread").assertIsDisplayed()
+        compose.runOnIdle { assertEquals("Back must restore the actual list anchor", 12, feedState.firstVisibleItemIndex) }
+    }
 
     @Composable private fun Entry(id: String) {
         val row = remember(id) { event(id).also(store::insert).let(store::synthesizeFeedRow) }

@@ -40,6 +40,12 @@ internal class DisplayWindowRetention(private val lock: Any) {
 
     fun contains(id: String): Boolean = synchronized(lock) { id in owners }
 
+    /** Current priority without allocating a snapshot on the admission path. */
+    fun priority(id: String): Int? = synchronized(lock) {
+        if (id !in owners) null
+        else if (entries.values.any { id in it.visibleIds }) 0 else 1
+    }
+
     /** Snapshot before sorting: never consult moving viewport state in a comparator. */
     fun priorities(): Map<String, Int> = synchronized(lock) {
         buildMap {

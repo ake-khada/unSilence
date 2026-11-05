@@ -678,14 +678,74 @@ class MemoryEventStore @Inject constructor(
             articleIdByCoord[target]?.let(displayWindows::contains) == true
     }
 
+    /** Derived for a single decision, never stored in the admission queues. */
+    private enum class ReadingProtection { WINDOW, REQUESTED, VISIBLE_REPLY, NEARBY_REPLY, NONE }
+
+    private fun readingTargetProtection(target: String): ReadingProtection {
+        val id = articleIdByCoord[target] ?: target
+        if (requestedEvents.contains(id)) return ReadingProtection.REQUESTED
+        return when (displayWindows.priority(id)) {
+            0 -> ReadingProtection.VISIBLE_REPLY
+            1 -> ReadingProtection.NEARBY_REPLY
+            else -> ReadingProtection.NONE
+        }
+    }
+
+    private fun readingProtection(
+        event: NostrEvent,
+        ancestors: Set<String>? = null,
+        resolvedTargets: MutableMap<String, ReadingProtection>? = null,
+    ): ReadingProtection {
+        if (isDisplayProtected(event)) return ReadingProtection.WINDOW
+        if (!isConversationReply(event)) return ReadingProtection.NONE
+        var result = ReadingProtection.NONE
+        if (ancestors != null) {
+            // The incoming reply's ancestry was already resolved for invalidation.
+            for (target in ancestors) {
+                if (target != event.id) result = minOf(result, readingTargetProtection(target))
+                if (result == ReadingProtection.REQUESTED) break
+            }
+        } else {
+            forEachReplyIndexTarget(event) {
+                result = minOf(result, resolveReadingTarget(it, resolvedTargets))
+            }
+            articleCommentCoordinate(event)?.let {
+                result = minOf(result, resolveReadingTarget(it, resolvedTargets))
+            }
+        }
+        return result
+    }
+
+    private fun resolveReadingTarget(
+        target: String,
+        resolvedTargets: MutableMap<String, ReadingProtection>?,
+    ): ReadingProtection {
+        resolvedTargets?.get(target)?.let { return it }
+        var result = readingTargetProtection(target)
+        val parent = eventsById[articleIdByCoord[target] ?: target]
+        if (result != ReadingProtection.REQUESTED && parent != null && isConversationReply(parent)) {
+            val ancestors = conversationInvalidationTargets(parent) { id ->
+                id != parent.id && resolvedTargets?.containsKey(id) == true
+            }
+            for (id in ancestors) {
+                result = minOf(result, readingTargetProtection(id), resolvedTargets?.get(id) ?: ReadingProtection.NONE)
+                if (result == ReadingProtection.REQUESTED) break
+            }
+        }
+        // Only cache this fully resolved target, never assign its result to
+        // every visited ancestor: unrelated branches need their own answer.
+        resolvedTargets?.put(target, result)
+        return result
+    }
+
     /** Caller owns the lease until lookup completes/cancels or its thread hides.
      * At most 32 distinct targets receive priority; kind caps are unchanged. */
     fun retainRequestedEvent(eventId: String?): AutoCloseable {
-        val lease = requestedEvents.acquire(eventId)
+        val lease = synchronized(contentPolicyLock) { requestedEvents.acquire(eventId) }
         if (eventId == null) return lease
         reclassifyRequestedEvent(eventId)
         return AutoCloseable {
-            lease.close()
+            synchronized(contentPolicyLock) { lease.close() }
             // Downgrades must be eager: a stale highest-priority queue entry
             // might otherwise never be examined while lower tiers keep arriving.
             reclassifyRequestedEvent(eventId)
@@ -1304,19 +1364,46 @@ class MemoryEventStore @Inject constructor(
      * If the novel event itself is the lowest-priority LRU victim, reject it at
      * the door; otherwise remove the reserved existing victim first.
      */
-    private fun admitNovelContent(event: NostrEvent, dirty: InsertDirty): Boolean {
+    private fun admitNovelContent(
+        event: NostrEvent,
+        dirty: InsertDirty,
+        ancestors: Set<String>?,
+    ): Boolean {
         val cap = CONTENT_EVENT_KIND_CAPS[event.kind] ?: return true
         contentAdmissionIndex.track(event.id, event.kind, contentAdmissionTier(event))
         val invalidatedTargets = mutableSetOf<String>()
         val removedIds = mutableSetOf<String>()
 
         while (contentAdmissionIndex.size(event.kind) > cap) {
-            var victim = contentAdmissionIndex.pollVictim(
-                kind = event.kind,
-                cap = cap,
-                isProtected = { id -> eventsById[id]?.let(::isDisplayProtected) == true },
-                classify = ::currentContentAdmissionTier,
-            )
+            var displacingForReading = false
+            var victim = synchronized(contentPolicyLock) {
+                // Shared ancestors resolve once within this locked decision.
+                // Discard before releasing the lock; final removal reads live state.
+                val resolvedTargets = HashMap<String, ReadingProtection>()
+                val ordinary = contentAdmissionIndex.pollVictim(
+                    kind = event.kind,
+                    cap = cap,
+                    isProtected = { id -> eventsById[id]?.let {
+                        readingProtection(it, ancestors.takeIf { id == event.id }, resolvedTargets) != ReadingProtection.NONE
+                    } == true },
+                    classify = ::currentContentAdmissionTier,
+                )
+                if (ordinary != null || contentAdmissionIndex.size(event.kind) <= cap) return@synchronized ordinary
+                // Background work never takes reading-owned bodies. Only a
+                // stronger active arrival may displace indirect protection;
+                // materialized window rows and equal-priority bodies stay put.
+                val incoming = readingProtection(event, ancestors)
+                if (incoming == ReadingProtection.NONE) null else {
+                    contentAdmissionIndex.pollVictim(
+                        kind = event.kind,
+                        cap = cap,
+                        isProtected = { id -> eventsById[id]?.let {
+                            readingProtection(it, resolvedTargets = resolvedTargets) <= incoming
+                        } == true },
+                        classify = ::currentContentAdmissionTier,
+                    ).also { displacingForReading = it != null }
+                }
+            }
             if (victim == null) {
                 if (contentAdmissionIndex.size(event.kind) <= cap) break
                 // All existing capacity is protected: reject this attempted insert.
@@ -1333,6 +1420,8 @@ class MemoryEventStore @Inject constructor(
             val removed = removeContentEventForEviction(
                 eventId = victim.eventId,
                 invalidatedReplyTargets = invalidatedTargets,
+                incoming = event.takeIf { displacingForReading },
+                incomingAncestors = ancestors,
             ) ?: continue
             removedIds += removed.id
             markKindDirty(removed.kind, dirty)
@@ -1543,7 +1632,10 @@ class MemoryEventStore @Inject constructor(
             return false
         }
 
-        if (!admitNovelContent(event, dirty)) return false
+        // Resolve once before admission, then reuse for count invalidation.
+        // No ownership graph or descendant priority survives this insert.
+        val conversationTargets = if (isConversationReply(event)) conversationInvalidationTargets(event) else null
+        if (!admitNovelContent(event, dirty, conversationTargets)) return false
 
         // 2. Update indexes
         idsByKind.getOrPut(event.kind) { ConcurrentHashMap.newKeySet() }.add(event.id)
@@ -1580,7 +1672,7 @@ class MemoryEventStore @Inject constructor(
         // 3. Update derived aggregates based on kind
         when (event.kind) {
             0 -> handleProfile(event)
-            1, 1111 -> invalidateConversationMembership(event, dirty)
+            1, 1111 -> invalidateConversationMembership(event, dirty, conversationTargets)
             3 -> handleFollows(event, dirty)
             6, 16 -> handleRepost(event, dirty)
             7 -> handleReaction(event, dirty)
@@ -2138,7 +2230,10 @@ class MemoryEventStore @Inject constructor(
      * notify article cards too. No new uppercase-E interpretation belongs here.
      * Cycles are harmless; work is bounded by the membership limit plus its root.
      */
-    private fun conversationInvalidationTargets(event: NostrEvent): Set<String> {
+    private fun conversationInvalidationTargets(
+        event: NostrEvent,
+        stopAt: ((String) -> Boolean)? = null,
+    ): Set<String> {
         if (event.kind != 1 && event.kind != 1111) return emptySet()
         val visited = HashSet<String>()
         val targets = LinkedHashSet<String>()
@@ -2149,6 +2244,7 @@ class MemoryEventStore @Inject constructor(
             if (!visited.add(id)) continue
             targets.add(id)
             articleCoordById[id]?.let(targets::add)
+            if (stopAt?.invoke(id) == true) continue
             val current = if (id == event.id) event else eventsById[id] ?: continue
             if (!isConversationReply(current)) continue
             forEachReplyIndexTarget(current) { queue.add(it) }
@@ -2160,9 +2256,13 @@ class MemoryEventStore @Inject constructor(
         return targets
     }
 
-    private fun invalidateConversationMembership(event: NostrEvent, dirty: InsertDirty) {
+    private fun invalidateConversationMembership(
+        event: NostrEvent,
+        dirty: InsertDirty,
+        targets: Set<String>? = null,
+    ) {
         val now = System.currentTimeMillis()
-        for (id in conversationInvalidationTargets(event)) {
+        for (id in targets ?: conversationInvalidationTargets(event)) {
             // Storing a root is not evidence that its engagement was refreshed.
             if (id != event.id) statsUpdatedAt[id] = now
             dirty.invalidatedStatsIds.add(id)
@@ -3224,8 +3324,12 @@ class MemoryEventStore @Inject constructor(
                 timelineReferencedIds = timelineReferencedIds,
                 lastTouchedAt = touchSnapshot,
                 requestedIds = requestedIds,
-                displayedIds = candidates.asSequence().mapNotNull { eventsById[it.id] }
-                    .filter(::isDisplayProtected).map { it.id }.toSet(),
+                displayedIds = synchronized(contentPolicyLock) {
+                    val resolvedTargets = HashMap<String, ReadingProtection>()
+                    candidates.asSequence().mapNotNull { eventsById[it.id] }
+                        .filter { readingProtection(it, resolvedTargets = resolvedTargets) != ReadingProtection.NONE }
+                        .map { it.id }.toSet()
+                },
             )
         }
 
@@ -3279,12 +3383,16 @@ class MemoryEventStore @Inject constructor(
     private fun removeContentEventForEviction(
         eventId: String,
         invalidatedReplyTargets: MutableSet<String>,
+        incoming: NostrEvent? = null,
+        incomingAncestors: Set<String>? = null,
     ): NostrEvent? {
         val kind = eventsById[eventId]?.kind ?: return null
         val lock = contentMutationLocks[kind]
         fun removeIfUnobserved(): NostrEvent? = synchronized(contentPolicyLock) {
             val event = eventsById[eventId] ?: return@synchronized null
-            if (isDisplayProtected(event)) {
+            val protection = readingProtection(event)
+            val canYield = incoming != null && protection > readingProtection(incoming, incomingAncestors)
+            if (protection != ReadingProtection.NONE && !canYield) {
                 // A lease may have started after selection. Restore the reserved
                 // admission entry and leave payload/indexes untouched.
                 contentAdmissionIndex.track(event.id, event.kind, contentAdmissionTier(event))
