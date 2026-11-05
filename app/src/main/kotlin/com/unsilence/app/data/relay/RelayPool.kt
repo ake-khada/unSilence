@@ -683,10 +683,6 @@ class RelayPool @Inject constructor(
     private val oneShotSubTargets = ConcurrentHashMap<String, Set<String>>()
     /** Per-subId set of relay URLs that have EOSE'd or CLOSED. */
     private val oneShotSubEosed = ConcurrentHashMap<String, MutableSet<String>>()
-    /** Per-subId set of relay URLs whose slot has already been released.
-     *  Idempotency guard for [releaseOneShotForRelay] — prevents double-decrement
-     *  when both handleEose and cleanupOneShotSub fire for the same (subId, url). */
-    private val oneShotReleased = ConcurrentHashMap<String, MutableSet<String>>()
     private val profileFetchAttempted = ConcurrentHashMap<String, Long>()
     private val hintedProfileFetchAttempted = ConcurrentHashMap<String, Long>()
     /** Pubkeys that went through the full indexer+fallback chain and still missed.
@@ -2304,8 +2300,8 @@ class RelayPool @Inject constructor(
      * Idempotent slot release for a single (subId, url) pair.
      *
      * Both [handleEose] and [cleanupOneShotSub] funnel through here. The
-     * [oneShotReleased] guard ensures that even if both paths fire for the
-     * same relay URL, the slot is decremented exactly once.
+     * [takeRelayOneShotOwner] removes the exact socket owner under the lifecycle
+     * lock, so a second release cannot decrement the slot again.
      *
      * Sends CLOSE frame, decrements [relayOneShotCount], and flushes the
      * per-relay queue so queued REQs can drain.
@@ -2323,9 +2319,6 @@ class RelayPool @Inject constructor(
             if (sourceConnection != null && currentOwner != null && currentOwner !== sourceConnection) {
                 return@synchronized
             }
-            val released = oneShotReleased.computeIfAbsent(subId) { ConcurrentHashMap.newKeySet() }
-            if (!released.add(url)) return@synchronized
-
             val owner = takeRelayOneShotOwner(
                 subId = subId,
                 url = url,
@@ -2390,9 +2383,8 @@ class RelayPool @Inject constructor(
         val targets = oneShotSubTargets.remove(subId) ?: emptySet()
         oneShotSubEosed.remove(subId)
 
-        // Release slot for every target relay. releaseOneShotForRelay is idempotent —
-        // relays that already EOSE'd (and were released in handleEose) are skipped
-        // via the oneShotReleased guard. Only un-released relays get CLOSE + decrement.
+        // Release only targets that still own a socket slot. Relays already
+        // released by EOSE/CLOSED have no owner and cannot decrement again.
         for (url in targets) {
             synchronized(socketLifecycleLock) {
                 relayReqQueue[url]?.removeIf { it.subId == subId }
@@ -2400,9 +2392,6 @@ class RelayPool @Inject constructor(
                 connections[url]?.let(::flushRelayQueue)
             }
         }
-
-        // Final cleanup of the released tracking set
-        oneShotReleased.remove(subId)
     }
 
     /** Remove every sibling before any slot release can flush another one. */
@@ -2432,7 +2421,7 @@ class RelayPool @Inject constructor(
             val total = targets.size
             Log.d(TAG, "one-shot '$subId' coverage $covered/$total")
 
-            // Retain release guards until the caller's bulk cleanup.
+            // All targets settled; the caller's bulk cleanup remains idempotent.
             if (covered >= total) {
                 oneShotEoseCallbacks.remove(subId)?.complete(Unit)
                 oneShotSubTargets.remove(subId)

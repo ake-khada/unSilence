@@ -260,6 +260,121 @@ class RelayRequestPacingTest {
             ).apply { isAccessible = true }.invoke(f.pool, authors, urls, prefix, true, continuation)
         }
 
+    /** Completed request IDs must not accumulate in pool-owned maps or active-ID sets. */
+    private fun retainedRequestContainers(f: Fixture, ids: Set<String>): List<String> =
+        RelayPool::class.java.declaredFields.mapNotNull { member ->
+            member.isAccessible = true
+            val keys = when (val value = member.get(f.pool)) {
+                is Map<*, *> -> value.keys
+                is Set<*> -> value
+                else -> return@mapNotNull null
+            }
+            member.name.takeIf {
+                keys.any { key ->
+                    key in ids || (key is RelayOneShotOwnerKey && key.subId in ids)
+                }
+            }
+        }
+
+    @Test fun `completed hinted profile requests leave no retained request bookkeeping`() = runBlocking {
+        Fixture().use { f ->
+            val url = "wss://hint-lifetime.test"
+            prepare(f, url)
+            val ids = mutableSetOf<String>()
+            repeat(3) { index ->
+                val author = (index + 1).toString(16).padStart(64, '0')
+                f.pool.fetchProfilesFromHints(mapOf(author to listOf(url)))
+                f.until { f.requests.size == index + 1 }
+                val id = f.requests.last().second[1].jsonPrimitive.content
+                ids += id
+                assertTrue(f.sockets.getValue(url).send("""["EOSE","$id"]"""))
+                f.until { (url to id) in f.closes }
+                // Observe slot accounting under the same lock used by terminal release.
+                synchronized(field(f.pool, "socketLifecycleLock")) {
+                    assertEquals(0, count(f, url).get())
+                }
+            }
+            assertEquals(3, f.requests.size)
+            assertEquals(3, f.closes.size)
+            assertEquals(1, f.opens.getValue(url).get())
+            assertEquals("completed requests must not leave per-ID terminal markers",
+                emptyList<String>(), retainedRequestContainers(f, ids))
+        }
+    }
+
+    @Test fun `EOSE and CLOSED then cleanup cannot release an unrelated occupied slot`() = runBlocking {
+        for (closed in listOf(false, true)) {
+            Fixture().use { f ->
+                val url = "wss://release-order.test"
+                prepare(f, url)
+                val id = "hint-profiles-terminal"
+                val lookup = async { f.pool.fetchOneShotOutcomes(id, listOf(url),
+                    """["REQ","$id",{"kinds":[0],"limit":1}]""", 5_000) }
+                f.until { f.requests.size == 1 }
+                send(f, url, "hint-profiles-unrelated")
+                f.until { f.requests.size == 2 }
+                val terminal = if (closed) """["CLOSED","$id","blocked: fixture"]"""
+                    else """["EOSE","$id"]"""
+                assertTrue(f.sockets.getValue(url).send(terminal))
+                assertEquals(if (closed) OneShotOutcome.CLOSED else OneShotOutcome.EOSE,
+                    withTimeout(2_000) { lookup.await() }[url])
+                f.until { (url to id) in f.closes }
+                f.pool.cleanupOneShotSub(id)
+                release(f, url, id) // Exercise idempotency even if a late handler already ran.
+                assertEquals(1, count(f, url).get())
+                assertEquals(1, f.closes.count { it == url to id })
+                assertFalse((url to "hint-profiles-unrelated") in f.closes)
+            }
+        }
+    }
+
+    @Test fun `cancel cleanup then late EOSE cannot release an unrelated occupied slot`() = runBlocking {
+        Fixture().use { f ->
+            val url = "wss://cancel-release.test"
+            prepare(f, url)
+            val id = "hint-profiles-cancelled"
+            val lookup = async { f.pool.fetchOneShotOutcomes(id, listOf(url),
+                """["REQ","$id",{"kinds":[0],"limit":1}]""", 5_000) }
+            f.until { f.requests.size == 1 }
+            send(f, url, "hint-profiles-unrelated")
+            f.until { f.requests.size == 2 }
+            lookup.cancelAndJoin()
+            f.until { (url to id) in f.closes }
+            release(f, url, id)
+            f.pool.cleanupOneShotSub(id)
+            assertEquals(1, count(f, url).get())
+            assertEquals(1, f.closes.count { it == url to id })
+            assertFalse((url to "hint-profiles-unrelated") in f.closes)
+        }
+    }
+
+    @Test fun `late release from replaced socket preserves the new request owner`() = runBlocking {
+        Fixture().use { f ->
+            val url = "wss://replaced-release.test"
+            prepare(f, url)
+            val id = "hint-profiles-same-id"
+            send(f, url, id)
+            f.until { f.requests.size == 1 }
+            val old = connection(f, url)
+            old.close()
+            prepare(f, url)
+            f.until { connection(f, url) !== old }
+            send(f, url, id)
+            f.until { f.requests.size == 2 }
+            val current = connection(f, url)
+            RelayPool::class.java.getDeclaredMethod("releaseOneShotForRelay", String::class.java,
+                String::class.java, RelayConnection::class.java).apply { isAccessible = true }
+                .invoke(f.pool, id, url, old)
+            assertEquals(1, count(f, url).get())
+            assertSame(current, (field(f.pool, "relayOneShotOwners") as Map<*, *>)[RelayOneShotOwnerKey(id, url)])
+            assertTrue(f.closes.isEmpty())
+            assertTrue(f.sockets.getValue(url).send("""["EOSE","$id"]"""))
+            f.until { (url to id) in f.closes }
+            assertEquals(0, count(f, url).get())
+            assertEquals(1, f.closes.count { it == url to id })
+        }
+    }
+
     @Test fun `author fallback phase settles both pooled relays on wire EOSE`() = runBlocking {
         pooledProfilePhase("prof-fb")
     }
