@@ -349,7 +349,7 @@ data class SearchResult(val token: Long, val eventId: String)
 enum class ConnectionPurpose {
     /** Long-lived, bootstrap-tagged (indexers, global default relays). Never evicted by sweep. */
     PERSISTENT,
-    /** User-initiated relay-browse session (RelayBrowseSession). Evicted when session ends. */
+    /** Browse-purpose connection, eligible for the existing bounded pool eviction policy. */
     BROWSE,
     /** Active single-relay feed source. Exempted from sweep while feed is active;
      *  removed when user switches feed type. */
@@ -641,10 +641,6 @@ class RelayPool @Inject constructor(
 
     fun hasPurpose(url: String, purpose: ConnectionPurpose): Boolean =
         connectionPurposes[url]?.contains(purpose) == true
-
-    fun isBrowseOnly(url: String): Boolean =
-        hasPurpose(url, ConnectionPurpose.BROWSE) &&
-        !hasPurpose(url, ConnectionPurpose.PERSISTENT)
 
     fun hasAnyPurpose(url: String): Boolean =
         connectionPurposes[url]?.isNotEmpty() == true
@@ -5866,8 +5862,7 @@ class RelayPool @Inject constructor(
 
     // ── Reconnect signal ──────────────────────────────────────────────────
 
-    /** Emitted when a relay reconnects or completes auth. Multiple subscribers
-     *  (RelayBrowseSession, Subscription) collect this to replay their subs. */
+    /** Emitted when a relay reconnects or completes auth; collectors resume their own work. */
     private val _onRelayReconnected = MutableSharedFlow<String>(
         replay = 0,
         extraBufferCapacity = 16,

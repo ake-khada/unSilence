@@ -3163,36 +3163,6 @@ class MemoryEventStoreInvariantsTest {
         }
     }
 
-    // ── A.5.1 T1: maxCreatedAtForRelays ────────────────────────────────────
-
-    @Test
-    fun `maxCreatedAtForRelays returns max createdAt across matching events`() {
-        val relay1 = "wss://relay1.example.com"
-        val relay2 = "wss://relay2.example.com"
-        store.insert(event(id = "r1-old", kind = 1, createdAt = 100, relayUrl = relay1))
-        store.insert(event(id = "r1-new", kind = 1, createdAt = 300, relayUrl = relay1))
-        store.insert(event(id = "r2-mid", kind = 1, createdAt = 200, relayUrl = relay2))
-
-        val max = store.maxCreatedAtForRelays(setOf(relay1))
-        assertEquals(300L, max)
-    }
-
-    @Test
-    fun `maxCreatedAtForRelays returns null when no events match`() {
-        store.insert(event(id = "other", kind = 1, createdAt = 100, relayUrl = "wss://other.example.com"))
-
-        val max = store.maxCreatedAtForRelays(setOf("wss://nomatch.example.com"))
-        assertNull(max)
-    }
-
-    @Test
-    fun `maxCreatedAtForRelays with empty relayUrls set returns null`() {
-        store.insert(event(id = "any", kind = 1, createdAt = 100))
-
-        val max = store.maxCreatedAtForRelays(emptySet())
-        assertNull(max)
-    }
-
     // ── A.5.1 T1: filterFreshEngagement ─────────────────────────────────────
 
     @Test

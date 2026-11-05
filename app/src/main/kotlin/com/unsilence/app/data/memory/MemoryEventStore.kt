@@ -4649,27 +4649,6 @@ class MemoryEventStore @Inject constructor(
             .toSet()
     }
 
-    // ─── A.5.1 T1: Relay browse queries ───────────────────────────────────
-
-    /**
-     * Returns the max `createdAt` across all events where `event.relaysSeen`
-     * overlaps with [relayUrls]. Used by RelayBrowseSession for REQ `since` cursors.
-     *
-     * Scan-based implementation — called infrequently (once per browse session start).
-     * // TODO(A.5.1 perf): per-relay index if profiling shows hot
-     */
-    fun maxCreatedAtForRelays(relayUrls: Set<String>): Long? {
-        if (relayUrls.isEmpty()) return null
-        var max: Long? = null
-        for (event in eventsById.values) {
-            if (event.relaysSeen.any { it in relayUrls }) {
-                val ts = event.createdAt
-                if (max == null || ts > max) max = ts
-            }
-        }
-        return max
-    }
-
     /**
      * Returns the subset of [eventIds] whose `statsUpdatedAt` is newer than [threshold].
      * Preserves input order. Replaces `EventStatsDao.getFreshEngagementIds`.
