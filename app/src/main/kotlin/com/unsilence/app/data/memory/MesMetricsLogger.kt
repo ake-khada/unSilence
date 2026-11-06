@@ -173,8 +173,6 @@ class MesMetricsLogger @Inject constructor(
         Log.w(
             TAG,
             "relay: inFlightPeak=${rm.eventFetchInFlightPeak} " +
-                "missingRefCache=${rm.missingRefCacheSize} " +
-                "missingRefHits=${rm.missingRefCacheHits} " +
                 "idLookupSent=${rm.idLookupSent} " +
                 "idBackoffSkips=${rm.idLookupBackoffSkips} " +
                 "idBackoffOpened=${rm.idLookupBackoffOpened} " +

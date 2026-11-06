@@ -882,7 +882,7 @@ class RelayRequestPacingTest {
         }
     }
 
-    @Test fun `negative cached ordinary lookup stays suppressed but timeline repair delivers signed event`() = runBlocking {
+    @Test fun `timeline repair delivers signed event with one request`() = runBlocking {
         Fixture().use { f ->
             val url = "wss://repair-ref.test"
             f.processor.start()
@@ -890,15 +890,9 @@ class RelayRequestPacingTest {
             val event = crypto.signedEvent(crypto.sender, 1, emptyList(), "reference repair control")
             f.remote[url] = listOf(event)
             prepare(f, url); f.held.clear()
-            f.pool.markEventUnresolved(event.id)
-            f.pool.fetchEventById(event.id, listOf(url))
-            f.pool.fetchEventById(event.id, listOf(url), bypassDedup = true)
-            assertTrue(f.requests.isEmpty())
-            assertTrue((field(f.pool, "eventFetchInFlight") as Map<*, *>).isEmpty())
             withTimeout(3_000) { f.pool.fetchTimelineEventsByIds(listOf(event.id), listOf(url)) }
             assertEquals(event.content, f.store.getNostrEvent(event.id)?.content)
             assertEquals(1, f.requests.size)
-            assertFalse(f.pool.isEventUnresolved(event.id))
         }
     }
 

@@ -654,7 +654,6 @@ class CardHydrator @Inject constructor(
                 )
                 continue
             }
-            if (relayPool.isEventUnresolved(ref.eventId)) continue
             awaitingIds.add(ref.eventId)
             if (ref.hints.isNotEmpty()) {
                 coalescedHintFetches += ref.eventId to ref.hints

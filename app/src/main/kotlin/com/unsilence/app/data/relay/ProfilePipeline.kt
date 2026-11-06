@@ -521,8 +521,7 @@ class ProfilePipeline @Inject constructor(
 
         if (referencedIds.isEmpty()) return emptySet()
 
-        // Skip refs already in MES or in negative cache
-        referencedIds.removeAll { relayPool.isEventUnresolved(it) }
+        // Skip refs already in MES
         val missingRefs = referencedIds.filter { memoryEventStore.getEventEntity(it) == null }
 
         if (missingRefs.isNotEmpty()) {

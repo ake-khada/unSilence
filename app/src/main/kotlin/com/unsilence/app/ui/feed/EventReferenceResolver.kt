@@ -57,7 +57,6 @@ class EventReferenceResolver @Inject constructor(
         }
 
         val id = target.eventId
-        val idSuppressed = id?.let(relayPool::isEventUnresolved) == true
 
         val outboxRelays = target.authorPubkey
             ?.let(memoryEventStore::lookupWriteRelaysFor)
@@ -73,15 +72,15 @@ class EventReferenceResolver @Inject constructor(
         val bridgeIdTargets = relayLadder.eventIdBridgeFallback
         val phases = ReferencePhaseBudget(
             steps = listOf(
-                id != null && !idSuppressed && idHintTargets.isNotEmpty(),
-                id != null && !idSuppressed && fallbackTargets.isNotEmpty(),
+                id != null && idHintTargets.isNotEmpty(),
+                id != null && fallbackTargets.isNotEmpty(),
                 id != null && bridgeIdTargets.isNotEmpty(),
             ).count { it } + if (target.address != null) 3 else 0,
         )
 
         // Phase 1: wire hints/source relay. Completion now means EOSE/timeout,
         // not merely that the coalescer dispatched the REQ.
-        if (id != null && !idSuppressed && idHintTargets.isNotEmpty()) {
+        if (id != null && idHintTargets.isNotEmpty()) {
             phases.run {
                 relayPool.fetchEventById(id, idHintTargets, bypassDedup = retry)
             }
@@ -89,7 +88,7 @@ class EventReferenceResolver @Inject constructor(
         }
 
         // Phase 2: cached/discovered author outbox plus curated read relays.
-        if (id != null && !idSuppressed && fallbackTargets.isNotEmpty()) {
+        if (id != null && fallbackTargets.isNotEmpty()) {
             phases.run {
                 relayPool.fetchEventsByIdsFromTargets(
                     eventIds = listOf(id),
