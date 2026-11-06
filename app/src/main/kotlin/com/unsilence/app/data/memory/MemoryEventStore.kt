@@ -3590,13 +3590,8 @@ class MemoryEventStore @Inject constructor(
             // Content filter: 1 = notes only, 2 = replies only.
             // kind-6 AND kind-16 reposts carry a rootId (the reposted event) and
             // must NOT be treated as replies — admit them to notes, exclude from replies.
-            val isRepostKind = event.kind == 6 || event.kind == 16
-            if (filter.contentFilter == 1 && !isRepostKind) {
-                if (event.replyToId != null || event.rootId != null) continue
-            }
-            if (filter.contentFilter == 2) {
-                if ((event.replyToId == null && event.rootId == null) || isRepostKind) continue
-            }
+            if (filter.contentFilter == 1 && !event.isNotesRowRoot()) continue
+            if (filter.contentFilter == 2 && event.isNotesRowRoot()) continue
             // Relay URL scoping — null or empty means no relay filter (all relays pass)
             if (!filter.relayUrls.isNullOrEmpty() && event.relaysSeen.none { it in filter.relayUrls }) continue
             result.add(event)
@@ -3674,7 +3669,7 @@ class MemoryEventStore @Inject constructor(
      * Returns the full scanned slice (roots + interleaved replies, muted included) so
      * the NOTES↔REPLIES toggle and mute-reactivity in feedRows still work.
      *
-     * "Displayable root" = (kind-6 OR no reply/root markers) AND isDisplayable(event).
+     * "Displayable root" = isNotesRowRoot() AND isDisplayable(event).
      * isDisplayable is injected by the caller (mute + sensitive-if-HIDE) so MES holds
      * no view state. Zero network: reads only events already in MES.
      */
@@ -3696,8 +3691,7 @@ class MemoryEventStore @Inject constructor(
             if (event.kind !in kinds) continue
             scanned++
             result.add(event)
-            val isRoot = event.kind == 6 || event.kind == 16 || (event.replyToId == null && event.rootId == null)
-            if (isRoot && isDisplayable(event)) displayable++
+            if (event.isNotesRowRoot() && isDisplayable(event)) displayable++
         }
         val bound = when { hitFloor -> "floor"; hitCap -> "cap"; else -> "exhausted" }
         Log.d("MES", "displayableFloor: ${result.size} events ($displayable displayable, $scanned scanned, " +

@@ -3,6 +3,7 @@ package com.unsilence.app.ui.profile
 import com.unsilence.app.data.memory.MuteList
 import com.unsilence.app.data.memory.NostrEvent
 import com.unsilence.app.data.memory.isMuted
+import com.unsilence.app.data.memory.isNotesRowRoot
 import com.unsilence.app.data.relay.PROFILE_NOTE_REPLY_EVENT_KINDS
 import com.unsilence.app.ui.feed.FeedContentFilter
 
@@ -15,18 +16,12 @@ internal fun matchesProfileContentFilter(
     event: NostrEvent,
     filter: FeedContentFilter,
 ): Boolean {
-    val isRepost = event.kind == 6 || event.kind == 16
     return when (filter) {
         FeedContentFilter.NOTES_ONLY ->
-            isRepost || (
-                event.kind != 1111 &&
-                    event.replyToId == null &&
-                    event.rootId == null
-                )
+            event.kind != 1111 && event.isNotesRowRoot()
         // NIP-22 addressable comments can carry only A/a coordinates, with no event id.
         FeedContentFilter.REPLIES_ONLY ->
-            event.kind == 1111 ||
-                (!isRepost && (event.replyToId != null || event.rootId != null))
+            event.kind == 1111 || !event.isNotesRowRoot()
     }
 }
 

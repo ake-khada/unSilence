@@ -17,6 +17,7 @@ import com.unsilence.app.data.memory.isMuted
 import com.unsilence.app.data.memory.MemoryEventStore
 import com.unsilence.app.data.memory.MuteList
 import com.unsilence.app.data.memory.NostrEvent
+import com.unsilence.app.data.memory.isNotesRowRoot
 import com.unsilence.app.data.memory.EventStats
 import com.unsilence.app.data.memory.ReactionInfo
 import com.unsilence.app.data.memory.SensitiveContentMode
@@ -1447,14 +1448,9 @@ class FeedViewModel @Inject constructor(
     }
 
     private fun matchesContentFilter(evt: NostrEvent, cf: FeedContentFilter): Boolean {
-        // kind-6 AND kind-16 reposts carry a rootId (the reposted event) and so look
-        // reply-like — they must count as roots for notes and be excluded from replies.
-        val isRepostKind = evt.kind == 6 || evt.kind == 16
         return when (cf) {
-            FeedContentFilter.NOTES_ONLY ->
-                isRepostKind || (evt.replyToId == null && evt.rootId == null)
-            FeedContentFilter.REPLIES_ONLY ->
-                !isRepostKind && (evt.replyToId != null || evt.rootId != null)
+            FeedContentFilter.NOTES_ONLY -> evt.isNotesRowRoot()
+            FeedContentFilter.REPLIES_ONLY -> !evt.isNotesRowRoot()
         }
     }
 

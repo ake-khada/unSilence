@@ -30,6 +30,10 @@ data class NostrEvent(
     val repostInfo: com.unsilence.app.data.model.RepostInfo? = null,
 )
 
+/** Notes-row selection, not protocol ancestry: reposts belong in Notes even with parent IDs. */
+internal fun NostrEvent.isNotesRowRoot(): Boolean =
+    kind == 6 || kind == 16 || (replyToId == null && rootId == null)
+
 data class ZapAggregate(val count: Int, val totalSats: Long) {
     companion object {
         val EMPTY = ZapAggregate(0, 0L)
