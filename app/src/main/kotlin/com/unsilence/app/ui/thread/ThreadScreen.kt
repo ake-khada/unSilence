@@ -18,7 +18,6 @@ import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.lazy.LazyColumn
 import com.unsilence.app.ui.common.AvatarLazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material3.HorizontalDivider
@@ -122,13 +121,12 @@ fun ThreadScreen(
     val pinnedShortcodes by actionsViewModel.pinnedEmojiShortcodes.collectAsStateWithLifecycle()
     val pinnedEmojis by actionsViewModel.pinnedEmojis.collectAsStateWithLifecycle()
     val pollActions = remember(actionsViewModel) { actionsViewModel.pollActionCallbacks() }
-    val listState = rememberLazyListState()
     val cardWidthPx = LocalWindowInfo.current.containerSize.width
-    var didScrollToFocus by rememberSaveable(eventId) { mutableStateOf(false) }
     var revealedSpamClusters by rememberSaveable(eventId) { mutableStateOf(emptySet<String>()) }
     val threadItems = remember(state.replies, revealedSpamClusters) {
         replyListItems(state.replies, revealedSpamClusters)
     }
+    val listState = rememberThreadListState(eventId, state, threadItems)
 
     var autoArticleHandled by rememberSaveable(eventId) { mutableStateOf(false) }
     ResumedEffect(openArticleOnLoad, state.focusedNote?.id) {
@@ -259,20 +257,6 @@ fun ThreadScreen(
         actionsViewModel.actionError.collect { showSnackbar(it) }
     }
 
-    // ── Scroll to focused reply (when thread opened via a deep reply) ────
-    LaunchedEffect(state.focusedReplyId, threadItems, state.focusedNote?.id) {
-        val focusId = state.focusedReplyId ?: return@LaunchedEffect
-        if (didScrollToFocus) return@LaunchedEffect
-        val replyIdx = threadItems.indexOfFirst { item ->
-            item is ReplyListItem.Reply && item.depthRow.row.id == focusId
-        }
-        if (replyIdx >= 0) {
-            val leadingItems = (if (state.focusedNote != null) 1 else 0) +
-                (if (state.replies.isNotEmpty()) 1 else 0)
-            listState.scrollToItem(leadingItems + replyIdx)
-            didScrollToFocus = true
-        }
-    }
 
     Box(
         modifier = Modifier
