@@ -51,12 +51,12 @@ class FollowBatchPublisher @Inject constructor(
         }.also(::logResult)
     }
 
-    /** Toggles one profile through the same guarded kind-3 transaction. */
-    internal suspend fun toggleFollow(targetPubkey: String): FollowPublishResult {
+    /** Applies explicit profile intent through the same guarded kind-3 transaction. */
+    internal suspend fun setFollowing(targetPubkey: String, following: Boolean): FollowPublishResult {
         val ownPubkey = keyManager.getPublicKeyHex()
             ?: return FollowPublishResult.AccountUnavailable
         return refreshThenPublish(ownPubkey) { existing ->
-            if (targetPubkey in existing) existing - targetPubkey else existing + targetPubkey
+            followSelection(existing, targetPubkey, following)
         }.also(::logResult)
     }
 

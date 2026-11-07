@@ -28,11 +28,7 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.VolumeOff
 import androidx.compose.material.icons.filled.Flag
 import androidx.compose.material.icons.filled.MoreVert
-import androidx.compose.material.icons.filled.PersonAdd
-import androidx.compose.material.icons.filled.PersonRemove
 import androidx.compose.material.icons.outlined.ContentCopy
-import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
@@ -66,7 +62,6 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import coil3.compose.AsyncImage
 import com.unsilence.app.data.repository.MuteResult
 import com.unsilence.app.data.memory.WotLookup
 import com.unsilence.app.ui.common.rememberAvatarImageRequest
@@ -80,7 +75,6 @@ import com.unsilence.app.ui.common.LocalNip05VerificationController
 import com.unsilence.app.ui.common.LocalShowSnackbar
 import com.unsilence.app.ui.common.ShimmerNoteCard
 import com.unsilence.app.ui.common.tabSwipe
-import com.unsilence.app.ui.feed.toCompactSats
 import com.unsilence.app.ui.feed.FullScreenVideoDialog
 import com.unsilence.app.ui.feed.NoteActionsViewModel
 import com.unsilence.app.ui.feed.NostrRichText
@@ -107,7 +101,6 @@ import androidx.compose.material.icons.outlined.Chat
 import com.unsilence.app.ui.common.EmptyState
 import com.unsilence.app.ui.theme.AppType
 import com.unsilence.app.ui.theme.Black
-import com.unsilence.app.ui.theme.Mint
 import com.unsilence.app.ui.theme.Sizing
 import com.unsilence.app.ui.theme.Spacing
 import com.unsilence.app.ui.theme.Surface1
@@ -169,10 +162,9 @@ fun UserProfileScreen(
     val isNwcConfigured = actionsViewModel.isNwcConfigured
     val clipboard        = LocalClipboardManager.current
     val showSnackbar     = LocalShowSnackbar.current
-    val isFollowing    by viewModel.isFollowing.collectAsStateWithLifecycle(initialValue = false)
+    val followState    by viewModel.followState.collectAsStateWithLifecycle()
     val followLoading  by viewModel.followLoading.collectAsStateWithLifecycle()
     val followerCount  by viewModel.followerCount.collectAsStateWithLifecycle()
-    val followingCount by viewModel.followingCount.collectAsStateWithLifecycle()
     val relayCount     by viewModel.relayCount.collectAsStateWithLifecycle()
     val isMuted        by viewModel.isMuted.collectAsStateWithLifecycle()
     val isOwnProfile   by viewModel.isOwnProfile.collectAsStateWithLifecycle()
@@ -393,227 +385,202 @@ fun UserProfileScreen(
 
             // ── Profile header ────────────────────────────────────────────────
             item {
-                // Banner + avatar overlap
-                Box(
-                    modifier         = Modifier
-                        .fillMaxWidth()
-                        .height(BANNER_HEIGHT + PROFILE_AVATAR_SIZE / 2),
-                    contentAlignment = Alignment.BottomCenter,
-                ) {
+                ProfileHeaderStack(Modifier.fillMaxWidth().padding(bottom = Spacing.small)) {
+                    // Banner + avatar overlap
                     Box(
-                        modifier = Modifier
+                        modifier         = Modifier
                             .fillMaxWidth()
-                            .height(BANNER_HEIGHT)
-                            .align(Alignment.TopStart),
+                            .height(BANNER_HEIGHT + PROFILE_AVATAR_SIZE / 2),
+                        contentAlignment = Alignment.BottomCenter,
                     ) {
-                        val bannerUrl = user?.banner
-                        if (!bannerUrl.isNullOrBlank()) {
-                            val bannerDensity = LocalDensity.current
-                            val bannerWidthPx = LocalWindowInfo.current.containerSize.width.coerceAtLeast(1)
-                            val bannerHeightPx = with(bannerDensity) { 200.dp.roundToPx() }
-                            AsyncImage(
-                                model              = rememberSizedImageRequest(bannerUrl, bannerWidthPx, bannerHeightPx),
-                                contentDescription = null,
-                                contentScale       = ContentScale.Crop,
-                                modifier           = Modifier.fillMaxSize(),
-                            )
-                        } else {
-                            Box(
-                                modifier = Modifier
-                                    .fillMaxSize()
-                                    .background(Surface1),
-                            )
-                        }
-                    }
-
-                    val avatarBorderColor = if (user?.banner.isNullOrBlank())
-                        Color.White.copy(alpha = 0.2f) else Black
-                    Box(
-                        modifier = Modifier
-                            .size(PROFILE_AVATAR_SIZE)
-                            .clip(CircleShape)
-                            .border(1.dp, avatarBorderColor, CircleShape),
-                    ) {
-                        if (pubkeyHex != null) {
-                            IdentIcon(pubkey = pubkeyHex!!, modifier = Modifier.fillMaxSize())
-                        }
-                        if (!user?.picture.isNullOrBlank()) {
-                            AvatarAsyncImage(
-                                model              = rememberAvatarImageRequest(user?.picture, 85.dp, pubkey),
-                                contentDescription = null,
-                                contentScale       = ContentScale.Crop,
-                                modifier           = Modifier.fillMaxSize(),
-                            )
-                        }
-                    }
-                }
-
-                Spacer(Modifier.height(Spacing.small))
-
-                if (displayName != null) {
-                    val risk = impersonationRisk
-                    if (risk != null) {
-                        Row(
+                        Box(
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .padding(horizontal = Spacing.medium),
-                            verticalAlignment = Alignment.CenterVertically,
+                                .height(BANNER_HEIGHT)
+                                .align(Alignment.TopStart),
                         ) {
-                            Spacer(Modifier.width(PROFILE_IMPERSONATION_INLINE_SLOT_WIDTH))
-                            Text(
-                                text       = displayName,
-                                color      = Color.White,
-                                style = AppTextStyles.heading,
-                                fontWeight = FontWeight.Bold,
-                                textAlign  = TextAlign.Center,
-                                maxLines   = 1,
-                                overflow   = TextOverflow.Ellipsis,
-                                modifier   = Modifier.weight(1f),
-                            )
-                            Box(
-                                modifier = Modifier.width(PROFILE_IMPERSONATION_INLINE_SLOT_WIDTH),
-                                contentAlignment = Alignment.CenterStart,
-                            ) {
-                                WotImpersonationBadge(risk = risk)
+                            val bannerUrl = user?.banner
+                            if (!bannerUrl.isNullOrBlank()) {
+                                val bannerDensity = LocalDensity.current
+                                val bannerWidthPx = LocalWindowInfo.current.containerSize.width.coerceAtLeast(1)
+                                val bannerHeightPx = with(bannerDensity) { 200.dp.roundToPx() }
+                                ProfileBannerImage(
+                                    model = rememberSizedImageRequest(bannerUrl, bannerWidthPx, bannerHeightPx),
+                                    modifier = Modifier.fillMaxSize(),
+                                )
+                            } else {
+                                Box(
+                                    modifier = Modifier
+                                        .fillMaxSize()
+                                        .background(Surface1),
+                                )
                             }
                         }
-                    } else {
-                        Text(
-                            text       = displayName,
-                            color      = Color.White,
-                            style = AppTextStyles.heading,
-                            fontWeight = FontWeight.Bold,
-                            textAlign  = TextAlign.Center,
-                            maxLines   = 1,
-                            overflow   = TextOverflow.Ellipsis,
-                            modifier   = Modifier
+
+                        val avatarBorderColor = if (user?.banner.isNullOrBlank())
+                            Color.White.copy(alpha = 0.2f) else Black
+                        Box(
+                            modifier = Modifier
+                                .size(PROFILE_AVATAR_SIZE)
+                                .clip(CircleShape)
+                                .border(1.dp, avatarBorderColor, CircleShape),
+                        ) {
+                            if (pubkeyHex != null) {
+                                IdentIcon(pubkey = pubkeyHex!!, modifier = Modifier.fillMaxSize())
+                            }
+                            if (!user?.picture.isNullOrBlank()) {
+                                AvatarAsyncImage(
+                                    model              = rememberAvatarImageRequest(user?.picture, 85.dp, pubkey),
+                                    contentDescription = null,
+                                    contentScale       = ContentScale.Crop,
+                                    modifier           = Modifier.fillMaxSize(),
+                                )
+                            }
+                        }
+                    }
+
+                    if (displayName != null) {
+                        val risk = impersonationRisk
+                        if (risk != null) {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = Spacing.medium),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                Spacer(Modifier.width(PROFILE_IMPERSONATION_INLINE_SLOT_WIDTH))
+                                ProfileDisplayName(
+                                    name = displayName,
+                                    isFollowing = !isOwnProfile && followState.isFollowing == true,
+                                    modifier = Modifier.weight(1f),
+                                )
+                                Box(
+                                    modifier = Modifier.width(PROFILE_IMPERSONATION_INLINE_SLOT_WIDTH),
+                                    contentAlignment = Alignment.CenterStart,
+                                ) {
+                                    WotImpersonationBadge(risk = risk)
+                                }
+                            }
+                        } else {
+                            ProfileDisplayName(
+                                name = displayName,
+                                isFollowing = !isOwnProfile && followState.isFollowing == true,
+                                modifier = Modifier.fillMaxWidth().padding(horizontal = Spacing.medium),
+                            )
+                        }
+                    }
+
+                    // npub — tappable row with copy icon
+                    if (npubShort != null) {
+                        Row(
+                            modifier = Modifier
+                                .clickable {
+                                    viewModel.npub?.let { full ->
+                                        clipboard.setText(AnnotatedString(full))
+                                        showSnackbar("Copied npub")
+                                    }
+                                }
+                                .padding(horizontal = Spacing.medium),
+                            verticalAlignment     = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.Center,
+                        ) {
+                            Text(
+                                text     = npubShort,
+                                color    = TextSecondary,
+                                fontSize = 10.5.sp,
+                                fontFamily = FontFamily.Monospace,
+                            )
+                            if (scoredWotInline != null) {
+                                Text(
+                                    text = " · ",
+                                    color = Text3,
+                                    fontSize = 10.5.sp,
+                                    fontFamily = FontFamily.Monospace,
+                                    maxLines = 1,
+                                )
+                                WotInlineLabel(
+                                    assertion = scoredWotInline.assertion,
+                                    onClick = { showWotBreakdown = true },
+                                )
+                            }
+                            Spacer(Modifier.width(4.dp))
+                            Icon(
+                                imageVector        = Icons.Outlined.ContentCopy,
+                                contentDescription = "Copy npub",
+                                tint               = TextSecondary,
+                                modifier           = Modifier.size(14.dp),
+                            )
+                        }
+
+                    }
+
+                    val nostrAddress = remember(user?.nip05) {
+                        selfDeclaredNostrAddressPresentation(user?.nip05, NostrAddressDisplay.FULL)
+                    }
+                    if (nostrAddress != null) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            SelfDeclaredNostrAddressText(
+                                pubkey = pubkeyHex.orEmpty(),
+                                presentation = nostrAddress,
+                                fontSize = AppType.bodySmall,
+                            )
+                        }
+                    }
+
+                    ProfileLightningAddress(user?.lud16)
+
+                    val about = user?.about?.takeIf { it.isNotBlank() }
+                    if (about != null) {
+                        NostrRichText(
+                            content       = about,
+                            kind          = 0, // Profile metadata stays plain; note syntax is kind-1/1111 only.
+                            lookupProfile = actionsViewModel::lookupProfile,
+                            onAuthorClick = interceptedAuthorClick,
+                            onHashtagClick = onHashtagClick,
+                            onTextClick   = {},
+                            maxLines      = 3,
+                            overflow      = TextOverflow.Ellipsis,
+                            textAlign     = TextAlign.Center,
+                            modifier      = Modifier
                                 .fillMaxWidth()
                                 .padding(horizontal = Spacing.medium),
                         )
                     }
-                    Spacer(Modifier.height(Spacing.micro))
-                }
 
-                // npub — tappable row with copy icon
-                if (npubShort != null) {
+                    // Following / Followers / Relays identity facts
+
                     Row(
-                        modifier = Modifier
-                            .clickable {
-                                viewModel.npub?.let { full ->
-                                    clipboard.setText(AnnotatedString(full))
-                                    showSnackbar("Copied npub")
-                                }
-                            }
-                            .padding(horizontal = Spacing.medium, vertical = 2.dp),
-                        verticalAlignment     = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.Center,
-                    ) {
-                        Text(
-                            text     = npubShort,
-                            color    = TextSecondary,
-                            fontSize = 10.5.sp,
-                            fontFamily = FontFamily.Monospace,
-                        )
-                        if (scoredWotInline != null) {
-                            Text(
-                                text = " · ",
-                                color = Text3,
-                                fontSize = 10.5.sp,
-                                fontFamily = FontFamily.Monospace,
-                                maxLines = 1,
-                            )
-                            WotInlineLabel(
-                                assertion = scoredWotInline.assertion,
-                                onClick = { showWotBreakdown = true },
-                            )
-                        }
-                        Spacer(Modifier.width(4.dp))
-                        Icon(
-                            imageVector        = Icons.Outlined.ContentCopy,
-                            contentDescription = "Copy npub",
-                            tint               = TextSecondary,
-                            modifier           = Modifier.size(14.dp),
-                        )
-                    }
-                    Spacer(Modifier.height(Spacing.micro))
-                }
-
-                val nostrAddress = remember(user?.nip05) {
-                    selfDeclaredNostrAddressPresentation(user?.nip05, NostrAddressDisplay.FULL)
-                }
-                if (nostrAddress != null) {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        modifier          = Modifier.padding(bottom = Spacing.micro),
-                    ) {
-                        SelfDeclaredNostrAddressText(
-                            pubkey = pubkeyHex.orEmpty(),
-                            presentation = nostrAddress,
-                            fontSize = AppType.bodySmall,
-                        )
-                    }
-                }
-
-                val about = user?.about?.takeIf { it.isNotBlank() }
-                if (about != null) {
-                    NostrRichText(
-                        content       = about,
-                        kind          = 0, // Profile metadata stays plain; note syntax is kind-1/1111 only.
-                        lookupProfile = actionsViewModel::lookupProfile,
-                        onAuthorClick = interceptedAuthorClick,
-                        onHashtagClick = onHashtagClick,
-                        onTextClick   = {},
-                        maxLines      = 3,
-                        overflow      = TextOverflow.Ellipsis,
-                        textAlign     = TextAlign.Center,
-                        modifier      = Modifier
+                        modifier              = Modifier
                             .fillMaxWidth()
                             .padding(horizontal = Spacing.medium),
-                    )
-                    Spacer(Modifier.height(Spacing.micro))
-                }
-
-                // Following / Followers / Relays identity facts
-                Spacer(Modifier.height(Spacing.small))
-                Row(
-                    modifier              = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = Spacing.medium),
-                    horizontalArrangement = Arrangement.Center,
-                ) {
-                    StatLabel(
-                        label = "Following",
-                        value = followingCount?.toString() ?: "—",
-                        onClick = { onConnectionsClick(ConnectionsTab.Following) },
-                    )
-                    Spacer(Modifier.size(Spacing.large))
-                    StatLabel(
-                        label = "Followers",
-                        value = formatFollowerCount(followerCount),
-                        onClick = { onConnectionsClick(ConnectionsTab.Followers) },
-                    )
-                    Spacer(Modifier.size(Spacing.large))
-                    StatLabel(
-                        label = "Relays",
-                        value = relayCount?.toString(),
-                        onClick = onRelaysClick,
-                    )
-                }
-                (profileWotLookup as? WotLookup.Scored)
-                    ?.assertion
-                    ?.verifiedFollowers
-                    ?.let { verified ->
-                        Spacer(Modifier.height(Spacing.micro))
-                        Text(
-                            text = "${verified.toCompactSats()} verified in your grapevine",
-                            color = Text3,
-                            style = AppTextStyles.caption,
-                            modifier = Modifier.fillMaxWidth(),
-                            textAlign = TextAlign.Center,
+                        horizontalArrangement = Arrangement.Center,
+                    ) {
+                        StatLabel(
+                            label = "Following",
+                            value = followState.followingCount?.toString() ?: "—",
+                            onClick = { onConnectionsClick(ConnectionsTab.Following) },
+                        )
+                        Spacer(Modifier.size(Spacing.large))
+                        StatLabel(
+                            label = "Followers",
+                            value = formatFollowerCount(followerCount),
+                            onClick = { onConnectionsClick(ConnectionsTab.Followers) },
+                        )
+                        Spacer(Modifier.size(Spacing.large))
+                        StatLabel(
+                            label = "Relays",
+                            value = relayCount?.toString(),
+                            onClick = onRelaysClick,
                         )
                     }
+                    ProfileSocialContext(
+                        verifiedFollowers = (profileWotLookup as? WotLookup.Scored)?.assertion?.verifiedFollowers,
+                        relationship = followState.relationship.takeUnless { isOwnProfile },
+                    )
 
-                Spacer(Modifier.height(Spacing.medium))
+                }
             }
 
             // ── Profile tabs ──────────────────────────────────────────────────
@@ -688,54 +655,14 @@ fun UserProfileScreen(
                                 modifier           = Modifier.size(22.dp),
                             )
                         }
-                        DropdownMenu(
-                            expanded         = showProfileActions,
+                        ProfileActionsMenu(
+                            subject = pubkeyHex,
+                            state = followState,
+                            loading = followLoading,
+                            expanded = showProfileActions,
                             onDismissRequest = { showProfileActions = false },
-                            modifier         = Modifier.background(Black),
+                            onSetFollowing = viewModel::setFollowing,
                         ) {
-                            DropdownMenuItem(
-                                enabled = !followLoading,
-                                text = {
-                                    Text(
-                                        text = when {
-                                            followLoading -> "Updating…"
-                                            isFollowing -> "Unfollow"
-                                            else -> "Follow"
-                                        },
-                                        color = if (!isFollowing) Mint else TextSecondary,
-                                        style = AppTextStyles.body,
-                                        fontWeight = if (!isFollowing) {
-                                            FontWeight.SemiBold
-                                        } else {
-                                            FontWeight.Normal
-                                        },
-                                    )
-                                },
-                                leadingIcon = {
-                                    if (followLoading) {
-                                        CircularProgressIndicator(
-                                            color = Mint,
-                                            strokeWidth = 2.dp,
-                                            modifier = Modifier.size(18.dp),
-                                        )
-                                    } else {
-                                        Icon(
-                                            imageVector = if (isFollowing) {
-                                                Icons.Filled.PersonRemove
-                                            } else {
-                                                Icons.Filled.PersonAdd
-                                            },
-                                            contentDescription = null,
-                                            tint = if (!isFollowing) Mint else TextSecondary,
-                                            modifier = Modifier.size(20.dp),
-                                        )
-                                    }
-                                },
-                                onClick = {
-                                    showProfileActions = false
-                                    viewModel.toggleFollow()
-                                },
-                            )
                             DropdownMenuItem(
                                 text = {
                                     Text(

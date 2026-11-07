@@ -9,6 +9,34 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class FollowPublishCoordinatorTest {
+    @Test fun `stale Follow intent keeps already-followed target without signing`() = runTest {
+        val original = FollowsSnapshot(setOf(TARGET, "alice"), createdAt = 10L)
+        val harness = Harness(original)
+        val result = harness.coordinator().publishMutation(OWN) { followSelection(it, TARGET, true) }
+        assertEquals(FollowPublishResult.Success(original.follows), result)
+        assertEquals(original, harness.snapshot)
+        assertEquals(0, harness.signCalls)
+        assertEquals(0, harness.publishCalls)
+    }
+
+    @Test fun `stale Unfollow intent never re-adds absent target`() = runTest {
+        val original = FollowsSnapshot(setOf("alice"), createdAt = 10L)
+        val harness = Harness(original)
+        harness.coordinator().publishMutation(OWN) { followSelection(it, TARGET, false) }
+        assertEquals(original, harness.snapshot)
+        assertEquals(0, harness.signCalls)
+        assertEquals(0, harness.publishCalls)
+    }
+
+    @Test fun `confirmed Unfollow removes only intended target through existing transaction`() = runTest {
+        val harness = Harness(FollowsSnapshot(setOf(TARGET, "alice"), createdAt = 10L))
+        val result = harness.coordinator().publishMutation(OWN) { followSelection(it, TARGET, false) }
+        assertEquals(FollowPublishResult.Success(setOf("alice")), result)
+        assertEquals(setOf("alice"), harness.snapshot?.follows)
+        assertEquals(1, harness.publishCalls)
+        assertEquals(1, harness.persistCalls)
+    }
+
     @Test
     fun `unresolved follows do not sign publish or mutate`() = runTest {
         val harness = Harness(initial = null)

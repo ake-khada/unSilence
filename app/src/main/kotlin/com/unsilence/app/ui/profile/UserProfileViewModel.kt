@@ -272,15 +272,20 @@ class UserProfileViewModel @Inject constructor(
         .flowOn(Dispatchers.Default)
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), FollowerCount.Unknown)
 
-    /** Exact following count when the subject's kind-3 is resolved; null while unknown. */
-    val followingCount: StateFlow<Long?> = combine(
+    /** One stored-list projection for count, relationship and the follow action. */
+    internal val followState: StateFlow<ProfileFollowState> = combine(
         _pubkeyHex,
         memoryEventStore.followsSignalFlow,
     ) { target, _ ->
-        target?.let { memoryEventStore.getFollows(it)?.size?.toLong() }
+        profileFollowState(
+            target = target,
+            viewer = myPubkey,
+            targetFollows = target?.let(memoryEventStore::getFollows),
+            viewerFollows = myPubkey?.let(memoryEventStore::getFollows),
+        )
     }.distinctUntilChanged()
         .flowOn(Dispatchers.Default)
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), ProfileFollowState())
 
     val isOwnProfile: StateFlow<Boolean> = _pubkeyHex
         .map { target -> target != null && target == myPubkey }
@@ -292,18 +297,6 @@ class UserProfileViewModel @Inject constructor(
     ) { target, muteList ->
         target != null && muteList.mutesPubkey(target)
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), false)
-
-    /** Whether the logged-in user follows the viewed pubkey. */
-    @OptIn(ExperimentalCoroutinesApi::class)
-    val isFollowing: Flow<Boolean> = if (myPubkey != null) {
-        _pubkeyHex
-            .filterNotNull()
-            .flatMapLatest { target ->
-                memoryEventStore.followsFlow(myPubkey).map { target in it }
-            }
-    } else {
-        MutableStateFlow(false)
-    }
 
     val followLoading = MutableStateFlow(false)
     private val followFeedbackChannel = Channel<String>(capacity = Channel.BUFFERED)
@@ -521,7 +514,7 @@ class UserProfileViewModel @Inject constructor(
 
     // ── Follow / Unfollow ────────────────────────────────────────────────
 
-    fun toggleFollow() {
+    fun setFollowing(following: Boolean) {
         val targetPubkey = _pubkeyHex.value ?: return
         if (myPubkey == null) return
         if (followLoading.value) return
@@ -529,7 +522,7 @@ class UserProfileViewModel @Inject constructor(
 
         viewModelScope.launch(Dispatchers.IO) {
             try {
-                val result = followBatchPublisher.toggleFollow(targetPubkey)
+                val result = followBatchPublisher.setFollowing(targetPubkey, following)
                 followFeedbackChannel.send(profileFollowFeedback(result, targetPubkey))
             } finally {
                 followLoading.value = false

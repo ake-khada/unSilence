@@ -94,3 +94,7 @@ internal class FollowPublishCoordinator(
         )
     }
 }
+
+/** A stale action may be a no-op, but must never reverse the user's chosen intent. */
+internal fun followSelection(existing: Set<String>, target: String, following: Boolean): Set<String> =
+    if (following) existing + target else existing - target

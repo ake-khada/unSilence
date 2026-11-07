@@ -67,7 +67,6 @@ import androidx.compose.ui.unit.sp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.compose.LifecycleResumeEffect
-import coil3.compose.AsyncImage
 import com.unsilence.app.ui.common.rememberAvatarImageRequest
 import com.unsilence.app.ui.common.rememberSizedImageRequest
 import com.unsilence.app.data.memory.FeedRow
@@ -323,192 +322,186 @@ fun ProfileScreen(
 
             // ── Profile header ───────────────────────────────────────────────
             item {
-                // Banner + avatar overlap composite.
-                Box(
-                    modifier         = Modifier
-                        .fillMaxWidth()
-                        .height(BANNER_HEIGHT + PROFILE_AVATAR_SIZE / 2),
-                    contentAlignment = Alignment.BottomCenter,
-                ) {
-                    // Banner
+                ProfileHeaderStack(Modifier.fillMaxWidth().padding(bottom = Spacing.small)) {
+                    // Banner + avatar overlap composite.
                     Box(
-                        modifier = Modifier
+                        modifier         = Modifier
                             .fillMaxWidth()
-                            .height(BANNER_HEIGHT)
-                            .align(Alignment.TopStart),
+                            .height(BANNER_HEIGHT + PROFILE_AVATAR_SIZE / 2),
+                        contentAlignment = Alignment.BottomCenter,
                     ) {
-                        val bannerUrl = user?.banner
-                        if (!bannerUrl.isNullOrBlank()) {
-                            val bannerDensity = LocalDensity.current
-                            val bannerWidthPx = LocalWindowInfo.current.containerSize.width.coerceAtLeast(1)
-                            val bannerHeightPx = with(bannerDensity) { 200.dp.roundToPx() }
-                            AsyncImage(
-                                model              = rememberSizedImageRequest(bannerUrl, bannerWidthPx, bannerHeightPx),
-                                contentDescription = null,
-                                contentScale       = ContentScale.Crop,
-                                modifier           = Modifier.fillMaxSize(),
-                            )
-                        } else {
-                            Box(
-                                modifier = Modifier
-                                    .fillMaxSize()
-                                    .background(Surface1),
-                            )
+                        // Banner
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(BANNER_HEIGHT)
+                                .align(Alignment.TopStart),
+                        ) {
+                            val bannerUrl = user?.banner
+                            if (!bannerUrl.isNullOrBlank()) {
+                                val bannerDensity = LocalDensity.current
+                                val bannerWidthPx = LocalWindowInfo.current.containerSize.width.coerceAtLeast(1)
+                                val bannerHeightPx = with(bannerDensity) { 200.dp.roundToPx() }
+                                ProfileBannerImage(
+                                    model = rememberSizedImageRequest(bannerUrl, bannerWidthPx, bannerHeightPx),
+                                    modifier = Modifier.fillMaxSize(),
+                                )
+                            } else {
+                                Box(
+                                    modifier = Modifier
+                                        .fillMaxSize()
+                                        .background(Surface1),
+                                )
+                            }
                         }
+
+                        // Avatar overlapping banner bottom
+                        val avatarBorderColor = if (user?.banner.isNullOrBlank())
+                            Color.White.copy(alpha = 0.2f) else Black
+                        ProfileAvatar(
+                            pubkeyHex  = viewModel.pubkeyHex,
+                            pictureUrl = user?.picture,
+                            modifier   = Modifier
+                                .size(PROFILE_AVATAR_SIZE)
+                                .clip(CircleShape)
+                                .border(1.dp, avatarBorderColor, CircleShape),
+                        )
                     }
 
-                    // Avatar overlapping banner bottom
-                    val avatarBorderColor = if (user?.banner.isNullOrBlank())
-                        Color.White.copy(alpha = 0.2f) else Black
-                    ProfileAvatar(
-                        pubkeyHex  = viewModel.pubkeyHex,
-                        pictureUrl = user?.picture,
-                        modifier   = Modifier
-                            .size(PROFILE_AVATAR_SIZE)
-                            .clip(CircleShape)
-                            .border(1.dp, avatarBorderColor, CircleShape),
-                    )
-                }
-
-                Spacer(Modifier.height(Spacing.small))
-
-                // Display name
-                if (displayName != null) {
-                    Text(
-                        text       = displayName,
-                        color      = Color.White,
-                        style = AppTextStyles.heading,
-                        fontWeight = FontWeight.Bold,
-                        textAlign  = TextAlign.Center,
-                        maxLines   = 1,
-                        overflow   = TextOverflow.Ellipsis,
-                        modifier   = Modifier
-                            .fillMaxWidth()
-                            .padding(horizontal = Spacing.medium),
-                    )
-                    Spacer(Modifier.height(Spacing.micro))
-                }
-
-                // npub — tappable row with copy icon
-                if (npubShort != null) {
-                    Row(
-                        modifier = Modifier
-                            .clickable {
-                                viewModel.npub?.let { full ->
-                                    clipboard.setText(AnnotatedString(full))
-                                    showSnackbar("Copied npub")
-                                }
-                            }
-                            .padding(horizontal = Spacing.medium, vertical = 2.dp),
-                        verticalAlignment     = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.Center,
-                    ) {
+                    // Display name
+                    if (displayName != null) {
                         Text(
-                            text     = npubShort,
-                            color    = TextSecondary,
-                            fontSize = 10.5.sp,
-                            fontFamily = FontFamily.Monospace,
+                            text       = displayName,
+                            color      = Color.White,
+                            style = AppTextStyles.heading,
+                            fontWeight = FontWeight.Bold,
+                            textAlign  = TextAlign.Center,
+                            maxLines   = 1,
+                            overflow   = TextOverflow.Ellipsis,
+                            modifier   = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = Spacing.medium),
                         )
-                        if (scoredWotInline != null) {
+                    }
+
+                    // npub — tappable row with copy icon
+                    if (npubShort != null) {
+                        Row(
+                            modifier = Modifier
+                                .clickable {
+                                    viewModel.npub?.let { full ->
+                                        clipboard.setText(AnnotatedString(full))
+                                        showSnackbar("Copied npub")
+                                    }
+                                }
+                                .padding(horizontal = Spacing.medium),
+                            verticalAlignment     = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.Center,
+                        ) {
                             Text(
-                                text = " · ",
-                                color = Text3,
+                                text     = npubShort,
+                                color    = TextSecondary,
                                 fontSize = 10.5.sp,
                                 fontFamily = FontFamily.Monospace,
-                                maxLines = 1,
                             )
-                            WotInlineLabel(
-                                assertion = scoredWotInline.assertion,
-                                onClick = { showWotBreakdown = true },
+                            if (scoredWotInline != null) {
+                                Text(
+                                    text = " · ",
+                                    color = Text3,
+                                    fontSize = 10.5.sp,
+                                    fontFamily = FontFamily.Monospace,
+                                    maxLines = 1,
+                                )
+                                WotInlineLabel(
+                                    assertion = scoredWotInline.assertion,
+                                    onClick = { showWotBreakdown = true },
+                                )
+                            }
+                            Spacer(Modifier.width(4.dp))
+                            Icon(
+                                imageVector        = Icons.Outlined.ContentCopy,
+                                contentDescription = "Copy npub",
+                                tint               = TextSecondary,
+                                modifier           = Modifier.size(14.dp),
                             )
                         }
-                        Spacer(Modifier.width(4.dp))
-                        Icon(
-                            imageVector        = Icons.Outlined.ContentCopy,
-                            contentDescription = "Copy npub",
-                            tint               = TextSecondary,
-                            modifier           = Modifier.size(14.dp),
+
+                    }
+
+                    val nostrAddress = remember(user?.nip05) {
+                        selfDeclaredNostrAddressPresentation(user?.nip05, NostrAddressDisplay.FULL)
+                    }
+                    if (nostrAddress != null) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            SelfDeclaredNostrAddressText(
+                                pubkey = viewModel.pubkeyHex.orEmpty(),
+                                presentation = nostrAddress,
+                                fontSize = AppType.bodySmall,
+                            )
+                        }
+                    }
+
+                    ProfileLightningAddress(user?.lud16)
+
+                    val about = user?.about?.takeIf { it.isNotBlank() }
+                    if (about != null) {
+                        NostrRichText(
+                            content       = about,
+                            kind          = 0, // Profile metadata stays plain; note syntax is kind-1/1111 only.
+                            lookupProfile = actionsViewModel::lookupProfile,
+                            onAuthorClick = interceptedAuthorClick,
+                            onHashtagClick = onHashtagClick,
+                            onTextClick   = {},
+                            maxLines      = 3,
+                            overflow      = TextOverflow.Ellipsis,
+                            textAlign     = TextAlign.Center,
+                            modifier      = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = Spacing.medium),
                         )
                     }
-                    Spacer(Modifier.height(Spacing.micro))
-                }
 
-                val nostrAddress = remember(user?.nip05) {
-                    selfDeclaredNostrAddressPresentation(user?.nip05, NostrAddressDisplay.FULL)
-                }
-                if (nostrAddress != null) {
+                    // Following / Followers / Relays identity facts
                     Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        modifier          = Modifier.padding(bottom = Spacing.micro),
-                    ) {
-                        SelfDeclaredNostrAddressText(
-                            pubkey = viewModel.pubkeyHex.orEmpty(),
-                            presentation = nostrAddress,
-                            fontSize = AppType.bodySmall,
-                        )
-                    }
-                }
-
-                // Bio / about (with inline @mention resolution)
-                val about = user?.about?.takeIf { it.isNotBlank() }
-                if (about != null) {
-                    NostrRichText(
-                        content       = about,
-                        kind          = 0, // Profile metadata stays plain; note syntax is kind-1/1111 only.
-                        lookupProfile = actionsViewModel::lookupProfile,
-                        onAuthorClick = interceptedAuthorClick,
-                        onHashtagClick = onHashtagClick,
-                        onTextClick   = {},
-                        maxLines      = 3,
-                        overflow      = TextOverflow.Ellipsis,
-                        textAlign     = TextAlign.Center,
-                        modifier      = Modifier
+                        modifier              = Modifier
                             .fillMaxWidth()
                             .padding(horizontal = Spacing.medium),
-                    )
-                    Spacer(Modifier.height(Spacing.micro))
-                }
-
-                // Following / Followers / Relays identity facts
-                Row(
-                    modifier              = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = Spacing.medium),
-                    horizontalArrangement = Arrangement.Center,
-                ) {
-                    StatLabel(
-                        label = "Following",
-                        value = followingCount?.toString() ?: "—",
-                        onClick = { onConnectionsClick(ConnectionsTab.Following) },
-                    )
-                    Spacer(Modifier.size(Spacing.large))
-                    StatLabel(
-                        label = "Followers",
-                        value = formatFollowerCount(followerCount),
-                        onClick = { onConnectionsClick(ConnectionsTab.Followers) },
-                    )
-                    Spacer(Modifier.size(Spacing.large))
-                    StatLabel(
-                        label = "Relays",
-                        value = relayCount?.toString(),
-                        onClick = onRelaysClick,
-                    )
-                }
-                (profileWotLookup as? WotLookup.Scored)
-                    ?.assertion
-                    ?.verifiedFollowers
-                    ?.let { verified ->
-                        Spacer(Modifier.height(Spacing.micro))
-                        Text(
-                            text = "${verified.toCompactSats()} verified in your grapevine",
-                            color = Text3,
-                            style = AppTextStyles.caption,
-                            modifier = Modifier.fillMaxWidth(),
-                            textAlign = TextAlign.Center,
+                        horizontalArrangement = Arrangement.Center,
+                    ) {
+                        StatLabel(
+                            label = "Following",
+                            value = followingCount?.toString() ?: "—",
+                            onClick = { onConnectionsClick(ConnectionsTab.Following) },
+                        )
+                        Spacer(Modifier.size(Spacing.large))
+                        StatLabel(
+                            label = "Followers",
+                            value = formatFollowerCount(followerCount),
+                            onClick = { onConnectionsClick(ConnectionsTab.Followers) },
+                        )
+                        Spacer(Modifier.size(Spacing.large))
+                        StatLabel(
+                            label = "Relays",
+                            value = relayCount?.toString(),
+                            onClick = onRelaysClick,
                         )
                     }
+                    (profileWotLookup as? WotLookup.Scored)
+                        ?.assertion
+                        ?.verifiedFollowers
+                        ?.let { verified ->
+                            Text(
+                                text = "${verified.toCompactSats()} verified in your grapevine",
+                                color = Text3,
+                                style = AppTextStyles.caption,
+                                modifier = Modifier.fillMaxWidth(),
+                                textAlign = TextAlign.Center,
+                            )
+                        }
 
-                Spacer(Modifier.height(Spacing.medium))
+                }
             }
 
             // ── Profile tabs ──────────────────────────────────────────────────
