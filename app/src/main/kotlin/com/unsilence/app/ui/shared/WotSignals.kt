@@ -52,6 +52,7 @@ fun WotFeedMetaTimestamp(
     createdAt: Long?,
     modifier: Modifier = Modifier,
     timestampColor: Color = TextSecondary,
+    timestampFontSize: TextUnit = AppTextStyles.metadata.fontSize,
 ) {
     val signal = wotFeedSignal(lookup, mode)
     Row(
@@ -84,17 +85,18 @@ fun WotFeedMetaTimestamp(
             }
         }
         if (createdAt != null) {
-            RelativeTimestamp(createdAt, timestampColor)
+            RelativeTimestamp(createdAt, timestampColor, timestampFontSize)
         }
     }
 }
 
 @Composable
-private fun RelativeTimestamp(createdAt: Long, color: Color) {
+private fun RelativeTimestamp(createdAt: Long, color: Color, fontSize: TextUnit) {
     Text(
         text = relativeTime(createdAt, LocalMinuteClock.current.value),
         color = color,
         style = AppTextStyles.metadata,
+        fontSize = fontSize,
         maxLines = 1,
         overflow = TextOverflow.Clip,
     )

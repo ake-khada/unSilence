@@ -1,20 +1,24 @@
 package com.unsilence.app.ui.feed
 
 import com.unsilence.app.ui.theme.AppTextStyles
+import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.offset
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Repeat
+import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -22,15 +26,14 @@ import com.unsilence.app.ui.shared.rememberCardWot
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
+import androidx.compose.ui.semantics.clearAndSetSemantics
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
-import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.unsilence.app.ui.theme.AppType
-import com.unsilence.app.ui.theme.Black
 import com.unsilence.app.data.memory.UserEntity
 import com.unsilence.app.data.memory.WotLookup
 import com.unsilence.app.data.relay.FeedWotDisplayMode
@@ -42,6 +45,8 @@ import com.unsilence.app.ui.shared.selfDeclaredNostrAddressPresentation
 import com.unsilence.app.ui.theme.Sizing
 import com.unsilence.app.ui.theme.Spacing
 import com.unsilence.app.ui.theme.TextSecondary
+
+private val RepostAttributionStyle = AppTextStyles.footnote.copy(lineHeight = 14.sp)
 
 /**
  * Avatar + display name + self-declared Nostr address + timestamp row.
@@ -72,9 +77,9 @@ internal fun AuthorHeader(
     val nostrAddress = remember(nip05) {
         selfDeclaredNostrAddressPresentation(nip05, NostrAddressDisplay.DOMAIN)
     }
-    val reposterPubkey = repostSourcePubkey?.takeIf { it.isNotBlank() && it != pubkey }
+    val reposterPubkey = repostSourcePubkey?.takeIf { it.isNotBlank() && !referenceRepost }
     val reposterLabel = reposterPubkey?.let { key ->
-        repostSourceProfile?.displayName?.takeIf { it.isNotBlank() }
+        if (key == pubkey) authorLabel else repostSourceProfile?.displayName?.takeIf { it.isNotBlank() }
             ?: repostSourceProfile?.name?.takeIf { it.isNotBlank() && !looksLikeHexPubkey(it) }
             ?: "${key.take(6)}…${key.takeLast(4)}"
     }
@@ -87,7 +92,6 @@ internal fun AuthorHeader(
             nostrAddress = nostrAddress,
             reposterPubkey = reposterPubkey,
             reposterLabel = reposterLabel,
-            reposterPicture = repostSourceProfile?.picture,
             createdAt = repostSourceCreatedAt ?: createdAt,
             onAuthorClick = onAuthorClick,
             onNoteClick = onNoteClick,
@@ -112,7 +116,8 @@ internal fun AuthorHeader(
                 .clickable { onAuthorClick(pubkey) },
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            AvatarImage(
+            HeaderAvatar(
+                reposted      = referenceRepost,
                 pubkey        = pubkey,
                 picture       = picture,
                 modifier      = Modifier.size(Sizing.avatar),
@@ -120,12 +125,16 @@ internal fun AuthorHeader(
             )
             Spacer(Modifier.width(Spacing.small))
             if (referenceRepost) {
-                Column(modifier = Modifier.weight(1f)) {
+                Column(
+                    modifier = Modifier.weight(1f),
+                    verticalArrangement = Arrangement.spacedBy(1.dp),
+                ) {
                     Text(
-                        text = "↻ Reposted",
+                        text = "Reposted",
                         color = TextSecondary,
-                        fontSize = 9.5.sp,
-                        lineHeight = 11.sp,
+                        style = RepostAttributionStyle,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
                     )
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         AuthorNameRow(
@@ -153,6 +162,7 @@ internal fun AuthorHeader(
             lookup = rememberCardWot(pubkey, wotLookup),
             mode = feedWotDisplayMode,
             createdAt = createdAt,
+            timestampFontSize = AppType.footnote,
             modifier = Modifier.clickable { onNoteClick() },
         )
     }
@@ -166,7 +176,6 @@ private fun RepostAuthorHeader(
     nostrAddress: NostrAddressPresentation?,
     reposterPubkey: String,
     reposterLabel: String,
-    reposterPicture: String?,
     createdAt: Long?,
     onAuthorClick: (String) -> Unit,
     onNoteClick: () -> Unit,
@@ -181,103 +190,74 @@ private fun RepostAuthorHeader(
             .padding(horizontal = Spacing.medium, vertical = Spacing.small),
         verticalAlignment = Alignment.Top,
     ) {
-        Row(
+        HeaderAvatar(
+            reposted = true,
+            pubkey = pubkey,
+            picture = picture,
+            modifier = Modifier.align(Alignment.Bottom).size(Sizing.avatar)
+                .semantics { contentDescription = "Open profile for $authorLabel" }
+                .clickable(role = Role.Button) { onAuthorClick(pubkey) },
+            lookupProfile = lookupProfile,
+        )
+        Spacer(Modifier.width(Spacing.small))
+        Column(
             modifier = Modifier.weight(1f),
-            verticalAlignment = Alignment.Top,
+            verticalArrangement = Arrangement.spacedBy(1.dp),
         ) {
-            RepostCompositeAvatar(
-                authorPubkey = pubkey,
-                authorPicture = picture,
-                reposterPubkey = reposterPubkey,
-                reposterPicture = reposterPicture,
-                reposterLabel = reposterLabel,
-                lookupProfile = lookupProfile,
-                onAuthorClick = { onAuthorClick(pubkey) },
-                onReposterClick = { onAuthorClick(reposterPubkey) },
+            Text(
+                text = if (reposterPubkey == pubkey) "Reposted" else "$reposterLabel reposted",
+                color = TextSecondary,
+                style = RepostAttributionStyle,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.fillMaxWidth()
+                    .semantics { contentDescription = "Reposted by $reposterLabel" }
+                    .clickable(role = Role.Button) { onAuthorClick(reposterPubkey) },
             )
-            Spacer(Modifier.width(Spacing.small))
-            Box(
-                modifier = Modifier
-                    .weight(1f)
-                    .height(Sizing.avatar),
-            ) {
-                Text(
-                    text = "↻ $reposterLabel",
-                    color = TextSecondary,
-                    fontSize = 9.5.sp,
-                    lineHeight = 12.sp,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier
-                        .align(Alignment.TopStart)
-                        .offset(y = (-Spacing.micro))
-                        .clickable { onAuthorClick(reposterPubkey) },
-                )
+            Row(verticalAlignment = Alignment.CenterVertically) {
                 Row(
-                    modifier = Modifier
-                        .align(Alignment.CenterStart)
-                        .clickable { onAuthorClick(pubkey) },
+                    modifier = Modifier.weight(1f).clickable { onAuthorClick(pubkey) },
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    AuthorNameRow(
-                        pubkey = pubkey,
-                        authorLabel = authorLabel,
-                        nostrAddress = nostrAddress,
-                    )
+                    AuthorNameRow(pubkey, authorLabel, nostrAddress)
                 }
+                Spacer(Modifier.width(Spacing.micro))
+                WotFeedMetaTimestamp(
+                    lookup = rememberCardWot(pubkey, wotLookup),
+                    mode = feedWotDisplayMode,
+                    createdAt = createdAt,
+                    timestampFontSize = AppType.footnote,
+                    modifier = Modifier.clickable(onClick = onNoteClick),
+                )
             }
         }
-        Spacer(Modifier.width(Spacing.micro))
-        WotFeedMetaTimestamp(
-            lookup = rememberCardWot(pubkey, wotLookup),
-            mode = feedWotDisplayMode,
-            createdAt = createdAt,
-            modifier = Modifier.clickable { onNoteClick() },
-        )
     }
 }
 
+/** A decorative repost marker; the existing avatar owns any profile click. */
 @Composable
-internal fun RepostCompositeAvatar(
-    authorPubkey: String,
-    authorPicture: String?,
-    reposterPubkey: String,
-    reposterPicture: String?,
-    reposterLabel: String,
-    lookupProfile: (suspend (String) -> UserEntity?)? = null,
-    onAuthorClick: () -> Unit,
-    onReposterClick: () -> Unit,
-    modifier: Modifier = Modifier,
+private fun HeaderAvatar(
+    pubkey: String,
+    picture: String?,
+    reposted: Boolean,
+    modifier: Modifier,
+    lookupProfile: (suspend (String) -> UserEntity?)?,
 ) {
-    Box(
-        modifier = modifier
-            .size(Sizing.avatar)
-            .semantics { contentDescription = "Reposted by $reposterLabel" },
-    ) {
-        AvatarImage(
-            pubkey = authorPubkey,
-            picture = authorPicture,
-            modifier = Modifier
-                .size(Sizing.avatar)
-                .clickable(onClick = onAuthorClick),
-            lookupProfile = lookupProfile,
-        )
+    if (!reposted) {
+        AvatarImage(pubkey, picture, modifier, lookupProfile = lookupProfile)
+        return
+    }
+    Box(modifier) {
+        AvatarImage(pubkey, picture, Modifier.size(Sizing.avatar), lookupProfile = lookupProfile)
         Box(
-            modifier = Modifier
-                .align(Alignment.TopEnd)
-                .offset(x = 3.dp)
-                .size(16.dp)
-                .clip(CircleShape)
-                .border(1.5f.dp, Black, CircleShape)
-                .clickable(onClick = onReposterClick),
+            modifier = Modifier.align(Alignment.TopEnd).offset(x = 3.dp).size(16.dp)
+                .background(MaterialTheme.colorScheme.surface, CircleShape)
+                .border(1.5.dp, MaterialTheme.colorScheme.background, CircleShape)
+                .clearAndSetSemantics {},
+            contentAlignment = Alignment.Center,
         ) {
-            AvatarImage(
-                pubkey = reposterPubkey,
-                picture = reposterPicture,
-                modifier = Modifier.size(16.dp),
-                sizeDp = 16.dp,
-                lookupProfile = lookupProfile,
-            )
+            Icon(Icons.Filled.Repeat, contentDescription = null,
+                tint = TextSecondary, modifier = Modifier.size(11.dp))
         }
     }
 }
@@ -294,15 +274,15 @@ private fun RowScope.AuthorNameRow(
         style = AppTextStyles.author,
         maxLines   = 1,
         overflow   = TextOverflow.Ellipsis,
-        modifier   = Modifier.weight(if (nostrAddress != null) 0.45f else 1f, fill = false),
+        modifier   = Modifier.weight(if (nostrAddress != null) 0.45f else 1f, fill = false).alignByBaseline(),
     )
     if (nostrAddress != null) {
         Spacer(Modifier.width(4.dp))
         SelfDeclaredNostrAddressText(
             pubkey = pubkey,
             presentation = nostrAddress,
-            fontSize = AppType.caption,
-            modifier = Modifier.weight(0.55f, fill = false),
+            fontSize = AppType.footnote,
+            modifier = Modifier.weight(0.55f, fill = false).alignByBaseline(),
         )
     }
 }
