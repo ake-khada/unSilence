@@ -2328,8 +2328,18 @@ class RelayPool @Inject constructor(
         if (isOwnedOneShotRequest(subId) && !oneShotOutcomes.isActive(subId)) return
         // This handler receives real wire EOSE only, never watchdog/CLOSED/skip.
         idRequestBackoff.onEose(conn, subId)
-        val isTrackedRequest = _activePages.containsKey(subId) || subId in _activeOneShotSubs
-        if (isTrackedRequest) relayCapabilitiesStore.recordRequestSuccess(conn.url)
+        if (_activePages.containsKey(subId)) {
+            relayCapabilitiesStore.recordRequestSuccess(conn.url)
+        } else synchronized(socketLifecycleLock) {
+            // The shared ID ends at the first EOSE; later pooled targets still
+            // own their slots. Retain legacy direct-send credit (e.g. search).
+            val isTrackedRequest = subId in _activeOneShotSubs ||
+                relayOneShotOwners[RelayOneShotOwnerKey(subId, conn.url)] === conn
+            // Recheck after admission/taps: replacement can occur in between.
+            if (connections[conn.url] === conn && isTrackedRequest) {
+                relayCapabilitiesStore.recordRequestSuccess(conn.url)
+            }
+        }
         // Paginated fetch: signal EOSE without sending CLOSE (pagination loop decides)
         _activePages[subId]?.let { page ->
             page.eoseReceived.complete(Unit)

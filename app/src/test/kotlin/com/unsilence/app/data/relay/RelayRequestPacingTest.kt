@@ -324,6 +324,280 @@ class RelayRequestPacingTest {
         }
     }
 
+    private suspend fun multiRelayCapabilitySuccess(reverse: Boolean) = coroutineScope {
+        Fixture().use { f ->
+            val urls = listOf("wss://health-a.test", "wss://health-b.test")
+            urls.forEach { prepare(f, it) }
+            val phase = async { profilePhase(f, urls.first(), listOf("a".repeat(64)), "prof-fb", urls) }
+            try {
+                f.until { f.requests.size == 2 }
+                val id = f.requests.first().second[1].jsonPrimitive.content
+                urls.forEach {
+                    f.capabilities.learnFromClosed(it, "error: fixture structural rejection")
+                    assertEquals(1, f.capabilities.get(it)?.consecutiveCapabilityFailures)
+                }
+                val order = if (reverse) urls.reversed() else urls
+                assertTrue(f.sockets.getValue(order[0]).send("""["EOSE","$id"]"""))
+                f.until { (order[0] to id) in f.closes }
+                assertEquals(0, f.capabilities.get(order[0])?.consecutiveCapabilityFailures)
+                assertEquals(1, f.capabilities.get(order[1])?.consecutiveCapabilityFailures)
+                assertFalse("The second relay still owns the phase", phase.isCompleted)
+                assertTrue(f.sockets.getValue(order[1]).send("""["EOSE","$id"]"""))
+                withTimeout(2_000) { phase.await() }
+                f.until { f.closes.size == 2 }
+                assertEquals("Every target's genuine EOSE must clear its own capability failures",
+                    0, f.capabilities.get(order[1])?.consecutiveCapabilityFailures)
+                assertEquals(2, f.requests.size)
+                urls.forEach {
+                    assertEquals(1, f.closes.count { close -> close == it to id })
+                    assertEquals(0, count(f, it).get())
+                }
+            } finally { phase.cancelAndJoin() }
+        }
+    }
+
+    @Test fun `finite request credits both relays in forward EOSE order`() = runBlocking {
+        multiRelayCapabilitySuccess(reverse = false)
+    }
+
+    @Test fun `finite request credits both relays in reverse EOSE order`() = runBlocking {
+        multiRelayCapabilitySuccess(reverse = true)
+    }
+
+    @Test fun `second relay metadata success preserves existing relay-wide half-open policy`() = runBlocking {
+        Fixture().use { f ->
+            val urls = listOf("wss://mixed-first.test", "wss://mixed-second.test")
+            urls.forEach { prepare(f, it) }
+            val mixed = urls[1]
+            repeat(MAX_CAPABILITY_STRIKES) { f.capabilities.learnFromClosed(mixed, "error: kind not allowed: 1") }
+            assertTrue(f.capabilities.shouldSkip(mixed))
+            // Use an expired persisted strike timestamp, without a production clock seam.
+            @Suppress("UNCHECKED_CAST")
+            val caps = field(f.capabilities, "caps") as ConcurrentHashMap<String, RelayCapabilities>
+            caps.computeIfPresent(mixed) { _, value -> value.copy(lastCapabilityStrikeAt = System.currentTimeMillis() - 360_000) }
+            assertFalse(f.capabilities.shouldSkip(mixed))
+            val phase = async { profilePhase(f, urls.first(), listOf("a".repeat(64)), "prof-fb", urls) }
+            try {
+                f.until { f.requests.size == 2 }
+                val id = f.requests.first().second[1].jsonPrimitive.content
+                assertTrue(f.sockets.getValue(urls[0]).send("""["EOSE","$id"]"""))
+                f.until { (urls[0] to id) in f.closes }
+                assertEquals(MAX_CAPABILITY_STRIKES, f.capabilities.get(mixed)?.consecutiveCapabilityFailures)
+                assertTrue(f.sockets.getValue(mixed).send("""["EOSE","$id"]"""))
+                withTimeout(2_000) { phase.await() }
+                assertEquals("Existing success policy is relay-wide, independent of responder order",
+                    0, f.capabilities.get(mixed)?.consecutiveCapabilityFailures)
+                assertFalse(f.capabilities.shouldSkip(mixed))
+                assertEquals(2, f.requests.size)
+            } finally { phase.cancelAndJoin() }
+        }
+    }
+
+    /** A NOTICE after the test frames proves the socket listener consumed them. */
+    private suspend fun throughListener(f: Fixture, url: String, vararg frames: String) {
+        val marker = """["NOTICE","barrier-${System.nanoTime()}"]"""
+        val consumed = CompletableDeferred<Unit>()
+        val tap = RelayMessageTap { message ->
+            if (message is RelayTapMessage.Control && message.raw == marker && message.relayUrl == url) {
+                consumed.complete(Unit)
+            }
+        }
+        f.processor.registerTap(tap)
+        try {
+            frames.forEach { assertTrue(f.sockets.getValue(url).send(it)) }
+            assertTrue(f.sockets.getValue(url).send(marker))
+            withTimeout(2_000) { consumed.await() }
+        } finally { f.processor.unregisterTap(tap) }
+    }
+
+    @Test fun `late duplicate cancelled timed-out and queued EOSE cannot clear capability failures`() = runBlocking {
+        for (ending in listOf("EOSE", "cancel", "timeout", "queued")) {
+            Fixture().use { f ->
+                val url = "wss://late-health.test"
+                if (ending == "queued") exhaust(f, url) else prepare(f, url)
+                val baseline = f.requests.size
+                val id = "hint-profiles-health-$ending"
+                val lookup = async { f.pool.fetchOneShotOutcomes(id, listOf(url),
+                    """["REQ","$id",{"kinds":[0]}]""", if (ending == "timeout") 250 else 10_000) }
+                try {
+                    if (ending == "queued") f.until { queued(f, url).size == 1 }
+                    else f.until { f.requests.size == baseline + 1 }
+                    when (ending) {
+                        "EOSE" -> { throughListener(f, url, """["EOSE","$id"]"""); lookup.await() }
+                        "cancel" -> lookup.cancelAndJoin()
+                        "timeout" -> assertEquals(OneShotOutcome.TIMEOUT, withTimeout(2_000) { lookup.await() }[url])
+                    }
+                    f.capabilities.learnFromClosed(url, "error: fixture rejection after termination")
+                    throughListener(f, url, """["EOSE","$id"]""")
+                    assertEquals(ending, 1, f.capabilities.get(url)?.consecutiveCapabilityFailures)
+                    assertEquals(baseline + if (ending == "queued") 0 else 1, f.requests.size)
+                } finally { lookup.cancelAndJoin() }
+            }
+        }
+    }
+
+    @Test fun `same-id EOSE on an unrelated socket cannot clear capability failures`() = runBlocking {
+        Fixture().use { f ->
+            val owner = "wss://health-owner.test"
+            val unrelated = "wss://health-unrelated.test"
+            listOf(owner, unrelated).forEach { prepare(f, it) }
+            val id = "hint-profiles-health-owner"
+            send(f, owner, id)
+            f.until { f.requests.size == 1 }
+            f.capabilities.learnFromClosed(unrelated, "error: fixture rejection")
+            throughListener(f, unrelated, """["EOSE","$id"]""")
+            assertEquals(1, f.capabilities.get(unrelated)?.consecutiveCapabilityFailures)
+            assertEquals(1, count(f, owner).get())
+            assertTrue(f.closes.isEmpty())
+        }
+    }
+
+    @Test fun `late admitted EOSE from replaced socket cannot clear current relay failures`() = runBlocking {
+        Fixture().use { f ->
+            val url = "wss://health-replaced.test"
+            prepare(f, url)
+            val id = "hint-profiles-health-replaced"
+            send(f, url, id)
+            f.until { f.requests.size == 1 }
+            val old = connection(f, url)
+            old.close()
+            prepare(f, url)
+            f.until { connection(f, url) !== old }
+            send(f, url, id)
+            f.until { f.requests.size == 2 }
+            f.capabilities.learnFromClosed(url, "error: fixture rejection on current socket")
+            // Model replacement between EventProcessor admission and this handler.
+            RelayPool::class.java.getDeclaredMethod("handleEose", RelayConnection::class.java, String::class.java)
+                .apply { isAccessible = true }.invoke(f.pool, old, """["EOSE","$id"]""")
+            assertEquals("Old socket must not clear current health", 1,
+                f.capabilities.get(url)?.consecutiveCapabilityFailures)
+            assertEquals(1, count(f, url).get())
+            assertSame(connection(f, url), (field(f.pool, "relayOneShotOwners") as Map<*, *>)[RelayOneShotOwnerKey(id, url)])
+            throughListener(f, url, """["EOSE","$id"]""")
+            assertEquals(0, f.capabilities.get(url)?.consecutiveCapabilityFailures)
+            assertEquals(0, count(f, url).get())
+        }
+    }
+
+    @Test fun `finite EOSE preserves transport strikes and permanent restriction`() = runBlocking {
+        for (restricted in listOf(false, true)) {
+            Fixture().use { f ->
+                val url = "wss://health-domains.test"
+                prepare(f, url)
+                val id = "hint-profiles-health-domains"
+                send(f, url, id)
+                f.until { f.requests.size == 1 }
+                f.capabilities.recordTransportFailure(url, SkipReason.CONNECT_TIMEOUT)
+                f.capabilities.learnFromClosed(url, if (restricted) "restricted: fixture" else "error: fixture")
+                val before = f.capabilities.get(url)!!
+                throughListener(f, url, """["EOSE","$id"]""")
+                val after = f.capabilities.get(url)!!
+                assertEquals(before.strikes, after.strikes)
+                assertEquals(before.lastStrikeAt, after.lastStrikeAt)
+                assertEquals(before.restricted, after.restricted)
+                assertEquals(if (restricted) before.consecutiveCapabilityFailures else 0,
+                    after.consecutiveCapabilityFailures)
+            }
+        }
+    }
+
+    @Test fun `ephemeral genuine EOSE still clears capability failures`() = runBlocking {
+        Fixture().use { f ->
+            val url = "wss://health-ephemeral.test"
+            f.held += url
+            val id = "hint-profiles-health-ephemeral"
+            val lookup = async { f.pool.fetchOneShotOutcomes(id, listOf(url),
+                """["REQ","$id",{"kinds":[0]}]""", 5_000) }
+            try {
+                f.until { f.requests.size == 1 }
+                f.capabilities.learnFromClosed(url, "error: fixture rejection")
+                assertTrue(f.sockets.getValue(url).send("""["EOSE","$id"]"""))
+                assertEquals(OneShotOutcome.EOSE, withTimeout(2_000) { lookup.await() }[url])
+                assertEquals(0, f.capabilities.get(url)?.consecutiveCapabilityFailures)
+                assertEquals(1, f.requests.size)
+            } finally { lookup.cancelAndJoin() }
+        }
+    }
+
+    @Test fun `page success and live EOSE retain their existing health behavior`() = runBlocking {
+        Fixture().use { f ->
+            val url = "wss://health-page.test"
+            prepare(f, url)
+            val page = async {
+                kotlin.coroutines.intrinsics.suspendCoroutineUninterceptedOrReturn<Any?> { continuation ->
+                    RelayPool::class.java.declaredMethods.single { it.name == "paginatedFetch" }
+                        .apply { isAccessible = true }.invoke(f.pool, connection(f, url),
+                            buildJsonObject { put("kinds", buildJsonArray { add(1) }) },
+                            "health-page", 5_000L, 1, { _: Int, _: Int -> }, continuation)
+                }
+            }
+            try {
+                f.until { f.requests.size == 1 }
+                val id = f.requests.single().second[1].jsonPrimitive.content
+                f.capabilities.learnFromClosed(url, "error: fixture structural rejection")
+                throughListener(f, url, """["EOSE","$id"]""")
+                withTimeout(2_000) { page.await() }
+                assertEquals(0, f.capabilities.get(url)?.consecutiveCapabilityFailures)
+                assertTrue(f.pool.sendToRelay(url, """["REQ","feed-health-control",{"kinds":[1]}]"""))
+                f.until { f.requests.size == 2 }
+                f.capabilities.learnFromClosed(url, "error: fixture structural rejection")
+                throughListener(f, url, """["EOSE","feed-health-control"]""")
+                assertEquals(1, f.capabilities.get(url)?.consecutiveCapabilityFailures)
+                assertNotNull(connection(f, url).requests.request("feed-health-control"))
+                assertFalse((url to "feed-health-control") in f.closes)
+            } finally { page.cancelAndJoin() }
+        }
+    }
+
+    @Test fun `CLOSED and failed dispatch do not credit capability success`() = runBlocking {
+        for (failedSend in listOf(false, true)) {
+            Fixture().use { f ->
+                val url = "wss://health-unsuccessful.test"
+                prepare(f, url)
+                val id = "hint-profiles-health-unsuccessful"
+                f.capabilities.learnFromClosed(url, "error: fixture structural rejection")
+                if (failedSend) {
+                    connection(f, url).requests.clear() // Existing socket rejects local sends.
+                    send(f, url, id)
+                    assertTrue(f.requests.isEmpty())
+                    assertEquals(0, count(f, url).get())
+                } else {
+                    send(f, url, id)
+                    f.until { f.requests.size == 1 }
+                    throughListener(f, url, """["CLOSED","$id","blocked: fixture"]""")
+                    assertEquals(0, count(f, url).get())
+                }
+                throughListener(f, url, """["EOSE","$id"]""")
+                assertEquals(1, f.capabilities.get(url)?.consecutiveCapabilityFailures)
+            }
+        }
+    }
+
+    @Test fun `legacy direct search and hashtag EOSE keep existing success credit`() = runBlocking {
+        for (hashtag in listOf(false, true)) {
+            Fixture().use { f ->
+                val url = "wss://health-search.test"
+                prepare(f, url)
+                val token = 42L
+                try {
+                    if (hashtag) f.pool.searchHashtag(listOf(url), "fixture", token)
+                    else f.pool.searchNotes(listOf(url), "fixture", token)
+                    f.until { f.requests.size == if (hashtag) 1 else 2 }
+                    val ids = f.requests.map { it.second[1].jsonPrimitive.content }
+                    ids.forEach { id ->
+                        assertNull((field(f.pool, "relayOneShotOwners") as Map<*, *>)[RelayOneShotOwnerKey(id, url)])
+                        f.capabilities.learnFromClosed(url, if (hashtag) "error: fixture rejection"
+                            else "error: search filter is required")
+                        throughListener(f, url, """["EOSE","$id"]""")
+                        assertEquals(0, f.capabilities.get(url)?.consecutiveCapabilityFailures)
+                        assertEquals(!hashtag, f.capabilities.get(url)?.searchOnly)
+                    }
+                    assertEquals(if (hashtag) 1 else 2, f.requests.size)
+                } finally { f.pool.closeSearch(token) }
+            }
+        }
+    }
+
     @Test fun `stalled upgrades recover all pooled entry paths and replay a buffered live request once`() = runBlocking {
         Fixture(stallFirstUpgrade = true).use { f ->
             val urls = listOf("connect", "await", "lookup", "reconnect").map { "wss://$it.test" }
