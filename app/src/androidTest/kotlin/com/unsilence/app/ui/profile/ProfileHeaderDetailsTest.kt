@@ -32,6 +32,7 @@ import androidx.compose.ui.text.TextLayoutResult
 import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.dp
 import androidx.test.ext.junit.runners.AndroidJUnit4
+import androidx.test.espresso.Espresso.pressBack
 import androidx.test.platform.app.InstrumentationRegistry
 import com.unsilence.app.ui.theme.UnsilenceTheme
 import org.junit.Assert.*
@@ -76,7 +77,9 @@ class ProfileHeaderDetailsTest {
     @Test fun unknownRelationshipShowsPlainFollowWithoutClaim() {
         render()
         openMenu()
-        compose.onNodeWithText("Follow").assertIsDisplayed().performClick()
+        compose.onNodeWithText("Follow").assertIsDisplayed()
+        captureMenu("profile-menu-follow")
+        compose.onNodeWithText("Follow").performClick()
         compose.onNodeWithText("Follows you").assertDoesNotExist()
         compose.onNodeWithText("Mutual follow").assertDoesNotExist()
         compose.runOnIdle { assertEquals(listOf(true), intents); assertFalse(menuOpen.value) }
@@ -91,21 +94,22 @@ class ProfileHeaderDetailsTest {
         compose.runOnIdle { assertEquals(listOf(true), intents) }
     }
 
-    @Test fun mutualFollowRequiresConfirmationOutsideDismissedMenuAndCancelDoesNothing() {
+    @Test fun mutualFollowUsesInlineCheckAndRowCancellationDoesNothing() {
         state.value = ProfileFollowState(isFollowing = true, followsYou = true)
         render()
         compose.onNodeWithText("Mutual follow").assertIsDisplayed()
         openMenu()
         compose.onNodeWithText("Unfollow").performClick()
-        compose.onNodeWithText("Unfollow?").assertIsDisplayed()
-        compose.runOnIdle { assertEquals(0, operations); assertFalse(menuOpen.value) }
-        compose.onNodeWithText("Cancel").performClick()
         compose.onNodeWithText("Unfollow?").assertDoesNotExist()
-        compose.runOnIdle { assertEquals(0, operations) }
-        openMenu()
+        compose.onNodeWithContentDescription("Confirm unfollow").assertIsDisplayed().assertTouchHeightIsEqualTo(48.dp)
+        compose.runOnIdle { assertEquals(0, operations); assertTrue(menuOpen.value) }
+        // The row itself can disarm; only the separate check confirms removal.
         compose.onNodeWithText("Unfollow").performClick()
-        compose.onNodeWithText("Unfollow", substring = false).performClick()
-        compose.runOnIdle { assertEquals(listOf(false), intents) }
+        compose.onNodeWithContentDescription("Confirm unfollow").assertDoesNotExist()
+        compose.runOnIdle { assertEquals(0, operations) }
+        compose.onNodeWithText("Unfollow").performClick()
+        compose.onNodeWithContentDescription("Confirm unfollow").performClick()
+        compose.runOnIdle { assertEquals(listOf(false), intents); assertFalse(menuOpen.value) }
     }
 
     @Test fun pendingFollowDisablesRepeatedOperation() {
@@ -129,8 +133,9 @@ class ProfileHeaderDetailsTest {
         render()
         openMenu()
         compose.onNodeWithText("Unfollow").performClick()
+        compose.onNodeWithContentDescription("Confirm unfollow").assertIsDisplayed()
         compose.runOnIdle { subject.value = "another-author" }
-        compose.onNodeWithText("Unfollow?").assertDoesNotExist()
+        compose.onNodeWithContentDescription("Confirm unfollow").assertDoesNotExist()
         compose.runOnIdle { assertEquals(0, operations) }
     }
 
@@ -139,11 +144,47 @@ class ProfileHeaderDetailsTest {
         render()
         openMenu()
         compose.onNodeWithText("Unfollow").performClick()
+        compose.onNodeWithContentDescription("Confirm unfollow").assertIsDisplayed()
         compose.runOnIdle { state.value = ProfileFollowState(isFollowing = false) }
-        compose.onNodeWithText("Unfollow?").assertDoesNotExist()
-        openMenu()
+        compose.onNodeWithContentDescription("Confirm unfollow").assertDoesNotExist()
         compose.onNodeWithText("Follow").assertIsDisplayed()
         compose.runOnIdle { assertEquals(0, operations) }
+    }
+
+    @Test fun backCancelsInlineUnfollowAndReopeningStartsUnarmed() {
+        state.value = ProfileFollowState(isFollowing = true)
+        render()
+        openMenu()
+        compose.onNodeWithText("Unfollow").performClick()
+        compose.onNodeWithContentDescription("Confirm unfollow").assertIsDisplayed()
+        pressBack()
+        compose.runOnIdle { assertFalse(menuOpen.value); assertTrue(intents.isEmpty()) }
+        openMenu()
+        compose.onNodeWithContentDescription("Confirm unfollow").assertDoesNotExist()
+        compose.runOnIdle { assertTrue(intents.isEmpty()) }
+    }
+
+    @Test fun pendingOperationDisablesAnArmedInlineConfirmation() {
+        state.value = ProfileFollowState(isFollowing = true)
+        render()
+        openMenu()
+        compose.onNodeWithText("Unfollow").performClick()
+        compose.runOnIdle { loading.value = true }
+        compose.onNodeWithContentDescription("Confirm unfollow").assertIsNotEnabled()
+        compose.onNodeWithText("Updating…").assertIsNotEnabled()
+        compose.runOnIdle { assertTrue(intents.isEmpty()) }
+    }
+
+    @Test fun menuKeepsItsSizeWhenInlineConfirmationAppears() {
+        state.value = ProfileFollowState(isFollowing = true)
+        render()
+        openMenu()
+        val before = compose.onNodeWithText("Unfollow").getUnclippedBoundsInRoot()
+        captureMenu("profile-menu-unfollow")
+        compose.onNodeWithText("Unfollow").performClick()
+        assertEquals(before, compose.onNodeWithText("Unfollow").getUnclippedBoundsInRoot())
+        captureMenu("profile-menu-confirm-unfollow")
+        compose.runOnIdle { assertTrue(intents.isEmpty()) }
     }
 
     @Test fun fullLightningValueCopiesWithoutAnyFollowOrPaymentAction() {
@@ -206,9 +247,22 @@ class ProfileHeaderDetailsTest {
         assertEquals(5f, (bounds.left - name.right).value, 0.5f)
         assertEquals((name.top.value + name.bottom.value) / 2, (bounds.top.value + bounds.bottom.value) / 2, 0.5f)
         val header = compose.onNodeWithTag("details").getUnclippedBoundsInRoot()
-        assertEquals((header.left.value + header.right.value) / 2, (name.left.value + bounds.right.value) / 2, 0.5f)
+        assertEquals((header.left.value + header.right.value) / 2, (name.left.value + name.right.value) / 2, 0.5f)
         compose.onNodeWithText("Follow").assertDoesNotExist()
         compose.onNodeWithText("Unfollow").assertDoesNotExist()
+    }
+
+    @Test fun longNameKeepsItsCenterAndCheckWithinNarrowLargeFontHeader() {
+        state.value = ProfileFollowState(isFollowing = true)
+        val longName = "A long display name ".repeat(8)
+        render(width = 280, scale = 1.5f, name = longName)
+        val name = compose.onNodeWithText(longName).getUnclippedBoundsInRoot()
+        val check = compose.onNodeWithContentDescription("Following").getUnclippedBoundsInRoot()
+        val header = compose.onNodeWithTag("details").getUnclippedBoundsInRoot()
+        assertEquals((header.left.value + header.right.value) / 2, (name.left.value + name.right.value) / 2, 0.5f)
+        assertEquals(5f, (check.left - name.right).value, 0.5f)
+        assertTrue(check.right <= header.right)
+        capture("profile-name-centered-large-font")
     }
 
     @Test fun socialContextJoinsKnownPartsAndWrapsCenteredAtLargeFont() {
@@ -298,7 +352,7 @@ class ProfileHeaderDetailsTest {
     }
 
     @Test fun wideBannerFitsWholeImageCenteredInViewport() = checkBanner(400, 100)
-    @Test fun tallBannerFitsWholeImageCenteredInViewport() = checkBanner(100, 400)
+    @Test fun tallBannerFillsWidthCenteredInViewport() = checkBanner(100, 400)
 
     private fun checkBanner(width: Int, height: Int) {
         val bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
@@ -319,23 +373,23 @@ class ProfileHeaderDetailsTest {
             pixels[pixels.width / 2 - 5, pixels.height / 2].red > 0.9f
         }
         val pixels = compose.onNodeWithTag("banner").captureToImage().toPixelMap()
-        val scale = minOf(pixels.width.toFloat() / width, pixels.height.toFloat() / height)
+        val scale = pixels.width.toFloat() / width
         val left = (pixels.width - width * scale) / 2f
         val top = (pixels.height - height * scale) / 2f
         val right = pixels.width - left
         val bottom = pixels.height - top
-        assertTrue(pixels[(left + 2).toInt(), (top + 2).toInt()].red > 0.9f)
-        assertTrue(pixels[(right - 3).toInt(), (bottom - 3).toInt()].green > 0.9f)
+        assertTrue(pixels[(left + 2).toInt(), maxOf(2, (top + 2).toInt())].red > 0.9f)
+        assertTrue(pixels[(right - 3).toInt(), minOf(pixels.height - 3, (bottom - 3).toInt())].green > 0.9f)
         if (top > 2) {
             assertEquals(0f, pixels[pixels.width / 2, (top - 2).toInt()].red, 0.01f)
             assertEquals(0f, pixels[pixels.width / 2, (bottom + 1).toInt()].green, 0.01f)
         } else {
-            assertEquals(0f, pixels[(left - 2).toInt(), pixels.height / 2].red, 0.01f)
-            assertEquals(0f, pixels[(right + 1).toInt(), pixels.height / 2].green, 0.01f)
+            assertTrue(pixels[2, pixels.height / 2].red > 0.9f)
+            assertTrue(pixels[pixels.width - 3, pixels.height / 2].green > 0.9f)
         }
     }
 
-    private fun render(address: String? = null, own: Boolean = false, width: Int = 360, scale: Float = 1f, verified: Long? = null) {
+    private fun render(address: String? = null, own: Boolean = false, width: Int = 360, scale: Float = 1f, verified: Long? = null, name: String = "Example author") {
         compose.setContent {
             val density = LocalDensity.current
             CompositionLocalProvider(
@@ -350,7 +404,7 @@ class ProfileHeaderDetailsTest {
                                 { menuOpen.value = false }, { intents += it }) {}
                         }
                         ProfileHeaderStack(Modifier.width(width.dp).background(MaterialTheme.colorScheme.background).padding(vertical = Spacing.large).testTag("details")) {
-                            ProfileDisplayName("Example author", !own && state.value.isFollowing == true)
+                            ProfileDisplayName(name, !own && state.value.isFollowing == true)
                             ProfileLightningAddress(address)
                             ProfileSocialContext(verified, state.value.relationship.takeUnless { own })
                         }
@@ -361,6 +415,11 @@ class ProfileHeaderDetailsTest {
     }
 
     private fun openMenu() { compose.onNodeWithText("Profile actions").performClick() }
+
+    private fun captureMenu(name: String) {
+        val file = File(InstrumentationRegistry.getInstrumentation().targetContext.getExternalFilesDir(null), "$name.png")
+        file.outputStream().use { compose.onNode(isPopup()).captureToImage().asAndroidBitmap().compress(Bitmap.CompressFormat.PNG, 100, it) }
+    }
 
     private fun capture(name: String) {
         val file = File(InstrumentationRegistry.getInstrumentation().targetContext.getExternalFilesDir(null), "$name.png")

@@ -81,7 +81,6 @@ import com.unsilence.app.ui.common.ShimmerNoteCard
 import com.unsilence.app.ui.common.tabSwipe
 import com.unsilence.app.ui.feed.FullScreenVideoDialog
 import com.unsilence.app.ui.feed.NoteActionsViewModel
-import com.unsilence.app.ui.feed.NostrRichText
 import com.unsilence.app.ui.feed.engagementId
 import com.unsilence.app.ui.feed.toCompactSats
 import com.unsilence.app.ui.shared.EngagementSnapshot
@@ -447,19 +446,11 @@ fun ProfileScreen(
 
                     val about = user?.about?.takeIf { it.isNotBlank() }
                     if (about != null) {
-                        NostrRichText(
-                            content       = about,
-                            kind          = 0, // Profile metadata stays plain; note syntax is kind-1/1111 only.
+                        ProfileBio(
+                            content = about,
                             lookupProfile = actionsViewModel::lookupProfile,
                             onAuthorClick = interceptedAuthorClick,
                             onHashtagClick = onHashtagClick,
-                            onTextClick   = {},
-                            maxLines      = 3,
-                            overflow      = TextOverflow.Ellipsis,
-                            textAlign     = TextAlign.Center,
-                            modifier      = Modifier
-                                .fillMaxWidth()
-                                .padding(horizontal = Spacing.medium),
                         )
                     }
 

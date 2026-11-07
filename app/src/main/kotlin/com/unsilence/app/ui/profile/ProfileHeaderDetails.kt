@@ -1,6 +1,8 @@
 package com.unsilence.app.ui.profile
 
 import android.os.Build
+import com.unsilence.app.data.memory.UserEntity
+import com.unsilence.app.ui.feed.NostrRichText
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material3.DropdownMenu
@@ -16,6 +18,8 @@ import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.ui.layout.ContentScale
 import coil3.compose.AsyncImage
+import coil3.request.ImageRequest
+import coil3.size.Scale
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -25,11 +29,12 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ElectricBolt
+import androidx.compose.material.icons.filled.PersonAdd
+import androidx.compose.material.icons.filled.PersonRemove
 import androidx.compose.material.icons.outlined.ContentCopy
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
+import androidx.compose.material3.IconButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -93,6 +98,8 @@ internal fun ProfileDisplayName(
     modifier: Modifier = Modifier,
 ) {
     Row(modifier, horizontalArrangement = Arrangement.Center, verticalAlignment = Alignment.CenterVertically) {
+        // Balance the decorative marker so the name itself stays on the centerline.
+        if (isFollowing) Spacer(Modifier.width(Spacing.micro + 16.dp))
         Text(
             name, color = Color.White, style = AppTextStyles.heading, fontWeight = FontWeight.Bold,
             textAlign = TextAlign.Center, maxLines = 1, overflow = TextOverflow.Ellipsis,
@@ -121,7 +128,7 @@ internal fun ProfileSocialContext(
         textAlign = TextAlign.Center, modifier = modifier.fillMaxWidth())
 }
 
-/** Confirmation lives outside the popup so closing the menu cannot dispose it. */
+/** Explicit removal confirmation belongs to this menu visit, not a separate dialog. */
 @Composable
 internal fun ProfileActionsMenu(
     subject: String?,
@@ -132,7 +139,7 @@ internal fun ProfileActionsMenu(
     onSetFollowing: (Boolean) -> Unit,
     content: @Composable ColumnScope.() -> Unit,
 ) {
-    var confirmingUnfollow by remember(subject, state.isFollowing) { mutableStateOf(false) }
+    var confirmingUnfollow by remember(subject, state.isFollowing, expanded) { mutableStateOf(false) }
     DropdownMenu(expanded = expanded, onDismissRequest = onDismissRequest,
         modifier = Modifier.background(Color.Black)) {
         DropdownMenuItem(
@@ -148,30 +155,45 @@ internal fun ProfileActionsMenu(
                     color = TextSecondary,
                 )
             },
+            leadingIcon = {
+                Icon(
+                    if (state.isFollowing == true) Icons.Filled.PersonRemove else Icons.Filled.PersonAdd,
+                    contentDescription = null,
+                    tint = TextSecondary,
+                    modifier = Modifier.size(20.dp),
+                )
+            },
+            trailingIcon = {
+                if (confirmingUnfollow) {
+                    IconButton(
+                        enabled = subject != null && !loading && state.isFollowing == true,
+                        onClick = {
+                            confirmingUnfollow = false
+                            onDismissRequest()
+                            onSetFollowing(false)
+                        },
+                    ) {
+                        Icon(Icons.Default.Check, contentDescription = "Confirm unfollow",
+                            tint = TextSecondary, modifier = Modifier.size(20.dp))
+                    }
+                } else {
+                    // Keep the popup width stable when confirmation appears.
+                    Spacer(Modifier.size(48.dp))
+                }
+            },
             enabled = subject != null && !loading && state.isFollowing != null,
             onClick = {
-                onDismissRequest()
-                if (state.isFollowing == true) confirmingUnfollow = true else onSetFollowing(true)
+                if (state.isFollowing == true) {
+                    confirmingUnfollow = !confirmingUnfollow
+                } else {
+                    onDismissRequest()
+                    onSetFollowing(true)
+                }
             },
         )
         content()
     }
-    if (confirmingUnfollow) {
-        AlertDialog(
-            onDismissRequest = { confirmingUnfollow = false },
-            title = { Text("Unfollow?") },
-            text = { Text("Remove this account from your follow list?") },
-            confirmButton = {
-                TextButton(enabled = !loading, onClick = {
-                    confirmingUnfollow = false
-                    onSetFollowing(false)
-                }) { Text("Unfollow") }
-            },
-            dismissButton = {
-                TextButton(onClick = { confirmingUnfollow = false }) { Text("Cancel") }
-            },
-        )
-    }
+
 }
 
 /** One spacing rhythm, including optional rows, shared by both profile variants. */
@@ -188,14 +210,40 @@ internal fun ProfileHeaderStack(
     )
 }
 
-/** Whole banner, centered in its existing viewport; request sizing stays with the caller. */
+/** Full-width banner, centered vertically; request sizing stays with the caller. */
 @Composable
-internal fun ProfileBannerImage(model: Any, modifier: Modifier = Modifier) {
+internal fun ProfileBannerImage(model: ImageRequest, modifier: Modifier = Modifier) {
+    // FillWidth otherwise makes Coil choose FILL decoding. Retain the previous FIT
+    // decode size while drawing the resulting image across the viewport width.
+    val request = remember(model) { model.newBuilder().scale(Scale.FIT).build() }
     AsyncImage(
-        model = model,
+        model = request,
         contentDescription = null,
-        contentScale = ContentScale.Fit,
+        contentScale = ContentScale.FillWidth,
         alignment = Alignment.Center,
         modifier = modifier.background(MaterialTheme.colorScheme.background),
+    )
+}
+
+/** Shared profile biography; the page owns scrolling and mention/navigation behavior. */
+@Composable
+internal fun ProfileBio(
+    content: String,
+    lookupProfile: (suspend (String) -> UserEntity?)?,
+    onAuthorClick: (String) -> Unit,
+    onHashtagClick: (String) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    NostrRichText(
+        content = content,
+        kind = 0,
+        lookupProfile = lookupProfile,
+        onAuthorClick = onAuthorClick,
+        onHashtagClick = onHashtagClick,
+        onTextClick = {},
+        maxLines = Int.MAX_VALUE,
+        overflow = TextOverflow.Clip,
+        textAlign = TextAlign.Center,
+        modifier = modifier.fillMaxWidth().padding(horizontal = Spacing.medium),
     )
 }
