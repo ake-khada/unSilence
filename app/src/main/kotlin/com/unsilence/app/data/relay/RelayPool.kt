@@ -4234,7 +4234,7 @@ class RelayPool @Inject constructor(
         if (pubkeys.isEmpty()) return
         val now = System.currentTimeMillis()
         val novel = pubkeys.filter { pk ->
-            // Negative-cache: full chain (indexer+fallback) failed for this pk recently
+            // Suppress recently incomplete chains that selected at least one target.
             val negCached = profileFallbackNegCache[pk]
             if (negCached != null && (now - negCached) < PROFILE_FALLBACK_NEG_TTL) return@filter false
             val lastAttempt = profileFetchAttempted[pk]
@@ -4262,21 +4262,29 @@ class RelayPool @Inject constructor(
         }
 
         scope.launch {
+            // Selected targets are not proof of a wire send or a valid response.
+            // Retain existing backoff unless every phase selected no target.
+            val selectedAuthors = mutableSetOf<String>()
+            fun releaseUnselectedAttempts() {
+                novel.filterNot(selectedAuthors::contains).forEach { profileFetchAttempted.remove(it, now) }
+            }
+
             // Phase 1: the relays where the feed rows were actually seen. Groups
             // combine authors per relay without broadcasting any author beyond
             // that author's own row hints.
             coroutineScope {
                 hintGroups.map { (hintUrls, hintedPubkeys) ->
                     async {
-                        fetchProfilePhase(
+                        val selected = fetchProfilePhase(
                             pubkeys = hintedPubkeys,
                             targetUrls = hintUrls,
                             subIdPrefix = "hint-profiles",
                             includeActiveFeedRelay = true,
                         )
+                        if (selected.isEmpty()) emptyList() else hintedPubkeys
                     }
                 }.awaitAll()
-            }
+            }.forEach(selectedAuthors::addAll)
             if (hintGroups.isNotEmpty()) delay(COLD_LANE_FLUSH_MS)
 
             val mes = memoryEventStore.get()
@@ -4289,17 +4297,21 @@ class RelayPool @Inject constructor(
                 novel.filter { profileMissingPicture(mes.getUserEntity(it)) }
             }
             if (indexerPubkeys.isNotEmpty() && targetUrls.isNotEmpty()) {
-                fetchProfilePhase(
+                val selected = fetchProfilePhase(
                     pubkeys = indexerPubkeys,
                     targetUrls = targetUrls,
                     subIdPrefix = "profiles",
                 )
+                if (selected.isNotEmpty()) selectedAuthors.addAll(indexerPubkeys)
                 delay(COLD_LANE_FLUSH_MS)
             }
 
             // ── Fallback: indexers incomplete → author's own relays (H19b) ─
             val stillIncomplete = novel.filter { profileMissingPicture(mes.getUserEntity(it)) }
-            if (stillIncomplete.isEmpty()) return@launch
+            if (stillIncomplete.isEmpty()) {
+                releaseUnselectedAttempts()
+                return@launch
+            }
 
             val triedRelays = hintedUrls + normalizedRelayTargets(targetUrls)
             val relayToPks = mutableMapOf<String, MutableList<String>>()
@@ -4325,11 +4337,12 @@ class RelayPool @Inject constructor(
                 Log.d(TAG, "PROFFB: ${fbPks.size} pk(s) → ${fbRelayUrls.size} relay(s): " +
                     fbPks.joinToString(",") { it.take(8) } + " → " +
                     fbRelayUrls.joinToString(",") { it.removePrefix("wss://").removeSuffix("/") })
-                fetchProfilePhase(
+                val selected = fetchProfilePhase(
                     pubkeys = fbPks,
                     targetUrls = fbRelayUrls,
                     subIdPrefix = "prof-fb",
                 )
+                if (selected.isNotEmpty()) selectedAuthors.addAll(fbPks)
                 delay(COLD_LANE_FLUSH_MS)
             } else {
                 Log.w(TAG, "PROFFB: ${stillIncomplete.size} pk(s) incomplete — no author relay signal")
@@ -4340,12 +4353,13 @@ class RelayPool @Inject constructor(
             val bridgePks = novel.filter { profileMissingPicture(mes.getUserEntity(it)) }
             val bridgeTargets = bridgeFallbackRelayTargets(triedRelays + fbRelayUrls)
             if (bridgePks.isNotEmpty() && bridgeTargets.isNotEmpty()) {
-                fetchProfilePhase(
+                val selected = fetchProfilePhase(
                     pubkeys = bridgePks,
                     targetUrls = bridgeTargets,
                     subIdPrefix = "bridge-profiles",
                     includeActiveFeedRelay = true,
                 )
+                if (selected.isNotEmpty()) selectedAuthors.addAll(bridgePks)
                 delay(COLD_LANE_FLUSH_MS)
             }
 
@@ -4354,7 +4368,8 @@ class RelayPool @Inject constructor(
             val finalIncomplete = novel.filter { profileMissingPicture(mes.getUserEntity(it)) }
             val resolved = stillIncomplete.size - finalIncomplete.size
             if (resolved > 0) Log.d(TAG, "PROFFB: $resolved pk(s) resolved avatar via fallback")
-            finalIncomplete.forEach { profileFallbackNegCache[it] = fbNow }
+            finalIncomplete.filter(selectedAuthors::contains).forEach { profileFallbackNegCache[it] = fbNow }
+            releaseUnselectedAttempts()
             if (finalIncomplete.isNotEmpty()) {
                 Log.w(TAG, "PROFFB: ${finalIncomplete.size} pk(s) still incomplete after bridge fallback")
             }
@@ -4371,20 +4386,21 @@ class RelayPool @Inject constructor(
         targetUrls: List<String>,
         subIdPrefix: String,
         includeActiveFeedRelay: Boolean = false,
-    ) {
-        if (pubkeys.isEmpty() || targetUrls.isEmpty()) return
+    ): Set<String> {
+        if (pubkeys.isEmpty() || targetUrls.isEmpty()) return emptySet()
         val requests = profileRequestPayloads(pubkeys, "$subIdPrefix-${System.nanoTime()}", listOf(0, 10002))
         val completions = requests.keys.map { subId ->
             CompletableDeferred<Unit>().also { oneShotEoseCallbacks[subId] = it }
         }
         try {
-            sendOneShotBatch(
+            val selected = sendOneShotBatch(
                 targetUrls,
                 requests.values.toList(),
                 requests.keys.toList(),
                 includeActiveFeedRelay = includeActiveFeedRelay,
             )
             withTimeoutOrNull(5_000L) { completions.awaitAll() }
+            return selected
         } finally {
             cleanupOneShotSubs(requests.keys)
         }
@@ -4408,16 +4424,33 @@ class RelayPool @Inject constructor(
         val pubkeys = novel.keys.toList()
         pubkeys.forEach { hintedProfileFetchAttempted[it] = now }
         val groups = groupProfileHintFetches(pubkeys, novel)
-        for ((targetUrls, groupedPubkeys) in groups) {
-            val requests = profileRequestPayloads(groupedPubkeys, "hint-profiles-${System.nanoTime()}", listOf(0))
-            scope.launch {
-                sendOneShotBatch(
-                    targetUrls,
-                    requests.values.toList(),
-                    requests.keys.toList(),
-                    includeActiveFeedRelay = true,
-                )
-            }
+        scope.launch {
+            // One author can occur in several relay groups. Keep its stamp if
+            // any group selects a target; release only after all groups finish.
+            val retainedAuthors = coroutineScope {
+                groups.map { (targetUrls, groupedPubkeys) ->
+                    async {
+                        try {
+                            val requests = profileRequestPayloads(groupedPubkeys, "hint-profiles-${System.nanoTime()}", listOf(0))
+                            val selected = sendOneShotBatch(
+                                targetUrls,
+                                requests.values.toList(),
+                                requests.keys.toList(),
+                                includeActiveFeedRelay = true,
+                            )
+                            if (selected.isEmpty()) emptyList() else groupedPubkeys
+                        } catch (cancelled: CancellationException) {
+                            throw cancelled
+                        } catch (_: Exception) {
+                            // Preserve independent hint dispatch and conservative
+                            // backoff when this group's selection is unknown.
+                            Log.w(TAG, "Hinted profile dispatch failed; retaining retry backoff")
+                            groupedPubkeys
+                        }
+                    }
+                }.awaitAll()
+            }.flatten().toSet()
+            pubkeys.filterNot(retainedAuthors::contains).forEach { hintedProfileFetchAttempted.remove(it, now) }
         }
 
         Log.d(TAG, "fetchProfilesFromHints: ${pubkeys.size} profiles → ${groups.size} hint group(s)")

@@ -134,6 +134,196 @@ class RelayRequestPacingTest {
     private fun connection(f: Fixture, url: String): RelayConnection =
         (field(field(f.pool, "connectionRegistry"), "pooled") as Map<*, *>)[url] as RelayConnection
 
+    /** Observe the existing owner job; no clock changes or production test hook. */
+    private suspend fun profilePass(f: Fixture, request: suspend () -> Unit): Job? {
+        val owner = (field(f.pool, "scope") as CoroutineScope).coroutineContext[Job]!!
+        val before = owner.children.toSet()
+        request()
+        return owner.children.firstOrNull { it !in before }
+    }
+
+    private suspend fun skippedProfileRetry(suspended: Boolean) {
+        Fixture(bridgeLoopback = true).use { f ->
+            val url = BRIDGE_FALLBACK_RELAY_URLS.single()
+            f.preferences.setIndexerUrls(listOf(url))
+            f.preferences.indexerRelayUrlsFlow().first { it == listOf(url) }
+            val crypto = ZapCryptoTestFixture()
+            val event = crypto.signedEvent(crypto.sender, 0, emptyList(),
+                """{"name":"fixture","picture":"https://images.test/avatar.png"}""")
+            f.remote[url] = listOf(event)
+            f.processor.start()
+            val resolver = ProfileResolver(f.store, Lazy { f.pool })
+            val users = com.unsilence.app.data.repository.UserRepository(f.store, resolver)
+            try {
+                if (suspended) f.pool.suspendSocketsForBackground()
+                else f.pool.onBlockedRelaysChanged(setOf(url))
+                val pass = profilePass(f) { users.fetchProfilesWithFanout(listOf(event.pubkey), 1) }
+                assertNotNull(pass)
+                assertNull("In-flight duplicate must remain suppressed",
+                    profilePass(f) { users.fetchProfilesWithFanout(listOf(event.pubkey), 1) })
+                withTimeout(10_000) { pass!!.join() }
+                assertTrue(f.requests.isEmpty())
+                if (suspended) f.pool.resumeSocketsForForeground()
+                else f.pool.onBlockedRelaysChanged(emptySet())
+                users.fetchProfilesWithFanout(listOf(event.pubkey), 1)
+                val resolved = withTimeoutOrNull(5_000) {
+                    f.until { f.store.getUserEntity(event.pubkey)?.picture == "https://images.test/avatar.png" }
+                    true
+                }
+                assertEquals("A pass selecting no target must allow the next ordinary demand", true, resolved)
+                assertEquals(1, f.requests.size)
+                assertEquals(listOf(event.pubkey), f.requests.single().second[2].jsonObject
+                    .getValue("authors").jsonArray.map { it.jsonPrimitive.content })
+            } finally { (field(resolver, "scope") as CoroutineScope).cancel() }
+        }
+    }
+
+    @Test fun `suspended profile pass can resolve on next foreground demand`() = runBlocking {
+        skippedProfileRetry(suspended = true)
+    }
+
+    @Test fun `fully blocked profile pass can resolve after unblock`() = runBlocking {
+        skippedProfileRetry(suspended = false)
+    }
+
+    @Test fun `hint retry releases only the group with no selected targets`() = runBlocking {
+        Fixture().use { f ->
+            val blocked = "wss://blocked-profile.test"
+            val selected = "wss://selected-profile.test"
+            val a = "a".repeat(64)
+            val b = "b".repeat(64)
+            f.pool.onBlockedRelaysChanged(setOf(blocked))
+            val pass = profilePass(f) { f.pool.fetchProfilesFromHints(mapOf(a to listOf(blocked))) }
+            withTimeout(5_000) { pass?.join() }
+            f.pool.fetchProfilesFromHints(mapOf(b to listOf(selected)))
+            f.until { f.requests.size == 1 }
+            f.pool.onBlockedRelaysChanged(emptySet())
+            f.pool.fetchProfilesFromHints(mapOf(a to listOf(blocked), b to listOf(selected)))
+            val retried = withTimeoutOrNull(5_000) { f.until { f.requests.size == 2 }; true }
+            assertEquals("Only the skipped hint group must retry", true, retried)
+            assertEquals(listOf(selected, blocked), f.requests.map { it.first })
+        }
+    }
+
+    @Test fun `selected profile passes preserve suppression for picture avatarless CLOSED and timeout`() = runBlocking {
+        for (mode in listOf("picture", "avatarless", "CLOSED", "timeout")) {
+            Fixture(bridgeLoopback = true).use { f ->
+                val url = BRIDGE_FALLBACK_RELAY_URLS.single()
+                f.preferences.setIndexerUrls(listOf(url))
+                f.preferences.indexerRelayUrlsFlow().first { it == listOf(url) }
+                val crypto = ZapCryptoTestFixture()
+                val content = if (mode == "picture")
+                    """{"name":"fixture","picture":"https://images.test/avatar.png"}"""
+                    else """{"name":"fixture"}"""
+                val event = crypto.signedEvent(crypto.sender, 0, emptyList(), content)
+                if (mode == "picture" || mode == "avatarless") f.remote[url] = listOf(event)
+                if (mode == "CLOSED") f.closed += url
+                if (mode == "timeout") f.held += url
+                f.processor.start()
+                f.pool.connectAndAwait(listOf(url), 5_000)
+                val resolver = ProfileResolver(f.store, Lazy { f.pool })
+                val users = com.unsilence.app.data.repository.UserRepository(f.store, resolver)
+                try {
+                    val pass = profilePass(f) { users.fetchProfilesWithFanout(listOf(event.pubkey), 1) }
+                    assertNotNull(pass)
+                    withTimeout(12_000) { pass!!.join() }
+                    assertEquals(mode, 1, f.requests.size)
+                    if (mode == "picture" || mode == "avatarless") {
+                        assertEquals("fixture", users.getUser(event.pubkey)?.name)
+                        assertEquals(if (mode == "picture") "https://images.test/avatar.png" else null,
+                            users.getUser(event.pubkey)?.picture)
+                    }
+                    assertNull(mode, profilePass(f) { users.fetchProfilesWithFanout(listOf(event.pubkey), 1) })
+                    assertEquals(mode, 1, f.requests.size)
+                    assertTrue((field(f.pool, "profileFetchAttempted") as Map<*, *>).containsKey(event.pubkey))
+                    assertEquals(mode, mode != "picture",
+                        (field(f.pool, "profileFallbackNegCache") as Map<*, *>).containsKey(event.pubkey))
+                } finally { (field(resolver, "scope") as CoroutineScope).cancel() }
+            }
+        }
+    }
+
+    @Test fun `empty profile pass cannot clear a newer attempt stamp`() = runBlocking {
+        Fixture(bridgeLoopback = true).use { f ->
+            val url = BRIDGE_FALLBACK_RELAY_URLS.single()
+            f.preferences.setIndexerUrls(listOf(url))
+            f.preferences.indexerRelayUrlsFlow().first { it == listOf(url) }
+            f.pool.suspendSocketsForBackground()
+            val author = "a".repeat(64)
+            val pass = profilePass(f) { f.pool.fetchProfiles(listOf(author), 1) }
+            @Suppress("UNCHECKED_CAST")
+            val stamps = field(f.pool, "profileFetchAttempted") as ConcurrentHashMap<String, Long>
+            val newer = stamps.getValue(author) + 1
+            stamps[author] = newer // Another pass owns this newer stamp.
+            withTimeout(10_000) { pass?.join() }
+            assertEquals(newer, stamps[author])
+            assertFalse("Empty selection must not write a negative-cache stamp",
+                (field(f.pool, "profileFallbackNegCache") as Map<*, *>).containsKey(author))
+        }
+    }
+
+    @Test fun `overlapping hint groups keep selected authors and release invalid hints`() = runBlocking {
+        Fixture().use { f ->
+            val blocked = "wss://blocked-overlap.test"
+            val selected = "wss://selected-overlap.test"
+            val author = "a".repeat(64)
+            val invalid = "b".repeat(64)
+            f.pool.onBlockedRelaysChanged(setOf(blocked))
+            val pass = profilePass(f) { f.pool.fetchProfilesFromHints(mapOf(
+                author to listOf(blocked, selected), invalid to listOf("not a relay"))) }
+            withTimeout(10_000) { pass?.join() }
+            f.until { f.requests.size == 1 }
+            val stamps = field(f.pool, "hintedProfileFetchAttempted") as Map<*, *>
+            assertTrue(stamps.containsKey(author))
+            assertFalse("No normalized target is not a profile attempt", stamps.containsKey(invalid))
+            f.pool.onBlockedRelaysChanged(emptySet())
+            f.pool.fetchProfilesFromHints(mapOf(author to listOf(blocked, selected), invalid to listOf(blocked)))
+            f.until { f.requests.size == 2 }
+            assertEquals(listOf(invalid), f.requests.last().second[2].jsonObject.getValue("authors")
+                .jsonArray.map { it.jsonPrimitive.content })
+        }
+    }
+
+    @Test fun `mixed profile phases release only never selected authors`() = runBlocking {
+        Fixture(bridgeLoopback = true).use { f ->
+            val bridge = BRIDGE_FALLBACK_RELAY_URLS.single()
+            val selected = "wss://selected-fanout.test"
+            val blocked = "wss://blocked-fanout.test"
+            f.preferences.setIndexerUrls(listOf(bridge))
+            f.preferences.indexerRelayUrlsFlow().first { it == listOf(bridge) }
+            f.pool.onBlockedRelaysChanged(setOf(bridge, blocked))
+            val crypto = ZapCryptoTestFixture()
+            val events = listOf(crypto.sender, crypto.recipient).map {
+                crypto.signedEvent(it, 0, emptyList(),
+                    """{"name":"fixture","picture":"https://images.test/avatar.png"}""")
+            }
+            val (a, b) = events.map { it.pubkey }
+            f.remote[selected] = listOf(events[0])
+            f.remote[blocked] = listOf(events[1])
+            f.processor.start()
+            f.pool.connectAndAwait(listOf(selected), 5_000)
+            val resolver = ProfileResolver(f.store, Lazy { f.pool })
+            val users = com.unsilence.app.data.repository.UserRepository(f.store, resolver)
+            val hints = mapOf(a to listOf(selected), b to listOf(blocked))
+            try {
+                val pass = profilePass(f) { users.fetchProfilesWithFanout(listOf(a, b), 1, hints) }
+                withTimeout(12_000) { pass!!.join() }
+                assertEquals(1, f.requests.size)
+                assertNotNull(users.getUser(a))
+                assertNull(users.getUser(b))
+                val stamps = field(f.pool, "profileFetchAttempted") as Map<*, *>
+                assertTrue(stamps.containsKey(a))
+                assertFalse(stamps.containsKey(b))
+                f.pool.onBlockedRelaysChanged(setOf(bridge))
+                users.fetchProfilesWithFanout(listOf(a, b), 1, hints)
+                f.until { users.getUser(b) != null }
+                assertEquals(listOf(selected, blocked), f.requests.map { it.first })
+                assertEquals(listOf(b), f.requests.last().second[2].jsonObject.getValue("authors")
+                    .jsonArray.map { it.jsonPrimitive.content })
+            } finally { (field(resolver, "scope") as CoroutineScope).cancel() }
+        }
+    }
+
     @Test fun `stalled upgrades recover all pooled entry paths and replay a buffered live request once`() = runBlocking {
         Fixture(stallFirstUpgrade = true).use { f ->
             val urls = listOf("connect", "await", "lookup", "reconnect").map { "wss://$it.test" }
@@ -252,13 +442,14 @@ class RelayRequestPacingTest {
     private suspend fun profilePhase(
         f: Fixture, url: String, authors: List<String>,
         prefix: String = "hint-profiles", urls: List<String> = listOf(url),
-    ): Unit =
-        kotlin.coroutines.intrinsics.suspendCoroutineUninterceptedOrReturn { continuation ->
+    ) {
+        kotlin.coroutines.intrinsics.suspendCoroutineUninterceptedOrReturn<Any?> { continuation ->
             RelayPool::class.java.getDeclaredMethod(
                 "fetchProfilePhase", List::class.java, List::class.java, String::class.java,
                 Boolean::class.javaPrimitiveType, kotlin.coroutines.Continuation::class.java,
             ).apply { isAccessible = true }.invoke(f.pool, authors, urls, prefix, true, continuation)
         }
+    }
 
     /** Completed request IDs must not accumulate in pool-owned maps or active-ID sets. */
     private fun retainedRequestContainers(f: Fixture, ids: Set<String>): List<String> =
