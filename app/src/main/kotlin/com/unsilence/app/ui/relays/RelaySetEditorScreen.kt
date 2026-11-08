@@ -277,10 +277,10 @@ fun RelaySetEditorScreen(
                                     modifier = Modifier.size(36.dp),
                                 ) {
                                     Icon(
-                                        Icons.Filled.Close,
+                                        Icons.Filled.Delete,
                                         contentDescription = "Remove image",
                                         tint = TextSecondary,
-                                        modifier = Modifier.size(18.dp),
+                                        modifier = Modifier.size(16.dp),
                                     )
                                 }
                             }
@@ -366,7 +366,7 @@ fun RelaySetEditorScreen(
                                 Icons.Filled.Delete,
                                 contentDescription = "Remove relay",
                                 tint = TextSecondary,
-                                modifier = Modifier.size(18.dp),
+                                modifier = Modifier.size(16.dp),
                             )
                         }
                     }

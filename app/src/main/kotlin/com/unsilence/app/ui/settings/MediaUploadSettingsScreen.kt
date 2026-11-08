@@ -20,6 +20,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.DropdownMenu
@@ -320,6 +321,7 @@ private fun ServerRow(
             ) {
                 DropdownMenuItem(
                     text = { Text("Remove") },
+                    leadingIcon = { Icon(Icons.Filled.Delete, contentDescription = null) },
                     onClick = {
                         showMenu = false
                         onRemove()

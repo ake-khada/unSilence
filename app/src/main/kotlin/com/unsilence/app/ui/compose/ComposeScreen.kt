@@ -47,7 +47,6 @@ import androidx.compose.material.icons.filled.ErrorOutline
 import androidx.compose.material.icons.filled.HourglassEmpty
 import androidx.compose.material.icons.filled.Save
 import androidx.compose.material.icons.filled.Add
-import androidx.compose.material.icons.outlined.DeleteOutline
 import androidx.compose.material.icons.outlined.Poll
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -1066,7 +1065,7 @@ private fun PollComposer(
                 trailingIcon = if (poll.options.size > 2) {
                     {
                         IconButton(onClick = { onRemoveOption(option.id) }) {
-                            Icon(Icons.Outlined.DeleteOutline, "Remove option", tint = TextSecondary)
+                            Icon(Icons.Filled.Close, "Remove option", tint = TextSecondary)
                         }
                     }
                 } else null,

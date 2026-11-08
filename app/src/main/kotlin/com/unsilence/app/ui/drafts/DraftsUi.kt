@@ -373,7 +373,7 @@ private fun DraftRow(
             }
         }
         IconButton(onClick = { onDelete(draft) }, modifier = Modifier.size(40.dp)) {
-            Icon(Icons.Filled.Delete, contentDescription = "Delete draft", tint = TextSecondary)
+            Icon(Icons.Filled.Delete, contentDescription = "Delete draft", tint = TextSecondary, modifier = Modifier.size(16.dp))
         }
         Icon(Icons.Filled.ChevronRight, contentDescription = null, tint = Text3, modifier = Modifier.size(16.dp))
     }

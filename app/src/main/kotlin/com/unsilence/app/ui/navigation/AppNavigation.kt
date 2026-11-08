@@ -54,7 +54,7 @@ import androidx.compose.material.icons.automirrored.filled.Article
 import androidx.compose.material.icons.automirrored.filled.FormatAlignLeft
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Check
-import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.GridView
 import androidx.compose.material.icons.filled.Photo
 import androidx.compose.material.icons.filled.Settings
@@ -1218,12 +1218,13 @@ private fun FeedSelectorSheet(
                             Spacer(Modifier.width(Spacing.small))
                         }
                         Icon(
-                            imageVector = Icons.Default.Close,
+                            imageVector = Icons.Default.Delete,
                             contentDescription = "Remove favorite",
                             tint = Text3,
                             modifier = Modifier
                                 .size(18.dp)
-                                .clickable { onRemoveFavorite(relay.url) },
+                                .clickable { onRemoveFavorite(relay.url) }
+                                .padding(1.dp),
                         )
                     }
                 }

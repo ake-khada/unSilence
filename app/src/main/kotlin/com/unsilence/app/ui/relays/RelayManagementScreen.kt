@@ -797,7 +797,7 @@ private fun RelaySetRow(
                             onClick = { viewModel.removeRelayFromSet(set.dTag, member) },
                             modifier = Modifier.size(24.dp),
                         ) {
-                            Icon(Icons.Filled.Delete, contentDescription = "Remove", tint = TextSecondary, modifier = Modifier.size(14.dp))
+                            Icon(Icons.Filled.Delete, contentDescription = "Remove", tint = TextSecondary, modifier = Modifier.size(16.dp))
                         }
                     }
                 }

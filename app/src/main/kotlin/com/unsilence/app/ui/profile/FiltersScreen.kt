@@ -25,6 +25,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -482,7 +483,7 @@ private fun MutedUserRow(
         }
         IconButton(onClick = onRemove, modifier = Modifier.size(32.dp)) {
             Icon(
-                imageVector = Icons.Default.Close,
+                imageVector = Icons.Default.Delete,
                 contentDescription = "Unmute",
                 tint = TextSecondary,
                 modifier = Modifier.size(16.dp),
@@ -571,7 +572,7 @@ private fun MutedTagRow(text: String, onRemove: () -> Unit) {
         )
         IconButton(onClick = onRemove, modifier = Modifier.size(32.dp)) {
             Icon(
-                imageVector = Icons.Default.Close,
+                imageVector = Icons.Default.Delete,
                 contentDescription = "Remove",
                 tint = TextSecondary,
                 modifier = Modifier.size(16.dp),
