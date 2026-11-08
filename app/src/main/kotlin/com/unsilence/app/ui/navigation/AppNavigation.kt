@@ -54,7 +54,6 @@ import androidx.compose.material.icons.automirrored.filled.Article
 import androidx.compose.material.icons.automirrored.filled.FormatAlignLeft
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Check
-import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.GridView
 import androidx.compose.material.icons.filled.Photo
 import androidx.compose.material.icons.filled.Settings
@@ -1187,46 +1186,13 @@ private fun FeedSelectorSheet(
                 for (relay in visiblePinned) {
                     val selected = isSelected(relay)
                     val latencyMs = (relayHealth[relay.url] ?: normalizeRelayUrl(relay.url)?.let { relayHealth[it] })?.ping
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(horizontal = 12.dp, vertical = 2.dp)
-                            .clip(RoundedCornerShape(12.dp))
-                            .background(if (selected) Brand.copy(alpha = 0.08f) else Color.Transparent)
-                            .clickable { onFeedChanged(relay) }
-                            .padding(horizontal = 16.dp, vertical = 13.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        com.unsilence.app.ui.relays.RelayLatencyDot(latencyMs, modifier = Modifier.size(8.dp))
-                        Spacer(Modifier.width(14.dp))
-                        Text(
-                            text       = relay.displayLabel,
-                            color      = if (selected) Brand else com.unsilence.app.ui.theme.White,
-                            style = AppTextStyles.bodyLarge,
-                            fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
-                            maxLines   = 1,
-                            overflow   = TextOverflow.Ellipsis,
-                            modifier   = Modifier.weight(1f),
-                        )
-                        if (selected) {
-                            Icon(
-                                imageVector = Icons.Filled.Check,
-                                contentDescription = "Selected",
-                                tint = Brand,
-                                modifier = Modifier.size(18.dp),
-                            )
-                            Spacer(Modifier.width(Spacing.small))
-                        }
-                        Icon(
-                            imageVector = Icons.Default.Delete,
-                            contentDescription = "Remove favorite",
-                            tint = Text3,
-                            modifier = Modifier
-                                .size(18.dp)
-                                .clickable { onRemoveFavorite(relay.url) }
-                                .padding(1.dp),
-                        )
-                    }
+                    FavoriteFeedSelectorRow(
+                        label = relay.displayLabel,
+                        selected = selected,
+                        latencyMs = latencyMs,
+                        onSelect = { onFeedChanged(relay) },
+                        onRemove = { onRemoveFavorite(relay.url) },
+                    )
                 }
             }
 
