@@ -140,6 +140,17 @@ object Nip19FailureCache {
     }
 }
 
+/** Runs the visible-card stages; media probes may suspend for network responses. */
+internal suspend fun hydrateVisibleCardWork(
+    hydrateMedia: suspend () -> Unit,
+    accumulateOwn: () -> Unit,
+    accumulatePublic: () -> Unit,
+) {
+    accumulateOwn()
+    accumulatePublic()
+    hydrateMedia()
+}
+
 /**
  * Bounded card hydration for the viewport and immediate look-ahead.
  *
@@ -898,14 +909,11 @@ class CardHydrator @Inject constructor(
         // Keep video MMR on the visible composable path only. A settled-scroll
         // background extraction can race the player/poster path and was one of
         // the regressions behind dark video cards during fast scrolling.
-        hydrateMedia(priorityEvents, mmrAllowed = false)
-
-        // Own-engagement backfill: accumulate novel targets (id+coord+author),
-        // dispatch after 250ms debounce so hydrateVisibleCards returns immediately.
-        accumulateOwnEngagement(priorityEvents)
-
-        // Engagement counts: viewport + forward look-ahead (IDs from caller).
-        accumulateEngagement(priorityEvents)
+        hydrateVisibleCardWork(
+            hydrateMedia = { hydrateMedia(priorityEvents, mmrAllowed = false) },
+            accumulateOwn = { accumulateOwnEngagement(priorityEvents) },
+            accumulatePublic = { accumulateEngagement(priorityEvents) },
+        )
     }
 
     /**
@@ -1068,10 +1076,12 @@ class CardHydrator @Inject constructor(
      *
      * Query budgets remain batched; a relay's limit is not per-post completeness.
      *
-     * Relay targeting: post author's NIP-65 write relays (top 4 by optional RTT) +
-     * user's read relays (top 2) as secondary catch-net. Reactors fan their
-     * kind-7/9735 broadcasts to the post author's write relays — that's where
-     * engagement propagates. GLOBAL fallback when neither kind-10002 is known.
+     * Relay targeting: post author's NIP-65 read/inbox relays (up to 4), write
+     * relays for compatibility (up to 4), and own read relays (up to 2).
+     * Existing source/hint coverage and the shared relay cap still apply; an
+     * eligible inbox is not a guarantee of dispatch under that cap. This read
+     * route does not change publication or zap receipt tags. GLOBAL fallback
+     * remains available when neither kind-10002 is known.
      * The coordinator records real EOSE per relay and requested filter scope.
      */
     private suspend fun dispatchEngagement() {

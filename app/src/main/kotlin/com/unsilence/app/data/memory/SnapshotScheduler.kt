@@ -58,6 +58,10 @@ internal class SnapshotSaveCoordinator {
     }
 }
 
+/** The follows section can finish before the rest of a valid snapshot is decoded. */
+internal enum class SnapshotFollowsOutcome { NONEMPTY, EMPTY, MISSING, UNAVAILABLE }
+internal enum class SnapshotRestoreOutcome { RESTORED, MISSING, REJECTED }
+
 /**
  * Manages MemoryEventStore snapshot persistence with process-lifecycle-driven scheduling.
  *
@@ -170,12 +174,22 @@ class SnapshotScheduler internal constructor(
      * [BufferedInputStream.reset] preserve the four magic bytes for the reader
      * without copying the full snapshot into memory.
      */
-    suspend fun restoreIfPresent() = withContext(snapshotDispatcher) {
+    internal suspend fun restoreIfPresent(
+        onFollowsRestored: (SnapshotFollowsOutcome) -> Unit = {},
+    ): SnapshotRestoreOutcome = withContext(snapshotDispatcher) {
+        var followsReported = false
+        fun reportFollows(outcome: SnapshotFollowsOutcome) {
+            if (!followsReported) {
+                followsReported = true
+                onFollowsRestored(outcome)
+            }
+        }
         val baseFile = snapshotFile.baseFile
         if (!baseFile.exists()) {
             Log.d(TAG, "No snapshot file found, starting fresh")
             restored = true
-            return@withContext
+            reportFollows(SnapshotFollowsOutcome.MISSING)
+            return@withContext SnapshotRestoreOutcome.MISSING
         }
         mutex.withLock {
             try {
@@ -191,17 +205,20 @@ class SnapshotScheduler internal constructor(
                         magic.contentEquals(SNAPSHOT_BINARY_MAGIC)
                     ) {
                         DataInputStream(buffered).use { input ->
-                            memoryEventStore.restoreSnapshotBinary(input)
+                            memoryEventStore.restoreSnapshotBinary(input, ::reportFollows)
                         }
                         Log.d(TAG, "Snapshot restored (binary V3) from ${snapshotBytes / 1024}KB")
                     } else {
                         InputStreamReader(buffered).buffered().use { reader ->
-                            memoryEventStore.restoreSnapshotFrom(reader)
+                            if (!memoryEventStore.restoreSnapshotFrom(reader, ::reportFollows)) {
+                                throw java.io.IOException("Unsupported or empty text snapshot")
+                            }
                         }
                         Log.d(TAG, "Snapshot restored (V2 TSV migration path) from ${snapshotBytes / 1024}KB")
                     }
                 }
                 restored = true
+                SnapshotRestoreOutcome.RESTORED
             } catch (t: Throwable) {
                 if (t is CancellationException) throw t
 
@@ -227,6 +244,8 @@ class SnapshotScheduler internal constructor(
                     )
                 }
                 restored = true
+                reportFollows(SnapshotFollowsOutcome.UNAVAILABLE)
+                SnapshotRestoreOutcome.REJECTED
             }
         }
     }

@@ -14,6 +14,7 @@ import com.unsilence.app.data.wallet.NwcManager
 import com.unsilence.app.data.memory.MemoryEventStore
 import com.unsilence.app.data.memory.NostrEvent
 import com.unsilence.app.data.memory.SnapshotScheduler
+import com.unsilence.app.data.memory.SnapshotRestoreOutcome
 import com.unsilence.app.data.memory.WotProviderDescriptor
 import com.unsilence.app.data.relay.AccountMetadataFetchResult
 import com.unsilence.app.data.relay.CardHydrator
@@ -38,6 +39,8 @@ import com.unsilence.app.data.repository.MuteSyncState
 import com.unsilence.app.data.settings.SettingsStore
 import com.unsilence.app.data.wallet.ZapPreferencesStore
 import com.unsilence.app.ui.feed.SharedPlayerHolder
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -61,6 +64,7 @@ import javax.inject.Singleton
 
 private const val TAG = "AppBootstrapper"
 private const val FRESHNESS_WINDOW_SEC = 6 * 3600L  // 6 hours
+private const val ACCOUNT_METADATA_READY_TIMEOUT_MS = 5_000L
 private val ACCOUNT_METADATA_RECOVERY_DELAYS_MS = listOf(10_000L, 30_000L)
 private val MUTE_RECOVERY_DELAYS_MS = listOf(10_000L, 20_000L, 40_000L)
 
@@ -105,6 +109,38 @@ private val DEFAULT_INDEXER_URLS = listOf(
     "wss://directory.yabu.me",
     "wss://profiles.nostr1.com",
 )
+
+/** Startup ordering seam: the real snapshot reader and relay discovery are supplied by bootstrap. */
+internal suspend fun bootstrapAccountMetadata(
+    scope: CoroutineScope,
+    snapshotFresh: Boolean,
+    connectIndexers: suspend () -> Unit,
+    restoreSnapshot: suspend () -> SnapshotRestoreOutcome,
+    prepareDiscovery: () -> Unit,
+    hasFreshMetadata: () -> Boolean,
+    fetchMetadata: suspend () -> AccountMetadataFetchResult,
+): AccountMetadataFetchResult? = coroutineScope {
+    val restoring = scope.async { restoreSnapshot() }
+    prepareDiscovery()
+    // Connections are already registered. Overlap their bounded readiness wait
+    // with local restore, rather than adding two serial startup deadlines.
+    val indexers = async { connectIndexers() }
+    try {
+        val restored = if (snapshotFresh) {
+            withTimeoutOrNull(ACCOUNT_METADATA_READY_TIMEOUT_MS) { restoring.await() }
+        } else null
+        if (restored == SnapshotRestoreOutcome.RESTORED && hasFreshMetadata()) {
+            null
+        } else {
+            indexers.await()
+            fetchMetadata()
+        }
+    } finally {
+        indexers.cancel()
+    }
+    // Only the wait times out. The independently owned restore continues and
+    // reports its actual outcome through the existing account/session fences.
+}
 
 @Singleton
 class AppBootstrapper @Inject constructor(
@@ -267,12 +303,9 @@ class AppBootstrapper @Inject constructor(
             normalizeRelayUrl(rawUrl)?.let { relayPool.addPurpose(it, ConnectionPurpose.PERSISTENT) }
         }
 
-        // Step 1: Connect to indexer relays BEFORE snapshot restore.
-        // connectAndAwait adds to connections map immediately, enabling
-        // sendOneShotBatch reuse during the 21s snapshot parse window.
-        // No MES dependency — pure WebSocket establishment.
-        val ready = relayPool.connectAndAwait(indexerUrls, timeoutMs = 5_000)
-        Log.d(TAG, "Phase1 Step1: $ready indexer relay(s) connected")
+        // Register/connect pooled indexers before restore can trigger requests,
+        // but local readiness must not await a WebSocket handshake.
+        relayPool.connect(indexerUrls)
 
         // Wire MES mute-list callbacks BEFORE snapshot restore. Every accepted
         // own event closes the publish gate until that exact event is verified.
@@ -283,13 +316,18 @@ class AppBootstrapper @Inject constructor(
             muteListRepository.markPublishUnsafe("own kind-10000 awaiting verification")
             scope.launch { handleOwnMuteListEvent(event) }
         }
-        // Phase 1.5: Launch snapshot restore in background — does NOT block bootstrap.
-        // Follows-first snapshot format fires _followsSignal early so downstream
-        // steps can await follows via signal flows without waiting for full parse.
+        // The follows-section outcome releases initial feed selection early.
+        // Skipping discovery additionally requires successful relay/event restore.
         val snapshotAgeSec = snapshotScheduler.getSnapshotAgeSeconds()
         val snapshotFresh = snapshotAgeSec < FRESHNESS_WINDOW_SEC
-        scope.launch {
-            snapshotScheduler.restoreIfPresent()
+        val restoreSnapshot: suspend () -> SnapshotRestoreOutcome = {
+            val outcome = snapshotScheduler.restoreIfPresent { follows ->
+                // Local follows readiness is not network discovery completion or
+                // proof that the later relay/event sections will be accepted.
+                if (sessionGen.get() == myGen && keyManager.getPublicKeyHex() == pubkeyHex) {
+                    initGate.signalSnapshotFollows(initSession, follows)
+                }
+            }
             if (sessionGen.get() == myGen && keyManager.getPublicKeyHex() == pubkeyHex) {
                 muteListRepository.markSnapshotReady()
                 initGate.signalSnapshotReady(initSession)
@@ -297,28 +335,36 @@ class AppBootstrapper @Inject constructor(
             } else {
                 Log.w(TAG, "SESSION-FENCE: stale snapshot completion ignored (gen=$myGen)")
             }
+            outcome
         }
 
         // A truly cold identity needs useful content even when it has never published
         // account metadata. Warm the safe fallback while the single combined metadata
         // lookup runs; established accounts with a fresh snapshot keep their own relays.
         val coldFallbackUrls = if (snapshotFresh) emptyList() else GLOBAL_RELAY_URLS
-        coldFallbackUrls.forEach { rawUrl ->
-            normalizeRelayUrl(rawUrl)?.let { relayPool.addPurpose(it, ConnectionPurpose.PERSISTENT) }
-        }
-        relayPool.connect(coldFallbackUrls)
 
         // Steps 2–3: kind 0, 3 and 10002 are one logical account-discovery request.
         // Serial waits made a verified empty identity pay every timeout in succession.
-        val followsBefore = memoryEventStore.getFollows(pubkeyHex)
-        val relaysBefore = memoryEventStore.getReadWriteRelayConfigs(pubkeyHex)
-        val hasFreshGraphAndRelays = snapshotFresh &&
-            followsBefore?.isNotEmpty() == true && relaysBefore.isNotEmpty()
-        val metadataFetch = if (hasFreshGraphAndRelays) {
-            null
-        } else {
-            relayPool.fetchAccountMetadata(pubkeyHex, indexerUrls)
-        }
+        val metadataFetch = bootstrapAccountMetadata(
+            scope = scope,
+            snapshotFresh = snapshotFresh,
+            connectIndexers = {
+                val ready = relayPool.connectAndAwait(indexerUrls, timeoutMs = ACCOUNT_METADATA_READY_TIMEOUT_MS)
+                Log.d(TAG, "Phase1 Step1: $ready indexer relay(s) connected")
+            },
+            restoreSnapshot = restoreSnapshot,
+            prepareDiscovery = {
+                coldFallbackUrls.forEach { rawUrl ->
+                    normalizeRelayUrl(rawUrl)?.let { relayPool.addPurpose(it, ConnectionPurpose.PERSISTENT) }
+                }
+                relayPool.connect(coldFallbackUrls)
+            },
+            hasFreshMetadata = {
+                snapshotFresh && memoryEventStore.getFollows(pubkeyHex)?.isNotEmpty() == true &&
+                    memoryEventStore.getReadWriteRelayConfigs(pubkeyHex).isNotEmpty()
+            },
+            fetchMetadata = { relayPool.fetchAccountMetadata(pubkeyHex, indexerUrls) },
+        )
         metadataFetch?.let { materializeConfirmedEmptyAccountLists(pubkeyHex, it) }
         val follows = memoryEventStore.getFollows(pubkeyHex)
         val freshRelays = memoryEventStore.getReadWriteRelayConfigs(pubkeyHex)

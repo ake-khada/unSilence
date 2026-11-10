@@ -7,6 +7,8 @@ import com.unsilence.app.domain.model.FeedFilter
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 
+private const val SNAPSHOT_MERGE_CEILING = 20
+
 /** Seed identity travels with the events, never in an independently collected loading flag. */
 internal data class FeedTimeline(
     val events: List<NostrEvent> = emptyList(),
@@ -24,6 +26,20 @@ internal data class FeedTimeline(
         copy(events = events.take(reset.rawLimit), paging = reset)
     }
 }
+
+/** Select/subscribe early, but never seed from a partially restored event section. */
+internal fun initialFeedCache(
+    snapshotReady: Boolean,
+    load: () -> List<NostrEvent>,
+): List<NostrEvent> = if (snapshotReady) load() else emptyList()
+
+/** Preserve the one-shot completion budget: an established live feed is not reseeded. */
+internal fun completedSnapshotCache(
+    currentEventCount: Int,
+    savedFeedSeedPending: Boolean,
+    load: () -> List<NostrEvent>,
+): List<NostrEvent> =
+    if (!savedFeedSeedPending && currentEventCount < SNAPSHOT_MERGE_CEILING) load() else emptyList()
 
 @Serializable
 internal data class FeedSelection(

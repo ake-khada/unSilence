@@ -275,11 +275,9 @@ class OutboxRelayResolver @Inject constructor(
     }
 
     /**
-     * Resolve the existing compatibility relays for engagement
-     * on a post authored by [authorPubkey].
-     *
-     * Receipt relay tags mirror this write/read route. Other engagement may
-     * also live on the author's inbox; thread replies use their own resolver.
+     * Resolve bounded read coverage for engagement on [authorPubkey]'s post.
+     * Author inboxes carry replies/reactions; author writes and own reads retain
+     * compatibility coverage. This lookup does not change publication or zap tags.
      * GLOBAL fallback handles the case where neither kind-10002 is known.
      *
      * @param authorPubkey  hex pubkey of the post author whose engagement
@@ -295,6 +293,7 @@ class OutboxRelayResolver @Inject constructor(
         authorPubkey: String,
         ownReadRelays: List<String>,
         blockedRelays: Set<String> = emptySet(),
+        includeAuthorInbox: Boolean = true,
     ): List<String> {
         val authorWrite = metadata.writeRelaysFor(authorPubkey)
             .mapNotNull { normalizeRelayUrl(it) }
@@ -314,7 +313,15 @@ class OutboxRelayResolver @Inject constructor(
             .sortedWith(byQuality)
             .take(MAX_OWN_READ_RELAYS_FOR_ENGAGEMENT)
 
-        val combined = (rankedAuthorWrite + rankedOwnRead).distinct()
+        val authorInbox = if (includeAuthorInbox) {
+            metadata.readRelaysFor(authorPubkey)
+                .mapNotNull(::normalizeRelayUrl)
+                .filter { it !in blockedRelays }
+                .distinct()
+                .sortedWith(byQuality)
+                .take(MAX_AUTHOR_WRITE_RELAYS_FOR_ENGAGEMENT)
+        } else emptyList()
+        val combined = (authorInbox + rankedAuthorWrite + rankedOwnRead).distinct()
         return combined.ifEmpty { GLOBAL_RELAY_URLS.filter { it !in blockedRelays } }
     }
 
@@ -346,7 +353,7 @@ class OutboxRelayResolver @Inject constructor(
             if (selected.size == 4) break
         }
         val compatibility = if (rootAuthor != null) {
-            resolveEngagementRelays(rootAuthor, ownReadRelays, blocked)
+            resolveEngagementRelays(rootAuthor, ownReadRelays, blocked, includeAuthorInbox = false)
         } else {
             eligible(ownReadRelays).sortedWith(quality).take(MAX_OWN_READ_RELAYS_FOR_ENGAGEMENT)
                 .ifEmpty { eligible(GLOBAL_RELAY_URLS) }

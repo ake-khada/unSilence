@@ -1871,6 +1871,12 @@ class MemoryEventStore @Inject constructor(
         val targetId = reactionTargetId(event) ?: return
         val contentStr = event.content.ifBlank { "+" }
         val reactionContent = parseReactionContent(contentStr, event.tags)
+        // Index the retained contributor before exposing its aggregate so target
+        // eviction cannot observe a row without its backing event ID.
+        if (reactionContent != ReactionContent.Standard("-")) {
+            addToActorIndex(reactedTargetsByActor, event.pubkey, targetId)
+            addActionEventId(reactionEventIdsByActorTarget, event.pubkey, targetId, event.id)
+        }
         // NIP-25 "-" is a downvote — don't index as a displayable reaction
         if (reactionContent != ReactionContent.Standard("-")) {
             reactionsByTarget
@@ -1879,11 +1885,7 @@ class MemoryEventStore @Inject constructor(
         }
         statsUpdatedAt[targetId] = System.currentTimeMillis()
         invalidateStatsForTarget(targetId, dirty)
-        // Actor-side index: track what this pubkey has reacted to (skip dislikes)
-        if (reactionContent != ReactionContent.Standard("-")) {
-            addToActorIndex(reactedTargetsByActor, event.pubkey, targetId)
-            addActionEventId(reactionEventIdsByActorTarget, event.pubkey, targetId, event.id)
-        }
+
     }
 
     /** A single request may affect at most [MAX_DELETION_TARGETS] event/address references. */
@@ -3418,6 +3420,17 @@ class MemoryEventStore @Inject constructor(
             invalidatedReplyTargets += zapDirty.invalidatedStatsIds
             zapAuthRecordedIds.remove(event.id)
         }
+        if (event.kind == 7) {
+            val target = reactionTargetId(event)
+            val retainedTarget = target?.let { eventsById[it] ?: articleIdByCoord[it]?.let(eventsById::get) }
+            if (target != null && retainedTarget == null) {
+                val contributor = ReactionInfo(event.pubkey, parseReactionContent(event.content.ifBlank { "+" }, event.tags))
+                reactionsByTarget.computeIfPresent(target) { _, contributors ->
+                    if (!hasRetainedReaction(target, contributor)) contributors.remove(contributor)
+                    contributors.takeIf { it.isNotEmpty() }
+                }
+            }
+        }
         contentAdmissionIndex.remove(event.id, event.kind)
         deindexNotificationRecipients(event)
         recentByCreatedAt.remove(EventEntry(event.id, event.createdAt))
@@ -3430,9 +3443,10 @@ class MemoryEventStore @Inject constructor(
                 invalidatedReplyTargets += targetId
             }
         }
-        // Reaction/repost contributor aggregates survive payload eviction. Their
-        // targets lost no displayed engagement and need neither recovery nor a
-        // stats refresh. Replies and authenticated receipts above are different.
+        // Existing reaction/repost summaries survive contributor eviction while
+        // their target is retained. A missing target's retained-reaction projection
+        // is pruned above when its last backing contributor disappears. Replies
+        // and authenticated receipts have their own invalidation paths above.
         // Article comment index: drop this id from each coord it referenced.
         if (event.kind == 1 || event.kind == 1111) {
             for (tag in event.tags) {
@@ -3465,10 +3479,33 @@ class MemoryEventStore @Inject constructor(
         repostCounts.remove(event.id)
         statsUpdatedAt.remove(event.id)
         repostPubkeysByTarget.remove(event.id)
-        reactionsByTarget.remove(event.id)
-        zapDetailsByTarget.remove(event.id)
+        // Retained engagement is still the source of truth. Dropping these rows
+        // while keeping their raw events would make provenance-only duplicates
+        // unable to restore the count when the target returns. Prune contributors
+        // without payloads; retain no eviction journal or new index.
+        reactionsByTarget.computeIfPresent(event.id) { _, contributors ->
+            contributors.removeAll { reaction ->
+                !hasRetainedReaction(event.id, reaction)
+            }
+            contributors.takeIf { it.isNotEmpty() }
+        }
+        zapDetailsByTarget.computeIfPresent(event.id) { _, details ->
+            synchronized(details) {
+                details.removeAll { detail ->
+                    detail.eventId?.let { eventsById.containsKey(it) && authenticatedZapReceiptsById.containsKey(it) } != true
+                }
+                details.takeIf { it.isNotEmpty() }
+            }
+        }
         return event
     }
+
+    private fun hasRetainedReaction(targetId: String, reaction: ReactionInfo): Boolean =
+        reactionEventIdsByActorTarget[actionKey(reaction.pubkey, targetId)].orEmpty().any { id ->
+            eventsById[id]?.let { raw ->
+                parseReactionContent(raw.content.ifBlank { "+" }, raw.tags) == reaction.content
+            } == true
+        }
 
     private fun publishEvictionInvalidations(
         invalidatedReplyTargets: MutableSet<String>,
@@ -5149,6 +5186,8 @@ class MemoryEventStore @Inject constructor(
     /** Observe a single user profile by pubkey. Emits null until the profile arrives. */
     fun userEntityFlow(pubkey: String): Flow<UserEntity?> =
         _profileSignal.map { getUserEntity(pubkey) }
+            .distinctUntilChanged()
+            .flowOn(Dispatchers.Default)
 
     internal fun nip05VerificationFlow(
         pubkey: String,
@@ -6319,10 +6358,25 @@ class MemoryEventStore @Inject constructor(
         }
     }
 
-    suspend fun restoreSnapshotFrom(reader: BufferedReader) {
+    private fun snapshotFollowsOutcome(): SnapshotFollowsOutcome {
+        val follows = ownPubkey?.let(followsByPubkey::get)
+        return when {
+            follows == null -> SnapshotFollowsOutcome.MISSING
+            follows.isEmpty() -> SnapshotFollowsOutcome.EMPTY
+            else -> SnapshotFollowsOutcome.NONEMPTY
+        }
+    }
+
+    /** Unsupported or empty legacy input is a rejected outcome, not a caller exception. */
+    internal suspend fun restoreSnapshotFrom(
+        reader: BufferedReader,
+        onFollowsRestored: (SnapshotFollowsOutcome) -> Unit = {},
+    ): Boolean {
         var section = 0  // 0=events, 1=aggregates, 2=relay_health, 3=follows
         var versionChecked = false
         var followsFiredEarly = false
+        var followsSectionSeen = false
+        var followsReported = false
         var lineCount = 0
 
         reader.useLines { lines ->
@@ -6335,12 +6389,16 @@ class MemoryEventStore @Inject constructor(
                 if (!versionChecked) {
                     versionChecked = true
                     if (line != SNAPSHOT_VERSION) {
-                        Log.w("MES", "Snapshot version mismatch (found=$line, expected=$SNAPSHOT_VERSION), discarding")
-                        return
+                        onFollowsRestored(SnapshotFollowsOutcome.UNAVAILABLE)
+                        return false
                     }
                     continue
                 }
                 if (line == "---EVENTS---") {
+                    if (followsSectionSeen && !followsReported) {
+                        onFollowsRestored(snapshotFollowsOutcome())
+                        followsReported = true
+                    }
                     // Follows section complete (new-format snapshots write follows first).
                     // Fire signal immediately so FeedVM cold-start resolves before
                     // the 25s event parse. All 7 consumers are safe with early-fire.
@@ -6352,7 +6410,7 @@ class MemoryEventStore @Inject constructor(
                 }
                 if (line == "---AGGREGATES---") { section = 1; continue }
                 if (line == "---RELAY_HEALTH---") { section = 2; continue }
-                if (line == "---FOLLOWS---") { section = 3; continue }
+                if (line == "---FOLLOWS---") { section = 3; followsSectionSeen = true; continue }
                 when (section) {
                     0 -> { val event = deserializeEvent(line) ?: continue; insertFromSnapshot(event) }
                     1 -> restoreAggregate(line)
@@ -6361,6 +6419,13 @@ class MemoryEventStore @Inject constructor(
                 }
             }
         }
+
+        if (!versionChecked) {
+            onFollowsRestored(SnapshotFollowsOutcome.UNAVAILABLE)
+            return false
+        }
+        // Legacy text layouts may put follows last, or contain no follows.
+        if (!followsReported) onFollowsRestored(snapshotFollowsOutcome())
 
         // Rebuild reaction set from raw kind-7 events (same as binary path)
         reindexReactionsFromEvents()
@@ -6392,6 +6457,7 @@ class MemoryEventStore @Inject constructor(
         rebuildContentAdmissionIndex()
 
         Log.d("MES", "Snapshot restore complete (EventModel parsing deferred to first read)")
+        return true
     }
 
     // Sink for handler self-bumps during snapshot restore. The bumps are
@@ -6735,7 +6801,10 @@ class MemoryEventStore @Inject constructor(
         )
     }
 
-    suspend fun restoreSnapshotBinary(input: DataInputStream) {
+    internal suspend fun restoreSnapshotBinary(
+        input: DataInputStream,
+        onFollowsRestored: (SnapshotFollowsOutcome) -> Unit = {},
+    ) {
         val magic = ByteArray(4)
         input.readFully(magic)
         if (!magic.contentEquals(SNAPSHOT_BINARY_MAGIC)) {
@@ -6818,6 +6887,8 @@ class MemoryEventStore @Inject constructor(
             }
             ownContactListEvent = retained.copyForContactListRetention()
         }
+
+        onFollowsRestored(snapshotFollowsOutcome())
 
         // Fire follows + action signals early so FeedVM cold-start resolves
         // and engagement icons light up before the events parse completes.

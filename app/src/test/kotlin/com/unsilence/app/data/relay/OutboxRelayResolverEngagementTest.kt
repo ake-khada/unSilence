@@ -160,4 +160,28 @@ class OutboxRelayResolverEngagementTest {
 
         assertEquals(GLOBAL_RELAY_URLS, result)
     }
+    @Test fun `feed engagement includes bounded inboxes and retains write and own coverage`() {
+        val inboxes = (1..8).map { "wss://inbox-$it.example" }
+        val writes = (1..6).map { "wss://write-$it.example" }
+        val own = (1..4).map { "wss://own-$it.example" }
+        val resolver = OutboxRelayResolver(object : RelayMetadataSource {
+            override fun writeRelaysFor(pubkey: String) = writes
+            override fun readRelaysFor(pubkey: String) = inboxes
+        })
+        val result = resolver.resolveEngagementRelays(hex(1), own, setOf(inboxes.first()))
+        assertEquals(inboxes.drop(1).take(4), result.filter { it in inboxes })
+        assertEquals(writes.take(4), result.filter { it in writes })
+        assertEquals(own.take(2), result.filter { it in own })
+        assertEquals(10, result.size)
+        assertEquals(result.distinct(), result)
+    }
+
+    @Test fun `inbox only author does not need unrelated global fallback`() {
+        val resolver = OutboxRelayResolver(object : RelayMetadataSource {
+            override fun writeRelaysFor(pubkey: String) = emptyList<String>()
+            override fun readRelaysFor(pubkey: String) = listOf("wss://inbox.example/")
+        })
+        assertEquals(listOf("wss://inbox.example"), resolver.resolveEngagementRelays(hex(1), emptyList()))
+    }
+
 }

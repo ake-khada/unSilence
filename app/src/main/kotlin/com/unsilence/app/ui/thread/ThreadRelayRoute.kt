@@ -57,7 +57,7 @@ internal fun resolveThreadRelayRoute(
     val relatedAuthors = listOfNotNull(tapped?.pubkey, tapped?.replyToId?.let(event)?.pubkey)
     val compatibility = if (rootAuthor != null) {
         (lookupWriteRelays(rootAuthor) + resolver.resolveEngagementRelays(
-            rootAuthor, ownReadRelays, blockedRelays,
+            rootAuthor, ownReadRelays, blockedRelays, includeAuthorInbox = false,
         )).distinct()
     } else ownReadRelays.ifEmpty { GLOBAL_RELAY_URLS }
     val urls = (hints + compatibility).distinct()

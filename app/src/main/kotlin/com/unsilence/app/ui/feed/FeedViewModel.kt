@@ -844,7 +844,10 @@ class FeedViewModel @Inject constructor(
             resetView && restoreTimelineOnSubscribe && it.source.restore() == key.type && it.filter == key.filter
         }
         val cachedEvents = if (resetView) withContext(Dispatchers.Default) {
-            loadCachedEvents(key.type, key.filter, restoring)
+            initialFeedCache(
+                snapshotReady = initGate.snapshotReady || memoryEventStore.snapshotRestoredFlow.value > 0L ||
+                    keyManager.getPublicKeyHex() == null,
+            ) { loadCachedEvents(key.type, key.filter, restoring) }
         } else emptyList()
         if (resetView) {
             restoreTimelineOnSubscribe = false
@@ -1178,11 +1181,12 @@ class FeedViewModel @Inject constructor(
                 } else if (keyManager.isGraphKnownEmpty()) {
                     selectAutomaticTrustedGlobal("completed empty graph")
                 } else {
-                    // Slow path: wait for bootstrap's authoritative kind-3 attempt.
+                    // Local follows-section completion can release selection early;
+                    // otherwise await bootstrap's authoritative kind-3 attempt.
                     // Do not flash Global while follows are still unknown; keep the
                     // user's intent on Following and let the existing feed hydrate
                     // when the contact list arrives.
-                    initGate.awaitFollows()
+                    initGate.awaitInitialFollows()
                     val follows = memoryEventStore.getFollows(ownPubkey)
                     if (shouldUseAutomaticTrustedGlobal(follows)) {
                         val reason = if (follows == null) {
@@ -1276,10 +1280,12 @@ class FeedViewModel @Inject constructor(
         viewModelScope.launch {
             memoryEventStore.snapshotRestoredFlow.filter { it > 0L }.first()
             // Restored sessions seed after awaitSnapshot; do not race that seed.
-            if (restoredSession != null && restoreTimelineOnSubscribe) return@launch
-            val cached = if (_timeline.value.events.size < SNAPSHOT_MERGE_CEILING) {
+            val cached = completedSnapshotCache(
+                currentEventCount = _timeline.value.events.size,
+                savedFeedSeedPending = restoredSession != null && restoreTimelineOnSubscribe,
+            ) {
                 loadCachedEvents(_feedType.value, _filter.value)
-            } else emptyList()
+            }
             if (cached.isNotEmpty()) {
                 feedTrace { "snapshot restored: merging ${cached.size} cached events into ${_timeline.value.events.size} current" }
                 _timeline.update { it.merge(cached) }
@@ -1628,7 +1634,6 @@ class FeedViewModel @Inject constructor(
         const val ENGAGEMENT_LOOKAHEAD_CHURNY = 6
         const val ACTIVITY_SWEEP_CANDIDATE_LIMIT = 150
         const val TRUSTED_SWEEP_CANDIDATE_LIMIT = 150
-        const val SNAPSHOT_MERGE_CEILING = 20
         /** Debounce window — collapses frantic mashing, not deliberate retries. */
         const val REFRESH_DEBOUNCE_MS = 1_500L
         /** Retain synthesized rows across slice swaps (pull-refresh, feed switch) so they hit

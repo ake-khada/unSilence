@@ -43,7 +43,7 @@ private const val DEDUP_TRIM = 2_000
 // bounded window captures the duplicate crypto win without retaining the feed.
 private const val VERIFIED_CACHE_MAX = 1_024
 private const val VERIFIED_CACHE_TRIM = 256
-private val RECOVERABLE_CONTENT_KINDS = setOf(1, 6, 16, 20, 21, 22, 34235, 34236, 1068, 1111, 30023)
+private val RECOVERABLE_CONTENT_KINDS = setOf(1, 6, 16, 7, 9735, 20, 21, 22, 34235, 34236, 1068, 1111, 30023)
 
 /**
  * Parses raw relay wire messages and writes valid events to [MemoryEventStore].

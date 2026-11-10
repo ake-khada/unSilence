@@ -6,6 +6,8 @@ import com.unsilence.app.data.memory.DELETION_TOMBSTONE_CAP
 import com.unsilence.app.data.memory.MAX_DELETION_TARGETS
 import com.unsilence.app.data.memory.MemoryEventStore
 import com.unsilence.app.data.memory.NostrEvent
+import com.unsilence.app.data.zap.ZapCryptoTestFixture
+import kotlinx.serialization.encodeToString
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.test.TestScope
@@ -205,9 +207,172 @@ class EventProcessorDrainerTest {
     }
 
     @Test
-    fun `absent profiles reactions and derived monitors keep their original dedup`() = runTest {
+    fun `evicted reaction restores its target count exactly once through ingestion`() = runTest {
         startProcessor()
-        for (kind in listOf(0, 7, 30166)) {
+        val reaction = rawEvent(2, kind = 7, tags = """[["e","${eventId(1)}"]]""")
+        processor.process(rawEvent(1), FIRST_RELAY)
+        processor.process(reaction, FIRST_RELAY)
+        runCurrent()
+        assertEquals(1, store.reactionCount(eventId(1)))
+        store.evictOldContentEventsForTest(mapOf(1 to 0, 7 to 0))
+        assertNull(store.getNostrEvent(eventId(2)))
+        assertEquals(0, store.reactionCount(eventId(1)))
+        processor.process(rawEvent(1), SECOND_RELAY)
+        repeat(3) { processor.process(reaction, SECOND_RELAY) }
+        runCurrent()
+        assertNotNull("Previously seen missing reaction must return", store.getNostrEvent(eventId(2)))
+        assertEquals(1, store.reactionCount(eventId(1)))
+        repeat(3) { processor.process(reaction, FIRST_RELAY) }
+        assertEquals(0, processor.drainForTest())
+        assertEquals(1, store.reactionCount(eventId(1)))
+    }
+
+    @Test
+    fun `evicted authenticated receipt restores count exactly once through ingestion`() = runTest {
+        startProcessor()
+        val fixture = ZapCryptoTestFixture()
+        val request = fixture.request(targetId = eventId(1))
+        val receipt = fixture.receipt(request = request, targetId = eventId(1))
+        val raw = wire(receipt)
+        processor.process(rawEvent(1), FIRST_RELAY)
+        processor.process(raw, FIRST_RELAY)
+        runCurrent()
+        assertEquals(1, store.zapStats(eventId(1)).count)
+        store.evictOldContentEventsForTest(mapOf(1 to 0, 9735 to 0))
+        assertNull(store.getNostrEvent(receipt.id))
+        assertEquals(0, store.zapStats(eventId(1)).count)
+        processor.process(rawEvent(1), SECOND_RELAY)
+        repeat(3) { processor.process(raw, SECOND_RELAY) }
+        runCurrent()
+        assertNotNull("Previously seen missing receipt must return", store.getNostrEvent(receipt.id))
+        assertEquals(1, store.zapStats(eventId(1)).count)
+        repeat(3) { processor.process(raw, FIRST_RELAY) }
+        assertEquals(0, processor.drainForTest())
+        assertEquals(1, store.zapStats(eventId(1)).count)
+    }
+
+    @Test
+    fun `retained engagement survives target eviction and duplicates only add provenance`() = runTest {
+        startProcessor()
+        val fixture = ZapCryptoTestFixture()
+        val receipt = fixture.receipt(request = fixture.request(targetId = eventId(1)), targetId = eventId(1))
+        val reaction = rawEvent(2, kind = 7, tags = """[["e","${eventId(1)}"]]""")
+        processor.process(rawEvent(1), FIRST_RELAY)
+        processor.process(reaction, FIRST_RELAY)
+        processor.process(wire(receipt), FIRST_RELAY)
+        runCurrent()
+        assertEquals(1, store.reactionCount(eventId(1)))
+        assertEquals(1, store.zapStats(eventId(1)).count)
+        store.evictOldContentEventsForTest(mapOf(1 to 0))
+        assertNull(store.getNostrEvent(eventId(1)))
+        assertNotNull(store.getNostrEvent(eventId(2)))
+        assertNotNull(store.getNostrEvent(receipt.id))
+        assertEquals("Retained reaction projection survives immediately", 1, store.reactionCount(eventId(1)))
+        assertEquals("Retained authenticated receipt survives immediately", 1, store.zapStats(eventId(1)).count)
+        processor.process(rawEvent(1), SECOND_RELAY)
+        runCurrent()
+        processor.process(reaction, SECOND_RELAY)
+        processor.process(wire(receipt), SECOND_RELAY)
+        assertEquals("Retained duplicates must not reenter MES", 0, processor.drainForTest())
+        assertEquals(1, store.reactionCount(eventId(1)))
+        assertEquals(1, store.zapStats(eventId(1)).count)
+        assertTrue(SECOND_RELAY in store.getNostrEvent(eventId(2))!!.relaysSeen)
+        assertTrue(SECOND_RELAY in store.getNostrEvent(receipt.id)!!.relaysSeen)
+    }
+
+    @Test
+    fun `seen engagement outside verified cache recovers without bypassing tombstones`() = runTest {
+        startProcessor()
+        val fixture = ZapCryptoTestFixture()
+        val receipt = fixture.receipt(request = fixture.request(targetId = eventId(1)), targetId = eventId(1))
+        val reaction = rawEvent(2, kind = 7, tags = """[["e","${eventId(1)}"]]""")
+        processor.seenIds[eventId(2)] = Unit
+        processor.seenIds[receipt.id] = Unit
+        processor.process(reaction, FIRST_RELAY)
+        processor.process(wire(receipt), FIRST_RELAY)
+        runCurrent()
+        assertEquals(1, store.reactionCount(eventId(1)))
+        assertEquals(1, store.zapStats(eventId(1)).count)
+        assertEquals("Uncached historical arrivals still verify", 2, verificationCount.get())
+        processor.process(rawEvent(3, kind = 5, pubkey = author(2),
+            tags = """[["e","${eventId(2)}"],["k","7"]]"""), FIRST_RELAY)
+        processor.process(rawEvent(4, kind = 5, pubkey = receipt.pubkey,
+            tags = """[["e","${receipt.id}"],["k","9735"]]"""), FIRST_RELAY)
+        runCurrent()
+        assertEquals(0, store.reactionCount(eventId(1)))
+        assertEquals(0, store.zapStats(eventId(1)).count)
+        repeat(3) {
+            processor.process(reaction, SECOND_RELAY)
+            processor.process(wire(receipt), SECOND_RELAY)
+            runCurrent()
+        }
+        assertNull(store.getNostrEvent(eventId(2)))
+        assertNull(store.getNostrEvent(receipt.id))
+        assertEquals(0, store.reactionCount(eventId(1)))
+        assertEquals(0, store.zapStats(eventId(1)).count)
+        assertEquals(0, processor.pendingContentCount)
+    }
+
+    @Test
+    fun `invalid receipt replay never acquires count and teardown clears retained engagement`() = runTest {
+        startProcessor()
+        val fixture = ZapCryptoTestFixture()
+        val receipt = fixture.receipt(request = fixture.request(targetId = eventId(1)), targetId = eventId(1))
+        // Receipt target disagrees with the authentically signed embedded request.
+        val invalid = fixture.receipt(request = fixture.request(), targetId = eventId(1))
+        repeat(3) { processor.process(wire(invalid), FIRST_RELAY); runCurrent() }
+        assertNull(store.getNostrEvent(invalid.id))
+        assertEquals(0, store.zapStats(eventId(1)).count)
+        processor.process(rawEvent(1), FIRST_RELAY)
+        processor.process(rawEvent(2, kind = 7, tags = """[["e","${eventId(1)}"]]"""), FIRST_RELAY)
+        processor.process(wire(receipt), FIRST_RELAY)
+        runCurrent()
+        store.evictOldContentEventsForTest(mapOf(1 to 0))
+        assertEquals(1, store.reactionCount(eventId(1)))
+        assertEquals(1, store.zapStats(eventId(1)).count)
+        processor.stop()
+        store.clear()
+        store.ownPubkey = "new-owner"
+        assertEquals(0, store.reactionCount(eventId(1)))
+        assertEquals(0, store.zapStats(eventId(1)).count)
+        assertNull(store.getNostrEvent(receipt.id))
+        assertEquals(0, processor.pendingContentCount)
+    }
+
+    @Test
+    fun `either target or contributor eviction order leaves no orphan projection`() = runTest {
+        val fixture = ZapCryptoTestFixture()
+        val receipt = fixture.receipt(request = fixture.request(targetId = eventId(1)), targetId = eventId(1))
+        for (kind in listOf(7, 9735)) for (targetFirst in listOf(true, false)) {
+            if (::processor.isInitialized) processor.stop()
+            startProcessor()
+            val raw = if (kind == 7) rawEvent(2, kind = 7, tags = """[["e","${eventId(1)}"]]""") else wire(receipt)
+            fun count() = if (kind == 7) store.reactionCount(eventId(1)) else store.zapStats(eventId(1)).count
+            processor.process(rawEvent(1), FIRST_RELAY)
+            processor.process(raw, FIRST_RELAY)
+            runCurrent()
+            assertEquals(1, count())
+            store.evictOldContentEventsForTest(mapOf((if (targetFirst) 1 else kind) to 0))
+            if (targetFirst) assertEquals("Retained contributor stays projected", 1, count())
+            store.evictOldContentEventsForTest(mapOf((if (targetFirst) kind else 1) to 0))
+            assertEquals("Both payloads gone: kind=$kind targetFirst=$targetFirst", 0, count())
+            processor.process(rawEvent(1), SECOND_RELAY)
+            repeat(3) { processor.process(raw, SECOND_RELAY) }
+            runCurrent()
+            assertEquals(1, count())
+        }
+    }
+
+    private fun wire(event: NostrEvent): String {
+        val json = NostrJson.encodeToString(EventDto(event.id, event.pubkey, event.kind,
+            event.content, event.createdAt, event.tags, event.sig))
+        return """["EVENT","drainer-test",$json]"""
+    }
+
+    @Test
+    fun `absent profiles and derived monitors keep their original dedup`() = runTest {
+        startProcessor()
+        for (kind in listOf(0, 30166)) {
             val raw = rawEvent(kind + 1, kind = kind, tags = """[["d","$FIRST_RELAY"]]""")
             val id = eventId(kind + 1)
             processor.process(raw, FIRST_RELAY)

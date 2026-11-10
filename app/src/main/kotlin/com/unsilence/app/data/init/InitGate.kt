@@ -1,5 +1,7 @@
 package com.unsilence.app.data.init
 
+import com.unsilence.app.data.memory.SnapshotFollowsOutcome
+import kotlinx.coroutines.selects.select
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -26,6 +28,7 @@ class InitGate @Inject constructor() {
         val owner: String?,
         val token: InitSession,
         val follows: CompletableDeferred<Unit> = CompletableDeferred(),
+        val snapshotFollows: CompletableDeferred<SnapshotFollowsOutcome> = CompletableDeferred(),
         val relays: CompletableDeferred<Unit> = CompletableDeferred(),
         val feedConnections: CompletableDeferred<Unit> = CompletableDeferred(),
         val snapshot: CompletableDeferred<Unit> = CompletableDeferred(),
@@ -78,6 +81,23 @@ class InitGate @Inject constructor() {
     /** The local restore attempt finished, including a missing or rejected snapshot. */
     fun signalSnapshotReady(session: InitSession) =
         signal(session, recompute = false) { it.snapshot }
+
+    /** Local section readiness is separate from completed network discovery. */
+    internal fun signalSnapshotFollows(session: InitSession, outcome: SnapshotFollowsOutcome) = synchronized(lock) {
+        state.takeIf { it.token == session }?.snapshotFollows?.complete(outcome)
+        Unit
+    }
+
+    /** Nonempty local follows can select Following before the event section settles.
+     * Empty/missing/rejected local sections still await the bounded discovery path. */
+    internal suspend fun awaitInitialFollows() {
+        val current = state
+        val local = select<SnapshotFollowsOutcome?> {
+            current.follows.onAwait { null }
+            current.snapshotFollows.onAwait { it }
+        }
+        if (local != null && local != SnapshotFollowsOutcome.NONEMPTY) current.follows.await()
+    }
 
     suspend fun awaitFollows() = state.follows.await()
 

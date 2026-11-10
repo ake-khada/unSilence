@@ -4279,6 +4279,13 @@ class RelayPool @Inject constructor(
                 novel.filterNot(selectedAuthors::contains).forEach { profileFetchAttempted.remove(it, now) }
             }
 
+            val mes = memoryEventStore.get()
+            suspend fun awaitPictures() = awaitProfilePhaseSettlement(
+                profileSignal = mes.profileSignalFlow,
+                allPicturesReady = { novel.all { !profileMissingPicture(mes.getUserEntity(it)) } },
+                deadlineMs = COLD_LANE_FLUSH_MS,
+            )
+
             // Phase 1: the relays where the feed rows were actually seen. Groups
             // combine authors per relay without broadcasting any author beyond
             // that author's own row hints.
@@ -4295,9 +4302,7 @@ class RelayPool @Inject constructor(
                     }
                 }.awaitAll()
             }.forEach(selectedAuthors::addAll)
-            if (hintGroups.isNotEmpty()) delay(COLD_LANE_FLUSH_MS)
-
-            val mes = memoryEventStore.get()
+            if (hintGroups.isNotEmpty()) awaitPictures()
 
             // Phase 2: ordinary indexer/global profile fan-out, excluding relays
             // already used by the locality phase.
@@ -4313,7 +4318,7 @@ class RelayPool @Inject constructor(
                     subIdPrefix = "profiles",
                 )
                 if (selected.isNotEmpty()) selectedAuthors.addAll(indexerPubkeys)
-                delay(COLD_LANE_FLUSH_MS)
+                awaitPictures()
             }
 
             // ── Fallback: indexers incomplete → author's own relays (H19b) ─
@@ -4353,7 +4358,7 @@ class RelayPool @Inject constructor(
                     subIdPrefix = "prof-fb",
                 )
                 if (selected.isNotEmpty()) selectedAuthors.addAll(fbPks)
-                delay(COLD_LANE_FLUSH_MS)
+                awaitPictures()
             } else {
                 Log.w(TAG, "PROFFB: ${stillIncomplete.size} pk(s) incomplete — no author relay signal")
             }
@@ -4370,7 +4375,7 @@ class RelayPool @Inject constructor(
                     includeActiveFeedRelay = true,
                 )
                 if (selected.isNotEmpty()) selectedAuthors.addAll(bridgePks)
-                delay(COLD_LANE_FLUSH_MS)
+                awaitPictures()
             }
 
             // Negative-cache only after every standard phase and the bridge miss tier.

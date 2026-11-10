@@ -18,6 +18,8 @@ import androidx.compose.ui.test.junit4.StateRestorationTester
 import androidx.compose.ui.test.junit4.v2.createComposeRule
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.performScrollToIndex
+import androidx.compose.ui.test.performTouchInput
+import androidx.compose.ui.test.swipeUp
 import androidx.compose.ui.unit.dp
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.unsilence.app.data.memory.FeedRow
@@ -174,6 +176,62 @@ class ThreadFocusPositionTest {
         }
     }
 
+    @Test fun firstRepliesDoNotMoveTheOpenRoot() {
+        start(ready(count = 0).copy(focusedReplyId = null))
+        compose.runOnUiThread { draws.clear(); projection.value = ready().copy(focusedReplyId = null) }
+        frames()
+        compose.runOnIdle {
+            assertTrue(draws.isNotEmpty())
+            draws.forEach {
+                assertEquals(0, it.first)
+                assertEquals(0, it.offset)
+                assertEquals(root.id, it.fullyVisibleKeys.first())
+            }
+        }
+    }
+
+    @Test fun earlierRepliesKeepTheReadingKeyAndOffsetOnEveryDraw() {
+        start(ready().copy(focusedReplyId = null))
+        compose.onNodeWithTag("thread-list").performScrollToIndex(12)
+        val before = compose.runOnIdle {
+            list.layoutInfo.visibleItemsInfo.first().let { it.key to it.offset }
+        }
+        compose.runOnUiThread {
+            draws.clear()
+            projection.value = projection.value.copy(
+                replies = (-3 until 0).map(::reply) + projection.value.replies,
+            )
+        }
+        frames()
+        compose.runOnIdle {
+            assertTrue(draws.isNotEmpty())
+            draws.forEach {
+                assertEquals(before.first, it.fullyVisibleKeys.first())
+                assertEquals(-before.second, it.offset)
+            }
+        }
+    }
+
+    @Test fun arrivingFocusDoesNotTakeOverAfterTheReaderScrolls() {
+        start(ready(count = 14, focus = 20))
+        compose.onNodeWithTag("thread-list").performTouchInput { swipeUp(durationMillis = 300) }
+        compose.mainClock.advanceTimeBy(2_000)
+        frames()
+        val before = compose.runOnIdle {
+            assertTrue("Fixture must move the reader away from the top", list.firstVisibleItemIndex > 0)
+            list.firstVisibleItemIndex to list.firstVisibleItemScrollOffset
+        }
+        compose.runOnUiThread { draws.clear(); projection.value = ready(count = 35, focus = 20) }
+        frames()
+        compose.runOnIdle {
+            assertTrue(draws.isNotEmpty())
+            draws.forEach {
+                assertEquals("Late focus must not override the reader's position", before.first, it.first)
+                assertEquals(before.second, it.offset)
+            }
+        }
+    }
+
     @Test fun savedThreadPositionDoesNotReapplyFocus() {
         projection.value = ready()
         val restoration = StateRestorationTester(compose)
@@ -183,6 +241,28 @@ class ThreadFocusPositionTest {
         restoration.emulateSavedInstanceStateRestore()
         compose.runOnIdle {
             assertEquals(anchor, list.firstVisibleItemIndex to list.firstVisibleItemScrollOffset)
+        }
+    }
+
+    @Test fun cancelledPendingFocusStaysCancelledAfterStateRestoration() {
+        projection.value = ready(count = 14, focus = 20)
+        val restoration = StateRestorationTester(compose)
+        restoration.setContent { UnsilenceTheme { Content() } }
+        compose.onNodeWithTag("thread-list").performTouchInput { swipeUp(durationMillis = 300) }
+        compose.waitForIdle()
+        val anchor = compose.runOnIdle {
+            assertTrue(list.firstVisibleItemIndex > 0)
+            list.firstVisibleItemIndex to list.firstVisibleItemScrollOffset
+        }
+        restoration.emulateSavedInstanceStateRestore()
+        compose.runOnIdle { draws.clear(); projection.value = ready(count = 35, focus = 20) }
+        compose.waitForIdle()
+        compose.runOnIdle {
+            assertTrue(draws.isNotEmpty())
+            draws.forEach {
+                assertEquals(anchor.first, it.first)
+                assertEquals(anchor.second, it.offset)
+            }
         }
     }
 
