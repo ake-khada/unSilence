@@ -363,6 +363,36 @@ class EventProcessorDrainerTest {
         }
     }
 
+    @Test
+    fun `repost target retention and both-order recovery use the existing ingestion path`() = runTest {
+        startProcessor()
+        for (kind in listOf(6, 16)) for (targetFirst in listOf(true, false)) {
+            store.clear()
+            // An event ID cannot change kind across cases: the processor caches verified events.
+            val seed = kind * 100 + if (targetFirst) 10 else 20
+            val targetSeed = seed + 1
+            val repostSeed = seed + 2
+            val raw = rawEvent(repostSeed, kind, tags = """[["e","${eventId(targetSeed)}"],["p","${author(targetSeed)}"]]""")
+            processor.process(rawEvent(targetSeed), FIRST_RELAY)
+            processor.process(raw, FIRST_RELAY)
+            runCurrent()
+            assertEquals(1, store.repostCount(eventId(targetSeed)))
+            store.evictOldContentEventsForTest(mapOf((if (targetFirst) 1 else kind) to 0))
+            assertEquals("First eviction must preserve count: kind=$kind targetFirst=$targetFirst", 1, store.repostCount(eventId(targetSeed)))
+            store.evictOldContentEventsForTest(mapOf((if (targetFirst) kind else 1) to 0))
+            assertEquals("Both payloads gone: kind=$kind targetFirst=$targetFirst", 0, store.repostCount(eventId(targetSeed)))
+            processor.process(rawEvent(targetSeed), SECOND_RELAY)
+            repeat(3) { processor.process(raw, SECOND_RELAY) }
+            runCurrent()
+            assertEquals(1, store.repostCount(eventId(targetSeed)))
+            assertTrue(SECOND_RELAY in store.getNostrEvent(eventId(repostSeed))!!.relaysSeen)
+            processor.process(raw, FIRST_RELAY)
+            assertEquals("Retained duplicate is provenance-only", 0, processor.drainForTest())
+            assertTrue(FIRST_RELAY in store.getNostrEvent(eventId(repostSeed))!!.relaysSeen)
+            assertEquals(1, store.repostCount(eventId(targetSeed)))
+        }
+    }
+
     private fun wire(event: NostrEvent): String {
         val json = NostrJson.encodeToString(EventDto(event.id, event.pubkey, event.kind,
             event.content, event.createdAt, event.tags, event.sig))

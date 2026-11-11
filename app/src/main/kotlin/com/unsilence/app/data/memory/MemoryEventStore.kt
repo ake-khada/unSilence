@@ -1836,15 +1836,68 @@ class MemoryEventStore @Inject constructor(
 
     private fun handleRepost(event: NostrEvent, dirty: InsertDirty) {
         val targetId = repostTargetId(event) ?: return
-        repostCounts.compute(targetId) { _, v -> (v ?: 0) + 1 }
-        repostPubkeysByTarget
-            .computeIfAbsent(targetId) { ConcurrentHashMap.newKeySet() }
-            .add(event.pubkey)
-        statsUpdatedAt[targetId] = System.currentTimeMillis()
-        dirty.invalidatedStatsIds.add(targetId)
-        // Actor-side index: track what this pubkey has reposted
-        addToActorIndex(repostedTargetsByActor, event.pubkey, targetId)
-        addActionEventId(repostEventIdsByActorTarget, event.pubkey, targetId, event.id)
+        synchronized(contentPolicyLock) {
+            // Target eviction uses this lock too. Publish the exact backing ID
+            // before the summary; deletion may have won while this insert waited.
+            if (!eventsById.containsKey(event.id) || isDeletedByTombstone(event)) return
+            addActionEventId(repostEventIdsByActorTarget, event.pubkey, targetId, event.id)
+            addToActorIndex(repostedTargetsByActor, event.pubkey, targetId)
+            repostPubkeysByTarget.computeIfAbsent(targetId) { ConcurrentHashMap.newKeySet() }.add(event.pubkey)
+            updateRepostCount(targetId)
+            statsUpdatedAt[targetId] = System.currentTimeMillis()
+            invalidateStatsForTarget(targetId, dirty)
+        }
+    }
+
+    /** Repost projections count distinct actors, including after raw reinsertion. */
+    private fun updateRepostCount(targetId: String) {
+        val count = repostPubkeysByTarget[targetId]?.size ?: 0
+        if (count == 0) {
+            repostPubkeysByTarget.remove(targetId)
+            repostCounts.remove(targetId)
+        } else {
+            repostCounts[targetId] = count
+        }
+    }
+
+    private fun hasRetainedRepostTarget(targetId: String): Boolean =
+        eventsById.containsKey(targetId) || articleIdByCoord[targetId]?.let(eventsById::containsKey) == true
+
+    private fun hasRetainedRepost(targetId: String, actor: String): Boolean =
+        repostEventIdsByActorTarget[actionKey(actor, targetId)].orEmpty().any { id ->
+            eventsById[id]?.let { raw ->
+                (raw.kind == 6 || raw.kind == 16) && raw.pubkey == actor &&
+                    repostTargetId(raw) == targetId && !isDeletedByTombstone(raw)
+            } == true
+        }
+
+    /** Caller holds contentPolicyLock. Sticky summaries require a retained target;
+     * otherwise only exact retained contributors justify keeping them. */
+    private fun pruneRepostsForMissingTarget(targetId: String, invalidatedTargets: MutableSet<String>) {
+        if (hasRetainedRepostTarget(targetId)) return
+        val contributors = repostPubkeysByTarget[targetId]
+        val before = contributors?.size ?: repostCounts[targetId] ?: 0
+        contributors?.removeAll { actor -> !hasRetainedRepost(targetId, actor) }
+        updateRepostCount(targetId)
+        if (before != (repostCounts[targetId] ?: 0)) invalidatedTargets.add(targetId)
+    }
+
+    /** Exact author/event ownership remains in the existing index after raw eviction. */
+    private fun removeRepostContribution(actor: String, targetId: String, eventId: String, dirty: InsertDirty) {
+        removeActionEventId(repostEventIdsByActorTarget, actor, targetId, eventId)
+        val hasMore = if (hasRetainedRepostTarget(targetId)) {
+            // Preserve other non-deleted sticky contributors while the target remains.
+            repostEventIdsByActorTarget[actionKey(actor, targetId)]?.isNotEmpty() == true
+        } else {
+            hasRetainedRepost(targetId, actor)
+        }
+        if (!hasMore) {
+            repostPubkeysByTarget[targetId]?.remove(actor)
+            removeFromActorIndex(repostedTargetsByActor, actor, targetId)
+        }
+        updateRepostCount(targetId)
+        invalidateStatsForTarget(targetId, dirty)
+        dirty.action = true
     }
 
     /**
@@ -2133,11 +2186,25 @@ class MemoryEventStore @Inject constructor(
             if (recordDeletionTombstone(deletedEventTombstones, EventTombstoneKey(eventId, deletionPubkey), deletionPubkey, deletionCreatedAt)) {
                 dirty.feed = true
             }
+            synchronized(contentPolicyLock) {
+                // Only missing-payload deletions need this lookup. The smaller
+                // actor target summary can be trimmed, so it is not complete proof.
+                // Reuse exact ownership in the action index rather than add a journal.
+                for ((key, ids) in repostEventIdsByActorTarget) {
+                    if (key.actor == deletionPubkey && eventId in ids) {
+                        removeRepostContribution(key.actor, key.target, eventId, dirty)
+                    }
+                }
+            }
             return
         }
         if (existing.kind == 5 || existing.pubkey != deletionPubkey) return
         recordDeletionTombstone(deletedEventTombstones, EventTombstoneKey(eventId, deletionPubkey), deletionPubkey, deletionCreatedAt)
-        deleteStoredEvent(existing, dirty)
+        if (existing.kind == 6 || existing.kind == 16) {
+            synchronized(contentPolicyLock) { deleteStoredEvent(existing, dirty) }
+        } else {
+            deleteStoredEvent(existing, dirty)
+        }
     }
 
     private fun deleteStoredEvent(event: NostrEvent, dirty: InsertDirty) {
@@ -2193,16 +2260,7 @@ class MemoryEventStore @Inject constructor(
             }
             6, 16 -> {
                 val targetId = repostTargetId(event) ?: return
-                decrementCounter(repostCounts, targetId)
-                removeActionEventId(repostEventIdsByActorTarget, event.pubkey, targetId, event.id)
-                val hasMore = repostEventIdsByActorTarget[actionKey(event.pubkey, targetId)]?.isNotEmpty() == true
-                if (!hasMore) {
-                    repostPubkeysByTarget[targetId]?.remove(event.pubkey)
-                    if (repostPubkeysByTarget[targetId]?.isEmpty() == true) repostPubkeysByTarget.remove(targetId)
-                    removeFromActorIndex(repostedTargetsByActor, event.pubkey, targetId)
-                }
-                invalidateStatsForTarget(targetId, dirty)
-                dirty.action = true
+                removeRepostContribution(event.pubkey, targetId, event.id, dirty)
             }
             7 -> {
                 val targetId = reactionTargetId(event) ?: return
@@ -3412,6 +3470,7 @@ class MemoryEventStore @Inject constructor(
     ): NostrEvent? {
         val event = eventsById[eventId] ?: return null
         val conversationTargets = conversationInvalidationTargets(event)
+        val coordinate = articleCoordById[eventId]
         if (!eventsById.remove(eventId, event)) return null
         invalidatedReplyTargets += conversationTargets
         if (event.kind == 9735) {
@@ -3431,6 +3490,9 @@ class MemoryEventStore @Inject constructor(
                 }
             }
         }
+        if (event.kind == 6 || event.kind == 16) {
+            repostTargetId(event)?.let { pruneRepostsForMissingTarget(it, invalidatedReplyTargets) }
+        }
         contentAdmissionIndex.remove(event.id, event.kind)
         deindexNotificationRecipients(event)
         recentByCreatedAt.remove(EventEntry(event.id, event.createdAt))
@@ -3444,7 +3506,7 @@ class MemoryEventStore @Inject constructor(
             }
         }
         // Existing reaction/repost summaries survive contributor eviction while
-        // their target is retained. A missing target's retained-reaction projection
+        // their target is retained. A missing target's retained-engagement projection
         // is pruned above when its last backing contributor disappears. Replies
         // and authenticated receipts have their own invalidation paths above.
         // Article comment index: drop this id from each coord it referenced.
@@ -3476,9 +3538,9 @@ class MemoryEventStore @Inject constructor(
         videoRenderModelsByEventId.remove(event.id)
         imetaImageDimsByEventId.remove(event.id)
         eventModelsByEventId.remove(event.id)
-        repostCounts.remove(event.id)
         statsUpdatedAt.remove(event.id)
-        repostPubkeysByTarget.remove(event.id)
+        pruneRepostsForMissingTarget(event.id, invalidatedReplyTargets)
+        coordinate?.let { pruneRepostsForMissingTarget(it, invalidatedReplyTargets) }
         // Retained engagement is still the source of truth. Dropping these rows
         // while keeping their raw events would make provenance-only duplicates
         // unable to restore the count when the target returns. Prune contributors
