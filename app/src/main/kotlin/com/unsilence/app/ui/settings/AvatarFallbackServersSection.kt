@@ -13,7 +13,12 @@ import com.unsilence.app.ui.theme.Spacing
 
 /** Device-local retrieval choices; never invokes the upload/server-list publication path. */
 @Composable
-internal fun AvatarFallbackServersSection(servers: List<String>, configuredServers: List<String> = emptyList(), onChange: (List<String>) -> Unit) {
+internal fun AvatarFallbackServersSection(
+    servers: List<String>,
+    configuredServers: List<String> = emptyList(),
+    enabled: Boolean = false,
+    onChange: (List<String>) -> Unit,
+) {
     var adding by remember { mutableStateOf(false) }
     var input by remember { mutableStateOf("https://") }
     val choices = (listOf("https://blossom.primal.net") + configuredServers + servers).mapNotNull(AvatarFallbackPolicy::server).distinct()
@@ -25,6 +30,8 @@ internal fun AvatarFallbackServersSection(servers: List<String>, configuredServe
     }
     Column {
         Text("Avatar fallback servers", style = AppTextStyles.body, color = Color.White, fontWeight = FontWeight.SemiBold)
+        Text("Use avatar fallback servers: ${if (enabled) "On" else "Off"}", style = AppTextStyles.caption, color = TextSecondary)
+        if (!enabled) Text("Enable in Content & Safety → Media & data.", style = AppTextStyles.caption, color = TextSecondary)
         Text(AVATAR_FALLBACK_DESCRIPTION, style = AppTextStyles.caption, color = TextSecondary)
         val primal = "https://blossom.primal.net"
         for (url in choices) {

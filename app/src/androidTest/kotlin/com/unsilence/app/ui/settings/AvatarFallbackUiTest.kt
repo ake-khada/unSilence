@@ -40,6 +40,18 @@ import java.security.MessageDigest
 class AvatarFallbackUiTest {
     @get:Rule val compose = createComposeRule()
 
+    @Test fun selectedServersDoNotImplyThatFallbackIsEnabled() {
+        val selected = mutableStateOf(listOf("https://blossom.primal.net"))
+        compose.setContent { UnsilenceTheme {
+            AvatarFallbackServersSection(selected.value) { selected.value = it }
+        } }
+        compose.onNode(isToggleable()).assertIsOn()
+        compose.onNodeWithText("Use avatar fallback servers: Off").assertIsDisplayed()
+        compose.onNodeWithText("Enable in Content & Safety → Media & data.").assertIsDisplayed()
+        compose.onNode(isToggleable()).performClick().assertIsOff()
+        compose.onNodeWithText("Use avatar fallback servers: Off").assertIsDisplayed()
+    }
+
     @Test fun mediaDataToggleStartsOffAndCanBeEnabled() {
         val enabled = mutableStateOf(false)
         compose.setContent { UnsilenceTheme {
@@ -48,6 +60,24 @@ class AvatarFallbackUiTest {
         compose.onNodeWithText("Use avatar fallback servers").performScrollTo().assertIsDisplayed()
         compose.onNode(isToggleable()).assertIsOff().performClick().assertIsOn()
         compose.runOnIdle { assertTrue(enabled.value) }
+    }
+
+    @Test fun chooserReflectsGlobalStateWithoutChangingServerSelections() {
+        val enabled = mutableStateOf(false)
+        val servers = mutableStateOf(listOf("https://blossom.primal.net"))
+        compose.setContent { UnsilenceTheme {
+            AvatarFallbackServersSection(servers.value, enabled = enabled.value) { servers.value = it }
+        } }
+        compose.onNodeWithText("Use avatar fallback servers: Off").assertIsDisplayed()
+        compose.runOnIdle { enabled.value = true }
+        compose.onNodeWithText("Use avatar fallback servers: On").assertIsDisplayed()
+        compose.onNodeWithText("Enable in Content & Safety → Media & data.").assertDoesNotExist()
+        compose.onNode(isToggleable()).assertIsOn().performClick().assertIsOff()
+        compose.onNodeWithText("Use avatar fallback servers: On").assertIsDisplayed()
+        compose.runOnIdle { enabled.value = false }
+        compose.onNode(isToggleable()).assertIsOff()
+        compose.onNodeWithText("Use avatar fallback servers: Off").assertIsDisplayed()
+        compose.onNodeWithText("Enable in Content & Safety → Media & data.").assertIsDisplayed()
     }
 
     @Test fun serverChoiceIsIndependentAndRejectsUnsafeInput() {

@@ -164,7 +164,12 @@ fun MediaUploadSettingsScreen(
                 HorizontalDivider(color = MaterialTheme.colorScheme.surfaceVariant)
                 Spacer(Modifier.height(Spacing.large))
 
-                AvatarFallbackServersSection(avatarPreferences.servers, servers.map { it.url }, viewModel::setAvatarServers)
+            AvatarFallbackServersSection(
+                servers = avatarPreferences.servers,
+                configuredServers = servers.map { it.url },
+                enabled = avatarPreferences.enabled,
+                onChange = viewModel::setAvatarServers,
+            )
                 Spacer(Modifier.height(Spacing.large))
 
                 // ── Image upload section ─────────────────────────────────────
