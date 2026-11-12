@@ -7,6 +7,7 @@ import coil3.network.NetworkRequest
 import coil3.network.NetworkResponse
 import coil3.network.NetworkResponseBody
 import okio.Buffer
+import okhttp3.Response
 import java.io.IOException
 
 internal data class AvatarRequest(val author: String, val original: String)
@@ -26,6 +27,12 @@ internal class AvatarNetworkClient(
             return delegate.executeRequest(request) { response ->
                 // Preserve streaming/cache/animation semantics for a successful origin.
                 canRecover = response.code in listOf(404, 410) || response.code in 500..599
+                // nostr.build can return its missing-image placeholder as HTTP 200,
+                // including after an origin redirect. Use the final response host.
+                if (response.code == 200 && response.headers["x-status"] == "404") {
+                    val host = (response.delegate as? Response)?.request?.url?.host
+                    canRecover = host == "nostr.build" || host?.endsWith(".nostr.build") == true
+                }
                 if (canRecover) throw IOException("avatar origin unavailable")
                 delivered = true
                 block(response)
