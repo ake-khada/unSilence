@@ -3116,6 +3116,10 @@ class MemoryEventStore @Inject constructor(
     fun getUserEmojiList(pubkey: String): UserEmojiListEntity? =
         userEmojiListByPubkey[pubkey]
 
+    /** Emits on accepted list changes and completed snapshot restore; no polling. */
+    internal fun userEmojiListFlow(pubkey: String): Flow<UserEmojiListEntity?> =
+        _emojiSetSignal.map { getUserEmojiList(pubkey) }.distinctUntilChanged()
+
     /** All emoji available to [pubkey]: inline + all subscribed sets, deduped by shortcode. */
     fun resolvedEmojisFor(pubkey: String): List<CustomEmoji> {
         val list = userEmojiListByPubkey[pubkey] ?: return emptyList()

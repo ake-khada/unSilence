@@ -13,6 +13,7 @@ import com.unsilence.app.data.relay.RelayPreferencesStore
 import com.unsilence.app.data.wallet.NwcManager
 import com.unsilence.app.data.memory.MemoryEventStore
 import com.unsilence.app.data.memory.NostrEvent
+import com.unsilence.app.data.memory.UserEmojiListEntity
 import com.unsilence.app.data.memory.SnapshotScheduler
 import com.unsilence.app.data.memory.SnapshotRestoreOutcome
 import com.unsilence.app.data.memory.WotProviderDescriptor
@@ -142,6 +143,24 @@ internal suspend fun bootstrapAccountMetadata(
     // reports its actual outcome through the existing account/session fences.
 }
 
+/** Resolve early network/local data, or give a still-running restore a bounded chance.
+ * Snapshot readiness means the attempt ended, including missing/rejected files.
+ */
+internal suspend fun awaitBootstrapEmojiList(
+    store: MemoryEventStore,
+    pubkey: String,
+    gate: InitGate,
+    session: InitSession,
+): UserEmojiListEntity? {
+    if (!gate.isCurrent(session, pubkey)) return null
+    val early = withTimeoutOrNull(5_000L) { store.userEmojiListFlow(pubkey).filterNotNull().first() }
+    if (!gate.isCurrent(session, pubkey)) return null
+    if (early != null) return early
+    // Only the wait is bounded; do not cancel or restart the shared restore.
+    withTimeoutOrNull(30_000L) { gate.awaitSnapshot() }
+    return store.getUserEmojiList(pubkey).takeIf { gate.isCurrent(session, pubkey) }
+}
+
 @Singleton
 class AppBootstrapper @Inject constructor(
     @dagger.hilt.android.qualifiers.ApplicationContext private val context: Context,
@@ -177,6 +196,7 @@ class AppBootstrapper @Inject constructor(
     private var bootstrapJob: Job? = null
     @Volatile private var accountMetadataRecoveryJob: Job? = null
     @Volatile private var muteRecoveryJob: Job? = null
+    @Volatile private var emojiBootstrapJob: Job? = null
     private val muteEventVerificationGate = MuteEventVerificationGate()
     // Monotonic session generation. Bumped by both bootstrap() (login) and teardown()
     // (logout). Each holds its captured gen and, inside the mutex, bails if a newer
@@ -236,6 +256,7 @@ class AppBootstrapper @Inject constructor(
         // Without this, the old bootstrap holds the mutex for minutes
         // (MediaPreconnect.warmUp can hang) and the new bootstrap starves.
         bootstrapJob?.cancel()
+        emojiBootstrapJob?.cancel()
         bootstrapJob = scope.launch { doBootstrap(pubkeyHex, myGen, initSession) }
         bootstrapJob?.join()
     }
@@ -502,15 +523,13 @@ class AppBootstrapper @Inject constructor(
 
         // NIP-30 custom emoji: fetch user's emoji list, then resolve subscribed sets.
         // Non-blocking — launched in background so it doesn't delay Phase 3.
-        scope.launch {
+        emojiBootstrapJob?.cancel()
+        emojiBootstrapJob = scope.launch {
+            fun current() = sessionGen.get() == myGen && initGate.isCurrent(initSession, pubkeyHex)
+            if (!current()) return@launch
             relayPool.fetchUserEmojiList(pubkeyHex, indexerUrls)
-            // Wait for kind-10030 to land in MES (up to 5s)
-            var waited = 0L
-            while (waited < 5_000L && memoryEventStore.getUserEmojiList(pubkeyHex) == null) {
-                delay(250L)
-                waited += 250L
-            }
-            val emojiList = memoryEventStore.getUserEmojiList(pubkeyHex)
+            val emojiList = awaitBootstrapEmojiList(memoryEventStore, pubkeyHex, initGate, initSession)
+            if (!current()) return@launch
             if (emojiList != null && emojiList.setRefs.isNotEmpty()) {
                 relayPool.fetchEmojiSets(emojiList.setRefs)
                 Log.d(TAG, "Phase2: NIP-30 emoji sets requested (${emojiList.setRefs.size} refs)")
@@ -520,6 +539,7 @@ class AppBootstrapper @Inject constructor(
                 // Phase 3a validation). Fall back to indexers + author write
                 // relays only.
                 delay(30_000L)
+                if (!current()) return@launch
                 val unresolved = emojiList.setRefs.filter { ref ->
                     memoryEventStore.getEmojiSet(ref.authorPubkey, ref.setName) == null
                 }
@@ -763,6 +783,8 @@ class AppBootstrapper @Inject constructor(
             accountMetadataRecoveryJob = null
             muteRecoveryJob?.cancel()
             muteRecoveryJob = null
+            emojiBootstrapJob?.cancel()
+            emojiBootstrapJob = null
             muteBootstrapSettledForPubkey = null
             muteEventVerificationGate.reset()
             muteListRepository.markPublishUnsafe("session teardown")
