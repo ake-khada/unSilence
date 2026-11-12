@@ -278,8 +278,8 @@ class EngagementFetchCoordinatorTest(mode: String) {
         assertTrue(h.due(article))
         h.fetch(listOf(article), listOf(first))
         val filters = Json.parseToJsonElement(h.requests.last().json).jsonArray.drop(2).map { it.jsonObject }
-        assertEquals(listOf(article.coord), filters[1]["#a"]!!.jsonArray.map { it.jsonPrimitive.content })
-        assertEquals(listOf(article.coord), filters[2]["#A"]!!.jsonArray.map { it.jsonPrimitive.content })
+        assertEquals(listOf(article.coord), filters.single { "#a" in it }["#a"]!!.jsonArray.map { it.jsonPrimitive.content })
+        assertEquals(listOf(article.coord), filters.single { "#A" in it }["#A"]!!.jsonArray.map { it.jsonPrimitive.content })
         assertEquals(ownPubkey, filters[0]["authors"]?.jsonArray?.single()?.jsonPrimitive?.content)
         assertFalse(h.due(article))
         val another = article.copy(coord = "30023:${old.authorPubkey}:different")

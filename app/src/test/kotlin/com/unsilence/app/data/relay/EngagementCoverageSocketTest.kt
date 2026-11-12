@@ -24,7 +24,11 @@ import java.util.concurrent.atomic.AtomicInteger
 
 /** Real pooled transport and signed reply fixtures; no external relay contact. */
 class EngagementCoverageSocketTest {
-    private class Fixture : AutoCloseable {
+    private class Fixture(
+        private val maxFilters: Int? = null,
+        private val applyHistoryLimits: Boolean = false,
+        private val closedReason: String = "restricted: fixture",
+    ) : AutoCloseable {
         val remote = ConcurrentHashMap<String, List<EventDto>>()
         val held = ConcurrentHashMap.newKeySet<String>()
         val closed = ConcurrentHashMap.newKeySet<String>()
@@ -48,9 +52,15 @@ class EngagementCoverageSocketTest {
                             when (arr[0].jsonPrimitive.content) {
                                 "REQ" -> {
                                     requests += relay to arr
+                                    if (maxFilters != null && arr.size - 2 > maxFilters) {
+                                        webSocket.send("""["CLOSED","$id","error: too many filters"]""")
+                                        return
+                                    }
                                     if (relay !in held) {
-                                        remote[relay].orEmpty().forEach { webSocket.send("""["EVENT","$id",${NostrJson.encodeToString(it)}]""") }
-                                        webSocket.send(if (relay in closed) """["CLOSED","$id","restricted: fixture"]""" else """["EOSE","$id"]""")
+                                        val history = remote[relay].orEmpty()
+                                        val selected = if (applyHistoryLimits) engagementHistory(arr, history) else history
+                                        selected.forEach { webSocket.send("""["EVENT","$id",${NostrJson.encodeToString(it)}]""") }
+                                        webSocket.send(if (relay in closed) """["CLOSED","$id","$closedReason"]""" else """["EOSE","$id"]""")
                                     }
                                 }
                                 "CLOSE" -> closes += relay to id
@@ -218,8 +228,139 @@ class EngagementCoverageSocketTest {
         }
     }
 
+    @Test fun `relay filter refusal releases the slot without certifying freshness or retrying immediately`() = runBlocking {
+        Fixture(maxFilters = 3).use { f ->
+            val url = "wss://limited.test"
+            f.pool.connect(listOf(url))
+            f.until { url in f.pool.connectedRelayUrls() }
+            var now = 2_000_000_000_000L
+            val targets = (1..5).map { CardHydrator.EngagementTarget(
+                it.toString().repeat(64), "30023:${"a".repeat(64)}:fixture", "a".repeat(64), 1,
+            ) }
+            val coordinator = EngagementFetchCoordinator(f.pool::fetchOneShotOutcomes, nowMs = { now })
+            val batches = listOf(url to targets.map { it.id })
+            coordinator.fetch(targets, batches)
+            assertEquals(1, f.requests.size)
+            val request = f.requests.single().second
+            assertEquals(12, request.size - 2)
+            val subId = request[1].jsonPrimitive.content
+            f.until { f.closes.any { it.second == subId } }
+            assertEquals(0, f.pool.connectionDebugSnapshot().getValue(url).oneShotCount)
+            coordinator.fetch(targets, batches)
+            assertEquals("A refusal cannot trigger immediate fallback/refill requests", 1, f.requests.size)
+            assertTrue(targets.none { coordinator.needsFetch(it) })
+            now += 30_000
+            assertTrue("CLOSED leaves every target retryable after backoff", targets.all { coordinator.needsFetch(it) })
+        }
+    }
+
     @Test fun `public profile engagement EOSE completes and releases pooled slot`() = runBlocking { profileEose("prof-eng-") }
     @Test fun `own profile engagement EOSE completes and releases pooled slot`() = runBlocking { profileEose("prof-own-eng-") }
+
+    @Test fun `partitioned history preserves visible and nearby counts through pressure and relay refusal`() = runBlocking {
+        Fixture(applyHistoryLimits = true, closedReason = "rate-limited: fixture").use { f ->
+            val url = "wss://source.test"
+            // This fixture advances the coordinator clock, not the transport's
+            // real 50 ms temporary-socket guard. Reuse a ready pooled socket so
+            // every simulated 30-second attempt actually reaches the relay.
+            f.pool.connect(listOf(url))
+            f.until { url in f.pool.connectedRelayUrls() }
+            val crypto = ZapCryptoTestFixture()
+            val roots = (0..4).map {
+                crypto.signedEvent(crypto.recipient, 1, emptyList(), "root-$it")
+            }
+            roots.forEach { assertTrue(f.store.insert(it.toNostrEvent(url))) }
+            val rows = roots.map { f.store.synthesizeFeedRow(it.toNostrEvent(url)) }
+            val reporter = com.unsilence.app.ui.shared.DisplayWindowReporter(f.store)
+            reporter.setActive(true)
+            reporter.prepareWarmWindow(rows, 0, 0, setOf(roots.first().id), 360)
+            try {
+                val seed = roots.flatMap { root ->
+                    val tags = listOf(listOf("e", root.id, "", "root"), listOf("p", root.pubkey))
+                    val receipt = crypto.receipt(request = crypto.request(targetId = root.id), targetId = root.id)
+                    listOf(
+                        crypto.signedEvent(crypto.sender, 1, tags, "seed reply"),
+                        crypto.signedEvent(crypto.sender, 7, tags, "+"),
+                        crypto.signedEvent(crypto.sender, 6, tags, ""),
+                        EventDto(id = receipt.id, pubkey = receipt.pubkey, createdAt = receipt.createdAt,
+                            kind = receipt.kind, tags = receipt.tags, content = receipt.content, sig = receipt.sig),
+                    )
+                }
+                val targets = roots.map { CardHydrator.EngagementTarget(it.id, null, it.pubkey, it.createdAt) }
+                val batches = listOf(url to roots.map { it.id })
+                f.remote[url] = seed
+                var now = 2_000_000_000_000L
+                val outcomes = mutableListOf<Map<String, OneShotOutcome>>()
+                val coordinator = EngagementFetchCoordinator({ id, relays, req, timeout, source ->
+                    f.pool.fetchOneShotOutcomes(id, relays, req, timeout, source).also(outcomes::add)
+                }, nowMs = { now })
+                coordinator.fetch(targets, batches)
+                f.processor.drainForTest()
+                val original = roots.associate { it.id to f.store.currentStatsSnapshot(it.id) }
+                original.values.forEach {
+                    assertEquals(1, it.replyCount)
+                    assertEquals(1, it.reactionCount)
+                    assertEquals(1, it.repostCount)
+                    assertEquals(1, it.zapCount)
+                }
+                // Fill the real note cap with unrelated cache payloads. Only the
+                // relay result below uses the live ingestion/verification path.
+                fun pressure(offset: Int, size: Int) {
+                    repeat(size) { n ->
+                        f.store.insert(roots.first().toNostrEvent(url).copy(
+                            id = (100_000 + offset + n).toString(16).padStart(64, '0'),
+                            content = "unrelated-$offset-$n",
+                        ))
+                    }
+                }
+                pressure(0, 5_000)
+                val replies = roots.flatMap { root -> (0 until 60).map { n ->
+                    crypto.signedEvent(crypto.sender, 1,
+                        listOf(listOf("e", root.id, "", "root")), "reply-$n", 1_675_001_000L + n)
+                } }
+                val busy = (0 until 300).map { n ->
+                    crypto.signedEvent(crypto.attacker, 7,
+                        listOf(listOf("e", roots.first().id)), "reaction-$n", 1_675_002_000L + n)
+                }
+                f.remote[url] = seed + replies + busy
+                coordinator.invalidateRetainedTargets(roots.map { it.id })
+                now += 30_000
+                coordinator.fetch(targets, batches)
+                f.processor.drainForTest()
+                assertEquals(2, f.requests.size)
+                pressure(5_000, 500)
+                assertTrue("Must exercise admission replacements", f.store.snapshotEvictionMetrics().admissionReplaced > 0)
+                for (root in roots) {
+                    val stats = f.store.currentStatsSnapshot(root.id)
+                    assertEquals("Old reply plus fifty reserved new replies", 51, stats.replyCount)
+                    assertTrue(stats.reactionCount >= original.getValue(root.id).reactionCount)
+                    assertEquals(1, stats.repostCount)
+                    assertEquals(1, stats.zapCount)
+                    assertEquals(original.getValue(root.id).zapTotalSats, stats.zapTotalSats)
+                }
+                val retained = roots.associate { it.id to f.store.currentStatsSnapshot(it.id) }
+                f.remote[url] = emptyList()
+                f.closed += url
+                coordinator.invalidateRetainedTargets(roots.map { it.id })
+                now += 30_000
+                coordinator.fetch(targets, batches)
+                f.processor.drainForTest()
+                assertEquals("Transport outcomes: $outcomes", 3, f.requests.size)
+                assertEquals(retained, roots.associate { it.id to f.store.currentStatsSnapshot(it.id) })
+                coordinator.fetch(targets, batches)
+                assertEquals("No immediate retry after rate-limit refusal", 3, f.requests.size)
+                now += 30_000
+                assertTrue(targets.all { coordinator.needsFetch(it) })
+                // Returning to an unprotected, evicted window requires retrieval;
+                // the protection must not turn into permanent retained counts.
+                reporter.setActive(false)
+                f.store.evictOldContentEventsForTest(mapOf(1 to 0, 6 to 0, 7 to 0, 9735 to 0))
+                assertTrue(roots.all { f.store.currentStatsSnapshot(it.id) == com.unsilence.app.data.memory.EventStats.EMPTY })
+            } finally {
+                reporter.setActive(false)
+            }
+        }
+    }
 
     private suspend fun profileEose(prefix: String) {
         Fixture().use { f ->

@@ -61,6 +61,177 @@ class ActiveReadingAdmissionTest {
         assertTrue(replies.all { store.getNostrEvent(it.id) == null })
     }
 
+    @Test fun `requested arrival uses nearby capacity without reducing a still visible card count`() {
+        val visible = note("visible-root").copy(pubkey = "owner")
+        val nearby = note("nearby-root").copy(pubkey = "owner")
+        val requested = note("requested-root").copy(pubkey = "owner")
+        store.insertBatch(listOf(visible, nearby, requested))
+        // Visible replies are older in the same ordinary LRU tier. Their
+        // visible status, not insertion order, must decide which bodies survive.
+        repeat(500) { assertTrue(store.insert(note("visible-$it", visible.id))) }
+        repeat(cap - 500) { assertTrue(store.insert(note("nearby-$it", nearby.id))) }
+        store.openDisplayWindow().use { window ->
+            window.update(listOf(visible.id to visible.id, nearby.id to nearby.id), setOf(visible.id))
+            store.retainRequestedEvent(requested.id).use {
+                assertTrue(store.insert(note("requested-reply", requested.id)))
+                assertEquals("The visible card must keep its count without releasing its window", 500,
+                    store.currentStatsSnapshot(visible.id).replyCount)
+                assertEquals(500, store.synthesizeFeedRow(visible).replyCount)
+                assertEquals(cap - 501, store.replyCount(nearby.id))
+                assertEquals(cap + 3, store.snapshotSize().eventsByKind[1])
+            }
+        }
+    }
+
+    @Test fun `requested arrival cannot steal a visible reply when the kind is fully occupied`() {
+        val visible = note("visible-root").copy(pubkey = "owner")
+        val requested = note("requested-root").copy(pubkey = "owner")
+        store.insertBatch(listOf(visible, requested))
+        repeat(cap) { assertTrue(store.insert(note("visible-$it", visible.id))) }
+        store.openDisplayWindow().use { window ->
+            window.update(listOf(visible.id to visible.id), setOf(visible.id))
+            store.retainRequestedEvent(requested.id).use {
+                assertFalse("Lookup priority must not evict the bodies behind a visible count",
+                    store.insert(note("requested-reply", requested.id)))
+                assertEquals(cap, store.replyCount(visible.id))
+                assertEquals(cap + 2, store.snapshotSize().eventsByKind[1])
+            }
+        }
+    }
+
+    @Test fun `covered surface retains reply bodies behind timeline cards under bounded pressure`() {
+        val roots = (0 until 5).map { note("retained-root-$it") }
+        store.insertBatch(roots)
+        for (root in roots) repeat(51) { store.insert(note("${root.id}-reply-$it", root.id)) }
+        val urls = listOf("wss://history.example")
+        val filter = NostrFilter(kinds = listOf(1), limit = 5)
+        val timeline = TimelineService.Timeline(
+            refs = roots.map { TimelineRef(it.id, it.createdAt) }, filter = filter, urls = urls,
+        )
+        provider.get().restoreFromSnapshot(mapOf(provider.get().generateTimelineKey(urls, filter) to timeline))
+        val reporter = com.unsilence.app.ui.shared.DisplayWindowReporter(store)
+        reporter.setActive(true)
+        reporter.prepareWarmWindow(roots.map(store::synthesizeFeedRow), 0, 0, setOf(roots.first().id), 360)
+        assertTrue(roots.all { store.replyCount(it.id) == 51 })
+        reporter.setActive(false)
+        repeat(cap) { store.insert(note("pressure-$it")) }
+        val requested = note("new-thread").copy(pubkey = "owner")
+        store.insert(requested)
+        store.retainRequestedEvent(requested.id).use {
+            repeat(50) { assertTrue(store.insert(note("new-thread-reply-$it", requested.id))) }
+        }
+        assertTrue("This diagnosis requires actual admission pressure", store.snapshotEvictionMetrics().admissionReplaced > 0)
+        for (root in roots) {
+            assertNotNull("Root eviction must not explain this result", store.getNostrEvent(root.id))
+            assertEquals(51, store.currentStatsSnapshot(root.id).replyCount)
+            assertEquals(51, store.synthesizeFeedRow(root).replyCount)
+        }
+        // Reactivation uses the same retained bodies, without fetching them again.
+        reporter.setActive(true)
+        reporter.prepareWarmWindow(roots.map(store::synthesizeFeedRow), 0, 0, setOf(roots.first().id), 360)
+        assertTrue(roots.all { store.replyCount(it.id) == 51 })
+        reporter.setActive(false)
+    }
+
+    @Test fun `full covered kind yields to a cold note and a requested root without raising the cap`() {
+        for (requested in listOf(false, true)) {
+            store.clear()
+            val root = note("covered-root-$requested").copy(pubkey = "owner")
+            store.ownPubkey = "owner"
+            store.insert(root)
+            repeat(cap) { assertTrue(store.insert(note("covered-$requested-$it", root.id))) }
+            val reporter = com.unsilence.app.ui.shared.DisplayWindowReporter(store)
+            reporter.setActive(true)
+            reporter.report(listOf(store.synthesizeFeedRow(root)), setOf(root.id))
+            reporter.setActive(false)
+            val newcomer = note("cold-$requested")
+            val lease = if (requested) store.retainRequestedEvent(newcomer.id) else null
+            assertTrue("Covered history cannot starve a root not rendered yet", store.insert(newcomer))
+            assertNotNull(store.getNostrEvent(newcomer.id))
+            assertEquals(cap + 1, store.snapshotSize().eventsByKind[1])
+            lease?.close()
+            reporter.close()
+        }
+    }
+
+    @Test fun `ordinary tier rejections cannot retire a covered followed conversation`() {
+        val root = note("covered-root").copy(pubkey = "owner")
+        store.insert(note("follows").copy(kind = 3, pubkey = "owner", tags = listOf(listOf("p", "unfollowed"))))
+        store.insert(root)
+        repeat(51) { store.insert(note("reply-$it", root.id)) }
+        repeat(cap - 51) { store.insert(note("other-followed-$it")) }
+        val reporter = com.unsilence.app.ui.shared.DisplayWindowReporter(store)
+        reporter.setActive(true)
+        reporter.report(listOf(store.synthesizeFeedRow(root)), setOf(root.id))
+        reporter.setActive(false)
+        repeat(200) {
+            assertFalse("Ordinary traffic must still lose to followed content",
+                store.insert(note("ordinary-$it").copy(pubkey = "stranger")))
+        }
+        assertEquals(51, store.replyCount(root.id))
+        // A retired entry cannot restore its roles without a new report.
+        reporter.setActive(true)
+        assertEquals(mapOf(root.id to 0), store.displayPriorities())
+        assertEquals(cap + 1, store.snapshotSize().eventsByKind[1])
+        reporter.close()
+    }
+
+    @Test fun `stale admission tiers cannot retire a now timeline referenced covered conversation`() {
+        val root = note("root").copy(pubkey = "owner")
+        val replies = (0 until 51).map { note("reply-$it", root.id) }
+        store.insertBatch(listOf(root) + replies)
+        val reporter = com.unsilence.app.ui.shared.DisplayWindowReporter(store)
+        reporter.setActive(true)
+        reporter.report(listOf(store.synthesizeFeedRow(root)), setOf(root.id))
+        reporter.setActive(false)
+        // Timeline ownership changes without eagerly moving the admission queues.
+        fillTimelineHistory(replies)
+        assertFalse(store.insert(note("ordinary-newcomer")))
+        assertEquals(51, store.replyCount(root.id))
+        reporter.setActive(true)
+        assertEquals("Stronger current tiers must not lose their covered lease",
+            mapOf(root.id to 0), store.displayPriorities())
+        reporter.close()
+    }
+
+    @Test fun `covered reclassification behind a same tier newcomer cannot trigger retirement`() {
+        val root = note("root").copy(pubkey = "owner")
+        val replies = (0 until cap).map { note("reply-$it", root.id) }
+        store.insertBatch(listOf(root) + replies)
+        val reporter = com.unsilence.app.ui.shared.DisplayWindowReporter(store)
+        reporter.setActive(true)
+        reporter.report(listOf(store.synthesizeFeedRow(root)), setOf(root.id))
+        reporter.setActive(false)
+        fillTimelineHistory(replies)
+        val newcomer = note("timeline-newcomer")
+        val urls = listOf("wss://new-timeline.example")
+        val filter = NostrFilter(kinds = listOf(1), limit = 1)
+        provider.get().restoreFromSnapshot(mapOf(provider.get().generateTimelineKey(urls, filter) to
+            TimelineService.Timeline(refs = listOf(TimelineRef(newcomer.id, newcomer.createdAt)), filter = filter, urls = urls)))
+        assertFalse(store.insert(newcomer))
+        assertEquals(cap, store.replyCount(root.id))
+        reporter.setActive(true)
+        assertEquals("Reclassification must precede blocker recording", mapOf(root.id to 0), store.displayPriorities())
+        reporter.close()
+    }
+
+    @Test fun `sweep can reclaim covered bodies but not a resumed window`() {
+        val root = note("root")
+        val reply = note("reply", root.id)
+        store.insertBatch(listOf(root, reply))
+        val reporter = com.unsilence.app.ui.shared.DisplayWindowReporter(store)
+        reporter.setActive(true)
+        reporter.report(listOf(store.synthesizeFeedRow(root)), setOf(root.id))
+        reporter.setActive(false)
+        reporter.setActive(true)
+        store.evictOldContentEventsForTest(mapOf(1 to 0))
+        assertNotNull(store.getNostrEvent(reply.id))
+        reporter.setActive(false)
+        store.evictOldContentEventsForTest(mapOf(1 to 0))
+        assertNull(store.getNostrEvent(reply.id))
+        reporter.close()
+    }
+
     @Test fun `nearby conversation cannot prevent a visible reply body from being admitted`() {
         val nearby = note("nearby-root").copy(pubkey = "owner")
         val active = note("active-root").copy(pubkey = "owner")

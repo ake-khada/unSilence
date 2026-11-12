@@ -105,9 +105,8 @@ class ProfilePipeline @Inject constructor(
         /** Kinds fetched for profile content, including NIP-22 comments for the Replies tab. */
         val PROFILE_KINDS = PROFILE_NOTE_REPLY_EVENT_KIND_SET + 30023
         /**
-         * Share the viewport's bounded chunk size. A relay filter's 500 results
-         * are shared across posts and kinds, not reserved per post; even a small
-         * chunk can return incomplete counts for a busy target.
+         * Share the viewport's bounded chunk size and reply reservations. Historical
+         * allowances remain finite; a successful query does not certify complete counts.
          */
         private const val PROFILE_ENGAGEMENT_CHUNK_SIZE = ENGAGEMENT_BATCH_CHUNK
         private const val ENGAGEMENT_TIMEOUT_MS = 10_000L
@@ -679,7 +678,7 @@ class ProfilePipeline @Inject constructor(
         Log.d(TAG, "Step4: relay fan-out capped to ${targetUrls.size}/$MAX_PROFILE_ENGAGEMENT_RELAYS")
 
         // Keep the shared bounded chunk size — REQ via the shared builder so
-        // profile and feed paths emit identical #e + #a + #A filters (incl. kind 16).
+        // profile and feed paths emit identical partitioned #e + #a + #A filters (incl. kind 16).
         val chunks = targets.chunked(PROFILE_ENGAGEMENT_CHUNK_SIZE)
         Log.d(TAG, "Step4: ${noteEvents.size} notes → ${chunks.size} chunks")
 

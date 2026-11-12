@@ -288,7 +288,7 @@ class NoteActionsViewModel @Inject constructor(
     fun clearDisplayWindow() = displayWindowReporter.report(emptyList(), emptySet())
 
     override fun onCleared() {
-        displayWindowReporter.setActive(false)
+        displayWindowReporter.close()
         super.onCleared()
     }
 

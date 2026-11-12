@@ -32,6 +32,7 @@ import com.unsilence.app.ui.shared.pruneFullyMutedSubtrees
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -42,6 +43,7 @@ import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.onStart
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
@@ -176,9 +178,19 @@ class ThreadViewModel @Inject constructor(
     // Non-navigation clients (e.g. the immersive engagement sheet) remain active
     // until clearThread; navigation explicitly supplies its resumed lifecycle.
     private val screenActive = MutableStateFlow(false)
+    private var pausedRootEngagement: ThreadRootEngagement? = null
 
     fun setScreenActive(active: Boolean) {
+        val pausing = !active && screenActive.value
         screenActive.value = active
+        if (pausing && pubkeyHex == keyManager.getPublicKeyHex()) {
+            // Card stats have a separate flow; the retained row may predate its
+            // final receipt. Snapshot this one root, without traversing replies.
+            val held = _baseUiState.value
+            if (held.focusedNote?.id == routeFlow.value?.rootId) {
+                pausedRootEngagement = held.rootEngagementForResume(memoryEventStore, pausedRootEngagement)
+            }
+        }
         if (!active) loadJob?.cancel()
         retainRoot(routeFlow.value?.rootId.takeIf { active })
         if (active) wotHydrationCoalescer.requestHydration(_wotSubjects.value)
@@ -196,6 +208,7 @@ class ThreadViewModel @Inject constructor(
     }
 
     override fun onCleared() {
+        pausedRootEngagement = null
         retainRoot(null)
         super.onCleared()
     }
@@ -233,11 +246,30 @@ class ThreadViewModel @Inject constructor(
                     rootIsKnown = { memoryEventStore.getEventEntity(it) != null },
                     refreshMissingRoot = { route -> routeFor(route.rootId, tappedId ?: route.rootId, visitRelayHints) },
                 )
+                .onStart {
+                    val route = routeFlow.value
+                    val paused = pausedRootEngagement
+                    if (route != null && pubkeyHex == keyManager.getPublicKeyHex()) {
+                        val held = _baseUiState.value
+                        val recovery = withContext(Dispatchers.Default) {
+                            missingThreadData(route.rootId, held, memoryEventStore, paused)
+                        }
+                        if (routeFlow.value?.rootId == route.rootId && pubkeyHex == keyManager.getPublicKeyHex()) {
+                            recovery.invalidate(completedThreadQueries, memoryEventStore.articleCoordForEvent(route.rootId),
+                                fetchedArticleCoords, fetchedReplyDescendants, fetchedMissingParents)
+                            // Cancellation before this point must keep recovery evidence.
+                            if (pausedRootEngagement === paused) pausedRootEngagement = null
+                        }
+                    }
+                }
                 .flatMapLatest { (route, coord) ->
                     val id = route.rootId
                     // Children belong to this active root/coordinate observation.
                     // Hiding, replacing or clearing it cancels their one-shots too.
                     channelFlow {
+                        val observation = currentCoroutineContext()[Job]
+                        fun stillOwned() = observation?.isActive == true && routeFlow.value?.rootId == id &&
+                            pubkeyHex == keyManager.getPublicKeyHex()
                         val descendants = HashSet<String>()
                         val parents = HashSet<String>()
                         val rowsFlow = if (coord != null) {
@@ -248,13 +280,13 @@ class ThreadViewModel @Inject constructor(
                                 ).distinct()
                             articleCommentRelays = relays
                             if (coord !in fetchedArticleCoords && relays.isNotEmpty()) launch {
-                                if (relayPool.fetchArticleComments(relays, coord) && routeFlow.value?.rootId == id) fetchedArticleCoords.add(coord)
+                                if (relayPool.fetchArticleComments(relays, coord) && stillOwned()) fetchedArticleCoords.add(coord)
                             }
                             memoryEventStore.articleCommentsFlow(coord)
                         } else {
                             launch {
                                 relayPool.fetchThread(route.compatibilityRelays, id, completedThreadQueries, route.replyRelays) { query, relay ->
-                                    if (routeFlow.value?.rootId == id) completedThreadQueries.add(query to relay)
+                                    if (stillOwned()) completedThreadQueries.add(query to relay)
                                 }
                             }
                             memoryEventStore.threadFeedRowFlow(id)
@@ -270,12 +302,12 @@ class ThreadViewModel @Inject constructor(
                                     .filter { it !in fetchedMissingParents && parents.add(it) }
                                     .toList()
                                 if (missing.isNotEmpty()) launch {
-                                    if (relayPool.fetchCommentParents(relays, missing) && routeFlow.value?.rootId == id) fetchedMissingParents.addAll(missing.take(200))
+                                    if (relayPool.fetchCommentParents(relays, missing) && stillOwned()) fetchedMissingParents.addAll(missing.take(200))
                                 }
                                 val novel = rows.map { it.id }
                                     .filter { it !in fetchedReplyDescendants && descendants.add(it) }
                                 if (novel.isNotEmpty()) launch {
-                                    if (relayPool.fetchCommentReplies(relays, novel) && routeFlow.value?.rootId == id) fetchedReplyDescendants.addAll(novel.take(200))
+                                    if (relayPool.fetchCommentReplies(relays, novel) && stillOwned()) fetchedReplyDescendants.addAll(novel.take(200))
                                 }
                             }
                             send(Triple(id, coord != null, rows))
@@ -402,6 +434,7 @@ class ThreadViewModel @Inject constructor(
         _wotSubjects.value = emptySet()
         _baseUiState.value = ThreadUiState()
         _uiState.value = ThreadUiState()
+        pausedRootEngagement = null
     }
 
     /**

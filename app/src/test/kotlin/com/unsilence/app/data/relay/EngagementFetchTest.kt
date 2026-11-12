@@ -31,50 +31,57 @@ class EngagementFetchTest {
     // ── buildBatchedEngagementReq ─────────────────────────────────────
 
     @Test
-    fun `buildBatchedEngagementReq constructs correct filter`() {
+    fun `buildBatchedEngagementReq partitions replies while retaining all engagement kinds`() {
         val req = buildBatchedEngagementReq("eng-test", listOf("evt-1", "evt-2"))
         val parsed = Json.parseToJsonElement(req).jsonArray
         assertEquals("REQ", parsed[0].jsonPrimitive.content)
         assertEquals("eng-test", parsed[1].jsonPrimitive.content)
 
-        val filter = parsed[2].jsonObject
-        val kinds = filter["kinds"]!!.jsonArray.map { it.jsonPrimitive.content.toInt() }
-        assertEquals(listOf(1, 1111, 6, 16, 7, 9735), kinds)
-
-        val eTags = filter["#e"]!!.jsonArray.map { it.jsonPrimitive.content }
-        assertEquals(listOf("evt-1", "evt-2"), eTags)
-
-        assertTrue(filter.containsKey("limit"))
-        assertFalse(filter.containsKey("since"))
+        val filters = parsed.drop(2).map { it.jsonObject }
+        assertEquals(4, filters.size)
+        for ((index, filter) in filters.take(2).withIndex()) {
+            assertEquals(listOf(1, 1111), filter["kinds"]!!.jsonArray.map { it.jsonPrimitive.content.toInt() })
+            assertEquals(listOf("evt-${index + 1}"), filter["#e"]!!.jsonArray.map { it.jsonPrimitive.content })
+            assertEquals("125", filter["limit"]!!.jsonPrimitive.content)
+        }
+        for ((index, other) in filters.drop(2).withIndex()) {
+            assertEquals(listOf(6, 16, 7, 9735), other["kinds"]!!.jsonArray.map { it.jsonPrimitive.content.toInt() })
+            assertEquals(listOf("evt-${index + 1}"), other["#e"]!!.jsonArray.map { it.jsonPrimitive.content })
+            assertEquals("125", other["limit"]!!.jsonPrimitive.content)
+        }
+        assertTrue(filters.all { it.containsKey("limit") })
+        assertTrue(filters.none { it.containsKey("since") })
     }
 
     @Test
     fun `buildBatchedEngagementReq adds hashA and hasha coordinate filters for articles`() {
         val req = buildBatchedEngagementReq("eng-test", listOf("evt-1"), listOf("30023:pk:slug"))
         val filters = Json.parseToJsonElement(req).jsonArray.drop(2).map { it.jsonObject }
-        // #e filter + #a filter + #A filter
-        assertEquals(3, filters.size)
+        // Two kind-disjoint #e filters + unchanged #a and #A filters.
+        assertEquals(4, filters.size)
         assertEquals(listOf("evt-1"), filters[0]["#e"]!!.jsonArray.map { it.jsonPrimitive.content })
-        assertEquals(listOf("30023:pk:slug"), filters[1]["#a"]!!.jsonArray.map { it.jsonPrimitive.content })
-        assertEquals(listOf("30023:pk:slug"), filters[2]["#A"]!!.jsonArray.map { it.jsonPrimitive.content })
-        val upperAKinds = filters[2]["kinds"]!!.jsonArray.map { it.jsonPrimitive.content.toInt() }
+        assertEquals(listOf("evt-1"), filters[1]["#e"]!!.jsonArray.map { it.jsonPrimitive.content })
+        assertEquals(listOf("30023:pk:slug"), filters[2]["#a"]!!.jsonArray.map { it.jsonPrimitive.content })
+        assertEquals(listOf("30023:pk:slug"), filters[3]["#A"]!!.jsonArray.map { it.jsonPrimitive.content })
+        val upperAKinds = filters[3]["kinds"]!!.jsonArray.map { it.jsonPrimitive.content.toInt() }
         assertTrue(1111 in upperAKinds)
         // Lowercase #a carries reactions/zaps; uppercase #A also carries NIP-22 comments.
-        assertEquals(listOf(7, 9735), filters[1]["kinds"]!!.jsonArray.map { it.jsonPrimitive.content.toInt() })
+        assertEquals(listOf(7, 9735), filters[2]["kinds"]!!.jsonArray.map { it.jsonPrimitive.content.toInt() })
         assertEquals(listOf(7, 9735, 1111), upperAKinds)
     }
 
     @Test
     fun `buildBatchedEngagementReq omits coordinate filters when no articles`() {
         val req = buildBatchedEngagementReq("eng-test", listOf("evt-1"), emptyList())
-        assertEquals(1, Json.parseToJsonElement(req).jsonArray.drop(2).size)
+        assertEquals(2, Json.parseToJsonElement(req).jsonArray.drop(2).size)
     }
 
     @Test
     fun `buildBatchedEngagementReq includes generic-repost kind 16`() {
         val req = buildBatchedEngagementReq("eng-test", listOf("evt-1"))
-        val kinds = Json.parseToJsonElement(req).jsonArray[2].jsonObject["kinds"]!!
-            .jsonArray.map { it.jsonPrimitive.content.toInt() }
+        val kinds = Json.parseToJsonElement(req).jsonArray.drop(2).flatMap { filter ->
+            filter.jsonObject["kinds"]!!.jsonArray.map { it.jsonPrimitive.content.toInt() }
+        }
         // 1/1111 replies, 6 note-repost, 16 generic-repost, 7 reaction, 9735 zap
         assertEquals(listOf(1, 1111, 6, 16, 7, 9735), kinds)
     }

@@ -136,6 +136,7 @@ fun UserProfileScreen(
         key = "note-actions-${LocalAppSessionKey.current}",
     ),
 ) {
+    com.unsilence.app.ui.shared.ObserveDisplayWindowLifecycle(actionsViewModel)
     LifecycleResumeEffect(viewModel, pubkey) {
         viewModel.loadProfile(pubkey)
         viewModel.setScreenActive(true)
@@ -312,7 +313,6 @@ fun UserProfileScreen(
         }
     }
 
-    com.unsilence.app.ui.shared.ObserveDisplayWindowLifecycle(actionsViewModel)
 
     val engagementRetryRevision by actionsViewModel.engagementRetryRevision.collectAsStateWithLifecycle()
     @OptIn(FlowPreview::class)

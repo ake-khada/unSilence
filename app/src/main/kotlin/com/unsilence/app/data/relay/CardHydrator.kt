@@ -1199,12 +1199,12 @@ internal fun engagementFreshnessInterval(postAgeSec: Long): Long = when {
 }
 
 private const val MAX_ENGAGEMENT_RELAYS = 12
-// Each relay filter shares 500 results across at most 5 posts AND all requested kinds.
-// This bounds work; it does not reserve 100 results per post or guarantee complete
-// counts. Busy posts/kinds can consume the window. ProfilePipeline shares this
-// chunk size so profile and viewport query budgets stay aligned.
+// ProfilePipeline shares the viewport chunk size. Direct historical allowances
+// total at most 500 per relay batch, with half reserved for per-target replies.
+// Coordinate filters have separate allowances; no query certifies complete counts.
 internal const val ENGAGEMENT_BATCH_CHUNK = 5
 private const val ENGAGEMENT_BATCH_LIMIT = 500
+private const val ENGAGEMENT_DIRECT_SHARE = ENGAGEMENT_BATCH_LIMIT / 2
 
 /**
  * Invert a per-item → relays map into a minimal set of per-relay REQ batches.
@@ -1270,30 +1270,42 @@ internal fun coalesceByRelay(
 }
 
 /**
- * Build batched engagement REQ as OR'd filters: the #e filter (all engagement
- * kinds by event id) plus coordinate filters for addressable content. The uppercase
- * #A filter also fetches NIP-22 comments rooted at the coordinate.
+ * Reserve half the direct historical allowance for replies, shared evenly across
+ * targets, and half for other engagement, also shared per target. A busy target
+ * cannot consume either allowance belonging to its neighbour. Overlapping #e tags can still match one event
+ * in several filters; these limits are not a promise of exhaustive/distinct counts.
+ * Coordinate filters retain their separate allowances; #A also finds NIP-22 comments.
  */
 internal fun buildBatchedEngagementReq(
     subId: String,
     eventIds: List<String>,
     coords: List<String> = emptyList(),
-): String =
-    buildJsonArray {
+): String {
+    val targets = eventIds.distinct()
+    require(targets.size <= ENGAGEMENT_BATCH_CHUNK) { "Engagement targets must be chunked before dispatch" }
+    return buildJsonArray {
         add(JsonPrimitive("REQ"))
         add(JsonPrimitive(subId))
-        add(buildJsonObject {
-            put("kinds", buildJsonArray {
-                add(JsonPrimitive(1))   // replies
-                add(JsonPrimitive(1111)) // NIP-22 comments on event-addressed videos
-                add(JsonPrimitive(6))   // note reposts
-                add(JsonPrimitive(16))  // generic reposts (NIP-18) — count toward repost totals
-                add(JsonPrimitive(7))   // reactions
-                add(JsonPrimitive(9735)) // zaps
+        for (target in targets) {
+            add(buildJsonObject {
+                put("kinds", buildJsonArray { add(JsonPrimitive(1)); add(JsonPrimitive(1111)) })
+                put("#e", buildJsonArray { add(JsonPrimitive(target)) })
+                put("limit", JsonPrimitive(ENGAGEMENT_DIRECT_SHARE / targets.size))
             })
-            put("#e", buildJsonArray { eventIds.forEach { add(JsonPrimitive(it)) } })
-            put("limit", JsonPrimitive(ENGAGEMENT_BATCH_LIMIT))
-        })
+        }
+        // Keep coordinate-only requests non-matching in their direct branch.
+        for (ids in targets.map { listOf(it) }.ifEmpty { listOf(emptyList()) }) {
+            add(buildJsonObject {
+                put("kinds", buildJsonArray {
+                    add(JsonPrimitive(6))
+                    add(JsonPrimitive(16))
+                    add(JsonPrimitive(7))
+                    add(JsonPrimitive(9735))
+                })
+                put("#e", buildJsonArray { ids.forEach { add(JsonPrimitive(it)) } })
+                put("limit", JsonPrimitive(ENGAGEMENT_DIRECT_SHARE / targets.size.coerceAtLeast(1)))
+            })
+        }
         if (coords.isNotEmpty()) {
             add(buildJsonObject {
                 put("kinds", buildJsonArray { add(JsonPrimitive(7)); add(JsonPrimitive(9735)) })
@@ -1311,6 +1323,7 @@ internal fun buildBatchedEngagementReq(
             })
         }
     }.toString()
+}
 
 /** Extract the relay hint (index 2) from the first "e" tag in a repost's tags. */
 fun extractRepostTargetRelay(tags: List<List<String>>): String? =

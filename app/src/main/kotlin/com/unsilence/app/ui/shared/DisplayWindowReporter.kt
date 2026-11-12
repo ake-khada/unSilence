@@ -25,14 +25,20 @@ internal fun ObserveDisplayWindowLifecycle(reporter: DisplayWindowReporter) {
 internal const val DISPLAY_WINDOW_ABOVE = 2
 
 /** One resumed surface's bounded visible + nearby window. No network work here. */
-internal class DisplayWindowReporter(private val store: MemoryEventStore) {
+internal class DisplayWindowReporter(private val store: MemoryEventStore) : AutoCloseable {
     private var active = false
-    private var window: MemoryEventStore.DisplayWindow? = null
+    private val window = store.openDisplayWindow()
 
     @Synchronized
     fun setActive(value: Boolean) {
         active = value
-        if (!value) { window?.close(); window = null }
+        window.setActive(value)
+    }
+
+    @Synchronized
+    override fun close() {
+        active = false
+        window.close()
     }
 
     /** Called before any width/network gate by both feed and non-feed warm paths. */
@@ -47,12 +53,10 @@ internal class DisplayWindowReporter(private val store: MemoryEventStore) {
     @Synchronized
     fun report(rows: List<FeedRow>, visibleIds: Set<String>) {
         if (!active) return
-        if (rows.isEmpty()) { window?.close(); window = null; return }
-        val current = window ?: store.openDisplayWindow().also { window = it }
         // Visible rows always win the bound; callers provide nearby rows in proximity order.
         val ordered = (rows.filter { it.id in visibleIds } + rows.filterNot { it.id in visibleIds })
             .distinctBy { it.id }.take(com.unsilence.app.data.memory.DISPLAY_WINDOW_ROW_LIMIT)
-        current.update(ordered.map { row ->
+        window.update(ordered.map { row ->
             row.id to (store.getEventModel(row.id)?.engagementId
                 ?: activityStatsTargetId(row.kind, row.id, row.rootId) ?: row.id)
         }, visibleIds)

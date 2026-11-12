@@ -284,6 +284,7 @@ internal class ContentAdmissionIndex(private val lock: Any = Any()) {
         kind: Int,
         cap: Int,
         isProtected: (String) -> Boolean = { false },
+        onSkippedProtected: (String, ContentEvictionTier) -> Unit = { _, _ -> },
         classify: (String) -> ContentEvictionTier?,
     ): ContentAdmissionVictim? {
         require(cap >= 0)
@@ -295,7 +296,16 @@ internal class ContentAdmissionIndex(private val lock: Any = Any()) {
                     val queue = queues.queue(tier)
                     // Protected entries remain in their original tier and count
                     // against the cap; only victim selection skips them.
-                    val eventId = queue.keys.firstOrNull { !isProtected(it) } ?: continue
+                    val eventId = queue.keys.firstOrNull { id ->
+                        if (!isProtected(id)) true
+                        // Protection must not hide a stale tier from the same
+                        // lazy reclassification used for unprotected candidates.
+                        else if (classify(id) != tier) true
+                        else {
+                            onSkippedProtected(id, tier)
+                            false
+                        }
+                    } ?: continue
                     val currentTier = classify(eventId)
                     when {
                         currentTier == null -> {
@@ -657,6 +667,8 @@ class MemoryEventStore @Inject constructor(
         }
 
         override fun close() = lease.close()
+
+        fun setActive(active: Boolean) = lease.setActive(active)
     }
 
     fun openDisplayWindow(): DisplayWindow = DisplayWindow()
@@ -666,29 +678,38 @@ class MemoryEventStore @Inject constructor(
     /** One existing hydration coordinator; IDs only, no retained eviction journal. */
     @Volatile internal var engagementEvicted: ((Set<String>) -> Unit)? = null
 
-    private fun isDisplayProtected(event: NostrEvent): Boolean {
-        if (displayWindows.contains(event.id)) return true
+    private fun displayProtection(event: NostrEvent): ReadingProtection {
+        var priority = displayWindows.priority(event.id)
         val target = when (event.kind) {
             6, 16 -> repostTargetId(event)
             7 -> reactionTargetId(event)
             9735 -> authenticatedZapReceiptsById[event.id]?.targetId
             else -> null
-        } ?: return false
-        return displayWindows.contains(target) ||
-            articleIdByCoord[target]?.let(displayWindows::contains) == true
+        }
+        if (target != null) {
+            displayWindows.priority(articleIdByCoord[target] ?: target)?.let {
+                priority = minOf(priority ?: it, it)
+            }
+        }
+        return when (priority) {
+            0, 1 -> ReadingProtection.WINDOW
+            2 -> ReadingProtection.COVERED
+            else -> ReadingProtection.NONE
+        }
     }
 
     /** Derived for a single decision, never stored in the admission queues. */
-    private enum class ReadingProtection { WINDOW, REQUESTED, VISIBLE_REPLY, NEARBY_REPLY, NONE }
+    private enum class ReadingProtection { WINDOW, VISIBLE_REPLY, REQUESTED, NEARBY_REPLY, COVERED, NONE }
 
     private fun readingTargetProtection(target: String): ReadingProtection {
         val id = articleIdByCoord[target] ?: target
-        if (requestedEvents.contains(id)) return ReadingProtection.REQUESTED
-        return when (displayWindows.priority(id)) {
+        val display = when (displayWindows.priority(id)) {
             0 -> ReadingProtection.VISIBLE_REPLY
             1 -> ReadingProtection.NEARBY_REPLY
+            2 -> ReadingProtection.COVERED
             else -> ReadingProtection.NONE
         }
+        return if (requestedEvents.contains(id)) minOf(display, ReadingProtection.REQUESTED) else display
     }
 
     private fun readingProtection(
@@ -696,14 +717,13 @@ class MemoryEventStore @Inject constructor(
         ancestors: Set<String>? = null,
         resolvedTargets: MutableMap<String, ReadingProtection>? = null,
     ): ReadingProtection {
-        if (isDisplayProtected(event)) return ReadingProtection.WINDOW
-        if (!isConversationReply(event)) return ReadingProtection.NONE
-        var result = ReadingProtection.NONE
+        var result = displayProtection(event)
+        if (result == ReadingProtection.WINDOW || !isConversationReply(event)) return result
         if (ancestors != null) {
             // The incoming reply's ancestry was already resolved for invalidation.
             for (target in ancestors) {
                 if (target != event.id) result = minOf(result, readingTargetProtection(target))
-                if (result == ReadingProtection.REQUESTED) break
+                if (result == ReadingProtection.VISIBLE_REPLY) break
             }
         } else {
             forEachReplyIndexTarget(event) {
@@ -723,13 +743,13 @@ class MemoryEventStore @Inject constructor(
         resolvedTargets?.get(target)?.let { return it }
         var result = readingTargetProtection(target)
         val parent = eventsById[articleIdByCoord[target] ?: target]
-        if (result != ReadingProtection.REQUESTED && parent != null && isConversationReply(parent)) {
+        if (result != ReadingProtection.VISIBLE_REPLY && parent != null && isConversationReply(parent)) {
             val ancestors = conversationInvalidationTargets(parent) { id ->
                 id != parent.id && resolvedTargets?.containsKey(id) == true
             }
             for (id in ancestors) {
                 result = minOf(result, readingTargetProtection(id), resolvedTargets?.get(id) ?: ReadingProtection.NONE)
-                if (result == ReadingProtection.REQUESTED) break
+                if (result == ReadingProtection.VISIBLE_REPLY) break
             }
         }
         // Only cache this fully resolved target, never assign its result to
@@ -1374,35 +1394,55 @@ class MemoryEventStore @Inject constructor(
         val invalidatedTargets = mutableSetOf<String>()
         val removedIds = mutableSetOf<String>()
 
+        var coveredRetirements = 0
         while (contentAdmissionIndex.size(event.kind) > cap) {
             var displacingForReading = false
             var victim = synchronized(contentPolicyLock) {
-                // Shared ancestors resolve once within this locked decision.
-                // Discard before releasing the lock; final removal reads live state.
-                val resolvedTargets = HashMap<String, ReadingProtection>()
-                val ordinary = contentAdmissionIndex.pollVictim(
-                    kind = event.kind,
-                    cap = cap,
-                    isProtected = { id -> eventsById[id]?.let {
-                        readingProtection(it, ancestors.takeIf { id == event.id }, resolvedTargets) != ReadingProtection.NONE
-                    } == true },
-                    classify = ::currentContentAdmissionTier,
-                )
-                if (ordinary != null || contentAdmissionIndex.size(event.kind) <= cap) return@synchronized ordinary
-                // Background work never takes reading-owned bodies. Only a
-                // stronger active arrival may displace indirect protection;
-                // materialized window rows and equal-priority bodies stay put.
-                val incoming = readingProtection(event, ancestors)
-                if (incoming == ReadingProtection.NONE) null else {
-                    contentAdmissionIndex.pollVictim(
-                        kind = event.kind,
-                        cap = cap,
-                        isProtected = { id -> eventsById[id]?.let {
-                            readingProtection(it, resolvedTargets = resolvedTargets) <= incoming
-                        } == true },
+                var selected: ContentAdmissionVictim?
+                do {
+                    // Cache only within this decision; retirement changes priorities.
+                    val resolvedTargets = HashMap<String, ReadingProtection>()
+                    var skippedCovered = false
+                    val incomingTier = contentAdmissionTier(event)
+                    fun protection(id: String): ReadingProtection = eventsById[id]?.let {
+                        readingProtection(it, ancestors.takeIf { id == event.id }, resolvedTargets)
+                    } ?: ReadingProtection.NONE
+                    val recordCoveredPredecessor = { id: String, tier: ContentEvictionTier ->
+                        if (id != event.id && incomingTier != null && tier.number >= incomingTier.number &&
+                            protection(id) == ReadingProtection.COVERED) {
+                            skippedCovered = true
+                        }
+                    }
+                    selected = contentAdmissionIndex.pollVictim(
+                        kind = event.kind, cap = cap,
+                        isProtected = { protection(it) != ReadingProtection.NONE },
+                        onSkippedProtected = recordCoveredPredecessor,
                         classify = ::currentContentAdmissionTier,
-                    ).also { displacingForReading = it != null }
-                }
+                    )
+                    displacingForReading = false
+                    if (selected == null && contentAdmissionIndex.size(event.kind) > cap) {
+                        // Materialized rows and equal/stronger reading bodies stay put.
+                        val incoming = readingProtection(event, ancestors)
+                        if (incoming != ReadingProtection.NONE) {
+                            selected = contentAdmissionIndex.pollVictim(
+                                kind = event.kind, cap = cap,
+                                isProtected = { protection(it) <= incoming },
+                                onSkippedProtected = recordCoveredPredecessor,
+                                classify = ::currentContentAdmissionTier,
+                            )
+                            displacingForReading = selected != null
+                        }
+                    }
+                    val rejected = selected?.eventId == event.id ||
+                        (selected == null && contentAdmissionIndex.size(event.kind) > cap)
+                    if (!rejected || !skippedCovered || coveredRetirements >= COVERED_WINDOW_LIMIT ||
+                        !displayWindows.retireOldestCovered()) break
+                    // Release only soft ownership, then use the same tier/LRU decision.
+                    // Restore the newcomer if polling had reserved it for rejection.
+                    coveredRetirements++
+                    contentAdmissionIndex.track(event.id, event.kind, contentAdmissionTier(event))
+                } while (true)
+                selected
             }
             if (victim == null) {
                 if (contentAdmissionIndex.size(event.kind) <= cap) break
@@ -2120,6 +2160,10 @@ class MemoryEventStore @Inject constructor(
     }
 
     fun isDeleted(event: NostrEvent): Boolean = isDeletedByTombstone(event)
+
+    /** Known author-qualified ID deletion, also usable after a reply payload is gone. */
+    internal fun isDeletedById(eventId: String, author: String): Boolean =
+        deletedEventTombstones.isNotEmpty() && deletedEventTombstones.containsKey(EventTombstoneKey(eventId, author))
 
     /**
      * Best-effort suppression, bounded per map. Eviction may let a re-fetched event
@@ -3376,7 +3420,7 @@ class MemoryEventStore @Inject constructor(
                 touchSnapshot[candidate.id] = lastTouchedAt[candidate.id] ?: 0L
                 eventsById[candidate.id]?.pubkey?.let { authorSnapshot[candidate.id] = it }
             }
-            toEvict += selectContentEvictionCandidates(
+            fun selectCandidates() = selectContentEvictionCandidates(
                 entries = candidates,
                 cap = cap,
                 authorsByEventId = authorSnapshot,
@@ -3391,6 +3435,15 @@ class MemoryEventStore @Inject constructor(
                         .map { it.id }.toSet()
                 },
             )
+            var selected = selectCandidates()
+            var retired = 0
+            while (selected.size < candidates.size - cap && retired < COVERED_WINDOW_LIMIT &&
+                displayWindows.retireOldestCovered()) {
+                retired++
+                selected = selectCandidates()
+            }
+            toEvict += selected
+
         }
 
         val invalidatedReplyTargets = mutableSetOf<String>()
@@ -4488,8 +4541,14 @@ class MemoryEventStore @Inject constructor(
 
     /** Invalidate a target plus the addressable event id its coordinate resolves to. */
     private fun invalidateStatsForTarget(targetId: String, dirty: InsertDirty) {
+        // Deletions need not advance the fetch timestamp; two updates can also
+        // share a millisecond. Never reproject stale totals after invalidation.
+        feedRowCache.remove(targetId)
         dirty.invalidatedStatsIds.add(targetId)
-        if (':' in targetId) articleIdByCoord[targetId]?.let { dirty.invalidatedStatsIds.add(it) }
+        if (':' in targetId) articleIdByCoord[targetId]?.let {
+            feedRowCache.remove(it)
+            dirty.invalidatedStatsIds.add(it)
+        }
     }
 
     /**

@@ -679,8 +679,8 @@ class FeedViewModel @Inject constructor(
     private val displayWindowReporter = com.unsilence.app.ui.shared.DisplayWindowReporter(memoryEventStore)
 
     fun setScreenActive(active: Boolean) {
-        screenActive.value = active
         displayWindowReporter.setActive(active)
+        screenActive.value = active
         if (active) wotHydrationCoalescer.requestHydration(_wotSubjects.value)
     }
 
@@ -1442,7 +1442,7 @@ class FeedViewModel @Inject constructor(
     }
 
     override fun onCleared() {
-        displayWindowReporter.setActive(false)
+        displayWindowReporter.close()
         super.onCleared()
         moderationCache.clear()
         currentHandle?.close()

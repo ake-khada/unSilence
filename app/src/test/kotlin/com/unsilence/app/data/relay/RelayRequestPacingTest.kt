@@ -37,6 +37,7 @@ class RelayRequestPacingTest {
         private val bridgeLoopback: Boolean = false,
         private val handshakeGate: CountDownLatch? = null,
         private val stallFirstUpgrade: Boolean = false,
+        private val limitEngagementHistory: Boolean = false,
     ) : AutoCloseable {
         val remote = ConcurrentHashMap<String, List<EventDto>>()
         val held = ConcurrentHashMap.newKeySet<String>()
@@ -70,7 +71,9 @@ class RelayRequestPacingTest {
                                 "REQ" -> {
                                     requests += relay to arr
                                     if (relay !in held) {
-                                        remote[relay].orEmpty().forEach { webSocket.send("""["EVENT","$id",${NostrJson.encodeToString(it)}]""") }
+                                        val history = remote[relay].orEmpty()
+                                        val result = if (limitEngagementHistory) engagementHistory(arr, history) else history
+                                        result.forEach { webSocket.send("""["EVENT","$id",${NostrJson.encodeToString(it)}]""") }
                                         webSocket.send(if (relay in closed) """["CLOSED","$id","restricted: fixture"]""" else """["EOSE","$id"]""")
                                     }
                                 }
@@ -1017,6 +1020,62 @@ class RelayRequestPacingTest {
                 }
                 assertTrue(withTimeout(2_000) { pipeline.fetchProfileRelayFacts(author) })
                 assertEquals("successful coverage is reused without a third REQ", 2, f.requests.size)
+            } finally {
+                (field(pipeline, "pipelineScope") as CoroutineScope).cancel()
+                (field(resolver, "scope") as CoroutineScope).cancel()
+            }
+        }
+    }
+
+    @Test fun `profile engagement keeps chunking and destinations while reserving replies`() = runBlocking {
+        Fixture(limitEngagementHistory = true).use { f ->
+            val urls = listOf("wss://profile-first.test", "wss://profile-second.test")
+            f.preferences.setIndexerUrls(urls)
+            f.preferences.indexerRelayUrlsFlow().first { it == urls }
+            val crypto = ZapCryptoTestFixture()
+            val roots = (1..6).map { n -> crypto.signedEvent(crypto.sender,
+                if (n == 6) 30023 else 1, if (n == 6) listOf(listOf("d", "fixture")) else emptyList(),
+                "root $n", createdAt = 1_000) }
+            // Earlier profile stages populate MES before the engagement stage runs.
+            val notes = roots.map { it.toNostrEvent(urls[0]) }
+            notes.forEach(f.store::insert)
+            val replies = roots.flatMap { root -> (1..2).map { n ->
+                crypto.signedEvent(crypto.recipient, 1, listOf(listOf("e", root.id, "", "reply")),
+                    "reply $n", createdAt = 2_000L + n)
+            } }
+            val busy = (1..500).map { n -> crypto.signedEvent(crypto.recipient, 7,
+                listOf(listOf("e", roots.first().id), listOf("p", crypto.sender.pubkey)), "+", createdAt = 3_000L + n) }
+            urls.forEach { f.remote[it] = busy + replies }
+            val resolver = ProfileResolver(f.store, Lazy { f.pool })
+            val pipeline = ProfilePipeline(f.pool, f.store,
+                com.unsilence.app.data.repository.UserRepository(f.store, resolver),
+                f.preferences, f.capabilities, f.monitor, PrimalCacheClient(f.client))
+            try {
+                // Execute the existing production stage; avoid unrelated profile discovery.
+                withTimeout(15_000) {
+                    kotlin.coroutines.intrinsics.suspendCoroutineUninterceptedOrReturn<Any?> { continuation ->
+                        ProfilePipeline::class.java.getDeclaredMethod("fetchEngagement", List::class.java,
+                            List::class.java, kotlin.coroutines.Continuation::class.java).apply { isAccessible = true }
+                            .invoke(pipeline, notes, urls, continuation)
+                    }
+                }
+                f.processor.drainForTest()
+                for (root in roots) assertEquals("Profile receives older replies beside busy reactions", 2,
+                    f.store.currentStatsSnapshot(root.id).replyCount)
+                assertEquals("Six targets still require two chunks on each of two relays", 4, f.requests.size)
+                assertEquals(urls.toSet(), f.opens.keys)
+                for (url in urls) {
+                    val requests = f.requests.filter { it.first == url }.map { it.second }
+                    assertEquals(2, requests.size)
+                    assertTrue(requests.all { it[1].jsonPrimitive.content.startsWith("prof-eng-") })
+                    assertEquals(listOf(10, 4), requests.map { it.size - 2 }) // five IDs; one article ID + #a/#A
+                    val coord = "30023:${crypto.sender.pubkey}:fixture"
+                    val coordinate = requests.last().drop(2).map { it.jsonObject }
+                    assertEquals(listOf(coord), coordinate.single { "#a" in it }["#a"]!!.jsonArray.map { it.jsonPrimitive.content })
+                    assertEquals(listOf(coord), coordinate.single { "#A" in it }["#A"]!!.jsonArray.map { it.jsonPrimitive.content })
+                }
+                f.until { f.closes.size == 4 }
+                assertTrue(f.pool.oneShotEoseCallbacks.isEmpty())
             } finally {
                 (field(pipeline, "pipelineScope") as CoroutineScope).cancel()
                 (field(resolver, "scope") as CoroutineScope).cancel()

@@ -2,15 +2,27 @@ package com.unsilence.app.data.memory
 
 /** Window-only ID leases; no payloads, conversation graph or time-based cache. */
 internal const val DISPLAY_WINDOW_ROW_LIMIT = 32
+internal const val COVERED_WINDOW_LIMIT = 3
 
 internal class DisplayWindowRetention(private val lock: Any) {
     private class Entry(var ids: Set<String> = emptySet(), var visibleIds: Set<String> = emptySet())
     private val entries = HashMap<Any, Entry>()
     private val owners = HashMap<String, Int>()
+    private val covered = LinkedHashSet<Any>()
+    private var generation = 0L
 
-    inner class Lease internal constructor(private val key: Any) : AutoCloseable {
+    inner class Lease internal constructor(private val key: Any, private val accountGeneration: Long) : AutoCloseable {
+        private var closed = false
+
         fun update(ids: Collection<String>, visibleIds: Set<String> = ids.toSet()): Boolean = synchronized(lock) {
-            val entry = entries[key] ?: return@synchronized false
+            if (closed || generation != accountGeneration) return@synchronized false
+            if (ids.isEmpty()) { remove(key); return@synchronized true }
+            val entry = entries[key] ?: run {
+                // Retired handles can return, but never across account teardown.
+                if (entries.size >= 32) retireOldestCovered()
+                if (entries.size >= 32) return@synchronized false
+                Entry().also { entries[key] = it }
+            }
             val limit = DISPLAY_WINDOW_ROW_LIMIT * 2
             val next = ids.asSequence().filter { it.isNotBlank() }.distinct().take(limit).toSet()
             val nextVisible = visibleIds.intersect(next)
@@ -23,34 +35,48 @@ internal class DisplayWindowRetention(private val lock: Any) {
             true
         }
 
+        fun setActive(active: Boolean) = synchronized(lock) {
+            if (closed || generation != accountGeneration || key !in entries) return@synchronized
+            if (active) covered.remove(key)
+            else if (covered.add(key) && covered.size > COVERED_WINDOW_LIMIT) retireOldestCovered()
+            Unit
+        }
+
         override fun close() = synchronized(lock) {
-            val entry = entries.remove(key) ?: return@synchronized
-            entry.ids.forEach(::releaseId)
+            closed = true
+            remove(key)
         }
     }
 
     fun acquire(): Lease = synchronized(lock) {
-        val key = Any()
-        val limit = 32
-        if (entries.size < limit) {
-            entries[key] = Entry()
-        }
-        Lease(key)
+        // An idle reporter holds only a fenced handle; registry space starts at report.
+        Lease(Any(), generation)
     }
 
-    fun contains(id: String): Boolean = synchronized(lock) { id in owners }
+    fun retireOldestCovered(): Boolean = synchronized(lock) {
+        val key = covered.firstOrNull() ?: return@synchronized false
+        remove(key)
+        true
+    }
 
     /** Current priority without allocating a snapshot on the admission path. */
     fun priority(id: String): Int? = synchronized(lock) {
         if (id !in owners) null
-        else if (entries.values.any { id in it.visibleIds }) 0 else 1
+        else if (entries.any { (key, entry) -> key !in covered && id in entry.visibleIds }) 0
+        else if (entries.any { (key, entry) -> key !in covered && id in entry.ids }) 1
+        else 2
     }
 
     /** Snapshot before sorting: never consult moving viewport state in a comparator. */
     fun priorities(): Map<String, Int> = synchronized(lock) {
         buildMap {
-            owners.keys.forEach { put(it, 1) }
-            this@DisplayWindowRetention.entries.values.forEach { entry -> entry.visibleIds.forEach { put(it, 0) } }
+            // Covered history never creates hidden-screen hydration priority.
+            this@DisplayWindowRetention.entries.forEach { (key, entry) ->
+                if (key !in covered) {
+                    entry.ids.forEach { putIfAbsent(it, 1) }
+                    entry.visibleIds.forEach { put(it, 0) }
+                }
+            }
         }
     }
 
@@ -61,8 +87,15 @@ internal class DisplayWindowRetention(private val lock: Any) {
     }
 
     fun clear() = synchronized(lock) {
+        generation++
         entries.clear()
         owners.clear()
+        covered.clear()
+    }
+
+    private fun remove(key: Any) {
+        covered.remove(key)
+        entries.remove(key)?.ids?.forEach(::releaseId)
     }
 
     private fun releaseId(id: String) {

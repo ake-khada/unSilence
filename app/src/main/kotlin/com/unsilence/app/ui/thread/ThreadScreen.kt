@@ -94,6 +94,7 @@ fun ThreadScreen(
     ),
 ) {
     // NavDisplay owns back and the ViewModel store. Covering is not destruction.
+    com.unsilence.app.ui.shared.ObserveDisplayWindowLifecycle(actionsViewModel)
     LifecycleResumeEffect(viewModel, eventId, relayHints) {
         viewModel.setScreenActive(true)
         viewModel.loadThread(eventId, relayHints)
@@ -213,7 +214,6 @@ fun ThreadScreen(
         )
     }
 
-    com.unsilence.app.ui.shared.ObserveDisplayWindowLifecycle(actionsViewModel)
 
     val engagementRetryRevision by actionsViewModel.engagementRetryRevision.collectAsStateWithLifecycle()
     @OptIn(FlowPreview::class)

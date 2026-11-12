@@ -136,6 +136,7 @@ fun ProfileScreen(
         key = "note-actions-${LocalAppSessionKey.current}",
     ),
 ) {
+    com.unsilence.app.ui.shared.ObserveDisplayWindowLifecycle(actionsViewModel)
     LifecycleResumeEffect(viewModel) {
         viewModel.setScreenActive(true)
         onPauseOrDispose { viewModel.setScreenActive(false) }
@@ -148,7 +149,6 @@ fun ProfileScreen(
 
     val user            by viewModel.userFlow.collectAsStateWithLifecycle(initialValue = null)
     val posts           by viewModel.tabPostsFlow.collectProfilePostsAsState()
-    com.unsilence.app.ui.shared.ObserveDisplayWindowLifecycle(actionsViewModel)
 
     val engagementRetryRevision by actionsViewModel.engagementRetryRevision.collectAsStateWithLifecycle()
     val sensitiveMode   by viewModel.sensitiveContentMode.collectAsStateWithLifecycle()

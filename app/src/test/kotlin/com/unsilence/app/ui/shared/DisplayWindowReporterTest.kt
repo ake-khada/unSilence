@@ -41,7 +41,7 @@ class DisplayWindowReporterTest {
         val reporter = DisplayWindowReporter(store)
         reporter.setActive(true)
         reporter.report(listOf(store.synthesizeFeedRow(visible), store.synthesizeFeedRow(lookahead)), setOf(visible.id))
-        reporter.setActive(false)
+        reporter.close()
         assertTrue(store.insert(event("newcomer")))
         assertNotNull(store.getNostrEvent(visible.id))
         assertNull(store.getNostrEvent(lookahead.id))
@@ -176,7 +176,7 @@ class DisplayWindowReporterTest {
         reporter.report(rows, setOf(visible.id))
         repeat(4_998) { store.insert(event("other-$it")) }
         reporter.report(rows, setOf(visible.id))
-        reporter.setActive(false)
+        reporter.close()
         store.insert(event("new"))
         store.insert(event("newer"))
         assertNotNull(store.getNostrEvent(visible.id))
@@ -208,6 +208,39 @@ class DisplayWindowReporterTest {
         assertNull(store.getNostrEvent("row-0"))
         assertNull(store.getNostrEvent("row-1"))
         assertNotNull(store.getNostrEvent("row-8"))
+    }
+
+    @Test fun `covered authenticated receipts yield to a cold receipt at the unchanged cap`() = kotlinx.coroutines.test.runTest {
+        val crypto = com.unsilence.app.data.zap.ZapCryptoTestFixture()
+        val store = MemoryEventStore(object : MuteKeyProvider {}, stubTimelineServiceProvider())
+        val target = event(crypto.defaultTarget).copy(pubkey = crypto.recipient.pubkey)
+        store.insert(target)
+        val request = crypto.request()
+        repeat(250) { index -> store.insert(crypto.receipt(request = request, createdAt = 1_675_000_002L + index)) }
+        assertEquals(250, store.zapStats(target.id).count)
+        val reporter = DisplayWindowReporter(store)
+        reporter.setActive(true)
+        reporter.report(listOf(store.synthesizeFeedRow(target)), setOf(target.id))
+        reporter.setActive(false)
+        val other = "cd".repeat(32)
+        val incoming = crypto.receipt(request = crypto.request(targetId = other), targetId = other, createdAt = 1_675_001_000L)
+        assertTrue(store.insert(incoming))
+        assertNotNull(store.getNostrEvent(incoming.id))
+        assertEquals(250, store.snapshotSize().eventsByKind[9735])
+        assertEquals(249, store.zapStats(target.id).count)
+        assertEquals(1, store.zapStats(other).count)
+        reporter.close()
+    }
+
+    @Test fun `inactive reporter created before account clear cannot register old rows`() {
+        val store = MemoryEventStore(object : MuteKeyProvider {}, stubTimelineServiceProvider())
+        val old = DisplayWindowReporter(store)
+        store.clearUserState()
+        val row = event("old-row").also(store::insert).let(store::synthesizeFeedRow)
+        old.setActive(true)
+        old.report(listOf(row), setOf(row.id))
+        assertTrue(store.displayPriorities().isEmpty())
+        old.close()
     }
 
     private fun event(id: String) = NostrEvent(

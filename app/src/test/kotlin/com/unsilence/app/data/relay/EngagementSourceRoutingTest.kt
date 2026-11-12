@@ -27,10 +27,12 @@ class EngagementSourceRoutingTest {
         val batches = coalesceByRelay(routes, 12, ENGAGEMENT_BATCH_CHUNK)
         val sent = mutableMapOf<String, Pair<List<String>, Boolean>>()
         val coordinator = EngagementFetchCoordinator({ _, relays, json, _, allowSource ->
-            val filter = NostrJson.parseToJsonElement(json).jsonArray[2].jsonObject
-            assertEquals(500, filter.getValue("limit").jsonPrimitive.int)
-            assertEquals(listOf(1, 1111, 6, 16, 7, 9735), filter.getValue("kinds").jsonArray.map { it.jsonPrimitive.int })
-            sent[relays.single()] = filter.getValue("#e").jsonArray.map { it.jsonPrimitive.content } to allowSource
+            val filters = NostrJson.parseToJsonElement(json).jsonArray.drop(2).map { it.jsonObject }
+            assertEquals(500, filters.sumOf { it.getValue("limit").jsonPrimitive.int })
+            assertEquals(listOf(1, 1111, 6, 16, 7, 9735),
+                filters.flatMap { it.getValue("kinds").jsonArray.map { it.jsonPrimitive.int } }.distinct())
+            sent[relays.single()] = filters.flatMap { it.getValue("#e").jsonArray.map { it.jsonPrimitive.content } }
+                .distinct() to allowSource
             relays.associateWith { OneShotOutcome.EOSE }
         })
         coordinator.fetch(targets, batches)
