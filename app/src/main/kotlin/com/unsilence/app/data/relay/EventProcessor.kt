@@ -318,7 +318,9 @@ class EventProcessor @Inject constructor(
 
         // Global dedup must not suppress a second matching subscription. Reuse
         // the already-verified object and let Subscription apply its own knownIds.
-        verifiedEvents[eventId]?.let { cached ->
+        // A queued payload is also already verified and owns its existing bounded
+        // lifetime. Reuse it after small-cache eviction; a seen ID alone is not proof.
+        (verifiedEvents[eventId] ?: pendingContent[eventId])?.let { cached ->
             if (!request.matches(cached) || !requests.isCurrent(request)) return false
             val relayed = cached.forRelay(relayUrl)
             dispatchToTaps(RelayTapMessage.VerifiedEvent(subscriptionId, relayed))
