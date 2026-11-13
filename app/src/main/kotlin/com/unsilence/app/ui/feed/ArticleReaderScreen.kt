@@ -401,7 +401,7 @@ fun ArticleReaderScreen(
         }
     }
 
-    com.unsilence.app.ui.shared.ObserveDisplayWindowLifecycle(commentActionsVm)
+    com.unsilence.app.ui.shared.ObserveDisplayWindowLifecycle(articleReaderVm.displayWindowReporter)
 
     val engagementRetryRevision by commentActionsVm.engagementRetryRevision.collectAsStateWithLifecycle()
     ResumedEffect(engagementRetryRevision) {
@@ -414,6 +414,7 @@ fun ArticleReaderScreen(
     ResumedEffect(displayedCommentRows, cardWidthPx) {
         val rowIndexById = displayedCommentRows.withIndex().associate { it.value.id to it.index }
         commentActionsVm.warmCardWindow(
+            displayWindowReporter = articleReaderVm.displayWindowReporter,
             contextRows = listOf(row),
             visibleIds = listState.layoutInfo.visibleItemsInfo.mapNotNull {
                 (it.key as? String)?.let { key -> if (key == "article") row.id else key }
@@ -431,6 +432,7 @@ fun ArticleReaderScreen(
             val first = visibleRows.minOrNull() ?: 0
             val last = visibleRows.maxOrNull() ?: first
             commentActionsVm.warmCardWindow(
+                displayWindowReporter = articleReaderVm.displayWindowReporter,
                 contextRows = listOf(row),
                 visibleIds = visibleKeys.mapTo(HashSet()) { if (it == "article") row.id else it },
                 rows = displayedCommentRows,

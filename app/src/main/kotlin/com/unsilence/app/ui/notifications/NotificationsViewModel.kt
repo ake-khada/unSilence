@@ -66,6 +66,9 @@ class NotificationsViewModel @Inject constructor(
     private val notifications: NotificationRepository,
     private val settingsStore: SettingsStore,
 ) : ViewModel() {
+    internal val displayWindowReporter = com.unsilence.app.ui.shared.DisplayWindowReporter(memoryEventStore)
+        .also { addCloseable(it) }
+
 
     private val _filter = MutableStateFlow(NotifFilter.Global)
     val filter: StateFlow<NotifFilter> = _filter.asStateFlow()

@@ -676,10 +676,9 @@ class FeedViewModel @Inject constructor(
         val visibleIds: Set<String> = emptySet(),
     )
 
-    private val displayWindowReporter = com.unsilence.app.ui.shared.DisplayWindowReporter(memoryEventStore)
+    internal val displayWindowReporter = com.unsilence.app.ui.shared.DisplayWindowReporter(memoryEventStore)
 
     fun setScreenActive(active: Boolean) {
-        displayWindowReporter.setActive(active)
         screenActive.value = active
         if (active) wotHydrationCoalescer.requestHydration(_wotSubjects.value)
     }

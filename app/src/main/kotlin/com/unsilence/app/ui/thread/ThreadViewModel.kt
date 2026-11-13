@@ -151,6 +151,9 @@ class ThreadViewModel @Inject constructor(
     private val timelineCardData: TimelineCardData,
     private val eventReferenceResolver: com.unsilence.app.ui.feed.EventReferenceResolver,
 ) : ViewModel() {
+    internal val displayWindowReporter = com.unsilence.app.ui.shared.DisplayWindowReporter(memoryEventStore)
+        .also { addCloseable(it) }
+
 
     /** NIP-36 sensitive-content display mode (shared with feed). */
     val sensitiveContentMode: StateFlow<com.unsilence.app.data.memory.SensitiveContentMode> =

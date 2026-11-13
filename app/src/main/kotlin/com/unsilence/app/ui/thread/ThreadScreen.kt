@@ -94,7 +94,7 @@ fun ThreadScreen(
     ),
 ) {
     // NavDisplay owns back and the ViewModel store. Covering is not destruction.
-    com.unsilence.app.ui.shared.ObserveDisplayWindowLifecycle(actionsViewModel)
+    com.unsilence.app.ui.shared.ObserveDisplayWindowLifecycle(viewModel.displayWindowReporter)
     LifecycleResumeEffect(viewModel, eventId, relayHints) {
         viewModel.setScreenActive(true)
         viewModel.loadThread(eventId, relayHints)
@@ -218,7 +218,7 @@ fun ThreadScreen(
     val engagementRetryRevision by actionsViewModel.engagementRetryRevision.collectAsStateWithLifecycle()
     @OptIn(FlowPreview::class)
     ResumedEffect(displayedRows, state.focusedNote?.id, cardWidthPx, engagementRetryRevision) {
-        if (displayedRows.isEmpty()) { actionsViewModel.clearDisplayWindow(); return@ResumedEffect }
+        if (displayedRows.isEmpty()) { viewModel.displayWindowReporter.clear(); return@ResumedEffect }
         val rowIndexById = displayedRows.withIndex().associate { it.value.id to it.index }
         fun visibleRowsFromLayout(): List<Int> =
             listState.layoutInfo.visibleItemsInfo.mapNotNull { item ->
@@ -226,9 +226,10 @@ fun ThreadScreen(
             }.distinct()
 
         fun warmVisibleRows(visibleRows: List<Int>) {
-            val first = visibleRows.minOrNull() ?: run { actionsViewModel.clearDisplayWindow(); return }
+            val first = visibleRows.minOrNull() ?: run { viewModel.displayWindowReporter.clear(); return }
             val last = visibleRows.maxOrNull() ?: first
             actionsViewModel.warmCardWindow(
+                displayWindowReporter = viewModel.displayWindowReporter,
                 visibleIds = listState.layoutInfo.visibleItemsInfo.mapNotNull { it.key as? String }.toSet(),
                 rows = displayedRows,
                 first = first,

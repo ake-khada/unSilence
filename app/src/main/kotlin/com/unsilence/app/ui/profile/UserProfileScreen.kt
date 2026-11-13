@@ -136,7 +136,7 @@ fun UserProfileScreen(
         key = "note-actions-${LocalAppSessionKey.current}",
     ),
 ) {
-    com.unsilence.app.ui.shared.ObserveDisplayWindowLifecycle(actionsViewModel)
+    com.unsilence.app.ui.shared.ObserveDisplayWindowLifecycle(viewModel.displayWindowReporter)
     LifecycleResumeEffect(viewModel, pubkey) {
         viewModel.loadProfile(pubkey)
         viewModel.setScreenActive(true)
@@ -317,13 +317,14 @@ fun UserProfileScreen(
     val engagementRetryRevision by actionsViewModel.engagementRetryRevision.collectAsStateWithLifecycle()
     @OptIn(FlowPreview::class)
     ResumedEffect(posts, cardWidthPx, engagementRetryRevision) {
-        if (posts.isEmpty()) actionsViewModel.clearDisplayWindow()
+        if (posts.isEmpty()) viewModel.displayWindowReporter.clear()
         val eventOffset = 3
         fun warmVisibleRange(first: Int, last: Int) {
             val dataFirst = (first - eventOffset).coerceAtLeast(0)
             val dataLast = (last - eventOffset).coerceAtMost(posts.lastIndex)
             if (dataFirst <= dataLast) {
                 actionsViewModel.warmCardWindow(
+                    displayWindowReporter = viewModel.displayWindowReporter,
                     visibleIds = listState.layoutInfo.visibleItemsInfo.mapNotNull { it.key as? String }.toSet(),
                     rows = posts,
                     first = dataFirst,
@@ -332,7 +333,7 @@ fun UserProfileScreen(
                     hydrateEngagement = true,
                 )
             } else {
-                actionsViewModel.clearDisplayWindow()
+                viewModel.displayWindowReporter.clear()
             }
         }
 

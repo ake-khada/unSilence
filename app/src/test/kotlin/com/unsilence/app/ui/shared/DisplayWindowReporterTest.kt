@@ -243,6 +243,52 @@ class DisplayWindowReporterTest {
         old.close()
     }
 
+    @Test fun `retired reporter restores its bounded IDs before another warm report`() {
+        val store = MemoryEventStore(object : MuteKeyProvider {}, stubTimelineServiceProvider())
+        val row = event("returning").also(store::insert).let(store::synthesizeFeedRow)
+        val reporter = DisplayWindowReporter(store)
+        reporter.setActive(true)
+        reporter.report(listOf(row), setOf(row.id))
+        reporter.setActive(false)
+        // Three newer covered windows retire the oldest without deleting its bodies.
+        val others = (0..2).map { i ->
+            DisplayWindowReporter(store).also {
+                val other = event("other-$i").also(store::insert).let(store::synthesizeFeedRow)
+                it.setActive(true)
+                it.report(listOf(other), setOf(other.id))
+                it.setActive(false)
+            }
+        }
+        reporter.setActive(true)
+        assertEquals(0, store.displayPriorities()[row.id])
+        store.evictOldContentEventsForTest(mapOf(1 to 0))
+        assertNotNull(store.getNostrEvent(row.id))
+        reporter.close()
+        reporter.setActive(true)
+        reporter.report(listOf(row), setOf(row.id))
+        store.evictOldContentEventsForTest(mapOf(1 to 0))
+        assertNull("Closed owner cannot resurrect protection", store.getNostrEvent(row.id))
+        others.forEach { it.close() }
+    }
+
+    @Test fun `reactivation cannot restore deleted IDs or an old account window`() {
+        val store = MemoryEventStore(object : MuteKeyProvider {}, stubTimelineServiceProvider())
+        val note = event("deleted")
+        store.insert(note)
+        val reporter = DisplayWindowReporter(store)
+        reporter.setActive(true)
+        reporter.report(listOf(store.synthesizeFeedRow(note)), setOf(note.id))
+        reporter.setActive(false)
+        store.insert(event("deletion").copy(kind = 5, createdAt = 2, tags = listOf(listOf("e", note.id))))
+        reporter.setActive(true)
+        assertNull(store.getNostrEvent(note.id))
+        assertFalse(note.id in store.displayPriorities())
+        reporter.setActive(false)
+        store.clearUserState()
+        reporter.setActive(true)
+        assertTrue(store.displayPriorities().isEmpty())
+    }
+
     private fun event(id: String) = NostrEvent(
         id = id, pubkey = "unfollowed", kind = 1, content = "fixture", createdAt = 1L,
         tags = emptyList(), sig = "", relayUrl = "wss://relay.example", replyToId = null, rootId = null,

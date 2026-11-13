@@ -326,13 +326,13 @@ fun SearchScreen(
     val noteListState = activeViewport.listState
     val discoveryListState = rememberLazyListState()
 
-    com.unsilence.app.ui.shared.ObserveDisplayWindowLifecycle(actionsViewModel)
+    com.unsilence.app.ui.shared.ObserveDisplayWindowLifecycle(viewModel.displayWindowReporter)
 
     val engagementRetryRevision by actionsViewModel.engagementRetryRevision.collectAsStateWithLifecycle()
     @OptIn(FlowPreview::class)
     com.unsilence.app.ui.shared.ResumedEffect(activeEventResults, peopleBelowEntity, state.entityTarget, selectedTab, cardWidthPx, engagementRetryRevision) {
         // People has its own list state: the retained note viewport is not visible.
-        if (selectedTab == 1 || activeEventResults.isEmpty()) { actionsViewModel.clearDisplayWindow(); return@ResumedEffect }
+        if (selectedTab == 1 || activeEventResults.isEmpty()) { viewModel.displayWindowReporter.clear(); return@ResumedEffect }
         fun entityOffset(): Int = when {
             selectedTab == 0 && state.entityTarget != null -> 1
             selectedTab == 2 && state.entityTarget is DeepLinkTarget.Note -> 1
@@ -346,6 +346,7 @@ fun SearchScreen(
             val dataLast = (last - noteOffset).coerceAtMost(activeEventResults.lastIndex)
             if (dataFirst <= dataLast) {
                 actionsViewModel.warmCardWindow(
+                    displayWindowReporter = viewModel.displayWindowReporter,
                     visibleIds = noteListState.layoutInfo.visibleItemsInfo.mapNotNull { it.key as? String }.toSet(),
                     rows = activeEventResults,
                     first = dataFirst,
@@ -354,7 +355,7 @@ fun SearchScreen(
                     hydrateEngagement = true,
                 )
             } else {
-                actionsViewModel.clearDisplayWindow()
+                viewModel.displayWindowReporter.clear()
             }
         }
 

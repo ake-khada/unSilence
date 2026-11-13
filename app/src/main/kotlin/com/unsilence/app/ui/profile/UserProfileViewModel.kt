@@ -92,6 +92,9 @@ class UserProfileViewModel @Inject constructor(
     private val muteListRepository: MuteListRepository,
     private val reportRepository: ReportRepository,
 ) : ViewModel() {
+    internal val displayWindowReporter = com.unsilence.app.ui.shared.DisplayWindowReporter(memoryEventStore)
+        .also { addCloseable(it) }
+
 
     private val _pubkeyHex = MutableStateFlow<String?>(null)
     val pubkeyHex: StateFlow<String?> = _pubkeyHex.asStateFlow()

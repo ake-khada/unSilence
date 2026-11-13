@@ -66,6 +66,9 @@ class ArticleReaderViewModel @Inject constructor(
     private val wotHydrationCoalescer: WotHydrationCoalescer,
     private val initGate: InitGate,
 ) : ViewModel() {
+    internal val displayWindowReporter = com.unsilence.app.ui.shared.DisplayWindowReporter(memoryEventStore)
+        .also { addCloseable(it) }
+
 
     val snapshotReady: Boolean get() = initGate.snapshotReady
 

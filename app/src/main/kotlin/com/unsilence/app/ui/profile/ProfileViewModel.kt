@@ -66,6 +66,9 @@ class ProfileViewModel @Inject constructor(
     private val wotHydrationCoalescer: WotHydrationCoalescer,
     private val timelineCardData: TimelineCardData,
 ) : ViewModel() {
+    internal val displayWindowReporter = com.unsilence.app.ui.shared.DisplayWindowReporter(memoryEventStore)
+        .also { addCloseable(it) }
+
 
     val pubkeyHex: String? = keyManager.getPublicKeyHex()
 

@@ -669,6 +669,17 @@ class MemoryEventStore @Inject constructor(
         override fun close() = lease.close()
 
         fun setActive(active: Boolean) = lease.setActive(active)
+
+        /** Restore a retired soft window and activate it in one eviction transaction. */
+        fun activate(rows: List<Pair<String, String>>, visibleRowIds: Set<String>) = synchronized(contentPolicyLock) {
+            // Only restore bodies still held: deletion/account cleanup is authoritative,
+            // and an already reclaimed body is recovered by the existing fetch path.
+            val retained = rows.filter { eventsById.containsKey(it.first) }.map { (id, target) ->
+                id to target.takeIf { eventsById.containsKey(it) }.orEmpty().ifEmpty { id }
+            }
+            update(retained, visibleRowIds)
+            lease.setActive(true)
+        }
     }
 
     fun openDisplayWindow(): DisplayWindow = DisplayWindow()

@@ -103,6 +103,9 @@ class SearchViewModel @Inject constructor(
     private val profilePipeline: ProfilePipeline,
     private val deepLinkRouter: DeepLinkRouter,
 ) : ViewModel() {
+    internal val displayWindowReporter = com.unsilence.app.ui.shared.DisplayWindowReporter(memoryEventStore)
+        .also { addCloseable(it) }
+
 
     private val _uiState = MutableStateFlow(SearchUiState())
     val uiState: StateFlow<SearchUiState> = _uiState.asStateFlow()

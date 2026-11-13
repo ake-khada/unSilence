@@ -139,6 +139,7 @@ fun FeedScreen(
         key = "immersive-thread-${LocalAppSessionKey.current}",
     ),
 ) {
+    com.unsilence.app.ui.shared.ObserveDisplayWindowLifecycle(viewModel.displayWindowReporter)
     LifecycleResumeEffect(viewModel) {
         viewModel.setScreenActive(true)
         onPauseOrDispose { viewModel.setScreenActive(false) }

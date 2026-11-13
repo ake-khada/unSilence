@@ -6,40 +6,59 @@ import com.unsilence.app.data.memory.MemoryEventStore
 import com.unsilence.app.ui.feed.activityStatsTargetId
 import com.unsilence.app.ui.feed.engagementId
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.SideEffect
+import androidx.compose.runtime.compositionLocalOf
 import androidx.lifecycle.compose.LifecycleResumeEffect
-import com.unsilence.app.ui.feed.NoteActionsViewModel
 
-@Composable
-internal fun ObserveDisplayWindowLifecycle(actions: NoteActionsViewModel) {
-    ObserveDisplayWindowLifecycle(actions.displayWindowReporter)
-}
+/** Navigation supplies only the incoming top surface, independently of network readiness. */
+internal val LocalDisplayWindowActive = compositionLocalOf<Boolean?> { null }
 
 @Composable
 internal fun ObserveDisplayWindowLifecycle(reporter: DisplayWindowReporter) {
-    LifecycleResumeEffect(reporter) {
-        reporter.setActive(true)
-        onPauseOrDispose { reporter.setActive(false) }
+    val active = LocalDisplayWindowActive.current
+    if (active == null) {
+        // Standalone hosts without the application's navigation policy.
+        LifecycleResumeEffect(reporter) {
+            reporter.setActive(true)
+            onPauseOrDispose { reporter.setActive(false) }
+        }
+    } else {
+        // Applied before drawing the incoming composition; no network work here.
+        SideEffect { reporter.setActive(active) }
+        DisposableEffect(reporter) {
+            onDispose { reporter.setActive(false) }
+        }
     }
 }
 
 internal const val DISPLAY_WINDOW_ABOVE = 2
 
-/** One resumed surface's bounded visible + nearby window. No network work here. */
+/** One retained surface's bounded visible + nearby IDs. No payloads or network work. */
 internal class DisplayWindowReporter(private val store: MemoryEventStore) : AutoCloseable {
     private var active = false
+    private var closed = false
     private val window = store.openDisplayWindow()
+    private var rows: List<Pair<String, String>> = emptyList()
+    private var visible: Set<String> = emptySet()
 
     @Synchronized
     fun setActive(value: Boolean) {
+        if (closed || active == value) return
         active = value
-        window.setActive(value)
+        if (value) window.activate(rows, visible) else window.setActive(false)
     }
 
     @Synchronized
     override fun close() {
+        closed = true
         active = false
+        rows = emptyList()
+        visible = emptySet()
         window.close()
     }
+
+    fun clear() = report(emptyList(), emptySet())
 
     /** Called before any width/network gate by both feed and non-feed warm paths. */
     fun prepareWarmWindow(
@@ -52,14 +71,16 @@ internal class DisplayWindowReporter(private val store: MemoryEventStore) : Auto
 
     @Synchronized
     fun report(rows: List<FeedRow>, visibleIds: Set<String>) {
-        if (!active) return
+        if (closed || !active) return
         // Visible rows always win the bound; callers provide nearby rows in proximity order.
         val ordered = (rows.filter { it.id in visibleIds } + rows.filterNot { it.id in visibleIds })
             .distinctBy { it.id }.take(com.unsilence.app.data.memory.DISPLAY_WINDOW_ROW_LIMIT)
-        window.update(ordered.map { row ->
+        this.rows = ordered.map { row ->
             row.id to (store.getEventModel(row.id)?.engagementId
                 ?: activityStatsTargetId(row.kind, row.id, row.rootId) ?: row.id)
-        }, visibleIds)
+        }
+        visible = visibleIds.intersect(ordered.mapTo(HashSet()) { it.id })
+        window.update(this.rows, visible)
     }
 }
 
