@@ -1962,23 +1962,42 @@ class MemoryEventStore @Inject constructor(
         // long-form article) there may be no e-tag — fall back to the a/A coordinate
         // so article likes are counted (reactionCount merges the coord key).
         val targetId = reactionTargetId(event) ?: return
-        val contentStr = event.content.ifBlank { "+" }
-        val reactionContent = parseReactionContent(contentStr, event.tags)
-        // Index the retained contributor before exposing its aggregate so target
-        // eviction cannot observe a row without its backing event ID.
-        if (reactionContent != ReactionContent.Standard("-")) {
-            addToActorIndex(reactedTargetsByActor, event.pubkey, targetId)
-            addActionEventId(reactionEventIdsByActorTarget, event.pubkey, targetId, event.id)
+        synchronized(contentPolicyLock) {
+            // Share deletion/eviction ownership with the contributor index. A
+            // deletion may have won while this insertion waited for the lock.
+            if (!eventsById.containsKey(event.id) || isDeletedByTombstone(event)) return
+            val reactionContent = parseReactionContent(event.content.ifBlank { "+" }, event.tags)
+            // NIP-25 "-" is a downvote — don't index as a displayable reaction.
+            if (reactionContent != ReactionContent.Standard("-")) {
+                addActionEventId(reactionEventIdsByActorTarget, event.pubkey, targetId, event.id)
+                addToActorIndex(reactedTargetsByActor, event.pubkey, targetId)
+                reactionsByTarget
+                    .computeIfAbsent(targetId) { ConcurrentHashMap.newKeySet() }
+                    .add(ReactionInfo(event.pubkey, reactionContent))
+            }
+            statsUpdatedAt[targetId] = System.currentTimeMillis()
+            invalidateStatsForTarget(targetId, dirty)
         }
-        // NIP-25 "-" is a downvote — don't index as a displayable reaction
-        if (reactionContent != ReactionContent.Standard("-")) {
-            reactionsByTarget
-                .computeIfAbsent(targetId) { ConcurrentHashMap.newKeySet() }
-                .add(ReactionInfo(event.pubkey, reactionContent))
-        }
-        statsUpdatedAt[targetId] = System.currentTimeMillis()
-        invalidateStatsForTarget(targetId, dirty)
+    }
 
+    /** Caller holds contentPolicyLock. Missing sibling payloads do not prove
+     * which emoji they contributed, so retain ambiguous summaries until the
+     * last exact contributor is deleted or all remaining content is known. */
+    private fun removeReactionContribution(actor: String, target: String, eventId: String, dirty: InsertDirty) {
+        removeActionEventId(reactionEventIdsByActorTarget, actor, target, eventId)
+        val remainingIds = reactionEventIdsByActorTarget[actionKey(actor, target)].orEmpty()
+        val remaining = remainingIds.mapNotNull(eventsById::get)
+        if (remaining.size == remainingIds.size) {
+            val contents = remaining.filter { it.kind == 7 && it.pubkey == actor && reactionTargetId(it) == target }
+                .mapTo(HashSet()) { parseReactionContent(it.content.ifBlank { "+" }, it.tags) }
+            reactionsByTarget[target]?.let { summaries ->
+                summaries.removeAll { it.pubkey == actor && it.content !in contents }
+                if (summaries.isEmpty()) reactionsByTarget.remove(target, summaries)
+            }
+        }
+        if (remainingIds.isEmpty()) removeFromActorIndex(reactedTargetsByActor, actor, target)
+        invalidateStatsForTarget(target, dirty)
+        dirty.action = true
     }
 
     /** A single request may affect at most [MAX_DELETION_TARGETS] event/address references. */
@@ -2239,12 +2258,17 @@ class MemoryEventStore @Inject constructor(
                         removeRepostContribution(key.actor, key.target, eventId, dirty)
                     }
                 }
+                for ((key, ids) in reactionEventIdsByActorTarget) {
+                    if (key.actor == deletionPubkey && eventId in ids) {
+                        removeReactionContribution(key.actor, key.target, eventId, dirty)
+                    }
+                }
             }
             return
         }
         if (existing.kind == 5 || existing.pubkey != deletionPubkey) return
         recordDeletionTombstone(deletedEventTombstones, EventTombstoneKey(eventId, deletionPubkey), deletionPubkey, deletionCreatedAt)
-        if (existing.kind == 6 || existing.kind == 16) {
+        if (existing.kind == 6 || existing.kind == 16 || existing.kind == 7) {
             synchronized(contentPolicyLock) { deleteStoredEvent(existing, dirty) }
         } else {
             deleteStoredEvent(existing, dirty)
@@ -2310,13 +2334,7 @@ class MemoryEventStore @Inject constructor(
                 val targetId = reactionTargetId(event) ?: return
                 val reactionContent = parseReactionContent(event.content.ifBlank { "+" }, event.tags)
                 if (reactionContent != ReactionContent.Standard("-")) {
-                    reactionsByTarget[targetId]?.remove(ReactionInfo(event.pubkey, reactionContent))
-                    if (reactionsByTarget[targetId]?.isEmpty() == true) reactionsByTarget.remove(targetId)
-                    removeActionEventId(reactionEventIdsByActorTarget, event.pubkey, targetId, event.id)
-                    val hasMore = reactionEventIdsByActorTarget[actionKey(event.pubkey, targetId)]?.isNotEmpty() == true
-                    if (!hasMore) removeFromActorIndex(reactedTargetsByActor, event.pubkey, targetId)
-                    invalidateStatsForTarget(targetId, dirty)
-                    dirty.action = true
+                    removeReactionContribution(event.pubkey, targetId, event.id, dirty)
                 }
             }
             9734 -> {
