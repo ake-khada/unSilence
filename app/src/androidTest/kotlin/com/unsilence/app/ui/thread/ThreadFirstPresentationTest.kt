@@ -9,6 +9,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.junit4.createComposeRule
+import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithText
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleOwner
@@ -24,6 +25,11 @@ import com.unsilence.app.ui.navigation.AppNavigator
 import com.unsilence.app.ui.navigation.rememberAppNavigator
 import com.unsilence.app.ui.shared.collectCardDataAsState
 import com.unsilence.app.ui.theme.UnsilenceTheme
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.flow.onEach
+import com.unsilence.app.ui.shared.CardDataFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import org.junit.Assert.*
 import org.junit.Rule
@@ -44,9 +50,19 @@ class ThreadFirstPresentationTest {
     private val screen = ScreenLifecycle()
     private var resumed = 0
     private val frames = mutableListOf<ThreadUiState>()
+    private var deliveryGate: CompletableDeferred<Unit>? = null
+    private val deliveryEntered = java.util.concurrent.atomic.AtomicBoolean(false)
 
     @Composable private fun Content(row: FeedRow? = root) {
-        val flow = remember(row) { threadPresentation("root", states, { row }) }
+        val flow = remember(row) {
+            val real = threadPresentation("root", states, { row })
+            if (deliveryGate == null) real else CardDataFlow(real.onEach { state ->
+                if (state.focusedNote?.content == "Resolved thread") withContext(Dispatchers.Default) {
+                    deliveryEntered.set(true)
+                    deliveryGate!!.await()
+                }
+            }) { real.value }
+        }
         val state by flow.collectCardDataAsState()
         LifecycleResumeEffect(Unit) {
             resumed++
@@ -121,14 +137,38 @@ class ThreadFirstPresentationTest {
         compose.onNodeWithText(root.content).assertIsDisplayed()
         val projected = root.copy(content = "Resolved thread")
         compose.runOnIdle { states.value = ThreadUiState(focusedNote = projected, loading = false) }
+        awaitText(projected.content)
         compose.onNodeWithText(projected.content).assertIsDisplayed()
         compose.runOnIdle { screen.registry.currentState = Lifecycle.State.CREATED }
         compose.onNodeWithText(projected.content).assertIsDisplayed()
         compose.runOnIdle { screen.registry.currentState = Lifecycle.State.RESUMED }
         compose.onNodeWithText(projected.content).assertIsDisplayed()
         compose.runOnIdle { states.value = ThreadUiState(loading = false) }
+        awaitText("No root")
         compose.onNodeWithText("No root").assertIsDisplayed()
         compose.onNodeWithText(root.content).assertDoesNotExist()
+    }
+
+    private fun awaitText(text: String) {
+        compose.waitUntil(5_000) { compose.onAllNodesWithText(text).fetchSemanticsNodes().isNotEmpty() }
+    }
+
+    @Test fun composeIdleDoesNotAwaitExternalFlowDelivery() {
+        deliveryGate = CompletableDeferred()
+        screen.registry.currentState = Lifecycle.State.RESUMED
+        compose.setContent { CompositionLocalProvider(LocalLifecycleOwner provides screen) { Content() } }
+        compose.onNodeWithText(root.content).assertIsDisplayed()
+        val projected = root.copy(content = "Resolved thread")
+        compose.runOnIdle { states.value = ThreadUiState(focusedNote = projected, loading = false) }
+        compose.waitUntil(5_000) { deliveryEntered.get() }
+        compose.waitForIdle()
+        compose.onNodeWithText(root.content).assertIsDisplayed()
+        assertEquals(projected, states.value.focusedNote)
+        val earlyAssertion = runCatching { compose.onNodeWithText(projected.content).assertIsDisplayed() }.exceptionOrNull()
+        assertTrue("The original immediate assertion fails while external flow delivery is pending", earlyAssertion is AssertionError)
+        deliveryGate!!.complete(Unit)
+        awaitText(projected.content)
+        compose.onNodeWithText(projected.content).assertIsDisplayed()
     }
 
     @Test fun quoteOnlyLocalRootIsPreparedWhileStartedWithoutResumingRequests() {

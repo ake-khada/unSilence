@@ -142,13 +142,19 @@ object Nip19FailureCache {
 
 /** Runs the visible-card stages; media probes may suspend for network responses. */
 internal suspend fun hydrateVisibleCardWork(
-    hydrateMedia: suspend () -> Unit,
-    accumulateOwn: () -> Unit,
-    accumulatePublic: () -> Unit,
+    events: List<FeedRow>,
+    viewportIds: Set<String> = emptySet(),
+    engagementRows: List<FeedRow>? = null,
+    hydrateMedia: suspend (List<FeedRow>) -> Unit,
+    accumulateOwn: (List<FeedRow>) -> Unit,
+    accumulatePublic: (List<FeedRow>) -> Unit,
 ) {
-    accumulateOwn()
-    accumulatePublic()
-    hydrateMedia()
+    val priorityRows = if (viewportIds.isEmpty()) events else events.filter { it.id in viewportIds }
+    // A supplied empty engagement window deliberately accumulates nothing.
+    val engagement = engagementRows ?: priorityRows
+    accumulateOwn(engagement)
+    accumulatePublic(engagement)
+    hydrateMedia(priorityRows)
 }
 
 /**
@@ -889,8 +895,13 @@ class CardHydrator @Inject constructor(
      *   Computed by the caller from the correctly-ordered event list so that
      *   feedRowsByIds re-sort cannot misalign indices. The larger warm zone is
      *   retained in memory but intentionally does not trigger network hydration.
+     * @param engagementRows Optional narrower reading window for public/own engagement.
+     *   Does not narrow media work; an explicit empty list disables engagement work.
      */
-    suspend fun hydrateVisibleCards(events: List<FeedRow>, viewportIds: Set<String> = emptySet()) {
+    suspend fun hydrateVisibleCards(
+        events: List<FeedRow>, viewportIds: Set<String> = emptySet(),
+        engagementRows: List<FeedRow>? = null,
+    ) {
         if (events.isEmpty()) return
 
         // Hydrate only the viewport plus its bounded look-ahead. The caller's
@@ -898,9 +909,6 @@ class CardHydrator @Inject constructor(
         // image-header probes, model parsing, and engagement routing for that
         // entire zone spends radio/CPU on cards a fast fling may never display.
         // An empty viewport set is retained as a safe fallback for non-feed callers.
-        val priorityEvents = if (viewportIds.isEmpty()) events
-            else events.filter { it.id in viewportIds }
-
         // Profile + ref hydration removed — per-card self-fetch paths handle
         // these (AvatarImage 800ms autofetch for profiles, QuoteCard/EmptyRepostBody
         // produceState for refs). Warm-zone batch dispatch was the burst source
@@ -910,9 +918,10 @@ class CardHydrator @Inject constructor(
         // background extraction can race the player/poster path and was one of
         // the regressions behind dark video cards during fast scrolling.
         hydrateVisibleCardWork(
-            hydrateMedia = { hydrateMedia(priorityEvents, mmrAllowed = false) },
-            accumulateOwn = { accumulateOwnEngagement(priorityEvents) },
-            accumulatePublic = { accumulateEngagement(priorityEvents) },
+            events = events, viewportIds = viewportIds, engagementRows = engagementRows,
+            hydrateMedia = { hydrateMedia(it, mmrAllowed = false) },
+            accumulateOwn = ::accumulateOwnEngagement,
+            accumulatePublic = ::accumulateEngagement,
         )
     }
 

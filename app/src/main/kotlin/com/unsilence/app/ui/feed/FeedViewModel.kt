@@ -669,13 +669,6 @@ class FeedViewModel @Inject constructor(
 
     // -- Warm-zone hydration ---------------------------------------------------
 
-    private data class HydrationViewport(
-        val first: Int,
-        val last: Int,
-        val cardWidthPx: Int,
-        val visibleIds: Set<String> = emptySet(),
-    )
-
     internal val displayWindowReporter = com.unsilence.app.ui.shared.DisplayWindowReporter(memoryEventStore)
 
     fun setScreenActive(active: Boolean) {
@@ -683,7 +676,7 @@ class FeedViewModel @Inject constructor(
         if (active) wotHydrationCoalescer.requestHydration(_wotSubjects.value)
     }
 
-    private val _hydrationViewport = MutableStateFlow(HydrationViewport(0, 0, 0))
+    private val _hydrationViewport = MutableStateFlow(FeedCardViewport(0, 0, 0))
     private val engagementRetryRevision = MutableStateFlow(0L)
 
     /** Called only by the visible screen; retries re-use its latest bounded viewport. */
@@ -723,62 +716,52 @@ class FeedViewModel @Inject constructor(
             combine(feedRows, _hydrationViewport, _filter) { rows, viewport, _ -> rows to viewport }
                 .conflate()
                 .collectLatestWhileActive(screenActive) { (rows, viewport) ->
-                    if (!displayWindowReporter.prepareWarmWindow(
-                        rows, viewport.first, viewport.last, viewport.visibleIds, viewport.cardWidthPx,
-                    )) return@collectLatestWhileActive
-                    val first = viewport.first.coerceIn(0, rows.lastIndex)
-                    val last = viewport.last.coerceAtLeast(first).coerceAtMost(rows.lastIndex)
-                    val lookahead = if (_feedType.value is FeedType.Following) {
-                        ASSET_WARM_LOOKAHEAD
-                    } else {
-                        ASSET_WARM_LOOKAHEAD_CHURNY
-                    }
-                    val start = (first - ASSET_WARM_ABOVE).coerceAtLeast(0)
-                    val end = (last + 1 + lookahead).coerceAtMost(rows.size)
-                    if (start >= end) return@collectLatestWhileActive
-
-                    val visibleEnd = (last + 1).coerceAtMost(end)
-                    val warmRows = buildList {
-                        addAll(rows.subList(first, visibleEnd))
-                        if (start < first) addAll(rows.subList(start, first))
-                        if (visibleEnd < end) addAll(rows.subList(visibleEnd, end))
-                    }
-                    cardHydrator.warmUpcomingAssets(
-                        events = warmRows,
-                        cardWidthPx = viewport.cardWidthPx,
-                        maxRows = ASSET_WARM_MAX_ROWS,
-                        maxImagePrefetches = ASSET_WARM_IMAGE_CAP,
-                        maxOgFetches = ASSET_WARM_OG_CAP,
-                        quotedMediaPolicy = { _filter.value.quotedMediaPolicy() },
+                    val warmBelow = if (_feedType.value is FeedType.Following) WARM_ZONE_BELOW else WARM_ZONE_BELOW_CHURNY
+                    observeFeedCardWindow(
+                        rows, viewport, warmBelow, engagementRetryRevision,
+                        report = displayWindowReporter::report,
+                        warmAssets = {
+                            if (viewport.cardWidthPx > 0) warmFeedAssets(rows, viewport)
+                        },
+                        hydrate = { engagementRows ->
+                            val first = viewport.first.coerceIn(0, rows.lastIndex)
+                            val last = viewport.last.coerceIn(first, rows.lastIndex)
+                            val zoneStart = (first - WARM_ZONE_ABOVE).coerceAtLeast(0)
+                            val zoneEnd = (first + warmBelow).coerceAtMost(rows.size)
+                            val warmRows = rows.subList(zoneStart, zoneEnd)
+                            val vpStart = first - zoneStart
+                            val vpEnd = (last - zoneStart + 1).coerceAtLeast(vpStart + MEDIA_VIEWPORT_SIZE)
+                                .coerceAtMost(warmRows.size)
+                            val engEnd = (vpEnd + ENGAGEMENT_LOOKAHEAD).coerceAtMost(warmRows.size)
+                            val mediaIds = warmRows.subList(vpStart, engEnd).map { it.id }.toSet()
+                            requestVisibleWotHydration(warmRows)
+                            cardHydrator.hydrateVisibleCards(warmRows, viewportIds = mediaIds, engagementRows = engagementRows)
+                        },
                     )
                 }
         }
+    }
 
-        @OptIn(FlowPreview::class)
-        viewModelScope.launch(Dispatchers.Default) {
-            combine(feedRows, _hydrationViewport, engagementRetryRevision) { rows, viewport, _ -> rows to viewport }
-                .debounce(300L)  // Fling guard: only fires after 300ms of no viewport changes
-                .collectLatestWhileActive(screenActive) { (rows, viewport) ->
-                    if (rows.isEmpty()) return@collectLatestWhileActive
-                    val first = viewport.first.coerceIn(0, rows.lastIndex)
-                    val last = viewport.last.coerceAtLeast(first).coerceAtMost(rows.lastIndex)
-                    val warmBelow = if (_feedType.value is FeedType.Following) WARM_ZONE_BELOW else WARM_ZONE_BELOW_CHURNY
-                    val zoneStart = (first - WARM_ZONE_ABOVE).coerceAtLeast(0)
-                    val zoneEnd = (first + warmBelow).coerceAtMost(rows.size)
-                    if (zoneStart >= zoneEnd) return@collectLatestWhileActive
-                    val warmRows = rows.subList(zoneStart, zoneEnd)
-                    val vpStart = (first - zoneStart).coerceAtLeast(0)
-                    val actualVpEnd = (last - zoneStart + 1).coerceAtLeast(vpStart + VIEWPORT_SIZE)
-                    val vpEnd = actualVpEnd.coerceAtMost(warmRows.size)
-                    val lookahead = if (_feedType.value is FeedType.Following) ENGAGEMENT_LOOKAHEAD else ENGAGEMENT_LOOKAHEAD_CHURNY
-                    val engEnd = (vpEnd + lookahead).coerceAtMost(warmRows.size)
-                    val viewportIds = warmRows.subList(vpStart, engEnd).map { it.id }.toSet()
-                    if (warmRows.isNotEmpty()) {
-                        requestVisibleWotHydration(warmRows)
-                        cardHydrator.hydrateVisibleCards(warmRows, viewportIds = viewportIds)
-                    }
-                }
+    private suspend fun warmFeedAssets(rows: List<FeedRow>, viewport: FeedCardViewport) {
+        val first = viewport.first.coerceIn(0, rows.lastIndex)
+        val last = viewport.last.coerceIn(first, rows.lastIndex)
+        val lookahead = if (_feedType.value is FeedType.Following) ASSET_WARM_LOOKAHEAD else ASSET_WARM_LOOKAHEAD_CHURNY
+        val start = (first - ASSET_WARM_ABOVE).coerceAtLeast(0)
+        val end = (last + 1 + lookahead).coerceAtMost(rows.size)
+        val visibleEnd = (last + 1).coerceAtMost(end)
+        val warmRows = buildList {
+            addAll(rows.subList(first, visibleEnd))
+            if (start < first) addAll(rows.subList(start, first))
+            if (visibleEnd < end) addAll(rows.subList(visibleEnd, end))
         }
+        cardHydrator.warmUpcomingAssets(
+            events = warmRows,
+            cardWidthPx = viewport.cardWidthPx,
+            maxRows = ASSET_WARM_MAX_ROWS,
+            maxImagePrefetches = ASSET_WARM_IMAGE_CAP,
+            maxOgFetches = ASSET_WARM_OG_CAP,
+            quotedMediaPolicy = { _filter.value.quotedMediaPolicy() },
+        )
     }
 
     private fun requestVisibleWotHydration(rows: List<FeedRow>) {
@@ -982,11 +965,11 @@ class FeedViewModel @Inject constructor(
     // ── User actions ──────────────────────────────────────────────────────────
 
     fun onViewportChanged(idx: Int) {
-        _hydrationViewport.value = HydrationViewport(idx, idx, 0)
+        _hydrationViewport.value = FeedCardViewport(idx, idx, 0)
     }
 
     fun onViewportChanged(first: Int, last: Int, cardWidthPx: Int, visibleIds: Set<String> = emptySet()) {
-        _hydrationViewport.value = HydrationViewport(
+        _hydrationViewport.value = FeedCardViewport(
             first = first.coerceAtLeast(0),
             last = last.coerceAtLeast(first),
             cardWidthPx = cardWidthPx.coerceAtLeast(0),
@@ -1628,9 +1611,8 @@ class FeedViewModel @Inject constructor(
         const val ASSET_WARM_MAX_ROWS = 16
         const val ASSET_WARM_IMAGE_CAP = 4
         const val ASSET_WARM_OG_CAP = 4
-        /** Approximate on-screen post count — engagement fetch scoped to this. */
-        const val VIEWPORT_SIZE = 8
-        const val ENGAGEMENT_LOOKAHEAD_CHURNY = 6
+        /** Preserve the existing media-dimension warm-up independently of engagement. */
+        const val MEDIA_VIEWPORT_SIZE = 8
         const val ACTIVITY_SWEEP_CANDIDATE_LIMIT = 150
         const val TRUSTED_SWEEP_CANDIDATE_LIMIT = 150
         /** Debounce window — collapses frantic mashing, not deliberate retries. */
