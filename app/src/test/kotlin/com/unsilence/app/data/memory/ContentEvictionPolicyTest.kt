@@ -46,6 +46,130 @@ class ContentEvictionPolicyTest {
     )
 
     @Test
+    fun `recency regression admission retains a touched ordinary note over older followed history`() {
+        val store = MemoryEventStore(object : MuteKeyProvider {}, stubTimelineServiceProvider())
+        store.ownPubkey = "owner"
+        store.updateFollows("owner", setOf("followed"), createdAt = 1L)
+        assertTrue(store.insert(event("ordinary", "other", 1L, kind = 20)))
+        repeat(499) { index ->
+            assertTrue(store.insert(event("followed-$index", "followed", 2L + index, kind = 20)))
+        }
+        store.markTouched("ordinary")
+
+        assertTrue(store.insert(event("arrival", "other", 501L, kind = 20)))
+
+        assertNull(store.getNostrEvent("followed-0"))
+        assertNotNull(store.getNostrEvent("ordinary"))
+        assertEquals(500, store.snapshotSize().eventsByKind[20])
+        val metrics = store.snapshotEvictionMetrics()
+        assertEquals(1L, metrics.tier1)
+        assertEquals(0L, metrics.admissionRejected)
+    }
+
+    @Test
+    fun `recency regression sweep shares admission order across non-requested labels`() {
+        val tiers = linkedMapOf(
+            "followed" to ContentEvictionTier.FOLLOWED_AUTHOR,
+            "timeline" to ContentEvictionTier.TIMELINE_REFERENCED,
+            "ordinary" to ContentEvictionTier.ORDINARY,
+        )
+        val touches = mapOf("followed" to 1L, "timeline" to 2L, "ordinary" to 3L)
+        val entries = tiers.keys.map { EventEntry(it, 100L) }
+        val selected = selectContentEvictionCandidates(
+            entries = entries, cap = 1,
+            authorsByEventId = mapOf("followed" to "followed-author"),
+            followedPubkeys = setOf("followed-author"),
+            timelineReferencedIds = setOf("timeline"), lastTouchedAt = touches,
+        )
+        val index = ContentAdmissionIndex()
+        tiers.forEach { (id, tier) -> index.track(id, 1, tier) }
+        val admittedVictims = List(2) { index.pollVictim(1, 1, classify = tiers::get) }
+
+        assertEquals(listOf("followed", "timeline"), selected.map { it.entry.id })
+        assertEquals(selected.map { it.entry.id }, admittedVictims.map { it?.eventId })
+        assertEquals(selected.map { it.tier }, admittedVictims.map { it?.tier })
+    }
+
+    @Test
+    fun `recency regression full followed note pool admits arrival and replaces oldest touch`() {
+        val store = MemoryEventStore(object : MuteKeyProvider {}, stubTimelineServiceProvider())
+        store.ownPubkey = "owner"
+        store.updateFollows("owner", setOf("followed"), createdAt = 1L)
+        val cap = CONTENT_EVENT_KIND_CAPS.getValue(1)
+        repeat(cap) { index ->
+            assertTrue(store.insert(event("followed-$index", "followed", index.toLong())))
+        }
+        store.markTouched("followed-0")
+
+        assertTrue(store.insert(event("arrival", "other", cap.toLong())))
+
+        assertNotNull(store.getNostrEvent("followed-0"))
+        assertNull(store.getNostrEvent("followed-1"))
+        assertEquals(cap, store.snapshotSize().eventsByKind[1])
+        val metrics = store.snapshotEvictionMetrics()
+        assertEquals(1L, metrics.admissionReplaced)
+        assertEquals(0L, metrics.admissionRejected)
+    }
+
+    @Test
+    fun `recency regression reclassification preserves position without a touch`() {
+        // Re-track covers eager author and receipt reconciliation, including no label change.
+        val index = ContentAdmissionIndex()
+        index.track("old", 20, ContentEvictionTier.ORDINARY)
+        index.track("new", 20, ContentEvictionTier.ORDINARY)
+        listOf(ContentEvictionTier.FOLLOWED_AUTHOR, ContentEvictionTier.TIMELINE_REFERENCED,
+            ContentEvictionTier.ORDINARY, ContentEvictionTier.ORDINARY).forEach {
+            index.track("old", 20, it)
+        }
+        assertEquals("old", index.pollVictim(20, 1) { ContentEvictionTier.ORDINARY }?.eventId)
+
+        // Real follow/unfollow and timeline membership changes exercise lazy classification.
+        for (change in listOf("follow", "unfollow", "timeline-add", "timeline-remove")) {
+            val provider = stubTimelineServiceProvider()
+            val store = MemoryEventStore(object : MuteKeyProvider {}, provider)
+            store.ownPubkey = "owner"
+            if (change == "unfollow") store.updateFollows("owner", setOf("changing"), 1L)
+            if (change == "timeline-remove") {
+                restoreTimeline(provider.get(), listOf(TimelineRef("old", 1L)))
+            }
+            assertTrue(store.insert(event("old", "changing", 1L, kind = 20)))
+            repeat(499) { assertTrue(store.insert(event("peer-$it", "other", 2L + it, kind = 20))) }
+            when (change) {
+                "follow" -> store.updateFollows("owner", setOf("changing"), 2L)
+                "unfollow" -> store.updateFollows("owner", emptySet(), 2L)
+                "timeline-add" -> restoreTimeline(provider.get(), listOf(TimelineRef("old", 1L)))
+                "timeline-remove" -> restoreTimeline(provider.get(), emptyList())
+            }
+            assertTrue(change, store.insert(event("arrival", "other", 501L, kind = 20)))
+            assertNull(change, store.getNostrEvent("old"))
+            assertTrue(change, (0 until 499).all { store.getNostrEvent("peer-$it") != null })
+        }
+    }
+
+    @Test
+    fun `recency regression requested entries follow the shared queue and still converge to cap`() {
+        val tiers = linkedMapOf(
+            "requested-old" to ContentEvictionTier.REQUESTED_REFERENCE,
+            "requested-new" to ContentEvictionTier.REQUESTED_REFERENCE,
+            "followed" to ContentEvictionTier.FOLLOWED_AUTHOR,
+            "ordinary" to ContentEvictionTier.ORDINARY,
+        )
+        val index = ContentAdmissionIndex()
+        tiers.forEach { (id, tier) -> index.track(id, 1, tier) }
+        val entries = tiers.keys.mapIndexed { i, id -> EventEntry(id, i.toLong()) }
+        val swept = selectContentEvictionCandidates(
+            entries, 0, mapOf("followed" to "followed-author"), setOf("followed-author"),
+            emptySet(), entries.associate { it.id to it.createdAt },
+            requestedIds = setOf("requested-old", "requested-new"),
+        )
+        val expected = listOf("followed", "ordinary", "requested-old", "requested-new")
+        assertEquals(expected, swept.map { it.entry.id })
+        assertEquals(expected, List(4) { index.pollVictim(1, 0, classify = tiers::get)?.eventId })
+        assertEquals(0, index.size(1))
+        assertNull(index.pollVictim(1, 0, classify = tiers::get))
+    }
+
+    @Test
     fun `active requested references outrank followed content during sweep but obey the cap`() {
         val store = MemoryEventStore(object : MuteKeyProvider {}, stubTimelineServiceProvider())
         store.ownPubkey = "owner"
@@ -86,7 +210,7 @@ class ContentEvictionPolicyTest {
     }
 
     @Test
-    fun `followed author survives ordinary candidates past cap`() {
+    fun `oldest followed author yields to more recently touched ordinary candidates`() {
         val provider = stubTimelineServiceProvider()
         val store = MemoryEventStore(object : MuteKeyProvider {}, provider)
         store.ownPubkey = "owner"
@@ -97,23 +221,24 @@ class ContentEvictionPolicyTest {
 
         store.evictOldContentEventsForTest(mapOf(1 to 2))
 
-        assertNotNull(store.getNostrEvent("followed-old"))
+        assertNull(store.getNostrEvent("followed-old"))
         assertEquals(
-            1,
+            2,
             listOf("ordinary-old", "ordinary-new").count { store.getNostrEvent(it) != null },
         )
         val metrics = store.snapshotEvictionMetrics()
-        assertEquals(0L, metrics.tier1)
+        assertEquals(1L, metrics.tier1)
         assertEquals(0L, metrics.tier2)
-        assertEquals(1L, metrics.tier3)
+        assertEquals(0L, metrics.tier3)
     }
 
     @Test
-    fun `timeline referenced event survives unreferenced candidates past cap`() {
+    fun `oldest timeline reference yields to more recently touched ordinary candidates`() {
         val provider = stubTimelineServiceProvider()
         val timelineService = provider.get()
         val store = MemoryEventStore(object : MuteKeyProvider {}, provider)
-        val referenced = event("timeline-old", "author-a", 1L)
+        // ID breaks a same-millisecond timestamp tie in arrival order.
+        val referenced = event("a-timeline-old", "author-a", 1L)
         store.insert(referenced)
         store.insert(event("ordinary-old", "author-b", 2L))
         store.insert(event("ordinary-new", "author-c", 3L))
@@ -121,15 +246,15 @@ class ContentEvictionPolicyTest {
 
         store.evictOldContentEventsForTest(mapOf(1 to 2))
 
-        assertNotNull(store.getNostrEvent("timeline-old"))
+        assertNull(store.getNostrEvent("a-timeline-old"))
         assertEquals(
-            1,
+            2,
             listOf("ordinary-old", "ordinary-new").count { store.getNostrEvent(it) != null },
         )
         val metrics = store.snapshotEvictionMetrics()
         assertEquals(0L, metrics.tier1)
-        assertEquals(0L, metrics.tier2)
-        assertEquals(1L, metrics.tier3)
+        assertEquals(1L, metrics.tier2)
+        assertEquals(0L, metrics.tier3)
     }
 
     @Test
@@ -186,16 +311,12 @@ class ContentEvictionPolicyTest {
 
         val retained = (0 until 9).count { store.getNostrEvent("event-$it") != null }
         assertEquals(3, retained)
-        assertNotNull(store.getNostrEvent("event-0"))
-        assertNotNull(store.getNostrEvent("event-1"))
-        assertEquals(
-            1,
-            listOf("event-2", "event-3").count { store.getNostrEvent(it) != null },
-        )
+        assertTrue((0 until 6).all { store.getNostrEvent("event-$it") == null })
+        assertTrue((6 until 9).all { store.getNostrEvent("event-$it") != null })
         val metrics = store.snapshotEvictionMetrics()
-        assertEquals(0L, metrics.tier1)
-        assertEquals(1L, metrics.tier2)
-        assertEquals(5L, metrics.tier3)
+        assertEquals(2L, metrics.tier1)
+        assertEquals(2L, metrics.tier2)
+        assertEquals(2L, metrics.tier3)
     }
 
     @Test
@@ -220,7 +341,7 @@ class ContentEvictionPolicyTest {
     }
 
     @Test
-    fun `bounded tiers evict ordinary then timeline before followed`() {
+    fun `bounded tiers label victims selected in oldest touched order`() {
         val entries = listOf(
             EventEntry("followed", 1L),
             EventEntry("timeline", 2L),
@@ -241,9 +362,10 @@ class ContentEvictionPolicyTest {
         )
 
         assertEquals(
-            listOf(ContentEvictionTier.ORDINARY, ContentEvictionTier.TIMELINE_REFERENCED),
+            listOf(ContentEvictionTier.FOLLOWED_AUTHOR, ContentEvictionTier.TIMELINE_REFERENCED),
             selected.map { it.tier },
         )
+        assertEquals(listOf("followed", "timeline"), selected.map { it.entry.id })
     }
 
     @Test
@@ -269,7 +391,7 @@ class ContentEvictionPolicyTest {
     }
 
     @Test
-    fun `ordinary arrival is rejected at door when capped pool is followed`() {
+    fun `ordinary arrival replaces followed history while protected capacity rejects orphans`() {
         val provider = stubTimelineServiceProvider()
         val store = MemoryEventStore(object : MuteKeyProvider {}, provider)
         val followedAuthors = (0 until 500).mapTo(linkedSetOf()) { "followed-$it" }
@@ -281,18 +403,38 @@ class ContentEvictionPolicyTest {
 
         val inserted = store.insert(event("ordinary-picture", "ordinary", 501L, kind = 20))
 
-        assertFalse(inserted)
-        assertNull(store.getNostrEvent("ordinary-picture"))
-        store.putImetaImageDims("ordinary-picture", mapOf("https://example.com/orphan.jpg" to 1f))
-        assertTrue(store.getImetaImageDims("ordinary-picture").isEmpty())
-        assertTrue(
-            (0 until 500).all { store.getNostrEvent("followed-picture-$it") != null },
-        )
+        assertTrue(inserted)
+        assertNotNull(store.getNostrEvent("ordinary-picture"))
+        assertNull(store.getNostrEvent("followed-picture-0"))
+        assertTrue((1 until 500).all { store.getNostrEvent("followed-picture-$it") != null })
+        assertEquals(500, store.snapshotSize().eventsByKind[20])
         val metrics = store.snapshotEvictionMetrics()
-        assertEquals(0L, metrics.evicted)
-        assertEquals(0L, metrics.admissionReplaced)
-        assertEquals(1L, metrics.admissionRejected)
-        assertEquals(mapOf(20 to 1L), metrics.admissionRejectedByKind)
+        assertEquals(1L, metrics.evicted)
+        assertEquals(1L, metrics.admissionReplaced)
+        assertEquals(1L, metrics.tier1)
+        assertEquals(0L, metrics.admissionRejected)
+        assertTrue(metrics.admissionRejectedByKind.isEmpty())
+
+        // Keep rejection/orphan coverage using actual reading protection.
+        val ids = (1 until 500).map { "followed-picture-$it" } + "ordinary-picture"
+        val windows = ids.chunked(DISPLAY_WINDOW_ROW_LIMIT).map { chunk ->
+            store.openDisplayWindow().also { window ->
+                window.update(chunk.map { it to it }, chunk.toSet())
+            }
+        }
+        try {
+            assertEquals(ids.toSet(), store.displayPriorities().keys)
+            assertFalse(store.insert(event("rejected-picture", "ordinary", 502L, kind = 20)))
+            assertNull(store.getNostrEvent("rejected-picture"))
+            store.putImetaImageDims("rejected-picture", mapOf("https://example.com/orphan.jpg" to 1f))
+            assertTrue(store.getImetaImageDims("rejected-picture").isEmpty())
+            assertTrue(ids.all { store.getNostrEvent(it) != null })
+            val rejected = store.snapshotEvictionMetrics()
+            assertEquals(1L, rejected.admissionRejected)
+            assertEquals(mapOf(20 to 1L), rejected.admissionRejectedByKind)
+        } finally {
+            windows.forEach { it.close() }
+        }
     }
 
     @Test
@@ -325,11 +467,32 @@ class ContentEvictionPolicyTest {
             start.countDown()
             val inserted = futures.map { it.get(10, TimeUnit.SECONDS) }
 
-            assertTrue(inserted.none { it })
-            assertTrue(
-                (0 until 64).all { store.getNostrEvent("concurrent-ordinary-$it") == null },
-            )
-            assertTrue((0 until 500).all { store.getNostrEvent("protected-$it") != null })
+            assertTrue(inserted.all { it })
+            val newcomers = (0 until 64).map { "concurrent-ordinary-$it" }.toSet()
+            val retainedHistory = (64 until 500).map { "protected-$it" }.toSet()
+            val retained = newcomers + retainedHistory
+            assertEquals(500, store.snapshotSize().eventsByKind[20])
+            assertEquals(retained, store.recentEvents(setOf(20), limit = 1_000).map { it.id }.toSet())
+            assertTrue(retained.all { store.getNostrEvent(it) != null })
+            assertTrue((0 until 64).all { store.getNostrEvent("protected-$it") == null })
+            // Check the actual indexes too: queries skip dangling IDs and can hide an orphan.
+            fun field(name: String): Any = MemoryEventStore::class.java.getDeclaredField(name)
+                .apply { isAccessible = true }.get(store)
+            val byKind = field("idsByKind") as Map<*, *>
+            val byAuthor = field("idsByPubkey") as Map<*, *>
+            val recent = field("recentByCreatedAt") as Set<*>
+            assertEquals(retained, byKind[20])
+            assertEquals(retained, recent.map { (it as EventEntry).id }.toSet())
+            for (i in 0 until 500) {
+                val expected = if (i < 64) emptySet() else setOf("protected-$i")
+                assertEquals(expected, byAuthor["followed-$i"] ?: emptySet<String>())
+            }
+            for (i in 0 until 64) {
+                assertEquals(setOf("concurrent-ordinary-$i"), byAuthor["ordinary-$i"])
+            }
+            val metrics = store.snapshotEvictionMetrics()
+            assertEquals(64L, metrics.admissionReplaced)
+            assertEquals(0L, metrics.admissionRejected)
         } finally {
             executor.shutdownNow()
             assertTrue(executor.awaitTermination(10, TimeUnit.SECONDS))
@@ -396,7 +559,7 @@ class ContentEvictionPolicyTest {
     }
 
     @Test
-    fun `admission lazily promotes a newly followed stale ordinary candidate`() {
+    fun `admission lazily relabels a newly followed candidate without changing recency`() {
         val index = ContentAdmissionIndex()
         index.track("became-followed", 1, ContentEvictionTier.ORDINARY)
         index.track("still-ordinary", 1, ContentEvictionTier.ORDINARY)
@@ -406,8 +569,8 @@ class ContentEvictionPolicyTest {
             else ContentEvictionTier.ORDINARY
         }
 
-        assertEquals("still-ordinary", victim?.eventId)
-        assertEquals(ContentEvictionTier.ORDINARY, victim?.tier)
+        assertEquals("became-followed", victim?.eventId)
+        assertEquals(ContentEvictionTier.FOLLOWED_AUTHOR, victim?.tier)
     }
 
     @Test

@@ -154,7 +154,7 @@ class ActiveReadingAdmissionTest {
         }
     }
 
-    @Test fun `ordinary tier rejections cannot retire a covered followed conversation`() {
+    @Test fun `ordinary arrivals replace unprotected followed history without retiring covered replies`() {
         val root = note("covered-root").copy(pubkey = "owner")
         store.insert(note("follows").copy(kind = 3, pubkey = "owner", tags = listOf(listOf("p", "unfollowed"))))
         store.insert(root)
@@ -165,11 +165,16 @@ class ActiveReadingAdmissionTest {
         reporter.report(listOf(store.synthesizeFeedRow(root)), setOf(root.id))
         reporter.setActive(false)
         repeat(200) {
-            assertFalse("Ordinary traffic must still lose to followed content",
+            assertTrue("Unprotected followed history must yield before covered replies",
                 store.insert(note("ordinary-$it").copy(pubkey = "stranger")))
         }
+        val metrics = store.snapshotEvictionMetrics()
+        assertEquals(200L, metrics.admissionReplaced)
+        assertEquals(200L, metrics.tier1)
+        assertEquals(0L, metrics.admissionRejected)
         assertEquals(51, store.replyCount(root.id))
-        // A retired entry cannot restore its roles without a new report.
+        assertTrue((0 until 51).all { store.getNostrEvent("reply-$it") != null })
+        // Resuming restores the retained root's active roles.
         reporter.setActive(true)
         assertEquals(mapOf(root.id to 0), store.displayPriorities())
         assertEquals(cap + 1, store.snapshotSize().eventsByKind[1])
@@ -186,15 +191,19 @@ class ActiveReadingAdmissionTest {
         reporter.setActive(false)
         // Timeline ownership changes without eagerly moving the admission queues.
         fillTimelineHistory(replies)
-        assertFalse(store.insert(note("ordinary-newcomer")))
+        assertTrue(store.insert(note("ordinary-newcomer")))
+        assertNull(store.getNostrEvent("history-51"))
+        assertEquals(1L, store.snapshotEvictionMetrics().tier2)
         assertEquals(51, store.replyCount(root.id))
+        assertTrue(replies.all { store.getNostrEvent(it.id) != null })
+        assertEquals(cap + 1, store.snapshotSize().eventsByKind[1])
         reporter.setActive(true)
         assertEquals("Stronger current tiers must not lose their covered lease",
             mapOf(root.id to 0), store.displayPriorities())
         reporter.close()
     }
 
-    @Test fun `covered reclassification behind a same tier newcomer cannot trigger retirement`() {
+    @Test fun `covered oldest replies can yield to a same tier newcomer at full capacity`() {
         val root = note("root").copy(pubkey = "owner")
         val replies = (0 until cap).map { note("reply-$it", root.id) }
         store.insertBatch(listOf(root) + replies)
@@ -208,10 +217,18 @@ class ActiveReadingAdmissionTest {
         val filter = NostrFilter(kinds = listOf(1), limit = 1)
         provider.get().restoreFromSnapshot(mapOf(provider.get().generateTimelineKey(urls, filter) to
             TimelineService.Timeline(refs = listOf(TimelineRef(newcomer.id, newcomer.createdAt)), filter = filter, urls = urls)))
-        assertFalse(store.insert(newcomer))
-        assertEquals(cap, store.replyCount(root.id))
+        assertTrue(store.insert(newcomer))
+        assertNotNull(store.getNostrEvent(newcomer.id))
+        assertNull(store.getNostrEvent("reply-0"))
+        assertEquals(cap - 1, store.replyCount(root.id))
+        assertEquals(cap + 1, store.snapshotSize().eventsByKind[1])
+        val metrics = store.snapshotEvictionMetrics()
+        assertEquals(1L, metrics.admissionReplaced)
+        assertEquals(1L, metrics.tier2)
         reporter.setActive(true)
-        assertEquals("Reclassification must precede blocker recording", mapOf(root.id to 0), store.displayPriorities())
+        assertEquals("Resume explicitly restores the retained root after retirement",
+            mapOf(root.id to 0), store.displayPriorities())
+        assertTrue(replies.drop(1).all { store.getNostrEvent(it.id) != null })
         reporter.close()
     }
 
@@ -352,6 +369,8 @@ class ActiveReadingAdmissionTest {
         store.retainRequestedEvent("root").use {
             assertTrue(store.insert(note("reply", "root")))
         }
+        // Make the released reply oldest without changing its protection classification.
+        store.markTouched((1 until cap).map { "history-$it" })
         assertTrue("An ordinary arrival can replace the released ordinary reply", store.insert(note("next")))
         assertNull(store.getNostrEvent("reply"))
         assertEquals(cap + 1, store.snapshotSize().eventsByKind[1])

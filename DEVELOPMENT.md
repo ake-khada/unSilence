@@ -58,6 +58,9 @@ Unit tests, lint and builds do not validate real scrolling, navigation or media
 behavior. Runtime changes also need human validation on a device. Do not publish,
 react, pay, change accounts or weaken device security settings for automated tests.
 
+Lint runs in separate worker processes to avoid sharing its Kotlin analysis state
+with the long-lived Gradle daemon. All source sets and checks remain enabled.
+
 Account-free rendered tests use the separate debug app. Offline minified crypto
 coverage uses `ReleaseCryptoTest` with `-PvalidationBuildType=release`; a debug pass
 does not establish release-shrinker correctness.

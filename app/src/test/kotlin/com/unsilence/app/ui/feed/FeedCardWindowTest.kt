@@ -65,11 +65,24 @@ class FeedCardWindowTest {
         DisplayWindowReporter(store).use { reporter ->
             reporter.setActive(true)
             reporter.prepareWarmWindow(rows, 0, 2, visible, 360)
-            for (row in feedEngagementRows(rows, FeedCardViewport(0, 2, 360, visible))) {
+            val selected = feedEngagementRows(rows, FeedCardViewport(0, 2, 360, visible))
+            for (row in selected) {
                 assertTrue("Fetched history for ${row.id} must have reading protection", store.insert(note("reply-${row.id}", row.id)))
                 assertEquals(1, store.replyCount(row.id))
             }
-            assertFalse("Unselected forward history still follows existing admission policy", store.insert(note("outside", roots[14].id)))
+            assertFalse(roots[14].id in store.displayPriorities())
+            assertTrue("Outside history can replace older unprotected content", store.insert(note("outside", roots[14].id)))
+            assertEquals(5_020, store.snapshotSize().eventsByKind[1])
+            // Make outside oldest among unprotected content; selected replies are older still.
+            store.markTouched(store.recentEvents(setOf(1), limit = 5_020)
+                .filter { it.pubkey == "followed" }.map { it.id })
+            assertTrue(store.insert(note("pressure")))
+            assertNull("Outside history has no reading protection", store.getNostrEvent("outside"))
+            assertEquals(0, store.replyCount(roots[14].id))
+            for (row in selected) {
+                assertNotNull(store.getNostrEvent("reply-${row.id}"))
+                assertEquals(1, store.replyCount(row.id))
+            }
             assertEquals(5_020, store.snapshotSize().eventsByKind[1])
         }
     }

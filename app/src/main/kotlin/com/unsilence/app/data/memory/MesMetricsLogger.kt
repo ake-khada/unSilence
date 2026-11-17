@@ -139,8 +139,8 @@ class MesMetricsLogger @Inject constructor(
                 "relaySets=${s.relaySetEntries}",
         )
 
-        // Interval work plus the last pass's live-ref union. Tier 1 is the
-        // strongest bounded protection; tier 3 is the expected eviction pool.
+        // Interval work plus the last pass's live-ref union. Tiers label victims;
+        // followed, timeline and ordinary content share oldest-touch ordering.
         val eviction = memoryEventStore.snapshotEvictionMetrics()
         val evictionKindStr = eviction.evictedByKind.entries
             .sortedBy { it.key }

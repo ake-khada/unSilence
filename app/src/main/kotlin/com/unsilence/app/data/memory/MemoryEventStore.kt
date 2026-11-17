@@ -189,7 +189,7 @@ internal val CONTENT_EVENT_KIND_CAPS = mapOf(
     30023 to 500,    // articles
 )
 
-/** Bounded protection tiers. Every tier still converges to its kind cap. */
+/** Policy labels for requested-last selection, covered retirement and eviction metrics. */
 internal enum class ContentEvictionTier(val number: Int) {
     REQUESTED_REFERENCE(0),
     FOLLOWED_AUTHOR(1),
@@ -210,29 +210,31 @@ internal data class ContentAdmissionVictim(
 
 /**
  * Bounded access-order index used to choose one victim before a novel content
- * event is fully indexed. Tier membership is revalidated lazily at removal,
- * so follows and timeline changes cannot evict a newly-protected event.
+ * event is fully indexed. Followed, timeline and ordinary content share one
+ * queue per kind; requested references are last resort. Reclassification within
+ * a queue preserves recency. Anchors and queue membership are checked lazily.
  */
 internal class ContentAdmissionIndex(private val lock: Any = Any()) {
     private class KindQueues {
         val tierById = HashMap<String, ContentEvictionTier>()
         val requested = java.util.LinkedHashMap<String, Unit>(16, 0.75f, true)
-        val followed = java.util.LinkedHashMap<String, Unit>(16, 0.75f, true)
-        val timeline = java.util.LinkedHashMap<String, Unit>(16, 0.75f, true)
-        val ordinary = java.util.LinkedHashMap<String, Unit>(16, 0.75f, true)
+        val shared = java.util.LinkedHashMap<String, Unit>(16, 0.75f, true)
 
         fun queue(tier: ContentEvictionTier): java.util.LinkedHashMap<String, Unit> =
             when (tier) {
                 ContentEvictionTier.REQUESTED_REFERENCE -> requested
-                ContentEvictionTier.FOLLOWED_AUTHOR -> followed
-                ContentEvictionTier.TIMELINE_REFERENCED -> timeline
-                ContentEvictionTier.ORDINARY -> ordinary
+                else -> shared
             }
 
         fun track(eventId: String, tier: ContentEvictionTier) {
             val previous = tierById.put(eventId, tier)
-            if (previous != null && previous != tier) queue(previous).remove(eventId)
-            queue(tier)[eventId] = Unit
+            val nextQueue = queue(tier)
+            if (previous != null) {
+                val previousQueue = queue(previous)
+                if (previousQueue === nextQueue) return
+                previousQueue.remove(eventId)
+            }
+            nextQueue[eventId] = Unit
         }
 
         fun remove(eventId: String) {
@@ -276,9 +278,8 @@ internal class ContentAdmissionIndex(private val lock: Any = Any()) {
 
     /**
      * Reserve the next victim and remove it from the index. [classify] returns
-     * null for missing or currently-untouchable events. A stale tier is moved
-     * once and selection restarts at ordinary, making reclassification O(1)
-     * amortized without eagerly walking the store when timelines change.
+     * null for missing or anchored events. Moving between requested and shared
+     * queues restarts selection; label changes within shared preserve order.
      */
     fun pollVictim(
         kind: Int,
@@ -294,17 +295,15 @@ internal class ContentAdmissionIndex(private val lock: Any = Any()) {
                 var reclassified = false
                 for (tier in EVICTION_ORDER) {
                     val queue = queues.queue(tier)
-                    // Protected entries remain in their original tier and count
-                    // against the cap; only victim selection skips them.
+                    // Protected entries count against the cap. Revalidate their
+                    // classification before reporting covered-retirement blockers.
                     val eventId = queue.keys.firstOrNull { id ->
-                        if (!isProtected(id)) true
-                        // Protection must not hide a stale tier from the same
-                        // lazy reclassification used for unprotected candidates.
-                        else if (classify(id) != tier) true
-                        else {
-                            onSkippedProtected(id, tier)
+                        val currentTier = classify(id)
+                        if (currentTier == null || queues.queue(currentTier) !== queue) true
+                        else if (isProtected(id)) {
+                            onSkippedProtected(id, currentTier)
                             false
-                        }
+                        } else true
                     } ?: continue
                     val currentTier = classify(eventId)
                     when {
@@ -312,13 +311,13 @@ internal class ContentAdmissionIndex(private val lock: Any = Any()) {
                             queues.remove(eventId)
                             reclassified = true
                         }
-                        currentTier != tier -> {
+                        queues.queue(currentTier) !== queue -> {
                             queues.track(eventId, currentTier)
                             reclassified = true
                         }
                         else -> {
                             queues.remove(eventId)
-                            return ContentAdmissionVictim(eventId, tier)
+                            return ContentAdmissionVictim(eventId, currentTier)
                         }
                     }
                     break
@@ -332,8 +331,6 @@ internal class ContentAdmissionIndex(private val lock: Any = Any()) {
     private companion object {
         val EVICTION_ORDER = listOf(
             ContentEvictionTier.ORDINARY,
-            ContentEvictionTier.TIMELINE_REFERENCED,
-            ContentEvictionTier.FOLLOWED_AUTHOR,
             ContentEvictionTier.REQUESTED_REFERENCE,
         )
     }
@@ -373,11 +370,10 @@ internal fun selectContentEvictionCandidates(
         )
     }
 
-    // Evict ordinary, timeline-backed, followed-author, then active requests;
-    // least-recently-touched first within each tier. ID is a stable final key.
+    // Shared recency order, then active requests; ID is a stable final key.
     return materialized
         .sortedWith(
-            compareByDescending<ContentEvictionCandidate> { it.tier.number }
+            compareBy<ContentEvictionCandidate> { it.tier == ContentEvictionTier.REQUESTED_REFERENCE }
                 .thenBy { it.lastTouchedAt }
                 .thenBy { it.entry.id },
         )
@@ -1448,7 +1444,7 @@ class MemoryEventStore @Inject constructor(
                         (selected == null && contentAdmissionIndex.size(event.kind) > cap)
                     if (!rejected || !skippedCovered || coveredRetirements >= COVERED_WINDOW_LIMIT ||
                         !displayWindows.retireOldestCovered()) break
-                    // Release only soft ownership, then use the same tier/LRU decision.
+                    // Release only soft ownership, then use the same recency decision.
                     // Restore the newcomer if polling had reserved it for rejection.
                     coveredRetirements++
                     contentAdmissionIndex.track(event.id, event.kind, contentAdmissionTier(event))
@@ -3361,12 +3357,14 @@ class MemoryEventStore @Inject constructor(
      *     - Events authored by ownPubkey
      *     - Events mentioning ownPubkey (notifications)
      *     - Events authored by currently viewed profile
+     *     - Own-profile referenced events in profileAnchoredIds
      *
      *   Band C (LRU-managed pool):
-     *     - Everything else; evicted by lastTouchedAt ASC when kind cap exceeded
+     *     - Followed, timeline and ordinary content share lastTouchedAt ASC order
+     *     - Active requested references are last resort, within the same kind cap
      *
-     * Recently-displayed events survive regardless of how old their created_at is.
-     * An ancient quoted post being viewed today outranks a fresh flood-feed reaction.
+     * Existing reading protection skips victims; tiers still label removals and
+     * govern covered-retirement eligibility. Reclassification adds no touch.
      */
     private fun evictOldContentEvents(kindCaps: Map<Int, Int> = CONTENT_EVENT_KIND_CAPS) {
         val ownPubkeyAnchor = ownPubkey
@@ -3435,8 +3433,7 @@ class MemoryEventStore @Inject constructor(
         }
 
         // Pass 2: for each kind over its cap, materialize all mutable policy
-        // inputs, then choose ordinary LRU first, timeline refs second,
-        // followed-author content next and active requests last.
+        // inputs, then choose oldest-touched content with active requests last.
         //
         // CRITICAL: snapshot lastTouchedAt values before sorting. The map is
         // concurrently mutated by the hot drainer (insertCore), CardHydrator

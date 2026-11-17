@@ -442,26 +442,38 @@ class EventProcessorDrainerTest {
         val followed = "d".repeat(64)
         store.updateFollows("owner", setOf(followed), createdAt = 1)
         for (seed in 2..5001) {
-            store.insert(processor.parseAndVerify(rawEvent(seed, pubkey = followed), FIRST_RELAY)!!)
+            val tags = if (seed == 2) "[]" else """[["e","${eventId(2)}","","root"]]"""
+            store.insert(processor.parseAndVerify(rawEvent(seed, pubkey = followed, tags = tags), FIRST_RELAY)!!)
         }
-        processor.process(rawEvent(1), FIRST_RELAY)
-        runCurrent()
-        assertNull("An ordinary incoming event loses to the full followed tier", store.getNostrEvent(eventId(1)))
-        assertTrue(store.snapshotEvictionMetrics().admissionRejected > 0)
-        assertEquals(0, processor.pendingContentCount)
+        assertEquals(4999, store.replyCount(eventId(2)))
+        store.openDisplayWindow().use { window ->
+            window.update(listOf(eventId(2) to eventId(2)), setOf(eventId(2)))
+            processor.process(rawEvent(1), FIRST_RELAY)
+            runCurrent()
+            assertNull("An unrelated arrival cannot replace displayed conversation bodies", store.getNostrEvent(eventId(1)))
+            assertTrue(store.snapshotEvictionMetrics().admissionRejected > 0)
+            assertEquals(0, processor.pendingContentCount)
+            assertEquals(4999, store.replyCount(eventId(2)))
+            assertEquals(5000, store.snapshotSize().eventsByKind[1])
+        }
 
+        val verifiedBeforeRetry = verificationCount.get()
         store.retainRequestedEvent(eventId(1)).use {
             processor.process(rawEvent(1), SECOND_RELAY)
             runCurrent()
             assertNotNull("An explicitly requested reference must be admitted", store.getNostrEvent(eventId(1)))
+            assertEquals("Retry reuses the verified payload", verifiedBeforeRetry, verificationCount.get())
+            assertTrue(SECOND_RELAY in store.getNostrEvent(eventId(1))!!.relaysSeen)
             for (seed in 5002..5101) {
                 store.insert(processor.parseAndVerify(rawEvent(seed, pubkey = followed), FIRST_RELAY)!!)
             }
             assertNotNull(store.getNostrEvent(eventId(1)))
             assertEquals("Requested targets still count against the cap", 5000, store.snapshotSize().eventsByKind[1])
         }
+        // Releasing a request makes it evictable, but does not make a recent target oldest.
+        store.markTouched(store.recentEvents(setOf(1), limit = 5000).map { it.id }.filter { it != eventId(1) })
         store.insert(processor.parseAndVerify(rawEvent(5102, pubkey = followed), FIRST_RELAY)!!)
-        assertNull("Released target regains ordinary priority immediately", store.getNostrEvent(eventId(1)))
+        assertNull("Released target yields when it is the oldest touched entry", store.getNostrEvent(eventId(1)))
     }
 
     @Test
