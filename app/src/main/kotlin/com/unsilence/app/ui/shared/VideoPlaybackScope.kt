@@ -427,11 +427,8 @@ fun rememberVideoPlaybackScope(
         }
     }
 
-    // Playback transitions: swap media source on active note change.
-    // B2 contract:
-    //   Deactivation: playWhenReady=false (retain codec+media). No stop(), no clearMediaItems().
-    //   Reactivation same URL: playWhenReady=true. No prepare(), no codec realloc.
-    //   Reactivation different URL: stop()+clearMediaItems(), then setMediaItem()+prepare().
+    // The holder retains the current item across owners. A same-URL claim only
+    // prepares again when the holder deliberately stopped loading that item.
     val activeVideoUrl = scope.activeVideoUrl
 
     // Player milestones are intentionally warning-level and owner-gated so they
@@ -501,7 +498,6 @@ fun rememberVideoPlaybackScope(
             exoPlayer.repeatMode = Player.REPEAT_MODE_ALL
             exoPlayer.volume = if (scope.isMuted) 0f else 1f
             if (retainedUrl != permittedUrl || exoPlayer.mediaItemCount == 0) {
-                // Different URL — full media swap (the one path where codec realloc is correct)
                 holder.clearPolicyStop()
                 exoPlayer.stop()
                 exoPlayer.clearMediaItems()
@@ -510,12 +506,9 @@ fun rememberVideoPlaybackScope(
             } else {
                 holder.recoverPolicyStop()
             }
-            // Same URL resumes without prepare or codec reallocation.
             exoPlayer.playWhenReady = true
         } else {
             if (holder.isOwner(ownerId)) {
-                // B2: retain codec — just release ownership (sets playWhenReady=false,
-                // retains the codec for the foreground session)
                 holder.releaseOwnership(ownerId)
             }
         }

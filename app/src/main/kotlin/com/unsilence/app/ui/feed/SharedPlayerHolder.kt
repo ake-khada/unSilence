@@ -2,14 +2,17 @@ package com.unsilence.app.ui.feed
 
 import android.content.Context
 import android.util.Log
+import androidx.media3.common.C
 import androidx.media3.common.Player
 import androidx.media3.common.MediaItem
 import androidx.media3.datasource.cache.CacheDataSource
 import androidx.media3.exoplayer.DefaultLoadControl
 import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.exoplayer.LoadControl
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.exoplayer.source.preload.DefaultPreloadManager
 import androidx.media3.exoplayer.source.preload.TargetPreloadStatusControl
+import androidx.media3.exoplayer.upstream.DefaultAllocator
 import com.unsilence.app.data.model.VideoRenderModel
 import com.unsilence.app.data.relay.NetworkMonitor
 import com.unsilence.app.data.relay.RelayPreferencesStore
@@ -39,7 +42,8 @@ class SharedPlayerHolder @Inject constructor(
 ) {
     private var _player: ExoPlayer? = null
     private var _preloadManager: DefaultPreloadManager? = null
-    private var _currentOwner: String? = null
+    // Written by UI ownership transitions and read by Media3 on its playback thread.
+    @Volatile private var _currentOwner: String? = null
     private var policyStoppedUrl: String? = null
     private var preloadCenterIndex = NO_PRELOAD_INDEX
     private val immersivePreloadEntries = linkedMapOf<String, PreloadEntry>()
@@ -56,16 +60,16 @@ class SharedPlayerHolder @Inject constructor(
     val canAutoplay get() = !autoplayBlocked.value
     private var networkJob: Job? = null
     private val networkPolicy = VideoNetworkPolicy(
-        stopUnrequested = {
-            if (_player?.playbackState != null && _player?.playbackState != Player.STATE_IDLE) {
-                policyStoppedUrl = currentUrl
-            }
-            _player?.playWhenReady = false
-            // stop cancels loading but retains the current item and position.
-            _player?.stop()
-        },
+        stopUnrequested = ::stopForPolicy,
         clearPreloads = ::clearImmersivePreloads,
     )
+
+    private fun stopForPolicy() {
+        val player = _player ?: return
+        if (player.playbackState != Player.STATE_IDLE) policyStoppedUrl = currentUrl
+        player.playWhenReady = false
+        player.stop() // Keeps the item and position for the next permitted claim.
+    }
 
     /** Do not turn unrelated player errors into automatic retries in Always mode. */
     fun recoverPolicyStop(): Boolean {
@@ -80,14 +84,20 @@ class SharedPlayerHolder @Inject constructor(
 
     fun clearPolicyStop() { policyStoppedUrl = null }
 
-    private val loadControl = DefaultLoadControl.Builder()
-        .setBufferDurationsMs(
-            5_000,   // minBufferMs
-            30_000,  // maxBufferMs
-            500,     // bufferForPlaybackMs — start playing after 500ms (default 2500)
-            1_000,   // bufferForPlaybackAfterRebufferMs
-        )
-        .build()
+    private val loadControl = object : DefaultLoadControl(
+        DefaultAllocator(true, C.DEFAULT_BUFFER_SEGMENT_SIZE),
+        /* minBufferMs = */ 5_000,
+        /* maxBufferMs = */ 30_000,
+        /* bufferForPlaybackMs = */ 500,
+        /* bufferForPlaybackAfterRebufferMs = */ 1_000,
+        DEFAULT_TARGET_BUFFER_BYTES,
+        DEFAULT_PRIORITIZE_TIME_OVER_SIZE_THRESHOLDS,
+        DEFAULT_BACK_BUFFER_DURATION_MS,
+        DEFAULT_RETAIN_BACK_BUFFER_FROM_KEYFRAME,
+    ) {
+        override fun shouldContinueLoading(parameters: LoadControl.Parameters): Boolean =
+            _currentOwner != null && super.shouldContinueLoading(parameters)
+    }
 
     private val mediaSourceFactory = DefaultMediaSourceFactory(mediaDataSourceFactory)
 
@@ -133,19 +143,18 @@ class SharedPlayerHolder @Inject constructor(
         return player
     }
 
-    /**
-     * Release ownership without tearing down the player. Sets playWhenReady=false
-     * to pause playback, but keeps the codec and media item alive for the rest of
-     * the foreground session. Codec teardown is lifecycle-driven only
-     * (app background, memory pressure, logout).
-     */
+    /** Retain playable media at its position and suspend further loading until another claim. */
     fun releaseOwnership(ownerId: String) {
-        if (_currentOwner == ownerId) {
-            _player?.playWhenReady = false
-            _currentOwner = null
-            networkPolicy.released()
-            Log.d(TAG, "Released ownership ($ownerId) — codec retained for session")
+        if (_currentOwner != ownerId) return
+        val player = _player
+        player?.playWhenReady = false
+        _currentOwner = null
+        networkPolicy.released()
+        // Media3 can report a stuck player if left BUFFERING below 500 ms without loading.
+        if (player?.playbackState == Player.STATE_BUFFERING && player.totalBufferedDuration < 500L) {
+            stopForPolicy()
         }
+        Log.d(TAG, "Released ownership ($ownerId)")
     }
 
     fun isOwner(ownerId: String): Boolean = _currentOwner == ownerId
