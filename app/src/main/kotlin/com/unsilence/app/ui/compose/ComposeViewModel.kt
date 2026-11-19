@@ -199,6 +199,8 @@ sealed interface AttachmentState {
 
 enum class AttachmentUploadPhase { Preparing, Transcoding, Uploading }
 
+internal enum class DraftSaveResult { SAVED, NEWER_EDITS, EMPTY, FAILED, SESSION_CHANGED }
+
 // ── Relay publish status ────────────────────────────────────────────────────
 
 enum class RelayPublishStatus { Pending, Accepted, Rejected, TimedOut }
@@ -622,12 +624,22 @@ class ComposeViewModel @Inject constructor(
         _sendState.value = SendState.Composing
     }
 
-    fun saveCurrentDraft(): Boolean {
-        val pk = pubkeyHex ?: return false
-        val draft = buildCurrentDraft() ?: return false
-        draftStore.save(pk, draft)
-        _savedDraftFingerprint.value = currentContentFingerprint(_blocks.value, _isSensitive.value, _pollDraft.value)
-        return true
+    internal suspend fun saveCurrentDraft(): DraftSaveResult {
+        val pk = pubkeyHex ?: return DraftSaveResult.FAILED
+        val session = composeSessionGate.activeSessionKey ?: return DraftSaveResult.SESSION_CHANGED
+        val draft = buildCurrentDraft() ?: return DraftSaveResult.EMPTY
+        val fingerprint = currentContentFingerprint(_blocks.value, _isSensitive.value)
+        val write = draftStore.save(pk, draft).await()
+        if (write.isFailure) return DraftSaveResult.FAILED
+        if (composeSessionGate.activeSessionKey != session || keyManager.getPublicKeyHex() != pk) {
+            return DraftSaveResult.SESSION_CHANGED
+        }
+        if (!draft.hadUnsavedMedia) _savedDraftFingerprint.value = fingerprint
+        return if (fingerprint == currentContentFingerprint(_blocks.value, _isSensitive.value)) {
+            DraftSaveResult.SAVED
+        } else {
+            DraftSaveResult.NEWER_EDITS
+        }
     }
 
     fun discardCurrentDraft() {

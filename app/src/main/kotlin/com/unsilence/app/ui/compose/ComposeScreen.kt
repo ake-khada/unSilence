@@ -188,7 +188,9 @@ fun ComposeScreen(
     val isFailed = sendState is SendState.Failed
     val keyboardController = LocalSoftwareKeyboardController.current
     var showCloseDraftSheet by remember { mutableStateOf(false) }
-    var saveNotice by remember { mutableStateOf<String?>(null) }
+    var closeAfterSave by remember(composeSessionKey) { mutableStateOf<Boolean?>(null) }
+    val saving = closeAfterSave != null
+    var saveNotice by remember(composeSessionKey) { mutableStateOf<String?>(null) }
     var initialized by remember(
         effectiveReplyToEventId,
         effectiveQuoteEventId,
@@ -201,7 +203,32 @@ fun ComposeScreen(
         onDismiss()
     }
 
+    fun saveDraft(andClose: Boolean) {
+        if (closeAfterSave != null) return
+        saveNotice = null
+        showCloseDraftSheet = false
+        closeAfterSave = andClose
+    }
+
+    LaunchedEffect(viewModel, composeSessionKey, closeAfterSave) {
+        val andClose = closeAfterSave ?: return@LaunchedEffect
+        when (viewModel.saveCurrentDraft()) {
+            DraftSaveResult.SAVED -> if (andClose) {
+                showSnackbar("Draft saved")
+                finishAndDismiss()
+            } else {
+                saveNotice = if (hasUnsavedMedia) "Draft saved without pending media" else "Draft saved"
+            }
+            DraftSaveResult.NEWER_EDITS -> saveNotice = "Earlier edits saved. Save again for the latest changes."
+            DraftSaveResult.EMPTY -> saveNotice = "Nothing to save"
+            DraftSaveResult.FAILED -> showSnackbar("Couldn’t save draft. Try again.")
+            DraftSaveResult.SESSION_CHANGED -> Unit
+        }
+        closeAfterSave = null
+    }
+
     fun requestDismiss() {
+        if (saving) return
         when {
             isConfirming -> viewModel.cancelSend()
             hasUnsavedDraftChanges && !isPublishing -> showCloseDraftSheet = true
@@ -251,6 +278,8 @@ fun ComposeScreen(
             ComposerBackAction.DISMISS -> finishAndDismiss()
         }
     }
+
+    BackHandler(enabled = saving) { /* Keep the editor until the save finishes. */ }
 
     LaunchedEffect(saveNotice) {
         if (saveNotice != null) {
@@ -675,9 +704,8 @@ fun ComposeScreen(
                         }
 
                         IconButton(
-                            onClick = {
-                                saveNotice = if (viewModel.saveCurrentDraft()) "Draft saved" else "Nothing to save"
-                            },
+                            onClick = { saveDraft(andClose = false) },
+                            enabled = !saving,
                             modifier = Modifier.size(44.dp),
                         ) {
                             Icon(
@@ -708,7 +736,7 @@ fun ComposeScreen(
                         // Post pill
                         Button(
                             onClick = { viewModel.requestPublish(isReply) },
-                            enabled = canPublish,
+                            enabled = canPublish && !saving,
                             shape = RoundedCornerShape(24.dp),
                             colors = ButtonDefaults.buttonColors(
                                 containerColor = BrandDeep,
@@ -963,12 +991,7 @@ fun ComposeScreen(
         CloseDraftSheet(
             hasDraftableContent = hasDraftableContent,
             hasUnsavedMedia = hasUnsavedMedia,
-            onSaveDraft = {
-                val saved = viewModel.saveCurrentDraft()
-                showCloseDraftSheet = false
-                if (saved) showSnackbar("Draft saved")
-                finishAndDismiss()
-            },
+            onSaveDraft = { saveDraft(andClose = true) },
             onDiscard = {
                 viewModel.discardCurrentDraft()
                 showCloseDraftSheet = false
