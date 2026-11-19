@@ -726,6 +726,7 @@ fun AppNavigation(
                 )
                 AppDestination.Filters -> com.unsilence.app.ui.profile.FiltersScreen(
                     onDismiss = navigator::pop,
+                    onOpenProfile = onAuthorClick,
                     navigationOwnsBack = true,
                 )
                 AppDestination.Keys -> com.unsilence.app.ui.settings.keys.KeysScreen(

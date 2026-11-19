@@ -39,6 +39,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import kotlinx.coroutines.delay
 import androidx.compose.ui.Alignment
@@ -74,6 +75,7 @@ private enum class MuteTab { USERS, WORDS, HASHTAGS }
 @Composable
 fun FiltersScreen(
     onDismiss: () -> Unit,
+    onOpenProfile: (String) -> Unit,
     navigationOwnsBack: Boolean = false,
     viewModel: FiltersViewModel = hiltViewModel(
         key = "filters-${LocalAppSessionKey.current}",
@@ -87,13 +89,10 @@ fun FiltersScreen(
     val muteSyncState by viewModel.muteSyncState.collectAsStateWithLifecycle()
     val profileVersion by viewModel.profileVersion.collectAsStateWithLifecycle()
 
-    var activeTab by remember { mutableStateOf(MuteTab.USERS) }
-    var searchQuery by remember { mutableStateOf("") }
-    var addInput by remember { mutableStateOf("") }
-    var showAdded by remember { mutableStateOf(false) }
-
-    // Clear inputs on tab switch
-    LaunchedEffect(activeTab) { searchQuery = ""; addInput = ""; showAdded = false }
+    var activeTab by rememberSaveable { mutableStateOf(MuteTab.USERS) }
+    var searchQuery by rememberSaveable(activeTab) { mutableStateOf("") }
+    var addInput by remember(activeTab) { mutableStateOf("") }
+    var showAdded by remember(activeTab) { mutableStateOf(false) }
 
     // Auto-clear checkmark after 1.2s
     LaunchedEffect(showAdded) {
@@ -253,6 +252,7 @@ fun FiltersScreen(
                                 MutedUserRow(
                                     pubkey = pubkey,
                                     profile = profile,
+                                    onOpenProfile = onOpenProfile,
                                     onRemove = { viewModel.unmuteUser(pubkey) },
                                 )
                             }
@@ -451,14 +451,16 @@ private fun SearchBar(query: String, onQueryChange: (String) -> Unit) {
 // ── Muted user row ──────────────────────────────────────────────────────
 
 @Composable
-private fun MutedUserRow(
+internal fun MutedUserRow(
     pubkey: String,
     profile: UserEntity?,
+    onOpenProfile: (String) -> Unit,
     onRemove: () -> Unit,
 ) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
+            .clickable(onClickLabel = "Open profile") { onOpenProfile(pubkey) }
             .padding(horizontal = Spacing.large, vertical = Spacing.small),
         verticalAlignment = Alignment.CenterVertically,
     ) {
