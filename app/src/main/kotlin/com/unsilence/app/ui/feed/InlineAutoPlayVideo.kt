@@ -35,6 +35,8 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.media3.common.Player
@@ -102,6 +104,7 @@ internal fun VideoThumbnailImage(
         mutableStateOf(thumbnailCache?.getCached(model.videoUrl))
     }
 
+    var measuredSize by remember { mutableStateOf(IntSize.Zero) }
     if (thumbnailCache != null) {
         // Track visibility for LRU eviction protection, including videos that
         // also have a poster. The first-frame cache is the reliable fallback
@@ -110,8 +113,10 @@ internal fun VideoThumbnailImage(
             thumbnailCache.markVisible(model.videoUrl)
             onDispose { thumbnailCache.markNotVisible(model.videoUrl) }
         }
-        LaunchedEffect(model.videoUrl, thumbnailCache) {
-            val resolved = thumbnail ?: thumbnailCache.getThumbnail(model.videoUrl)
+        LaunchedEffect(model.videoUrl, thumbnailCache, measuredSize, contentScale) {
+            if (measuredSize.width <= 0 || measuredSize.height <= 0) return@LaunchedEffect
+            val target = ThumbnailTarget(measuredSize, crop = contentScale == ContentScale.Crop)
+            val resolved = thumbnailCache.getThumbnail(model.videoUrl, target)
             if (resolved != null) {
                 thumbnail = resolved
                 currentOnAspectRatioResolved?.invoke(resolved.aspectRatio)
@@ -119,29 +124,31 @@ internal fun VideoThumbnailImage(
         }
     }
 
-    if (thumbnail != null) {
-        Image(
-            bitmap = thumbnail!!.bitmap.asImageBitmap(),
-            contentDescription = null,
-            contentScale = contentScale,
-            modifier = modifier,
-        )
-    }
+    Box(modifier.onSizeChanged { measuredSize = it }) {
+        if (thumbnail != null) {
+            Image(
+                bitmap = thumbnail!!.bitmap.asImageBitmap(),
+                contentDescription = null,
+                contentScale = contentScale,
+                modifier = Modifier.matchParentSize(),
+            )
+        }
 
-    if (!model.posterUrl.isNullOrBlank()) {
-        AsyncImage(
-            model = rememberFullWidthImageRequest(model.posterUrl, aspectRatio = requestAspectRatio),
-            contentDescription = null,
-            contentScale = contentScale,
-            modifier = modifier,
-            onSuccess = { state ->
-                val w = state.result.image.width
-                val h = state.result.image.height
-                if (w > 0 && h > 0) {
-                    onAspectRatioResolved?.invoke(w.toFloat() / h)
-                }
-            },
-        )
+        if (!model.posterUrl.isNullOrBlank()) {
+            AsyncImage(
+                model = rememberFullWidthImageRequest(model.posterUrl, aspectRatio = requestAspectRatio),
+                contentDescription = null,
+                contentScale = contentScale,
+                modifier = Modifier.matchParentSize(),
+                onSuccess = { state ->
+                    val w = state.result.image.width
+                    val h = state.result.image.height
+                    if (w > 0 && h > 0) {
+                        onAspectRatioResolved?.invoke(w.toFloat() / h)
+                    }
+                },
+            )
+        }
     }
     // While loading (thumbnail == null and poster not ready): dark placeholder shows through from parent Box
 }

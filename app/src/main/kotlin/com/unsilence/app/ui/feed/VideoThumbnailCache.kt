@@ -1,15 +1,18 @@
 package com.unsilence.app.ui.feed
 
+import android.content.Context
 import android.graphics.Bitmap
 import android.media.MediaMetadataRetriever
-import android.net.Uri
 import android.os.Build
 import android.util.Log
+import androidx.core.graphics.scale
+import androidx.core.net.toUri
 import com.unsilence.app.data.media.GuardedRemoteMediaDataSource
 import com.unsilence.app.data.network.parseAllowedUntrustedHttpUrl
 import com.unsilence.app.di.MediaClient
 import dagger.hilt.android.qualifiers.ApplicationContext
-import android.content.Context
+import androidx.compose.ui.unit.IntSize
+import kotlin.math.roundToInt
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Deferred
@@ -27,7 +30,6 @@ import javax.inject.Singleton
 private const val TAG = "VideoThumbCache"
 private const val MAX_ENTRIES = 30
 private const val MAX_BITMAP_BYTES = 48L * 1024 * 1024 // 48MB
-private const val DOWNSAMPLE = 2 // dst-dimension divisor — halves each dimension → ~4x fewer pixels
 private const val REMOTE_MMR_CONCURRENCY = 3
 
 /**
@@ -35,8 +37,28 @@ private const val REMOTE_MMR_CONCURRENCY = 3
  */
 data class VideoThumbnail(
     val bitmap: Bitmap,
-    val aspectRatio: Float,  // width / height
+    val aspectRatio: Float = bitmap.width.toFloat() / bitmap.height,
+    internal val sourceSize: IntSize = IntSize(bitmap.width, bitmap.height),
+    internal val decodedFor: IntSize = sourceSize,
 )
+
+internal data class ThumbnailTarget(val size: IntSize, val crop: Boolean = false) {
+    fun frameSize(source: IntSize): IntSize {
+        val horizontal = size.width.toDouble() / source.width
+        val vertical = size.height.toDouble() / source.height
+        val scale = (if (crop) maxOf(horizontal, vertical) else minOf(horizontal, vertical)).coerceAtMost(0.5)
+        return IntSize(
+            (source.width * scale).roundToInt().coerceIn(1, (source.width / 2).coerceAtLeast(1)),
+            (source.height * scale).roundToInt().coerceIn(1, (source.height / 2).coerceAtLeast(1)),
+        )
+    }
+
+    fun fits(frame: VideoThumbnail): Boolean {
+        val needed = frameSize(frame.sourceSize)
+        // Compare requested box sizes. The codec can round the output or correct its pixel aspect.
+        return frame.decodedFor.width >= needed.width && frame.decodedFor.height >= needed.height
+    }
+}
 
 internal sealed interface VideoThumbnailInput {
     data class Remote(val url: HttpUrl) : VideoThumbnailInput
@@ -62,7 +84,7 @@ internal fun classifyVideoThumbnailInput(raw: String): VideoThumbnailInput {
 }
 
 internal fun interface VideoThumbnailFrameExtractor {
-    fun extract(input: VideoThumbnailInput): VideoThumbnail?
+    fun extract(input: VideoThumbnailInput, target: ThumbnailTarget): VideoThumbnail?
 }
 
 /**
@@ -71,26 +93,33 @@ internal fun interface VideoThumbnailFrameExtractor {
  * Remote extraction gives [MediaMetadataRetriever] a bounded [android.media.MediaDataSource]
  * backed by the guarded media client. The platform never receives the attacker-controlled URL.
  *
- * Each URL is fetched at most once; the result (including null on failure) is cached.
+ * A URL shares one extraction at a time and one cached frame across surfaces.
  *
  * Bounded: LRU eviction at [MAX_ENTRIES] entries OR [MAX_BITMAP_BYTES] total bitmap bytes,
  * whichever hits first. URLs in [visibleUrls] are never evicted.
- * Bitmaps are decoded at half source dimensions via [MediaMetadataRetriever.getScaledFrameAtTime]
+ * Decode to the requested display size, up to half source dimensions, via [MediaMetadataRetriever.getScaledFrameAtTime]
  * (API 27+) or [Bitmap.createScaledBitmap] fallback — no JPEG round-trip.
  */
 @Singleton
 @androidx.compose.runtime.Stable
-class VideoThumbnailCache private constructor(
+class VideoThumbnailCache internal constructor(
     private val frameExtractor: VideoThumbnailFrameExtractor,
+    private val warmTarget: () -> ThumbnailTarget,
 ) {
     @Inject
     constructor(
         @ApplicationContext context: Context,
         @MediaClient mediaClient: OkHttpClient,
-    ) : this(PlatformVideoThumbnailFrameExtractor(context, mediaClient))
+    ) : this(PlatformVideoThumbnailFrameExtractor(context, mediaClient), {
+        val metrics = context.resources.displayMetrics
+        ThumbnailTarget(IntSize(metrics.widthPixels.coerceAtLeast(1), metrics.heightPixels.coerceAtLeast(1)))
+    })
 
     internal constructor(extractFrame: (VideoThumbnailInput) -> VideoThumbnail?) :
-        this(VideoThumbnailFrameExtractor(extractFrame))
+        this(
+            VideoThumbnailFrameExtractor { input, _ -> extractFrame(input) },
+            { ThumbnailTarget(IntSize(Int.MAX_VALUE, Int.MAX_VALUE)) },
+        )
 
     private val cache = ConcurrentHashMap<String, VideoThumbnail?>()
     private val failedUrls = ConcurrentHashMap.newKeySet<String>() // negative cache — skip re-stall
@@ -135,7 +164,7 @@ class VideoThumbnailCache private constructor(
      */
     suspend fun warmThumbnail(url: String) {
         if (cache.containsKey(url) || url in failedUrls) return
-        thumbnailJob(url).await()
+        thumbnailJob(url, target = null).await()
     }
 
     /** Return a cached thumbnail immediately, or null if not yet fetched. No I/O. */
@@ -151,43 +180,43 @@ class VideoThumbnailCache private constructor(
      * so visible cards repaint when a pre-viewport warm completes.
      */
     suspend fun getThumbnail(videoUrl: String): VideoThumbnail? {
-        cache[videoUrl]?.let {
-            lastAccessedAt[videoUrl] = System.nanoTime()
-            return it
-        }
-        // Negative cache: skip URLs that already failed (DNS-blocked, timeout)
-        if (videoUrl in failedUrls) {
-            return null
-        }
+        getCached(videoUrl)?.let { return it }
+        if (videoUrl in failedUrls) return null
+        return thumbnailJob(videoUrl, target = null).await()
+    }
 
-        return thumbnailJob(videoUrl).await()?.also {
-            lastAccessedAt[videoUrl] = System.nanoTime()
+    internal suspend fun getThumbnail(videoUrl: String, target: ThumbnailTarget): VideoThumbnail? {
+        while (true) {
+            val cached = getCached(videoUrl)
+            if (cached != null && target.fits(cached)) return cached
+            if (videoUrl in failedUrls) return cached
+
+            val pending = thumbnailJob(videoUrl, target)
+            val frame = pending.await() ?: return getCached(videoUrl)
+            if (target.fits(frame)) return frame
+            // We joined a smaller request. Keep its frame visible during the upgrade.
+            inFlight.remove(videoUrl, pending)
         }
     }
 
-    private fun thumbnailJob(videoUrl: String): Deferred<VideoThumbnail?> {
-        val existing = inFlight[videoUrl]
-        if (existing != null) {
-            return existing
-        }
-
+    private fun thumbnailJob(videoUrl: String, target: ThumbnailTarget?): Deferred<VideoThumbnail?> {
+        inFlight[videoUrl]?.let { return it }
         val deferred = extractionScope.async(start = CoroutineStart.LAZY) {
-            extractThumbnail(videoUrl)
+            extractThumbnail(videoUrl, target)
         }
         val raced = inFlight.putIfAbsent(videoUrl, deferred)
         if (raced != null) {
             deferred.cancel()
             return raced
         }
+        deferred.invokeOnCompletion { inFlight.remove(videoUrl, deferred) }
         deferred.start()
-        deferred.invokeOnCompletion {
-            inFlight.remove(videoUrl, deferred)
-        }
         return deferred
     }
 
-    private suspend fun extractThumbnail(videoUrl: String): VideoThumbnail? {
-        cache[videoUrl]?.let { return it }
+    private suspend fun extractThumbnail(videoUrl: String, target: ThumbnailTarget?): VideoThumbnail? {
+        // A warm request has no measured surface. It can use any existing frame.
+        cache[videoUrl]?.let { if (target == null || target.fits(it)) return it }
         if (videoUrl in failedUrls) return null
         val input = classifyVideoThumbnailInput(videoUrl)
         if (input is VideoThumbnailInput.Rejected) {
@@ -195,6 +224,7 @@ class VideoThumbnailCache private constructor(
             return null
         }
         val isRemote = input is VideoThumbnailInput.Remote
+        val decodeTarget = target ?: warmTarget()
 
         return withContext(Dispatchers.IO) {
             try {
@@ -205,7 +235,7 @@ class VideoThumbnailCache private constructor(
                     // negative cache before they get a turn.
                     remoteMmrSemaphore.acquire()
                     val result = try {
-                        withTimeoutOrNull(8_000L) { frameExtractor.extract(input) }
+                        withTimeoutOrNull(8_000L) { frameExtractor.extract(input, decodeTarget) }
                     } finally {
                         remoteMmrSemaphore.release()
                     }
@@ -213,7 +243,7 @@ class VideoThumbnailCache private constructor(
                     result?.also { rememberThumbnail(videoUrl, it) }
                 } else {
                     // Local file: no concurrency limit, no timeout
-                    frameExtractor.extract(input)?.also { rememberThumbnail(videoUrl, it) }
+                    frameExtractor.extract(input, decodeTarget)?.also { rememberThumbnail(videoUrl, it) }
                 }
             } catch (e: kotlin.coroutines.cancellation.CancellationException) {
                 throw e
@@ -267,20 +297,16 @@ private class PlatformVideoThumbnailFrameExtractor(
     private val context: Context,
     private val mediaClient: OkHttpClient,
 ) : VideoThumbnailFrameExtractor {
-    override fun extract(input: VideoThumbnailInput): VideoThumbnail? {
+    override fun extract(input: VideoThumbnailInput, target: ThumbnailTarget): VideoThumbnail? {
         if (input is VideoThumbnailInput.Rejected) return null
         MediaMetadataRetriever().use { retriever ->
             when (input) {
                 is VideoThumbnailInput.Remote -> setGuardedRemoteSource(retriever, input.url)
-                is VideoThumbnailInput.LocalUri -> retriever.setDataSource(context, Uri.parse(input.raw))
+                is VideoThumbnailInput.LocalUri -> retriever.setDataSource(context, input.raw.toUri())
                 is VideoThumbnailInput.LocalPath -> retriever.setDataSource(input.raw)
                 VideoThumbnailInput.Rejected -> return null
             }
-            val frame = decodeScaledFrame(retriever) ?: return null
-            return VideoThumbnail(
-                bitmap = frame,
-                aspectRatio = frame.width.toFloat() / frame.height,
-            )
+            return decodeScaledFrame(retriever, target)
         }
     }
 
@@ -295,34 +321,27 @@ private class PlatformVideoThumbnailFrameExtractor(
         // MediaMetadataRetriever owns and closes a successfully attached MediaDataSource.
     }
 
-    /**
-     * Decode the first keyframe already downsampled. On API 27+ the codec emits the
-     * frame at target size — the full-res bitmap is NEVER allocated (no ~33MB transient
-     * for a 4K source) and there is no JPEG encode/decode round-trip. dstW/dstH are a
-     * bounding box; the result keeps the source aspect ratio, so a transposed box on a
-     * rotated video is still correct. API 26 / missing-metadata path falls back to one
-     * native bilinear downscale — still no round-trip.
-     */
-    private fun decodeScaledFrame(retriever: MediaMetadataRetriever): Bitmap? {
+    private fun decodeScaledFrame(retriever: MediaMetadataRetriever, target: ThumbnailTarget): VideoThumbnail? {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
-            val w = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_WIDTH)?.toIntOrNull() ?: 0
-            val h = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_HEIGHT)?.toIntOrNull() ?: 0
-            if (w > 0 && h > 0) {
-                retriever.getScaledFrameAtTime(
-                    0,
-                    MediaMetadataRetriever.OPTION_CLOSEST_SYNC,
-                    (w / DOWNSAMPLE).coerceAtLeast(1),
-                    (h / DOWNSAMPLE).coerceAtLeast(1),
-                )?.let { return it }
+            val width = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_WIDTH)?.toIntOrNull()
+            val height = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_HEIGHT)?.toIntOrNull()
+            if (width != null && width > 0 && height != null && height > 0) {
+                val rotation = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_ROTATION)?.toIntOrNull()
+                val source = if (rotation == 90 || rotation == 270) IntSize(height, width) else IntSize(width, height)
+                val size = target.frameSize(source)
+                val frame = retriever.getScaledFrameAtTime(
+                    0, MediaMetadataRetriever.OPTION_CLOSEST_SYNC, size.width, size.height,
+                )
+                if (frame != null) return VideoThumbnail(frame, sourceSize = source, decodedFor = size)
             }
         }
+
         val full = retriever.getFrameAtTime(0, MediaMetadataRetriever.OPTION_CLOSEST_SYNC) ?: return null
-        if (full.allocationByteCount < 200 * 1024) return full
-        return Bitmap.createScaledBitmap(
-            full,
-            (full.width / DOWNSAMPLE).coerceAtLeast(1),
-            (full.height / DOWNSAMPLE).coerceAtLeast(1),
-            true,
-        ).also { if (it !== full) full.recycle() }
+        val source = IntSize(full.width, full.height)
+        if (full.allocationByteCount < 200 * 1024) return VideoThumbnail(full, sourceSize = source)
+        val size = target.frameSize(source)
+        val scaled = full.scale(size.width, size.height, filter = true)
+        if (scaled !== full) full.recycle()
+        return VideoThumbnail(scaled, sourceSize = source, decodedFor = size)
     }
 }
