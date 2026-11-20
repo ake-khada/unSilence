@@ -119,6 +119,7 @@ fun LazyListScope.eventFeedItems(
     newEventIds: Set<String> = emptySet(),
     onNewPostAnimated: ((String) -> Unit)? = null,
     showThreadParents: Boolean = false,
+    afterRow: (@Composable (FeedRow) -> Unit)? = null,
 ) {
     items(
         items = events,
@@ -151,6 +152,7 @@ fun LazyListScope.eventFeedItems(
             )
         }
         FeedDivider()
+        afterRow?.invoke(row)
     }
 }
 

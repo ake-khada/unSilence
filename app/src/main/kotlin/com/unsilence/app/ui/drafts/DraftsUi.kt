@@ -171,6 +171,7 @@ fun CloseDraftSheet(
     onSaveDraft: () -> Unit,
     onDiscard: () -> Unit,
     onContinueEditing: () -> Unit,
+    hasSavedDraft: Boolean = false,
 ) {
     ModalBottomSheet(
         onDismissRequest = onContinueEditing,
@@ -191,6 +192,8 @@ fun CloseDraftSheet(
             Text(
                 text = if (hasUnsavedMedia) {
                     "Only text and uploaded media can be saved. Pending or failed media will be discarded."
+                } else if (hasSavedDraft) {
+                    "Save your changes or delete the saved draft."
                 } else {
                     "Save this as a draft or discard it."
                 },
@@ -224,7 +227,7 @@ fun CloseDraftSheet(
                 colors = ButtonDefaults.outlinedButtonColors(contentColor = Like),
                 modifier = Modifier.fillMaxWidth(),
             ) {
-                Text("Discard")
+                Text(if (hasSavedDraft) "Delete draft" else "Discard")
             }
             TextButton(
                 onClick = onContinueEditing,
@@ -393,7 +396,7 @@ private fun draftLabel(context: DraftContext): String = when (context) {
     is DraftContext.ArticleComment -> "Article comment"
 }
 
-private fun draftDetail(draft: Draft): String? {
+internal fun draftDetail(draft: Draft): String? {
     val media = when (draft.attachmentCount) {
         0 -> null
         1 -> "1 uploaded attachment"

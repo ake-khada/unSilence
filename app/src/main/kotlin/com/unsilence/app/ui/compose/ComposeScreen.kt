@@ -43,11 +43,13 @@ import androidx.compose.material.icons.filled.WarningAmber
 import androidx.compose.material.icons.filled.ArrowUpward
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.outlined.Delete
 import androidx.compose.material.icons.filled.ErrorOutline
 import androidx.compose.material.icons.filled.HourglassEmpty
 import androidx.compose.material.icons.filled.Save
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.outlined.Poll
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Icon
@@ -63,6 +65,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -90,6 +93,9 @@ import com.unsilence.app.ui.common.IdentIcon
 import com.unsilence.app.ui.common.LocalAppSessionKey
 import com.unsilence.app.ui.common.LocalShowSnackbar
 import com.unsilence.app.ui.common.rememberAvatarImageRequest
+import com.unsilence.app.ui.drafts.DraftAuthorHeader
+import com.unsilence.app.ui.drafts.draftBounds
+import com.unsilence.app.ui.drafts.rememberDraftReadyForFocus
 import com.unsilence.app.ui.drafts.CloseDraftSheet
 import com.unsilence.app.ui.feed.ComposePreviewCard
 import com.unsilence.app.ui.feed.NoteActionsViewModel
@@ -106,10 +112,17 @@ import com.unsilence.app.ui.theme.TextSecondary
 import com.unsilence.app.ui.theme.Warn
 import kotlinx.coroutines.delay
 
-internal enum class ComposerBackAction { DISMISS, CONFIRM_DISCARD }
+internal enum class ComposerBackAction { DISMISS, CONFIRM_DISCARD, CONFIRM_DELETE }
+private enum class DraftDeletion { CONFIRM, DELETING, FAILED }
 
-internal fun composerBackAction(hasUnsavedDraftChanges: Boolean): ComposerBackAction =
-    if (hasUnsavedDraftChanges) ComposerBackAction.CONFIRM_DISCARD else ComposerBackAction.DISMISS
+internal fun composerBackAction(
+    hasUnsavedDraftChanges: Boolean,
+    clearedSavedDraft: Boolean = false,
+): ComposerBackAction = when {
+    clearedSavedDraft -> ComposerBackAction.CONFIRM_DELETE
+    hasUnsavedDraftChanges -> ComposerBackAction.CONFIRM_DISCARD
+    else -> ComposerBackAction.DISMISS
+}
 
 @Composable
 fun ComposeScreen(
@@ -125,9 +138,9 @@ fun ComposeScreen(
     actionsViewModel: NoteActionsViewModel = hiltViewModel(
         key = "note-actions-${LocalAppSessionKey.current}",
     ),
+    draftOrigin: String? = null,
 ) {
     val pubkeyHex      = viewModel.pubkeyHex
-    val userAvatarUrl by viewModel.userAvatarUrl.collectAsStateWithLifecycle()
     val userEntity    by viewModel.userEntity.collectAsStateWithLifecycle()
     val blocks        by viewModel.blocks.collectAsStateWithLifecycle()
     val pollDraft     by viewModel.pollDraft.collectAsStateWithLifecycle()
@@ -198,6 +211,12 @@ fun ComposeScreen(
         initialDraft?.key,
     ) { mutableStateOf(false) }
 
+    val savedKey by viewModel.savedDraftKey.collectAsStateWithLifecycle()
+    val draftKey = savedKey ?: initialDraft?.key
+    val clearedSavedDraft = initialized && draftKey != null && !pollDraft.enabled && !viewModel.hasAnyContent(blocks)
+    val backAction = composerBackAction(hasUnsavedDraftChanges, clearedSavedDraft)
+    var deletion by rememberSaveable(composeSessionKey) { mutableStateOf<DraftDeletion?>(null) }
+
     fun finishAndDismiss() {
         viewModel.finishComposeSession(composeSessionKey)
         onDismiss()
@@ -227,12 +246,30 @@ fun ComposeScreen(
         closeAfterSave = null
     }
 
+    LaunchedEffect(viewModel, composeSessionKey, initialized, deletion) {
+        if (!initialized || deletion != DraftDeletion.DELETING) return@LaunchedEffect
+        val key = draftKey ?: return@LaunchedEffect
+        when (viewModel.deleteSavedDraft(key, composeSessionKey)) {
+            DraftDeleteResult.DELETED -> {
+                deletion = null
+                showSnackbar("Draft deleted")
+                finishAndDismiss()
+            }
+            DraftDeleteResult.FAILED -> deletion = DraftDeletion.FAILED
+            DraftDeleteResult.SESSION_CHANGED -> deletion = null
+        }
+    }
+
     fun requestDismiss() {
-        if (saving) return
-        when {
-            isConfirming -> viewModel.cancelSend()
-            hasUnsavedDraftChanges && !isPublishing -> showCloseDraftSheet = true
-            else -> finishAndDismiss()
+        if (saving || isPublishing || deletion != null) return
+        if (isConfirming) {
+            viewModel.cancelSend()
+            return
+        }
+        when (backAction) {
+            ComposerBackAction.CONFIRM_DELETE -> deletion = DraftDeletion.CONFIRM
+            ComposerBackAction.CONFIRM_DISCARD -> showCloseDraftSheet = true
+            ComposerBackAction.DISMISS -> finishAndDismiss()
         }
     }
 
@@ -272,12 +309,7 @@ fun ComposeScreen(
     // delegates back to NavDisplay, allowing the normal predictive preview.
     // Legacy inline hosts still need their own dismiss handler.
     BackHandler(enabled = sendState is SendState.Composing &&
-        (hasUnsavedDraftChanges || !navigationOwnsBack)) {
-        when (composerBackAction(hasUnsavedDraftChanges)) {
-            ComposerBackAction.CONFIRM_DISCARD -> showCloseDraftSheet = true
-            ComposerBackAction.DISMISS -> finishAndDismiss()
-        }
-    }
+        (backAction != ComposerBackAction.DISMISS || !navigationOwnsBack), onBack = ::requestDismiss)
 
     BackHandler(enabled = saving) { /* Keep the editor until the save finishes. */ }
 
@@ -332,6 +364,11 @@ fun ComposeScreen(
 
                 Spacer(Modifier.weight(1f))
 
+                if (initialized && draftKey != null && sendState is SendState.Composing) {
+                    IconButton(onClick = { deletion = DraftDeletion.CONFIRM }, enabled = !saving) {
+                        Icon(Icons.Outlined.Delete, contentDescription = "Delete draft", tint = TextSecondary)
+                    }
+                }
                 // No close button during Publishing — event already broadcast
                 if (!isPublishing) {
                     IconButton(onClick = {
@@ -405,7 +442,7 @@ fun ComposeScreen(
                             text       = parentText.take(140),
                             color      = Color.White.copy(alpha = 0.82f),
                             style = AppTextStyles.bodySmall,
-                            maxLines   = 2,
+                            maxLines   = if (draftOrigin != null) 1 else 2,
                             overflow   = TextOverflow.Ellipsis,
                         )
                     }
@@ -415,69 +452,15 @@ fun ComposeScreen(
             // ── Body area: Composing vs Confirming ──────────────────────────
             when (val state = sendState) {
                 is SendState.Composing -> {
-                    // ── Author header ────────────────────────────────────────
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(horizontal = Spacing.medium, vertical = Spacing.small),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        Box(
-                            modifier = Modifier
-                                .size(Sizing.avatar)
-                                .clip(CircleShape),
-                        ) {
-                            if (pubkeyHex != null) {
-                                IdentIcon(pubkey = pubkeyHex, modifier = Modifier.size(Sizing.avatar))
-                            } else {
-                                Box(modifier = Modifier.size(Sizing.avatar).background(com.unsilence.app.ui.theme.Surface2))
-                            }
-                            if (!userAvatarUrl.isNullOrBlank()) {
-                                AsyncImage(
-                                    model              = rememberAvatarImageRequest(userAvatarUrl, Sizing.avatar, pubkeyHex),
-                                    contentDescription = null,
-                                    contentScale       = ContentScale.Crop,
-                                    modifier           = Modifier.fillMaxSize(),
-                                )
-                            }
-                        }
-
-                        Spacer(Modifier.width(Spacing.small))
-
-                        Column {
-                            val displayName = userEntity?.displayName?.takeIf { it.isNotBlank() }
-                                ?: userEntity?.name?.takeIf { it.isNotBlank() }
-                                ?: pubkeyHex?.let { "${it.take(6)}…${it.takeLast(4)}" } ?: ""
-                            Text(
-                                text       = displayName,
-                                color      = Color.White,
-                                style = AppTextStyles.body,
-                                fontWeight = FontWeight.SemiBold,
-                                maxLines   = 1,
-                                overflow   = TextOverflow.Ellipsis,
-                            )
-                            val nip05 = userEntity?.nip05
-                            if (!nip05.isNullOrBlank()) {
-                                Text(
-                                    text     = nip05,
-                                    color    = TextSecondary,
-                                    style = AppTextStyles.caption,
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis,
-                                )
-                            }
-                        }
-                    }
-
-                    // ── Block list ──────────────────────────────────────────
+                    // The expanded draft keeps the same author header and text insets as the reading card.
                     Column(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .weight(1f)
-                            .verticalScroll(rememberScrollState())
-                            .padding(horizontal = Spacing.medium),
+                        modifier = Modifier.fillMaxWidth().weight(1f).draftBounds(draftOrigin)
+                            .background(Black).verticalScroll(rememberScrollState())
+                            .padding(horizontal = Spacing.medium, vertical = Spacing.small),
                         verticalArrangement = Arrangement.spacedBy(Spacing.small),
                     ) {
+                        DraftAuthorHeader(pubkeyHex, userEntity, showDraftMark = initialDraft != null)
+                        val readyForFocus = rememberDraftReadyForFocus(draftOrigin)
                         val firstTextId = blocks.firstOrNull { it is ComposeBlock.Text }?.id
                         blocks.forEach { block ->
                             key(block.id) {
@@ -491,6 +474,8 @@ fun ComposeScreen(
                                         TextBlock(
                                             blockId = block.id,
                                             initialText = block.content,
+                                            initialSelection = viewModel.selectionFor(block.id),
+                                            onSelectionChange = { viewModel.updateSelection(block.id, it) },
                                             onTextChange = { viewModel.updateTextBlock(block.id, it) },
                                             onFocused = { viewModel.setFocusedBlock(it) },
                                             pendingInsert = insertForBlock,
@@ -498,7 +483,9 @@ fun ComposeScreen(
                                                 if (mentionForBlock != null) viewModel.consumeMentionInsert()
                                                 else viewModel.consumeEmojiInsert()
                                             },
-                                            autoFocus = true,
+                                            autoFocus = initialized && readyForFocus && if (initialDraft != null) {
+                                                block.id == (viewModel.restoredFocusId ?: firstTextId)
+                                            } else block.id == blocks.lastOrNull { it is ComposeBlock.Text }?.id,
                                             placeholder = when {
                                                 block.id != firstTextId -> ""
                                                 isReply -> "Write your reply\u2026"
@@ -992,14 +979,34 @@ fun ComposeScreen(
             hasDraftableContent = hasDraftableContent,
             hasUnsavedMedia = hasUnsavedMedia,
             onSaveDraft = { saveDraft(andClose = true) },
+            hasSavedDraft = draftKey != null,
             onDiscard = {
-                viewModel.discardCurrentDraft()
                 showCloseDraftSheet = false
-                finishAndDismiss()
+                if (draftKey != null) deletion = DraftDeletion.DELETING else finishAndDismiss()
             },
             onContinueEditing = { showCloseDraftSheet = false },
         )
     }
+    if (deletion != null) {
+        val canRespond = deletion != DraftDeletion.DELETING
+        AlertDialog(
+            onDismissRequest = { if (canRespond) deletion = null },
+            title = { Text("Delete draft?") },
+            text = {
+                Text(if (deletion == DraftDeletion.FAILED) "Couldn’t delete draft. Try again."
+                    else "This will remove the saved draft from this device.")
+            },
+            confirmButton = {
+                TextButton(onClick = { deletion = DraftDeletion.DELETING }, enabled = canRespond) {
+                    Text("Delete draft", color = Like)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { deletion = null }, enabled = canRespond) { Text("Continue editing") }
+            },
+        )
+    }
+
 }
 
 @Composable

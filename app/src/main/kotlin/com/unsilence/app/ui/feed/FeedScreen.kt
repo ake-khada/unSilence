@@ -40,9 +40,11 @@ import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import com.unsilence.app.ui.common.PullThresholdFeedback
 import com.unsilence.app.ui.shared.rememberCardWotLookup
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -58,6 +60,14 @@ import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.compose.ui.platform.LocalWindowInfo
 import androidx.compose.ui.unit.IntOffset
+import com.unsilence.app.data.drafts.Draft
+import com.unsilence.app.data.drafts.feedDraft
+import com.unsilence.app.data.drafts.replyDraftsByParent
+import com.unsilence.app.ui.drafts.InlineDraftCard
+import com.unsilence.app.ui.drafts.InlineReplyDrafts
+import com.unsilence.app.ui.drafts.draftBounds
+import com.unsilence.app.ui.drafts.LocalDraftEntry
+import androidx.compose.material3.FilledTonalButton
 import com.unsilence.app.data.memory.FeedRow
 import com.unsilence.app.data.memory.toEventModel
 import com.unsilence.app.data.memory.SensitiveContentMode
@@ -138,6 +148,11 @@ fun FeedScreen(
     immersiveThreadViewModel: ThreadViewModel = hiltViewModel(
         key = "immersive-thread-${LocalAppSessionKey.current}",
     ),
+    drafts: List<Draft> = emptyList(),
+    onResumeDraft: (String, String) -> Unit = { _, _ -> },
+    onHideDraft: suspend (Draft) -> Boolean = { false },
+    onShowDrafts: () -> Unit = {},
+    showComposeControls: Boolean = true,
 ) {
     com.unsilence.app.ui.shared.ObserveDisplayWindowLifecycle(viewModel.displayWindowReporter)
     LifecycleResumeEffect(viewModel) {
@@ -175,8 +190,12 @@ fun FeedScreen(
     val coldStartState by viewModel.coldStartState.collectAsStateWithLifecycle()
     val trustedHydrationFailed by viewModel.trustedHydrationFailed.collectAsStateWithLifecycle()
     val sensitiveMode  by viewModel.sensitiveContentMode.collectAsStateWithLifecycle()
+    val standalone = remember(drafts) { drafts.feedDraft() }
+    val replies = remember(drafts) { drafts.replyDraftsByParent() }
+    val headerCount = if (standalone != null) 1 else 0
     val listState = rememberFeedScrollState(
         feedEvents,
+        leadingItems = headerCount,
         restorationReady = presentation.restorationReady,
         restorationScope = remember(presentation.selection) {
             presentation.selection?.scrollRestorationScope()
@@ -186,6 +205,20 @@ fun FeedScreen(
     val scrollScope = rememberCoroutineScope()
     val cardWidthPx = LocalWindowInfo.current.containerSize.width
 
+
+    val owner = actionsViewModel.currentPubkey
+    val standaloneCard: (@Composable () -> Unit)? = standalone?.let { draft ->
+        {
+            InlineDraftCard(draft, owner, owner?.let { collectProfileAsState(it, viewModel::profileFlow) },
+                "feed-slot", onResumeDraft,
+                onHide = {
+                    scrollScope.launch {
+                        if (!onHideDraft(draft)) showSnackbar("Couldn’t hide draft. Try again.")
+                    }
+                },
+                onShowDrafts = onShowDrafts.takeIf { drafts.size > 1 })
+        }
+    }
 
     // ── Long-press bottom sheet state ────────────────────────────────────────
     var actionsRow by remember { mutableStateOf<FeedRow?>(null) }
@@ -312,6 +345,13 @@ fun FeedScreen(
     // NOT flip _isAtTop false.  isScrollInProgress is true only during a
     // user drag/fling, never during a layout-driven index shift.
     val isAtTop by viewModel.isAtTop.collectAsStateWithLifecycle()
+    var previousHeaderCount by remember { mutableIntStateOf(headerCount) }
+    LaunchedEffect(headerCount) {
+        if (previousHeaderCount == 0 && headerCount > 0 && isAtTop && !listState.isScrollInProgress) {
+            listState.requestScrollToItem(0)
+        }
+        previousHeaderCount = headerCount
+    }
 
     LaunchedEffect(listState) {
         var wasScrolling = false
@@ -464,6 +504,8 @@ fun FeedScreen(
                     modifier = Modifier.fillMaxWidth(),
                     contentPadding = PaddingValues(top = totalTopPadding, bottom = staticBottomPadding),
                 ) {
+                    // A non-event key keeps the private draft out of viewport and relay ID sets.
+                    if (events.isNotEmpty() && standaloneCard != null) item(key = -1) { standaloneCard() }
                     eventFeedItems(
                         events = events,
                         engagement = engagement,
@@ -472,6 +514,11 @@ fun FeedScreen(
                         newEventIds = liveArrivalIds,
                         onNewPostAnimated = { viewModel.clearLiveArrival(it) },
                         showThreadParents = showThreadParents,
+                        afterRow = if (replies.isEmpty()) null else { row ->
+                            val target = if (row.kind == 6 || row.kind == 16)
+                                actionsViewModel.getEventModel(row.id)?.navigateId ?: row.id else row.id
+                            InlineReplyDrafts(replies[target], owner, viewModel::profileFlow, row.id, 1, onResumeDraft)
+                        },
                     )
 
                     if (currentFeedType is FeedType.Global &&
@@ -538,7 +585,7 @@ fun FeedScreen(
                 // Viewport tracking — warm-zone hydration + auto-paging.
                 // _isAtTop is driven by the gesture-based snapshotFlow above,
                 // NOT from this sampled index (which drifts on prepends).
-                ResumedEffect(events, cardWidthPx, contentFilter) {
+                ResumedEffect(events, cardWidthPx, contentFilter, headerCount) {
                     if (events.isNotEmpty() && cardWidthPx > 0) {
                         val info = listState.layoutInfo
                         val first = info.visibleItemsInfo.firstOrNull()?.index
@@ -546,8 +593,8 @@ fun FeedScreen(
                         val last = info.visibleItemsInfo.lastOrNull()?.index
                             ?: (first + 8).coerceAtMost(events.lastIndex)
                         viewModel.onViewportChanged(
-                            first = first,
-                            last = last,
+                            first = (first - headerCount).coerceAtLeast(0),
+                            last = (last - headerCount).coerceAtLeast(0),
                             cardWidthPx = cardWidthPx,
                             visibleIds = info.visibleItemsInfo.mapNotNull { it.key as? String }.toSet(),
                         )
@@ -555,13 +602,14 @@ fun FeedScreen(
                 }
 
                 @OptIn(kotlinx.coroutines.FlowPreview::class)
-                ResumedEffect(Unit) {
+                ResumedEffect(headerCount) {
                     snapshotFlow {
                         val info = listState.layoutInfo
                         val first = info.visibleItemsInfo.firstOrNull()?.index ?: 0
                         val last = info.visibleItemsInfo.lastOrNull()?.index ?: 0
                         val total = info.totalItemsCount
-                        FeedViewport(first, last, total, isLoadingMore, cardWidthPx,
+                        FeedViewport((first - headerCount).coerceAtLeast(0), (last - headerCount).coerceAtLeast(0),
+                            total - headerCount, isLoadingMore, cardWidthPx,
                             info.visibleItemsInfo.mapNotNull { it.key as? String }.toSet())
                     }.sample(100).collect { viewport ->
                         viewModel.onViewportChanged(
@@ -587,6 +635,23 @@ fun FeedScreen(
 
         // ── Tab row overlay (slides with top bar via offset, no height collapse) ─
         if (!immersiveMode) {
+            if (events.isEmpty() && standaloneCard != null) {
+                Box(Modifier.fillMaxWidth().padding(top = totalTopPadding)) { standaloneCard() }
+            }
+            if (standalone != null && events.isNotEmpty() && showComposeControls) {
+                val slotOffscreen by remember(listState) {
+                    derivedStateOf { listState.firstVisibleItemIndex > 0 }
+                }
+                if (slotOffscreen) {
+                    val origin = "${LocalDraftEntry.current}/feed-shortcut/${standalone.key}"
+                    FilledTonalButton(
+                        onClick = { onResumeDraft(standalone.key, origin) },
+                        modifier = Modifier.align(Alignment.BottomEnd)
+                            .padding(end = 80.dp, bottom = staticBottomPadding + Spacing.medium + 18.dp)
+                            .draftBounds(origin),
+                    ) { Text("Resume draft") }
+                }
+            }
             PendingPostsPill(
                 pendingCount = viewModel.pendingCount,
                 atTop = isAtTop,

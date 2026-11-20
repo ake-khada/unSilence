@@ -51,14 +51,25 @@ internal data class FeedScrollAnchor(
     val offset: Int,
     val eventId: String,
     val neighbors: List<String> = emptyList(),
+    val startedBeforeHeader: Boolean = false,
 ) {
-    fun save(): List<Any> = listOf(index, offset, eventId) + neighbors.take(NEIGHBOR_RADIUS * 2)
+    fun layoutIndex(eventIndex: Int, leadingItems: Int): Int =
+        if (index < 0 || (startedBeforeHeader && eventIndex == 0)) 0 else eventIndex + leadingItems
+
+    fun save(): List<Any> = buildList {
+        add(index)
+        add(offset)
+        add(eventId)
+        addAll(neighbors.take(NEIGHBOR_RADIUS * 2))
+        if (startedBeforeHeader) add(true)
+    }
 
     companion object {
         /** Existing three-field saves remain valid; never retain an unbounded list. */
         fun restore(saved: List<Any>) = FeedScrollAnchor(
             saved[0] as Int, saved[1] as Int, saved[2] as String,
-            saved.drop(3).take(NEIGHBOR_RADIUS * 2).map { it as String },
+            saved.drop(3).filterIsInstance<String>().take(NEIGHBOR_RADIUS * 2),
+            startedBeforeHeader = saved.lastOrNull() == true,
         )
     }
 }
@@ -71,26 +82,30 @@ internal fun rememberFeedScrollState(
     restorationReady: Boolean = true,
     restorationScope: String? = null,
     scrollToTopTrigger: Int = 0,
+    leadingItems: Int = 0,
 ): LazyListState {
     val currentRows = rememberUpdatedState(rows)
-    val saver = remember(currentRows) {
+    val leading = rememberUpdatedState(leadingItems)
+    val saver = remember(currentRows, leading) {
         listSaver<FeedScrollHolder, Any>(
             save = { holder ->
                 val state = holder.list
                 val pending = holder.pending
-                val index = state.firstVisibleItemIndex
+                val index = state.firstVisibleItemIndex - leading.value
                 (pending ?: FeedScrollAnchor(
                     index, state.firstVisibleItemScrollOffset,
                     currentRows.value.getOrNull(index)?.id.orEmpty(),
                     feedAnchorNeighbors(currentRows.value.size, index) { currentRows.value[it].id },
+                    startedBeforeHeader = leading.value == 0 && index == 0 && state.firstVisibleItemScrollOffset == 0,
                 )).save()
             },
             restore = { saved ->
                 val anchor = FeedScrollAnchor.restore(saved)
                 FeedScrollHolder(
                     list = LazyListState(
-                        firstVisibleItemIndex = restoredFeedIndex(
-                            currentRows.value.map { it.id }, anchor.eventId, anchor.index, anchor.neighbors,
+                        firstVisibleItemIndex = anchor.layoutIndex(
+                            restoredFeedIndex(currentRows.value.map { it.id }, anchor.eventId, anchor.index, anchor.neighbors),
+                            leading.value,
                         ),
                         firstVisibleItemScrollOffset = anchor.offset,
                     ),
@@ -108,7 +123,7 @@ internal fun rememberFeedScrollState(
             holder.pending = null
         }
     }
-    LaunchedEffect(holder, rows, restorationReady, restorationScope, scrollToTopTrigger) {
+    LaunchedEffect(holder, rows, leadingItems, restorationReady, restorationScope, scrollToTopTrigger) {
         // Intent may arrive while the list is empty, when a no-op scroll does not
         // produce an observable isScrollInProgress change. Fence it explicitly.
         if (handledTopTrigger != scrollToTopTrigger) {
@@ -136,7 +151,7 @@ internal fun rememberFeedScrollState(
         val index = pendingFeedRestoreIndex(
             rows.map { it.id }, anchor.eventId, anchor.index, restorationReady, anchor.neighbors,
         ) ?: return@LaunchedEffect
-        holder.list.requestScrollToItem(index, anchor.offset)
+        holder.list.requestScrollToItem(anchor.layoutIndex(index, leadingItems), anchor.offset)
         holder.pending = null
     }
     return holder.list

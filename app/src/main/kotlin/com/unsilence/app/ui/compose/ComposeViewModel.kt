@@ -2,6 +2,7 @@ package com.unsilence.app.ui.compose
 
 import android.content.ContentResolver
 import android.net.Uri
+import androidx.compose.ui.text.TextRange
 import android.os.Bundle
 import android.util.Log
 import androidx.compose.runtime.getValue
@@ -20,6 +21,8 @@ import com.unsilence.app.data.blossom.ImageCompressor
 import com.unsilence.app.data.blossom.VideoTranscoder
 import com.unsilence.app.data.drafts.Draft
 import com.unsilence.app.data.drafts.DraftBlock
+import com.unsilence.app.data.drafts.isStandalone
+import com.unsilence.app.data.drafts.DraftCursor
 import com.unsilence.app.data.drafts.DraftContext
 import com.unsilence.app.data.drafts.DraftStore
 import com.unsilence.app.data.drafts.DraftPoll
@@ -199,6 +202,8 @@ sealed interface AttachmentState {
 
 enum class AttachmentUploadPhase { Preparing, Transcoding, Uploading }
 
+internal enum class DraftDeleteResult { DELETED, FAILED, SESSION_CHANGED }
+
 internal enum class DraftSaveResult { SAVED, NEWER_EDITS, EMPTY, FAILED, SESSION_CHANGED }
 
 // ── Relay publish status ────────────────────────────────────────────────────
@@ -285,12 +290,6 @@ class ComposeViewModel @Inject constructor(
         userRepository.userFlow(pk)
             .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
     } ?: MutableStateFlow(null)
-
-    /** Signed-in user's avatar URL, for the compose avatar — derived from [userEntity]
-     *  so there's a single upstream userFlow subscription. */
-    val userAvatarUrl: StateFlow<String?> = userEntity
-        .map { it?.picture }
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
 
     /** True once the note has been signed, published, and inserted into MES. */
     var published by mutableStateOf(false)
@@ -413,6 +412,7 @@ class ComposeViewModel @Inject constructor(
     private val _isSensitive = MutableStateFlow(restoredEditor?.isSensitive ?: false)
     val isSensitive: StateFlow<Boolean> = _isSensitive.asStateFlow()
 
+    internal val savedDraftKey = savedStateHandle.getStateFlow<String?>(SAVED_DRAFT_KEY, null)
     private val _savedDraftFingerprint = MutableStateFlow<String?>(null)
     val hasUnsavedDraftChanges: StateFlow<Boolean> = combine(
         _blocks,
@@ -573,6 +573,11 @@ class ComposeViewModel @Inject constructor(
         savedStateHandle.setSavedStateProvider(EDITOR_STATE_KEY) {
             Bundle().apply {
                 if (composeSessionGate.activeSessionKey != null) {
+                    editorSelection?.let { (id, range) ->
+                        putString("cursor_block", id)
+                        putInt("cursor_start", range.start)
+                        putInt("cursor_end", range.end)
+                    }
                     encodeComposeEditor(
                         captureComposeEditor(
                             blocks = _blocks.value,
@@ -586,7 +591,26 @@ class ComposeViewModel @Inject constructor(
         }
     }
 
+    // New standalone posts need distinct identities. Older drafts can still have the key "new".
+    private fun draftKey(context: DraftContext): String = if (context == DraftContext.New || context is DraftContext.Quote) {
+        savedStateHandle.get<String>(STANDALONE_KEY) ?: UUID.randomUUID().toString().also {
+            savedStateHandle[STANDALONE_KEY] = it
+        }
+    } else context.key
+
+    private var editorSelection: Pair<String, TextRange>? = savedStateHandle.get<Bundle>(EDITOR_STATE_KEY)?.let { state ->
+        state.getString("cursor_block")?.let { it to TextRange(state.getInt("cursor_start"), state.getInt("cursor_end")) }
+    }
+    internal var restoredFocusId: String? = editorSelection?.first
+        private set
+    internal fun selectionFor(id: String) = editorSelection?.takeIf { it.first == id }?.second
+    internal fun updateSelection(id: String, range: TextRange) {
+        editorSelection = id to range
+    }
+
     fun restoreDraft(draft: Draft) {
+        savedStateHandle[SAVED_DRAFT_KEY] = draft.key
+        if (draft.isStandalone) savedStateHandle[STANDALONE_KEY] = draft.key
         _selectedEmojiUrls.value = emptyMap()
         val restored = draft.blocks.map { block ->
             when (block) {
@@ -611,6 +635,16 @@ class ComposeViewModel @Inject constructor(
         } else {
             restored + ComposeBlock.Text("")
         }
+        val textBlocks = _blocks.value.filterIsInstance<ComposeBlock.Text>()
+        val cursor = draft.cursor
+        val active = cursor?.let { textBlocks.getOrNull(it.textBlock) } ?: textBlocks.firstOrNull()
+        restoredFocusId = active?.id
+        if (active != null && cursor != null) {
+            val length = active.content.length
+            updateSelection(active.id, TextRange(
+                cursor.start.coerceIn(0, length), cursor.end.coerceIn(0, length),
+            ))
+        }
         _isSensitive.value = draft.isSensitive
         _pollDraft.value = draft.poll?.let { saved ->
             PollDraft(
@@ -634,6 +668,7 @@ class ComposeViewModel @Inject constructor(
         if (composeSessionGate.activeSessionKey != session || keyManager.getPublicKeyHex() != pk) {
             return DraftSaveResult.SESSION_CHANGED
         }
+        savedStateHandle[SAVED_DRAFT_KEY] = draft.key
         if (!draft.hadUnsavedMedia) _savedDraftFingerprint.value = fingerprint
         return if (fingerprint == currentContentFingerprint(_blocks.value, _isSensitive.value)) {
             DraftSaveResult.SAVED
@@ -642,13 +677,16 @@ class ComposeViewModel @Inject constructor(
         }
     }
 
-    fun discardCurrentDraft() {
-        val pk = pubkeyHex ?: return
-        draftStore.delete(pk, currentContext().key)
-    }
-
-    fun deleteDraft(draft: Draft) {
-        pubkeyHex?.let { draftStore.delete(it, draft.key) }
+    internal suspend fun deleteSavedDraft(key: String, session: String): DraftDeleteResult {
+        val owner = pubkeyHex ?: return DraftDeleteResult.FAILED
+        fun isCurrent() = keyManager.getPublicKeyHex() == owner && composeSessionGate.activeSessionKey == session
+        if (!isCurrent()) return DraftDeleteResult.SESSION_CHANGED
+        val result = draftStore.delete(owner, key).await()
+        return when {
+            !isCurrent() -> DraftDeleteResult.SESSION_CHANGED
+            result.isFailure -> DraftDeleteResult.FAILED
+            else -> DraftDeleteResult.DELETED
+        }
     }
 
     /** Manually trigger upload for a single idle attachment. */
@@ -955,6 +993,10 @@ class ComposeViewModel @Inject constructor(
 
     /** Reset state for reuse — ViewModel is activity-scoped, survives recomposition. */
     fun reset() {
+        savedStateHandle.set<String?>(SAVED_DRAFT_KEY, null)
+        savedStateHandle.remove<String>(STANDALONE_KEY)
+        editorSelection = null
+        restoredFocusId = null
         cancelPendingSigning()
         attachmentUploadJobs.values.forEach { it.cancel() }
         attachmentUploadJobs.clear()
@@ -1075,7 +1117,12 @@ class ComposeViewModel @Inject constructor(
         if (draftBlocks.isEmpty() && !poll.enabled) return null
         val context = currentContext()
         return Draft(
-            key = context.key,
+            key = draftKey(context),
+            cursor = editorSelection?.let { (id, selection) ->
+                val index = blocks.filterIsInstance<ComposeBlock.Text>().filter { it.content.isNotBlank() }
+                    .indexOfFirst { it.id == id }
+                if (index < 0) null else DraftCursor(index, selection.start, selection.end)
+            },
             blocks = draftBlocks,
             isSensitive = _isSensitive.value,
             updatedAt = System.currentTimeMillis(),
@@ -1105,7 +1152,7 @@ class ComposeViewModel @Inject constructor(
     private fun hasUnsavedMediaBlocks(blocks: List<ComposeBlock>): Boolean =
         blocks.any { it is ComposeBlock.Attachment && it.state !is AttachmentState.Uploaded }
 
-    private fun hasAnyContent(blocks: List<ComposeBlock>): Boolean =
+    internal fun hasAnyContent(blocks: List<ComposeBlock>): Boolean =
         blocks.any { block ->
             when (block) {
                 is ComposeBlock.Text -> block.content.isNotBlank()
@@ -1141,10 +1188,12 @@ class ComposeViewModel @Inject constructor(
 
     private fun deleteCurrentDraft() {
         val pk = pubkeyHex ?: return
-        draftStore.delete(pk, currentContext().key)
+        draftStore.delete(pk, draftKey(currentContext()))
     }
 
     private companion object {
+        const val SAVED_DRAFT_KEY = "saved_draft_key"
+        const val STANDALONE_KEY = "standalone_draft_key"
         const val ACTIVE_SESSION_KEY = "compose_active_session"
         const val EDITOR_STATE_KEY = "compose_editor_state"
         const val EDITOR_JSON_KEY = "editor_json"

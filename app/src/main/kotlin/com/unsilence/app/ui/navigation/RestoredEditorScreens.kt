@@ -8,6 +8,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.produceState
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.compose.ui.Alignment
@@ -31,9 +32,11 @@ internal fun ResumeDraftScreen(
     onDismiss: () -> Unit,
     actions: NoteActionsViewModel,
     viewModel: DraftsViewModel = hiltViewModel(),
+    origin: String? = null,
 ) {
-    val resolved by produceState<ResolvedDraft?>(null, viewModel, draftKey) {
-        value = ResolvedDraft(viewModel.resolveForResume(draftKey))
+    val cached = remember(viewModel, draftKey) { viewModel.cachedForResume(draftKey)?.let(::ResolvedDraft) }
+    val resolved by produceState(cached, viewModel, draftKey) {
+        if (cached == null) value = ResolvedDraft(viewModel.resolveForResume(draftKey))
     }
     val result = resolved
     when {
@@ -41,6 +44,7 @@ internal fun ResumeDraftScreen(
         result.draft == null -> MissingDestination("This draft is no longer available.", onDismiss)
         else -> ComposeScreen(
             initialDraft = result.draft,
+            draftOrigin = origin,
             onDismiss = onDismiss,
             navigationOwnsBack = true,
             actionsViewModel = actions,

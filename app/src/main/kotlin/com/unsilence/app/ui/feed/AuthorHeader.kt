@@ -263,7 +263,7 @@ private fun HeaderAvatar(
 }
 
 @Composable
-private fun RowScope.AuthorNameRow(
+internal fun RowScope.AuthorNameRow(
     pubkey: String,
     authorLabel: String,
     nostrAddress: NostrAddressPresentation?,

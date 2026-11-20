@@ -48,7 +48,6 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.TextRange
-import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.style.TextOverflow
@@ -76,6 +75,8 @@ fun TextBlock(
     autoFocus: Boolean = false,
     placeholder: String = "What's on your mind?",
     modifier: Modifier = Modifier,
+    initialSelection: TextRange? = null,
+    onSelectionChange: (TextRange) -> Unit = {},
 ) {
     val focusRequester = remember { FocusRequester() }
     val bringIntoViewRequester = remember { BringIntoViewRequester() }
@@ -85,13 +86,9 @@ fun TextBlock(
         mutableStateOf(
             TextFieldValue(
                 text = initialText,
-                selection = TextRange(initialText.length),
+                selection = initialSelection ?: TextRange(initialText.length),
             )
         )
-    }
-
-    LaunchedEffect(textValue.text) {
-        onTextChange(textValue.text)
     }
 
     // Insert mention text at cursor when pendingInsert arrives for this block
@@ -103,6 +100,7 @@ fun TextBlock(
         val newCursor = cursor + insert.length
         textValue = TextFieldValue(text = newText, selection = TextRange(newCursor))
         onTextChange(newText)
+        onSelectionChange(textValue.selection)
         onInsertConsumed()
         focusRequester.requestFocus()
     }
@@ -110,25 +108,25 @@ fun TextBlock(
     if (autoFocus) {
         LaunchedEffect(Unit) {
             focusRequester.requestFocus()
-            bringIntoViewRequester.bringIntoView()
         }
     }
 
-    val inputStyle = TextStyle(
-        color = Color.White.copy(alpha = 0.95f),
-        fontSize = 15.sp,
-        lineHeight = 22.sp,
-    )
+    val inputStyle = AppTextStyles.bodyLarge.copy(color = Color.White.copy(alpha = 0.95f))
 
     BasicTextField(
         value = textValue,
-        onValueChange = { textValue = it },
+        onValueChange = { value ->
+            if (value.text != textValue.text) onTextChange(value.text)
+            textValue = value
+            onSelectionChange(value.selection)
+        },
         modifier = modifier
             .focusRequester(focusRequester)
             .bringIntoViewRequester(bringIntoViewRequester)
             .onFocusChanged { state ->
                 if (state.isFocused) {
                     onFocused(blockId)
+                    onSelectionChange(textValue.selection)
                     scope.launch { bringIntoViewRequester.bringIntoView() }
                 }
             },

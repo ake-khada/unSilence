@@ -29,7 +29,7 @@ internal sealed interface AppDestination {
         val relayHints: List<String> = emptyList(),
         val focusedCommentId: String? = null,
     ) : AppDestination
-    @Serializable data class ResumeDraft(val key: String) : AppDestination
+    @Serializable data class ResumeDraft(val key: String, val origin: String? = null) : AppDestination
     @Serializable data class EditRelaySet(val dTag: String) : AppDestination
     @Serializable data object Settings : AppDestination
     @Serializable data object EditProfile : AppDestination

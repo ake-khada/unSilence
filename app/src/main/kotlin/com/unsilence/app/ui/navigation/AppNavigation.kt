@@ -258,6 +258,11 @@ fun AppNavigation(
     val notifViewModel: NotificationsViewModel? = if (selectedTab == 2) {
         hiltViewModel(key = "notif-$sessionKey")
     } else null
+    val localDrafts: com.unsilence.app.ui.drafts.DraftsViewModel = hiltViewModel(key = "draft-cards-$sessionKey")
+    val drafts by localDrafts.drafts.collectAsStateWithLifecycle()
+    val resumeCard: (String, String) -> Unit = remember(navigator) {
+        { key, origin -> navigator.push(AppDestination.ResumeDraft(key, origin)) }
+    }
     val noteActionsVm: NoteActionsViewModel = hiltViewModel(key = "note-actions-$sessionKey")
     val haptic = LocalHapticFeedback.current
     ResumedEffect(noteActionsVm, haptic) {
@@ -410,6 +415,11 @@ fun AppNavigation(
                         tabStateHolder.SaveableStateProvider(selectedTab) {
                             when (selectedTab) {
                                 0    -> FeedScreen(
+                                    drafts = drafts,
+                                    onResumeDraft = resumeCard,
+                                    onHideDraft = localDrafts::hideFromFeed,
+                                    onShowDrafts = { navigator.push(AppDestination.Drafts) },
+                                    showComposeControls = splashDone && barsVisible,
                                     onArticleClick = onArticleClick,
                                     scrollToTopTrigger = scrollToTopTrigger,
                                     topBarShown        = topBarShown,
@@ -660,6 +670,8 @@ fun AppNavigation(
                     }
                 }
                 is AppDestination.Thread -> ThreadScreen(
+                    drafts = drafts,
+                    onResumeDraft = resumeCard,
                     onArticleClick = { row, focus -> navigator.push(articleDestination(row, focus)) },
                     entryId = entry.id,
                     eventId = destination.eventId,
@@ -748,6 +760,7 @@ fun AppNavigation(
                 )
                 is AppDestination.ResumeDraft -> ResumeDraftScreen(
                     draftKey = destination.key,
+                    origin = destination.origin,
                     onDismiss = navigator::pop,
                     actions = noteActionsVm,
                 )

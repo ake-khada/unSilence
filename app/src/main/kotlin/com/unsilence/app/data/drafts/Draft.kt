@@ -80,6 +80,8 @@ data class Draft(
     val context: DraftContext,
     val hadUnsavedMedia: Boolean = false,
     val poll: DraftPoll? = null,
+    val hiddenFromFeed: Boolean = false,
+    val cursor: DraftCursor? = null,
 ) {
     val previewText: String
         get() = blocks.filterIsInstance<DraftBlock.Text>()
@@ -89,6 +91,26 @@ data class Draft(
             .orEmpty()
 
     val attachmentCount: Int get() = blocks.count { it is DraftBlock.Attachment }
+}
+
+@Serializable
+data class DraftCursor(val textBlock: Int, val start: Int, val end: Int)
+
+val Draft.isStandalone: Boolean
+    get() = context == DraftContext.New || context is DraftContext.Quote
+
+/** Dismissing the newest draft also keeps older drafts from filling the slot. */
+fun List<Draft>.feedDraft(): Draft? = firstOrNull { it.isStandalone && !it.hiddenFromFeed }
+
+fun List<Draft>.replyDraftsByParent(): Map<String, List<Draft>> = buildMap {
+    for (draft in this@replyDraftsByParent) {
+        val parent = when (val context = draft.context) {
+            is DraftContext.Reply -> context.parentId
+            is DraftContext.ArticleComment -> context.parentId ?: context.articleId
+            else -> null
+        } ?: continue
+        put(parent, get(parent).orEmpty() + draft)
+    }
 }
 
 @Serializable
@@ -133,7 +155,7 @@ object DraftMutations {
         draft: Draft,
         max: Int = MAX_DRAFTS_PER_PUBKEY,
     ): List<Draft> =
-        (existing.filterNot { it.key == draft.key } + draft)
+        (listOf(draft) + existing.filterNot { it.key == draft.key })
             .sortedByDescending { it.updatedAt }
             .take(max)
 

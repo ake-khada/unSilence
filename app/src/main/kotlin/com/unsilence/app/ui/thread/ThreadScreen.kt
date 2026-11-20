@@ -15,6 +15,9 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.statusBarsPadding
+import com.unsilence.app.data.drafts.Draft
+import com.unsilence.app.data.drafts.replyDraftsByParent
+import com.unsilence.app.ui.drafts.InlineReplyDrafts
 import androidx.compose.foundation.lazy.LazyColumn
 import com.unsilence.app.ui.common.AvatarLazyColumn
 import androidx.compose.foundation.lazy.items
@@ -35,8 +38,6 @@ import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.drawBehind
-import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
@@ -92,6 +93,8 @@ fun ThreadScreen(
     actionsViewModel: NoteActionsViewModel = hiltViewModel(
         key = "note-actions-${LocalAppSessionKey.current}",
     ),
+    drafts: List<Draft> = emptyList(),
+    onResumeDraft: (String, String) -> Unit = { _, _ -> },
 ) {
     // NavDisplay owns back and the ViewModel store. Covering is not destruction.
     com.unsilence.app.ui.shared.ObserveDisplayWindowLifecycle(viewModel.displayWindowReporter)
@@ -127,6 +130,7 @@ fun ThreadScreen(
     val threadItems = remember(state.replies, revealedSpamClusters) {
         replyListItems(state.replies, revealedSpamClusters)
     }
+    val replyDrafts = remember(drafts) { drafts.replyDraftsByParent() }
     val listState = rememberThreadListState(eventId, state, threadItems)
 
     var autoArticleHandled by rememberSaveable(eventId) { mutableStateOf(false) }
@@ -322,6 +326,8 @@ fun ThreadScreen(
                                     ),
                                 )
                                 FeedDivider()
+                                InlineReplyDrafts(replyDrafts[note.id], actionsViewModel.currentPubkey,
+                                    viewModel::profileFlow, "root", 1, onResumeDraft)
                             }
                         }
 
@@ -342,25 +348,7 @@ fun ThreadScreen(
                                     is ReplyListItem.Reply -> threadItem.depthRow.depth
                                     is ReplyListItem.SpamCluster -> threadItem.depth
                                 }
-                                val indent = replyIndentDp(depth).dp
-                                val lineColor = Color.White.copy(alpha = 0.10f)
-
-                                Box(
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .drawBehind {
-                                            for (d in 1..depth) {
-                                                val x = replyIndentDp(d).dp.toPx()
-                                                drawLine(
-                                                    color       = lineColor,
-                                                    start       = Offset(x, 0f),
-                                                    end         = Offset(x, size.height),
-                                                    strokeWidth = 1.dp.toPx(),
-                                                )
-                                            }
-                                        }
-                                        .padding(start = indent),
-                                ) {
+                                Box(Modifier.fillMaxWidth().threadReplyIndent(depth)) {
                                     when (threadItem) {
                                         is ReplyListItem.SpamCluster -> LikelySpamClusterCard(
                                             replyCount = threadItem.replyCount,
@@ -410,6 +398,11 @@ fun ThreadScreen(
                                     }
                                 }
                                 FeedDivider()
+                                if (threadItem is ReplyListItem.Reply && !threadItem.depthRow.muted) {
+                                    val id = threadItem.depthRow.row.id
+                                    InlineReplyDrafts(replyDrafts[id], actionsViewModel.currentPubkey,
+                                        viewModel::profileFlow, id, depth + 1, onResumeDraft)
+                                }
                             }
                         }
                     }

@@ -68,7 +68,17 @@ class DraftStore internal constructor(
         DraftMutations.find(draftsFor(pubkey), key)
 
     fun save(pubkey: String, draft: Draft): Deferred<Result<Unit>> =
-        mutate(pubkey) { DraftMutations.upsert(it, draft) }
+        mutate(pubkey) { drafts ->
+            val previous = DraftMutations.find(drafts, draft.key)
+            DraftMutations.upsert(drafts, draft.copy(hiddenFromFeed = previous?.hiddenFromFeed == true))
+        }
+
+    fun hideFromFeed(pubkey: String, displayed: Draft): Deferred<Result<Unit>> =
+        mutate(pubkey) { drafts ->
+            if (drafts.feedDraft()?.key != displayed.key) drafts else drafts.map { draft ->
+                if (draft.isStandalone) draft.copy(hiddenFromFeed = true) else draft
+            }
+        }
 
     fun delete(pubkey: String, key: String): Deferred<Result<Unit>> =
         mutate(pubkey) { DraftMutations.delete(it, key) }

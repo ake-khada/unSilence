@@ -5,6 +5,17 @@ import org.junit.Assert.assertNull
 import org.junit.Test
 
 class FeedScrollStateTest {
+    @Test fun `draft slot insertion and removal preserve the reading anchor`() {
+        val top = FeedScrollAnchor(0, 0, "first", startedBeforeHeader = true)
+        assertEquals(0, FeedScrollAnchor.restore(top.save()).layoutIndex(0, 1))
+        val reading = FeedScrollAnchor(12, 17, "anchor")
+        assertEquals(13, reading.layoutIndex(12, 1))
+        assertEquals(12, reading.layoutIndex(12, 0))
+        assertEquals(17, FeedScrollAnchor.restore(reading.save()).offset)
+        assertEquals(1, FeedScrollAnchor(0, 0, "first").layoutIndex(0, 1))
+        assertEquals(0, FeedScrollAnchor(-1, 0, "").layoutIndex(0, 1))
+    }
+
     @Test fun `neighbors are bounded and ordered by old distance with successor first`() {
         assertEquals(listOf("21", "19", "22", "18", "23", "17"), feedAnchorNeighbors(500, 20) { "$it" })
         assertEquals(listOf("1", "2", "3"), feedAnchorNeighbors(500, 0) { "$it" })

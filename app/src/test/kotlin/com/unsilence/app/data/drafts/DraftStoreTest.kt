@@ -93,6 +93,35 @@ class DraftStoreTest {
         assertEquals(listOf(other), reopened.draftsFor("bob"))
     }
 
+    @Test fun hidingTheFeedSlotSurvivesRestartAndOnlyANewStandaloneDraftReopensIt() = runTest {
+        val data = PreferenceDataStoreFactory.create(scope = backgroundScope) {
+            temporary.root.resolve("drafts.preferences_pb")
+        }
+        val old = Draft("new", listOf(DraftBlock.Text("Legacy post")), false, 1, DraftContext.New)
+        val newer = old.copy(key = "second", updatedAt = 3)
+        val reply = reply("parent", "Thread draft").copy(updatedAt = 4)
+        val store = DraftStore(data, backgroundScope)
+        for (draft in listOf(old, newer, reply)) store.save("alice", draft).await().getOrThrow()
+        store.save("bob", old).await().getOrThrow()
+        // A click from an obsolete card must not hide the new head.
+        store.hideFromFeed("alice", old).await().getOrThrow()
+        assertEquals(newer, store.draftsFor("alice").feedDraft())
+        store.hideFromFeed("alice", newer).await().getOrThrow()
+        val reopened = DraftStore(data, backgroundScope)
+        reopened.awaitLoaded()
+        assertNull(reopened.draftsFor("alice").feedDraft())
+        assertEquals(3, reopened.draftsFor("alice").size)
+        assertEquals(listOf(reply), reopened.draftsFor("alice").replyDraftsByParent()["parent"])
+        assertEquals(old, reopened.draftsFor("bob").feedDraft())
+        reopened.save("alice", old.copy(updatedAt = 5)).await().getOrThrow()
+        assertNull(reopened.draftsFor("alice").feedDraft())
+        val next = old.copy(key = "third", updatedAt = 6)
+        reopened.save("alice", next).await().getOrThrow()
+        assertEquals(next, reopened.draftsFor("alice").feedDraft())
+        reopened.delete("alice", next.key).await().getOrThrow()
+        assertNull(reopened.draftsFor("alice").feedDraft())
+    }
+
     @Test fun failedReplacementKeepsPreviousVersionAndCanBeRetried() = runTest {
         val data = PreferenceDataStoreFactory.create(scope = backgroundScope) {
             temporary.root.resolve("drafts.preferences_pb")
