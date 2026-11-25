@@ -432,13 +432,6 @@ class FeedViewModel @Inject constructor(
                 return@combine projected
             }
 
-            // Determine which IDs need fresh rows (not in cache)
-            val displayedIds = displayed.map { it.id }.toSet()
-
-            // Protect displayed events from LRU eviction — events in the
-            // active timeline must stay in MES for EventModel resolution.
-            memoryEventStore.markTouched(displayedIds)
-
             projected.copy(
                 rows = resolveFeedRows(displayed, feedRowCache,
                     memoryEventStore::feedRowsByIds, memoryEventStore::synthesizeFeedRow,
