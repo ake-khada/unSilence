@@ -324,7 +324,7 @@ class SocialGraphViewModel @Inject constructor(
                 ownProvider = ownProvider,
                 encryptedOwnProviderAvailable = !memoryEventStore.ownWotProviderEncryptedContent().isNullOrBlank(),
             ),
-            ownStanding = ownPubkey?.let { memoryEventStore.wotFor(it) } ?: WotLookup.Pending,
+            ownStanding = ownPubkey?.let { memoryEventStore.displayWotFor(it) } ?: WotLookup.Pending,
             coverage = computeWotCoverage(follows, assertions),
             lastWotFetchAt = lastFetchAt,
             feedWotDisplayMode = feedWotDisplayMode,

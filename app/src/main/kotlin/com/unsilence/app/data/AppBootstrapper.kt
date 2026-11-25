@@ -647,7 +647,7 @@ class AppBootstrapper @Inject constructor(
             val wotAge = System.currentTimeMillis() - relayPreferencesStore.lastWotFetchAt()
             val lastWotTargetsHash = relayPreferencesStore.lastWotTargetsHash()
             if (shouldSkipBootstrapWotFetch(
-                    hasWotData = memoryEventStore.hasWotData(),
+                    hasWotData = memoryEventStore.hasFreshWotCoverage(wotTargets),
                     ageMs = wotAge,
                     lastTargetsHash = lastWotTargetsHash,
                     currentTargetsHash = targetsHash,

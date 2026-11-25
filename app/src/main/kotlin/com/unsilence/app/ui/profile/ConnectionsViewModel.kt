@@ -139,7 +139,7 @@ class ConnectionsViewModel @Inject constructor(
         }
         val rows = pubkeys.map { pubkey ->
             val user = memoryEventStore.getUserEntity(pubkey) ?: UserEntity(pubkey = pubkey)
-            val wot = memoryEventStore.wotFor(pubkey)
+            val wot = memoryEventStore.displayWotFor(pubkey)
             ConnectionRow(
                 pubkey = pubkey,
                 user = user,

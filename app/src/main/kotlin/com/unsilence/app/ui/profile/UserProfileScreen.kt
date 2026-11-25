@@ -93,6 +93,7 @@ import com.unsilence.app.ui.shared.rememberVideoPlaybackScope
 import com.unsilence.app.ui.shared.threadParentVideoSourceCandidateIds
 import com.unsilence.app.ui.shared.WotBreakdownProvenance
 import com.unsilence.app.ui.shared.WotImpersonationBadge
+import com.unsilence.app.ui.common.LocalMinuteClock
 import com.unsilence.app.ui.shared.WotInlineLabel
 import androidx.compose.material.icons.automirrored.outlined.Reply
 import androidx.compose.material.icons.outlined.Article
@@ -770,7 +771,7 @@ fun UserProfileScreen(
                 ScoredStanding(scoredWot.assertion)
                 Spacer(Modifier.height(Spacing.medium))
                 WotBreakdownProvenance(
-                    text = "Via ${wotProvenance.providerName} grapevine · ${profileWotSyncedAgo(wotProvenance.lastFetchAt)}",
+                    text = "Via ${wotProvenance.providerName} grapevine · ${profileWotConfirmation(scoredWot, LocalMinuteClock.current.value)}",
                     modifier = Modifier.fillMaxWidth(),
                 )
             }
@@ -799,9 +800,15 @@ fun UserProfileScreen(
     }
 }
 
-internal fun profileWotSyncedAgo(timestamp: Long): String {
+internal fun profileWotConfirmation(score: WotLookup.Scored, now: Long): String {
+    val age = (now - score.assertion.confirmedAt).coerceAtLeast(0L)
+    return if (score.cached) "Cached · last confirmed ${age / 3_600_000L}h ago"
+    else profileWotSyncedAgo(score.assertion.confirmedAt, now)
+}
+
+internal fun profileWotSyncedAgo(timestamp: Long, now: Long = System.currentTimeMillis()): String {
     if (timestamp <= 0L) return "never synced"
-    val ageMs = (System.currentTimeMillis() - timestamp).coerceAtLeast(0L)
+    val ageMs = (now - timestamp).coerceAtLeast(0L)
     val minutes = ageMs / 60_000L
     val hours = ageMs / 3_600_000L
     val days = ageMs / 86_400_000L

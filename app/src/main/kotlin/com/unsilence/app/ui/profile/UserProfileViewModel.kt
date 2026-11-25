@@ -179,12 +179,12 @@ class UserProfileViewModel @Inject constructor(
 
     val wotLookups: StateFlow<Map<String, WotLookup>> =
         combine(_wotSubjects, memoryEventStore.wotSignalFlow) { subjects, _ ->
-            wotLookupSnapshot(subjects, memoryEventStore::wotFor)
+            wotLookupSnapshot(subjects, memoryEventStore::displayWotFor)
         }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyMap())
 
     val profileWotLookup: StateFlow<WotLookup> =
         combine(_pubkeyHex, memoryEventStore.wotSignalFlow) { target, _ ->
-            target?.let { memoryEventStore.wotFor(it) } ?: WotLookup.Pending
+            target?.let { memoryEventStore.displayWotFor(it) } ?: WotLookup.Pending
         }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), WotLookup.Pending)
 
     val impersonationRisk: StateFlow<ImpersonationRisk?> =

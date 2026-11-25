@@ -151,7 +151,7 @@ private const val PROFILE_ANCHOR_RECENT_EVENTS = 500
 private const val PROFILE_TRIM_NOOP_BACKOFF_MS = 60_000L
 private const val MAX_FUTURE_DRIFT_SECONDS = 60L
 private const val EVICTION_SAFETY_SWEEP_INTERVAL = 5_000
-private const val WOT_ASSERTION_CAP = 5_000
+internal const val WOT_ASSERTION_CAP = 5_000
 private const val WOT_ASSERTION_TRIM = 500
 internal const val DELETION_TOMBSTONE_CAP = 5_000
 internal const val DELETION_TOMBSTONE_TRIM = 500
@@ -992,8 +992,12 @@ class MemoryEventStore @Inject constructor(
             synchronized(ownDeletionHistory) {
                 if (field == value) return
                 ownDeletionHistory.clear()
-                field = value
+                synchronized(wotProviderLock) {
+                    clearWotAssertionsLocked()
+                    field = value
+                }
             }
+            _wotSignal.value = System.nanoTime()
             privateZapPendingSignal.update { it + 1L }
             _muteListSignal.value = System.nanoTime()
         }
@@ -1107,6 +1111,8 @@ class MemoryEventStore @Inject constructor(
 
 
     // ─── NIP-85 user-level WoT assertions (kind 30382) ───────────────────────
+    @Volatile internal var wotCacheRevision = 0L
+        private set
     private val wotBySubject = ConcurrentHashMap<String, WotAssertionEntity>()
     private val wotQueriedSubjects = ConcurrentHashMap.newKeySet<String>()
     private val wotAccessedAt = ConcurrentHashMap<String, Long>()
@@ -1569,6 +1575,8 @@ class MemoryEventStore @Inject constructor(
         providerPubkey: String,
         events: List<NostrEvent>,
         queriedSubjects: Collection<String>,
+        queryStartedAt: Long = System.currentTimeMillis(),
+        queryOwner: String? = ownPubkey,
     ): Int {
         val chunkProvider = normalizeHexPubkey(providerPubkey) ?: return 0
         if (events.isEmpty() && queriedSubjects.isEmpty()) return 0
@@ -1577,10 +1585,25 @@ class MemoryEventStore @Inject constructor(
         var inserted = 0
 
         synchronized(wotProviderLock) {
-            if (chunkProvider != activeWotProviderPubkey) return 0
+            if (chunkProvider != activeWotProviderPubkey || queryOwner != ownPubkey) return 0
+            val returnedSubjects = HashSet<String>()
 
             for (event in events) {
-                if (event.createdAt > nowSec + MAX_FUTURE_DRIFT_SECONDS) continue
+                if (event.createdAt > nowSec + MAX_FUTURE_DRIFT_SECONDS || event.kind != 30382 ||
+                    event.pubkey != chunkProvider) continue
+                val subject = normalizeHexPubkey(event.tags.firstOrNull { it.firstOrNull() == "d" }?.getOrNull(1))
+                    ?: continue
+                returnedSubjects.add(subject)
+                val current = wotBySubject[subject]
+                if (current != null && current.eventId == event.id) {
+                    val confirmed = System.currentTimeMillis()
+                    if (confirmed > current.confirmedAt) {
+                        wotBySubject[subject] = current.copy(confirmedAt = confirmed)
+                        wotCacheRevision++
+                        dirty.wot = true
+                    }
+                    continue
+                }
                 if (!insertCore(event, dirty)) continue
                 inserted++
                 markKindDirty(event.kind, dirty)
@@ -1590,6 +1613,13 @@ class MemoryEventStore @Inject constructor(
             for (subject in queriedSubjects.mapNotNull { normalizeHexPubkey(it) }) {
                 wotAccessedAt[subject] = System.nanoTime()
                 if (wotQueriedSubjects.add(subject)) queriedChanged = true
+                // Only a completed query can withdraw the cached result. Preserve a newer live arrival.
+                val previous = wotBySubject[subject]
+                if (subject !in returnedSubjects && previous != null && previous.confirmedAt < queryStartedAt) {
+                    wotBySubject.remove(subject)
+                    wotCacheRevision++
+                    queriedChanged = true
+                }
             }
             if (queriedChanged) {
                 trimWotAssertionsIfNeeded()
@@ -2964,10 +2994,15 @@ class MemoryEventStore @Inject constructor(
                         verifiedMuters = tag("verifiedMuterCount")?.toLongOrNull(),
                         verifiedReporters = tag("verifiedReporterCount")?.toLongOrNull(),
                         updatedAt = event.createdAt,
+                        eventId = event.id,
+                        confirmedAt = System.currentTimeMillis(),
                     )
                 }
             }
-            if (changed) trimWotAssertionsIfNeeded()
+            if (changed) {
+                wotCacheRevision++
+                trimWotAssertionsIfNeeded()
+            }
         }
 
         if (changed) {
@@ -3034,7 +3069,7 @@ class MemoryEventStore @Inject constructor(
             .map { it.key }
         for (subject in toRemove) {
             wotAccessedAt.remove(subject)
-            wotBySubject.remove(subject)
+            if (wotBySubject.remove(subject) != null) wotCacheRevision++
             wotQueriedSubjects.remove(subject)
         }
     }
@@ -5619,25 +5654,84 @@ class MemoryEventStore @Inject constructor(
             .maxByOrNull { it.createdAt }
     }
 
-    fun getWotAssertions(): Map<String, WotAssertionEntity> = HashMap(wotBySubject)
+    fun getWotAssertions(): Map<String, WotAssertionEntity> {
+        val now = System.currentTimeMillis()
+        return wotBySubject.filterValues { it.freshAt(now) }
+    }
 
     fun hasWotData(): Boolean = wotBySubject.isNotEmpty() || wotQueriedSubjects.isNotEmpty()
 
-    fun wotFor(pubkey: String): WotLookup {
-        val subject = normalizeHexPubkey(pubkey) ?: return WotLookup.Pending
-        val assertion = wotBySubject[subject]
-        return when {
-            assertion != null -> {
-                wotAccessedAt[subject] = System.nanoTime()
-                WotLookup.Scored(assertion)
-            }
-            subject in wotQueriedSubjects -> {
-                wotAccessedAt[subject] = System.nanoTime()
-                WotLookup.Absent
-            }
-            else -> WotLookup.Pending
+    internal fun hasFreshWotCoverage(subjects: Collection<String>): Boolean {
+        val now = System.currentTimeMillis()
+        return subjects.isNotEmpty() && subjects.all { subject ->
+            wotBySubject[subject]?.freshAt(now) ?: (subject in wotQueriedSubjects)
         }
     }
+
+    fun wotFor(pubkey: String): WotLookup = when (val result = displayWotFor(pubkey)) {
+        is WotLookup.Scored -> if (result.cached) WotLookup.Pending else result
+        else -> result
+    }
+
+    fun displayWotFor(pubkey: String): WotLookup = displayWotFor(pubkey, System.currentTimeMillis())
+
+    internal fun displayWotFor(pubkey: String, now: Long): WotLookup {
+        val subject = normalizeHexPubkey(pubkey) ?: return WotLookup.Pending
+        val assertion = wotBySubject[subject]
+        if (assertion != null) {
+            if (!assertion.displayableAt(now)) return WotLookup.Pending
+            wotAccessedAt[subject] = System.nanoTime()
+            return WotLookup.Scored(assertion, cached = !assertion.freshAt(now))
+        }
+        if (subject !in wotQueriedSubjects) return WotLookup.Pending
+        wotAccessedAt[subject] = System.nanoTime()
+        return WotLookup.Absent
+    }
+
+    internal fun wotCacheSnapshot(): WotScoreSnapshot? = synchronized(wotProviderLock) {
+        val owner = ownPubkey ?: return null
+        val now = System.currentTimeMillis()
+        WotScoreSnapshot(owner, activeWotProviderPubkey, wotBySubject.values.filter { it.displayableAt(now) })
+    }
+
+    internal fun restoreWotScores(snapshot: WotScoreSnapshot) {
+        synchronized(wotProviderLock) {
+            if (ownPubkey != snapshot.owner || activeWotProviderPubkey != snapshot.provider ||
+                snapshot.scores.size > WOT_ASSERTION_CAP) return
+            val now = System.currentTimeMillis()
+            // Rewrite a matching cache that accumulated expired rows while the app was stopped.
+            if (snapshot.scores.any { !it.displayableAt(now) }) wotCacheRevision++
+            for (score in snapshot.scores) {
+                if (score.providerPubkey != snapshot.provider || normalizeHexPubkey(score.subjectPubkey) != score.subjectPubkey ||
+                    score.rank !in 0..100 || !score.displayableAt(now) || score.subjectPubkey in wotQueriedSubjects) continue
+                if (wotBySubject.putIfAbsent(score.subjectPubkey, score) == null) {
+                    wotAccessedAt[score.subjectPubkey] = System.nanoTime()
+                }
+            }
+            trimWotAssertionsIfNeeded()
+        }
+        notifyWotAgeChanged()
+    }
+
+    internal fun refreshWotAges(now: Long = System.currentTimeMillis()) {
+        synchronized(wotProviderLock) {
+            for ((subject, score) in wotBySubject) {
+                if (score.displayableAt(now)) continue
+                wotBySubject.remove(subject)
+                wotQueriedSubjects.remove(subject)
+                wotAccessedAt.remove(subject)
+                wotCacheRevision++
+            }
+        }
+        notifyWotAgeChanged()
+    }
+
+    private fun notifyWotAgeChanged() {
+        _wotSignal.value = System.nanoTime()
+    }
+
+    internal fun nextWotAgeChange(now: Long): Long? =
+        wotBySubject.values.minOfOrNull { it.nextAgeChange(now) }?.takeIf { it != Long.MAX_VALUE }
 
     fun wotFlow(pubkey: String): Flow<WotLookup> =
         _wotSignal
@@ -5669,6 +5763,7 @@ class MemoryEventStore @Inject constructor(
 
     private fun clearWotAssertionsLocked(): Boolean {
         if (wotBySubject.isEmpty() && wotQueriedSubjects.isEmpty() && wotAccessedAt.isEmpty()) return false
+        wotCacheRevision++
         wotBySubject.clear()
         wotQueriedSubjects.clear()
         wotAccessedAt.clear()

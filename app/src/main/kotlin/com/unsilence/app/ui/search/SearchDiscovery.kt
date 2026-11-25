@@ -143,7 +143,7 @@ internal fun searchDiscoveryFlow(
     val wotChanges = store.wotSignalFlow.drop(1).debounce(400L)
         .onStart { emit(store.wotSignalFlow.value) }
     val ranked = combine(candidates, wotChanges) { current, _ ->
-        current to wotLookupSnapshot(current.users.map(UserEntity::pubkey), store::wotFor)
+        current to wotLookupSnapshot(current.users.map(UserEntity::pubkey), store::displayWotFor)
     }
     combine(ranked, safety, store.profileSignalFlow) { (current, ranks), account, _ ->
         if (!ownerIsCurrent()) return@combine SearchDiscoveryState()

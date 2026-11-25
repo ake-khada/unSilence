@@ -581,7 +581,7 @@ class FeedViewModel @Inject constructor(
 
     val wotLookups: StateFlow<Map<String, WotLookup>> =
         combine(_wotSubjects, memoryEventStore.wotSignalFlow) { subjects, _ ->
-            wotLookupSnapshot(subjects, memoryEventStore::wotFor)
+            wotLookupSnapshot(subjects, memoryEventStore::displayWotFor)
         }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyMap())
 
     val feedWotDisplayMode =

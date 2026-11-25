@@ -3653,13 +3653,14 @@ class RelayPool @Inject constructor(
         val relayUrl = normalizeRelayUrl(relayHint) ?: return false
         if (relayUrl in blockedUrls || relayCapabilitiesStore.shouldSkip(relayUrl)) return false
 
+        val queryOwner = memoryEventStore.get().ownPubkey
         val chunks = wotSubjectChunks(subjects, prioritySubjects = prioritySubjects)
         if (chunks.isEmpty()) return false
 
         return try {
             runWotChunkBatch(chunks) { chunk, page, totalPages ->
                 try {
-                    fetchWotChunk(relayUrl, provider, chunk, page, totalPages)
+                    fetchWotChunk(relayUrl, provider, chunk, page, totalPages, queryOwner)
                 } catch (e: CancellationException) {
                     throw e
                 } catch (e: Exception) {
@@ -3681,7 +3682,9 @@ class RelayPool @Inject constructor(
         chunk: List<String>,
         page: Int,
         totalPages: Int,
+        queryOwner: String?,
     ): Boolean {
+        if (memoryEventStore.get().ownPubkey != queryOwner) return false
         // Admit the provider to the unpurposed warm pool. Repeated viewport batches reuse it,
         // while the ordinary sweep/background lifecycle still bounds its lifetime.
         if (getOrCreateConnection(relayUrl, RelayRequestClass.GENERAL) == null) {
@@ -3689,6 +3692,7 @@ class RelayPool @Inject constructor(
             return false
         }
 
+        val queryStartedAt = System.currentTimeMillis()
         val subId = "wot-30382-${relayUrl.hashCode().toUInt()}-${System.nanoTime()}-$page"
         val filter = wotAssertionFilter(provider, chunk) ?: return false
         val req = buildJsonArray {
@@ -3741,6 +3745,8 @@ class RelayPool @Inject constructor(
             providerPubkey = provider,
             events = verifiedEvents.values.toList(),
             queriedSubjects = if (eosed) chunk else emptyList(),
+            queryStartedAt = queryStartedAt,
+            queryOwner = queryOwner,
         )
         return eosed
     }

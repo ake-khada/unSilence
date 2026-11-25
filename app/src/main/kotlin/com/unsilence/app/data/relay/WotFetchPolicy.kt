@@ -141,7 +141,7 @@ internal fun selectWotHydrationCandidates(
         when (val state = lookup(pubkey)) {
             WotLookup.Pending -> selected.add(pubkey)
             is WotLookup.Scored -> {
-                if (refreshStaleScored && nowSeconds - state.assertion.updatedAt >= staleAfterSeconds) {
+                if (refreshStaleScored && nowSeconds - state.assertion.lastConfirmationSeconds >= staleAfterSeconds) {
                     selected.add(pubkey)
                 }
             }

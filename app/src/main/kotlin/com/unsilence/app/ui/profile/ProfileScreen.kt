@@ -91,6 +91,7 @@ import com.unsilence.app.ui.shared.NostrAddressDisplay
 import com.unsilence.app.ui.shared.SelfDeclaredNostrAddressText
 import com.unsilence.app.ui.shared.selfDeclaredNostrAddressPresentation
 import com.unsilence.app.ui.shared.PostActionsHost
+import com.unsilence.app.ui.common.LocalMinuteClock
 import com.unsilence.app.ui.shared.WotInlineLabel
 import com.unsilence.app.ui.shared.WotBreakdownProvenance
 import com.unsilence.app.ui.shared.eventFeedItems
@@ -686,7 +687,7 @@ fun ProfileScreen(
                 ScoredStanding(scoredWot.assertion)
                 Spacer(Modifier.height(Spacing.medium))
                 WotBreakdownProvenance(
-                    text = "Via ${wotProvenance.providerName} grapevine · ${profileWotSyncedAgo(wotProvenance.lastFetchAt)}",
+                    text = "Via ${wotProvenance.providerName} grapevine · ${profileWotConfirmation(scoredWot, LocalMinuteClock.current.value)}",
                     modifier = Modifier.fillMaxWidth(),
                 )
             }

@@ -99,7 +99,7 @@ class ArticleReaderViewModel @Inject constructor(
     private val _wotSubjects = MutableStateFlow<Set<String>>(emptySet())
     val wotLookups: StateFlow<Map<String, WotLookup>> =
         combine(_wotSubjects, memoryEventStore.wotSignalFlow) { subjects, _ ->
-            wotLookupSnapshot(subjects, memoryEventStore::wotFor)
+            wotLookupSnapshot(subjects, memoryEventStore::displayWotFor)
         }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyMap())
 
     val feedWotDisplayMode: StateFlow<FeedWotDisplayMode> =

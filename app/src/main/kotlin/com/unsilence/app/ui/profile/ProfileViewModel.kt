@@ -162,12 +162,12 @@ class ProfileViewModel @Inject constructor(
 
     val wotLookups: StateFlow<Map<String, WotLookup>> =
         combine(_wotSubjects, memoryEventStore.wotSignalFlow) { subjects, _ ->
-            wotLookupSnapshot(subjects, memoryEventStore::wotFor)
+            wotLookupSnapshot(subjects, memoryEventStore::displayWotFor)
         }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyMap())
 
     val profileWotLookup: StateFlow<WotLookup> =
         memoryEventStore.wotSignalFlow
-            .map { pubkeyHex?.let { memoryEventStore.wotFor(it) } ?: WotLookup.Pending }
+            .map { pubkeyHex?.let { memoryEventStore.displayWotFor(it) } ?: WotLookup.Pending }
             .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), WotLookup.Pending)
 
     val wotProvenance: StateFlow<ProfileWotProvenance> =

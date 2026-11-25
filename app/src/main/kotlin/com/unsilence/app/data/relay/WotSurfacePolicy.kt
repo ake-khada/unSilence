@@ -119,9 +119,8 @@ internal fun searchImpersonationDisposition(
     isFollowed: Boolean,
     followsResolved: Boolean = true,
 ): SearchImpersonationDisposition {
-    if (isFollowed) return SearchImpersonationDisposition.KEEP
-    val assertion = (lookup as? WotLookup.Scored)?.assertion
-        ?: return SearchImpersonationDisposition.KEEP
+    if (isFollowed || lookup !is WotLookup.Scored || lookup.cached) return SearchImpersonationDisposition.KEEP
+    val assertion = lookup.assertion
     val verifiedReporters = assertion.verifiedReporters?.coerceAtLeast(0L) ?: 0L
     val verifiedMuters = assertion.verifiedMuters?.coerceAtLeast(0L) ?: 0L
     val isElevated = verifiedReporters >= SEARCH_ELEVATED_VERIFIED_REPORTERS ||
@@ -250,7 +249,7 @@ fun detectImpersonationRisk(
 }
 
 fun isProtectedWotLookup(lookup: WotLookup?): Boolean =
-    (lookup as? WotLookup.Scored)?.assertion?.rank?.let { it >= PROTECTED_PROFILE_RANK_THRESHOLD } == true
+    lookup is WotLookup.Scored && !lookup.cached && lookup.assertion.rank >= PROTECTED_PROFILE_RANK_THRESHOLD
 
 private fun UserEntity.identitySearchFields(): List<String> =
     listOfNotNull(

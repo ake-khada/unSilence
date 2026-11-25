@@ -83,7 +83,7 @@ class NotificationsViewModel @Inject constructor(
     private val previewWotSubjects = MutableStateFlow<Set<String>>(emptySet())
     val wotLookups: StateFlow<Map<String, WotLookup>> =
         combine(_wotSubjects, previewWotSubjects, memoryEventStore.wotSignalFlow) { subjects, previews, _ ->
-            wotLookupSnapshot(subjects + previews, memoryEventStore::wotFor)
+            wotLookupSnapshot(subjects + previews, memoryEventStore::displayWotFor)
         }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyMap())
 
     val feedWotDisplayMode: StateFlow<FeedWotDisplayMode> =

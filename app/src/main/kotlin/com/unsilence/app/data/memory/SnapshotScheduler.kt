@@ -11,6 +11,8 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -19,6 +21,7 @@ import kotlinx.coroutines.withTimeoutOrNull
 import java.io.BufferedInputStream
 import java.io.DataInputStream
 import java.io.File
+import java.io.IOException
 import java.io.InputStreamReader
 import java.util.concurrent.atomic.AtomicLong
 import javax.inject.Inject
@@ -97,6 +100,9 @@ class SnapshotScheduler internal constructor(
     private val snapshotDispatcher = Dispatchers.IO.limitedParallelism(1)
     private val scope = CoroutineScope(SupervisorJob() + snapshotDispatcher)
     private val mutex = Mutex()
+    private val scoreCache = WotScoreCache(File(snapshotFile.baseFile.parentFile, snapshotFile.baseFile.name + ".wot"))
+    private var savedScoreRevision = 0L
+    private var scoreAgeJob: Job? = null
     private val saveCoordinator = SnapshotSaveCoordinator()
     private val scheduledJobsLock = Any()
     internal var periodicJob: Job? = null
@@ -119,14 +125,32 @@ class SnapshotScheduler internal constructor(
      */
     fun attach() {
         ProcessLifecycleOwner.get().lifecycle.addObserver(this)
+        scope.launch {
+            // Collapse bursts of relay assertions into one compact write on the I/O dispatcher.
+            memoryEventStore.wotSignalFlow.drop(1).collectLatest {
+                delay(500)
+                mutex.withLock { if (restored) saveScoresIfChanged() }
+            }
+        }
         Log.d(TAG, "Attached to process lifecycle")
     }
 
     override fun onStart(owner: LifecycleOwner) {
         startPeriodicSave()
+        scoreAgeJob?.cancel()
+        scoreAgeJob = scope.launch {
+            memoryEventStore.refreshWotAges()
+            memoryEventStore.wotSignalFlow.collectLatest {
+                val now = System.currentTimeMillis()
+                val boundary = memoryEventStore.nextWotAgeChange(now) ?: return@collectLatest
+                delay((boundary - System.currentTimeMillis()).coerceAtLeast(1))
+                memoryEventStore.refreshWotAges()
+            }
+        }
     }
 
     override fun onStop(owner: LifecycleOwner) {
+        scoreAgeJob?.cancel()
         periodicJob?.cancel()
         periodicJob = null
         scope.launch { saveBeforeStopDeadline() }
@@ -185,13 +209,14 @@ class SnapshotScheduler internal constructor(
             }
         }
         val baseFile = snapshotFile.baseFile
-        if (!baseFile.exists()) {
-            Log.d(TAG, "No snapshot file found, starting fresh")
-            restored = true
-            reportFollows(SnapshotFollowsOutcome.MISSING)
-            return@withContext SnapshotRestoreOutcome.MISSING
-        }
         mutex.withLock {
+            scoreCache.read()?.let(memoryEventStore::restoreWotScores)
+            if (!baseFile.exists()) {
+                Log.d(TAG, "No snapshot file found, starting fresh")
+                restored = true
+                reportFollows(SnapshotFollowsOutcome.MISSING)
+                return@withLock SnapshotRestoreOutcome.MISSING
+            }
             try {
                 val snapshotBytes = baseFile.length()
                 snapshotFile.openRead().use { fileInput ->
@@ -341,9 +366,23 @@ class SnapshotScheduler internal constructor(
         pendingJobs.forEach { it.join() }
         mutex.withLock {
             snapshotFile.delete()
+            scoreCache.delete()
+            savedScoreRevision = memoryEventStore.wotCacheRevision
             saveCoordinator.reset()
             restored = false
             Log.d(TAG, "Snapshot deleted")
+        }
+    }
+
+    /** Called under mutex. A mutation during the write remains dirty for the next flush. */
+    private fun saveScoresIfChanged() {
+        val revision = memoryEventStore.wotCacheRevision
+        if (savedScoreRevision == revision) return
+        try {
+            scoreCache.write(memoryEventStore.wotCacheSnapshot())
+            savedScoreRevision = revision
+        } catch (error: IOException) {
+            Log.w(TAG, "Could not save WoT scores", error)
         }
     }
 
@@ -359,6 +398,7 @@ class SnapshotScheduler internal constructor(
                 Log.d(TAG, "save() skipped — restore not yet complete")
                 return@withContext
             }
+            saveScoresIfChanged()
             val coveredThrough = saveCoordinator.coverageForSave(request) ?: return@withContext
             try {
                 val stream = snapshotFile.startWrite()

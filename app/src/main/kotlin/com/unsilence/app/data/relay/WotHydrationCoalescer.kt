@@ -52,7 +52,7 @@ class WotHydrationCoalescer @Inject constructor(
         when (state) {
             WotLookup.Pending -> pendingSubjects.add(subject)
             is WotLookup.Scored -> {
-                if (nowSeconds - state.assertion.updatedAt >= WOT_STALENESS_SECONDS) {
+                if (nowSeconds - state.assertion.lastConfirmationSeconds >= WOT_STALENESS_SECONDS) {
                     staleProfileSubjects.add(subject)
                 }
             }

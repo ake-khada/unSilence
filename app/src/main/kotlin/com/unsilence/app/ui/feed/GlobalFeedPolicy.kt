@@ -115,7 +115,7 @@ internal class BurstDuplicateTracker(
 }
 
 internal fun trustedGateVerdict(lookup: WotLookup): TrustedGateVerdict = when (lookup) {
-    is WotLookup.Scored -> TrustedGateVerdict.PASS
+    is WotLookup.Scored -> if (lookup.cached) TrustedGateVerdict.HOLD else TrustedGateVerdict.PASS
     WotLookup.Pending -> TrustedGateVerdict.HOLD
     WotLookup.Absent -> TrustedGateVerdict.DROP
 }

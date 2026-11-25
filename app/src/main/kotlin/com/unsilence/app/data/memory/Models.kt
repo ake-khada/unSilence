@@ -372,6 +372,7 @@ data class RelayHealthInfo(
  * Keyed by [subjectPubkey], but the provider is stored on every row so provider
  * switches cannot silently reuse stale scores from a previous grapevine.
  */
+@kotlinx.serialization.Serializable
 data class WotAssertionEntity(
     val subjectPubkey: String,
     val providerPubkey: String,
@@ -386,10 +387,15 @@ data class WotAssertionEntity(
     val verifiedMuters: Long? = null,
     val verifiedReporters: Long? = null,
     val updatedAt: Long = 0L,
-)
+    val eventId: String = "",
+    /** Last receipt of this verified assertion, in wall-clock milliseconds. */
+    val confirmedAt: Long = 0L,
+) {
+    val lastConfirmationSeconds: Long get() = if (confirmedAt > 0L) confirmedAt / 1000L else updatedAt
+}
 
 sealed interface WotLookup {
-    data class Scored(val assertion: WotAssertionEntity) : WotLookup
+    data class Scored(val assertion: WotAssertionEntity, val cached: Boolean = false) : WotLookup
     data object Absent : WotLookup
     data object Pending : WotLookup
 }
