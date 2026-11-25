@@ -995,6 +995,7 @@ class MemoryEventStore @Inject constructor(
                 field = value
             }
             privateZapPendingSignal.update { it + 1L }
+            _muteListSignal.value = System.nanoTime()
         }
 
     /** Currently viewed profile — single-slot anchor for content eviction.
@@ -4183,7 +4184,7 @@ class MemoryEventStore @Inject constructor(
      * Driven by _muteListSignal, bumped in handleMuteList and updateMuteListPrivateTags.
      */
     fun ownMuteListFlow(): Flow<MuteList?> =
-        _muteListSignal.map { muteListsByPubkey[ownPubkey] }
+        _muteListSignal.map { ownPubkey?.let(::getMuteList) }
             .distinctUntilChanged()
             .flowOn(Dispatchers.Default)
 
@@ -7956,6 +7957,7 @@ class MemoryEventStore @Inject constructor(
         clearNip05VerificationCache()
         relayListsByPubkey.clear()
         muteListsByPubkey.clear()
+        _muteListSignal.value = System.nanoTime()
         latestMuteEventIdByPubkey.clear()
         pendingMutePublishesByPubkey.clear()
         blockedRelaysByPubkey.clear()
@@ -8037,6 +8039,7 @@ class MemoryEventStore @Inject constructor(
         followerCountCache.clear()
         relayListsByPubkey.clear()
         muteListsByPubkey.clear()
+        _muteListSignal.value = System.nanoTime()
         latestMuteEventIdByPubkey.clear()
         pendingMutePublishesByPubkey.clear()
         blockedRelaysByPubkey.clear()
