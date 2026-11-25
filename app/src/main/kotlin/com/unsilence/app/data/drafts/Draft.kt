@@ -57,6 +57,17 @@ sealed interface DraftBlock {
     data class Text(val content: String) : DraftBlock
 
     @Serializable
+    @SerialName("local_media")
+    data class LocalMedia(
+        val id: String,
+        val uri: String,
+        val displayName: String,
+        val originalBytes: Long,
+        val quality: String,
+        val failure: String? = null,
+    ) : DraftBlock
+
+    @Serializable
     @SerialName("attachment")
     data class Attachment(
         val url: String,
@@ -90,7 +101,7 @@ data class Draft(
             ?.trim()
             .orEmpty()
 
-    val attachmentCount: Int get() = blocks.count { it is DraftBlock.Attachment }
+    val attachmentCount: Int get() = blocks.count { it !is DraftBlock.Text }
 }
 
 @Serializable

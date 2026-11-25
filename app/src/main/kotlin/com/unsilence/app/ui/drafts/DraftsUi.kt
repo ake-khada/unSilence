@@ -58,6 +58,7 @@ import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.unsilence.app.data.drafts.Draft
+import com.unsilence.app.data.drafts.DraftBlock
 import com.unsilence.app.data.drafts.DraftContext
 import com.unsilence.app.ui.common.LocalAppSessionKey
 import com.unsilence.app.ui.theme.AppType
@@ -191,7 +192,7 @@ fun CloseDraftSheet(
             )
             Text(
                 text = if (hasUnsavedMedia) {
-                    "Only text and uploaded media can be saved. Pending or failed media will be discarded."
+                    "Unfinished attachments stay in the draft. You can upload them when you return."
                 } else if (hasSavedDraft) {
                     "Save your changes or delete the saved draft."
                 } else {
@@ -397,13 +398,15 @@ private fun draftLabel(context: DraftContext): String = when (context) {
 }
 
 internal fun draftDetail(draft: Draft): String? {
-    val media = when (draft.attachmentCount) {
+    val pending = draft.blocks.count { it is DraftBlock.LocalMedia }
+    val uploaded = draft.attachmentCount - pending
+    val media = when (uploaded) {
         0 -> null
         1 -> "1 uploaded attachment"
-        else -> "${draft.attachmentCount} uploaded attachments"
+        else -> "$uploaded uploaded attachments"
     }
     val unsaved = if (draft.hadUnsavedMedia) "some media was not saved" else null
-    return listOfNotNull(media, unsaved).joinToString(" · ").ifBlank { null }
+    return listOfNotNull(media, "$pending awaiting upload".takeIf { pending > 0 }, unsaved).joinToString(" · ").ifBlank { null }
 }
 
 private fun relativeDraftTime(updatedAtMs: Long): String {

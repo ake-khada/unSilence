@@ -30,6 +30,7 @@ class BlossomAuthSigner @Inject constructor(
         sha256Hex: String,
         verb: String = "upload",
         expirationSeconds: Long = 300L,
+        expectedPubkey: String? = null,
     ): String? {
         val now = System.currentTimeMillis() / 1000L
         val expiration = now + expirationSeconds
@@ -44,7 +45,8 @@ class BlossomAuthSigner @Inject constructor(
             ),
             content = "",
         )
-        val signed = signingManager.sign(template) ?: return null
+        val signed = signingManager.sign(template, expectedPubkey) ?: return null
+        if (expectedPubkey != null && signed.pubKey != expectedPubkey) return null
         val json = toEventJson(signed)
         val b64 = Base64.encodeToString(json.toByteArray(Charsets.UTF_8), Base64.NO_WRAP)
         return "Nostr $b64"

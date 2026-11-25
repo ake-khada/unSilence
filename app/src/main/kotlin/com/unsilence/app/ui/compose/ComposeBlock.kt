@@ -1,5 +1,9 @@
 package com.unsilence.app.ui.compose
 
+import androidx.core.net.toUri
+import com.unsilence.app.data.blossom.AttachmentQuality
+import com.unsilence.app.data.drafts.DraftBlock
+import com.unsilence.app.data.drafts.toDraftAttachment
 import java.util.UUID
 
 /**
@@ -24,4 +28,28 @@ sealed interface ComposeBlock {
     data class Attachment(val state: AttachmentState) : ComposeBlock {
         override val id: String get() = state.id
     }
+}
+
+internal fun ComposeBlock.toDraftBlock(): DraftBlock = when (this) {
+    is ComposeBlock.Text -> DraftBlock.Text(content)
+    is ComposeBlock.Attachment -> if (state is AttachmentState.Uploaded) {
+        state.blob.toDraftAttachment()
+    } else {
+        DraftBlock.LocalMedia(
+            id = state.id,
+            uri = state.uri.toString(),
+            displayName = state.displayName,
+            originalBytes = state.originalBytes,
+            quality = state.quality.name,
+            failure = (state as? AttachmentState.Failed)?.message?.take(512),
+        )
+    }
+}
+
+internal fun DraftBlock.LocalMedia.restoreMedia(hasAccess: Boolean): AttachmentState {
+    val source = uri.toUri()
+    val selected = AttachmentQuality.entries.find { it.name == quality } ?: AttachmentQuality.ORIGINAL
+    val message = if (hasAccess) failure else "File unavailable. Remove it and choose it again."
+    return if (message == null) AttachmentState.Idle(source, id, displayName, originalBytes, selected)
+    else AttachmentState.Failed(source, id, displayName, originalBytes, selected, message)
 }

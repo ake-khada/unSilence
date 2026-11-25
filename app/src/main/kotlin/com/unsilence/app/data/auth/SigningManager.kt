@@ -79,15 +79,17 @@ class SigningManager @Inject constructor(
             .also { signerSync = it }
     }
 
-    suspend fun <T : Event> sign(template: EventTemplate<T>): T? {
+    suspend fun <T : Event> sign(template: EventTemplate<T>, expectedPubkey: String? = null): T? {
         val s = getOrCreateSigner() ?: return null
-        return if (s is NostrSignerExternal) {
+        if (expectedPubkey != null && s.pubKey != expectedPubkey) return null
+        val signed = if (s is NostrSignerExternal) {
             signerAttempt { s.sign(template) }
         } else {
             withContext(Dispatchers.Default) {
                 signerAttempt { s.sign(template) }
             }
         }
+        return signed.takeIf { expectedPubkey == null || keyManager.getPublicKeyHex() == expectedPubkey }
     }
 
     /**

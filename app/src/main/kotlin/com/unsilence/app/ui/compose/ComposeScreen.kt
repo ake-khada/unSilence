@@ -236,11 +236,13 @@ fun ComposeScreen(
                 showSnackbar("Draft saved")
                 finishAndDismiss()
             } else {
-                saveNotice = if (hasUnsavedMedia) "Draft saved without pending media" else "Draft saved"
+                saveNotice = "Draft saved"
             }
             DraftSaveResult.NEWER_EDITS -> saveNotice = "Earlier edits saved. Save again for the latest changes."
             DraftSaveResult.EMPTY -> saveNotice = "Nothing to save"
             DraftSaveResult.FAILED -> showSnackbar("Couldn’t save draft. Try again.")
+            DraftSaveResult.MEDIA_ACCESS -> showSnackbar("Can’t keep access to this file. Remove it and choose it again.")
+            DraftSaveResult.MEDIA_LIMIT -> showSnackbar("Too many files held by drafts. Remove unused attachments or drafts and retry.")
             DraftSaveResult.SESSION_CHANGED -> Unit
         }
         closeAfterSave = null

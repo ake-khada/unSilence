@@ -9,6 +9,14 @@ import com.unsilence.app.data.relay.NostrJson
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlin.coroutines.resume
+import kotlin.coroutines.resumeWithException
+import okhttp3.Call
+import okhttp3.Callback
+import okhttp3.Response
+import java.io.IOException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.RequestBody
@@ -62,6 +70,7 @@ class BlossomClient @Inject constructor(
         file: File,
         mimeType: String,
         serverUrl: String,
+        expectedPubkey: String? = null,
     ): Result<BlossomBlob> = withContext(Dispatchers.IO) {
         try {
             val sha256hex = sha256Streaming(file)
@@ -78,7 +87,9 @@ class BlossomClient @Inject constructor(
                     }
                 }
             }
-            executeUpload(body, sha256hex, mimeType, file.length(), serverUrl)
+            executeUpload(body, sha256hex, mimeType, file.length(), serverUrl, expectedPubkey)
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: BlossomException) {
             Log.e(TAG, "Upload failed: ${e.message}")
             Result.failure(e)
@@ -94,10 +105,11 @@ class BlossomClient @Inject constructor(
         mimeType: String,
         sizeBytes: Long,
         serverUrl: String,
+        expectedPubkey: String?,
     ): Result<BlossomBlob> {
         val uploadUrl = serverUrl.trimEnd('/') + "/upload"
 
-        val authHeader = authSigner.authHeader(sha256Hex = sha256hex)
+        val authHeader = authSigner.authHeader(sha256Hex = sha256hex, expectedPubkey = expectedPubkey)
             ?: return Result.failure(BlossomException.AuthFailed("Signing unavailable"))
 
         val request = Request.Builder()
@@ -107,19 +119,17 @@ class BlossomClient @Inject constructor(
             .build()
 
         Log.d(TAG, "Uploading $sizeBytes bytes to $uploadUrl")
-        val response = client.newCall(request).execute()
-
-        val responseBody = response.body?.string() ?: ""
-        Log.d(TAG, "Response ${response.code}: $responseBody")
+        val (code, responseBody) = client.newCall(request).uploadResponse()
+        Log.d(TAG, "Response $code: $responseBody")
         when {
-            response.code == 401 || response.code == 403 ->
-                return Result.failure(BlossomException.AuthFailed("Auth rejected: ${response.code}: $responseBody"))
-            response.code == 413 ->
+            code == 401 || code == 403 ->
+                return Result.failure(BlossomException.AuthFailed("Auth rejected: $code: $responseBody"))
+            code == 413 ->
                 return Result.failure(BlossomException.QuotaExceeded("File too large"))
-            response.code == 429 ->
+            code == 429 ->
                 return Result.failure(BlossomException.QuotaExceeded("Rate limited"))
-            !response.isSuccessful ->
-                return Result.failure(BlossomException.ServerError(response.code, responseBody))
+            code !in 200..299 ->
+                return Result.failure(BlossomException.ServerError(code, responseBody))
         }
 
         val json = NostrJson.parseToJsonElement(responseBody).jsonObject
@@ -180,4 +190,22 @@ class BlossomClient @Inject constructor(
         }
         return md.digest().joinToString("") { "%02x".format(it) }
     }
+}
+
+/** Cancelling an editor upload also closes the in-flight network call. */
+private suspend fun Call.uploadResponse(): Pair<Int, String> = suspendCancellableCoroutine { continuation ->
+    continuation.invokeOnCancellation { cancel() }
+    enqueue(object : Callback {
+        override fun onFailure(call: Call, e: IOException) = continuation.resumeWithException(e)
+
+        override fun onResponse(call: Call, response: Response) {
+            val result = try {
+                response.use { it.code to it.body.string() }
+            } catch (error: IOException) {
+                continuation.resumeWithException(error)
+                return
+            }
+            continuation.resume(result)
+        }
+    })
 }

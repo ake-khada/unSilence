@@ -24,11 +24,12 @@ import com.unsilence.app.data.drafts.DraftBlock
 import com.unsilence.app.data.drafts.isStandalone
 import com.unsilence.app.data.drafts.DraftCursor
 import com.unsilence.app.data.drafts.DraftContext
+import com.unsilence.app.data.drafts.DraftMediaAccessException
+import com.unsilence.app.data.drafts.DraftMediaLimitException
 import com.unsilence.app.data.drafts.DraftStore
 import com.unsilence.app.data.drafts.DraftPoll
 import com.unsilence.app.data.drafts.DraftPollOption
 import com.unsilence.app.data.drafts.toBlob
-import com.unsilence.app.data.drafts.toDraftAttachment
 import com.unsilence.app.data.init.InitGate
 import com.unsilence.app.data.memory.CustomEmoji
 import com.unsilence.app.data.memory.MemoryEventStore
@@ -204,7 +205,7 @@ enum class AttachmentUploadPhase { Preparing, Transcoding, Uploading }
 
 internal enum class DraftDeleteResult { DELETED, FAILED, SESSION_CHANGED }
 
-internal enum class DraftSaveResult { SAVED, NEWER_EDITS, EMPTY, FAILED, SESSION_CHANGED }
+internal enum class DraftSaveResult { SAVED, NEWER_EDITS, EMPTY, FAILED, MEDIA_ACCESS, MEDIA_LIMIT, SESSION_CHANGED }
 
 // ── Relay publish status ────────────────────────────────────────────────────
 
@@ -277,6 +278,7 @@ class ComposeViewModel @Inject constructor(
 
     internal fun finishComposeSession(sessionKey: String) {
         if (composeSessionGate.finish(sessionKey)) {
+            cancelAttachmentUploads()
             savedStateHandle.remove<String>(ACTIVE_SESSION_KEY)
             savedStateHandle.remove<Bundle>(EDITOR_STATE_KEY)
         }
@@ -371,7 +373,7 @@ class ComposeViewModel @Inject constructor(
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), false)
 
     val hasDraftableContent: StateFlow<Boolean> = combine(_blocks, _pollDraft) { blocks, poll ->
-            draftBlocksFrom(blocks).isNotEmpty() || poll.enabled
+            hasAnyContent(blocks) || poll.enabled
         }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), false)
 
@@ -388,14 +390,11 @@ class ComposeViewModel @Inject constructor(
             val hasUploaded = blocks.any {
                 it is ComposeBlock.Attachment && it.state is AttachmentState.Uploaded
             }
-            val inFlight = blocks.any {
-                it is ComposeBlock.Attachment &&
-                (it.state is AttachmentState.Idle || it.state is AttachmentState.Uploading)
-            }
+            val unfinished = blocks.any { it is ComposeBlock.Attachment && it.state !is AttachmentState.Uploaded }
             if (poll.enabled) {
-                hasText && poll.options.count { it.label.isNotBlank() } >= 2 && !inFlight
+                hasText && poll.options.count { it.label.isNotBlank() } >= 2 && !unfinished
             } else {
-                (hasText || hasUploaded) && !inFlight
+                (hasText || hasUploaded) && !unfinished
             }
         }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), false)
@@ -608,13 +607,17 @@ class ComposeViewModel @Inject constructor(
         editorSelection = id to range
     }
 
-    fun restoreDraft(draft: Draft) {
+    suspend fun restoreDraft(draft: Draft) {
+        val held = if (draft.blocks.any { it is DraftBlock.LocalMedia }) withContext(Dispatchers.IO) {
+            contentResolver.persistedUriPermissions.filter { it.isReadPermission }.mapTo(mutableSetOf()) { it.uri.toString() }
+        } else emptySet()
         savedStateHandle[SAVED_DRAFT_KEY] = draft.key
         if (draft.isStandalone) savedStateHandle[STANDALONE_KEY] = draft.key
         _selectedEmojiUrls.value = emptyMap()
         val restored = draft.blocks.map { block ->
             when (block) {
                 is DraftBlock.Text -> ComposeBlock.Text(block.content)
+                is DraftBlock.LocalMedia -> ComposeBlock.Attachment(block.restoreMedia(hasAccess = block.uri in held))
                 is DraftBlock.Attachment -> {
                     val blob = block.toBlob()
                     ComposeBlock.Attachment(
@@ -660,16 +663,23 @@ class ComposeViewModel @Inject constructor(
 
     internal suspend fun saveCurrentDraft(): DraftSaveResult {
         val pk = pubkeyHex ?: return DraftSaveResult.FAILED
+        if (keyManager.getPublicKeyHex() != pk) return DraftSaveResult.SESSION_CHANGED
         val session = composeSessionGate.activeSessionKey ?: return DraftSaveResult.SESSION_CHANGED
         val draft = buildCurrentDraft() ?: return DraftSaveResult.EMPTY
         val fingerprint = currentContentFingerprint(_blocks.value, _isSensitive.value)
         val write = draftStore.save(pk, draft).await()
-        if (write.isFailure) return DraftSaveResult.FAILED
         if (composeSessionGate.activeSessionKey != session || keyManager.getPublicKeyHex() != pk) {
             return DraftSaveResult.SESSION_CHANGED
         }
+        write.exceptionOrNull()?.let { error ->
+            return when (error) {
+                is DraftMediaAccessException -> DraftSaveResult.MEDIA_ACCESS
+                is DraftMediaLimitException -> DraftSaveResult.MEDIA_LIMIT
+                else -> DraftSaveResult.FAILED
+            }
+        }
         savedStateHandle[SAVED_DRAFT_KEY] = draft.key
-        if (!draft.hadUnsavedMedia) _savedDraftFingerprint.value = fingerprint
+        _savedDraftFingerprint.value = fingerprint
         return if (fingerprint == currentContentFingerprint(_blocks.value, _isSensitive.value)) {
             DraftSaveResult.SAVED
         } else {
@@ -691,11 +701,11 @@ class ComposeViewModel @Inject constructor(
 
     /** Manually trigger upload for a single idle attachment. */
     fun startUpload(id: String) {
+        if (pubkeyHex == null || keyManager.getPublicKeyHex() != pubkeyHex || attachmentUploadJobs[id]?.isActive == true) return
         val block = _blocks.value.firstOrNull {
             it is ComposeBlock.Attachment && it.state.id == id
         } as? ComposeBlock.Attachment ?: return
         val idle = block.state as? AttachmentState.Idle ?: return
-        attachmentUploadJobs.remove(id)?.cancel()
         lateinit var job: Job
         job = viewModelScope.launch(start = CoroutineStart.LAZY) {
             try {
@@ -829,6 +839,7 @@ class ComposeViewModel @Inject constructor(
                 } else block
             }
         }
+        startUpload(id)
     }
 
     fun updateAttachmentQuality(id: String, quality: AttachmentQuality) {
@@ -847,25 +858,17 @@ class ComposeViewModel @Inject constructor(
     }
 
     private suspend fun uploadAttachment(idle: AttachmentState.Idle) {
-        val sourceMime = contentResolver.getType(idle.uri) ?: "application/octet-stream"
-        val isVideo = sourceMime.startsWith("video/")
         updateAttachmentState(idle.id) {
-            AttachmentState.Uploading(
-                uri = idle.uri,
-                id = idle.id,
-                displayName = idle.displayName,
-                originalBytes = idle.originalBytes,
-                quality = idle.quality,
-                phase = if (isVideo) {
-                    AttachmentUploadPhase.Preparing
-                } else {
-                    AttachmentUploadPhase.Uploading
-                },
-            )
+            AttachmentState.Uploading(idle.uri, idle.id, idle.displayName, idle.originalBytes, idle.quality,
+                AttachmentUploadPhase.Preparing)
         }
-
-        val server = blossomServersStore.selectedServer.value
         try {
+            val sourceMime = withContext(Dispatchers.IO) {
+                contentResolver.getType(idle.uri) ?: "application/octet-stream"
+            }
+            val isVideo = sourceMime.startsWith("video/")
+            if (!isVideo) updateUploadProgress(idle.id, AttachmentUploadPhase.Uploading, null)
+            val server = blossomServersStore.selectedServer.value
             val blob = if (isVideo) {
                 uploadVideo(idle.id, idle.uri, server, idle.quality) { progress ->
                     updateUploadProgress(
@@ -898,7 +901,10 @@ class ComposeViewModel @Inject constructor(
                     displayName = idle.displayName,
                     originalBytes = idle.originalBytes,
                     quality = idle.quality,
-                    message = ex.message ?: "Upload failed",
+                    message = when (ex) {
+                        is SecurityException, is java.io.FileNotFoundException -> "File unavailable. Remove it and choose it again."
+                        else -> ex.message ?: "Upload failed"
+                    },
                 )
             }
         }
@@ -952,6 +958,7 @@ class ComposeViewModel @Inject constructor(
                 file = prepared.file,
                 mimeType = prepared.mimeType,
                 serverUrl = server,
+                expectedPubkey = pubkeyHex,
             ).getOrThrow()
             return blob.copy(dimensions = blob.dimensions ?: prepared.dimensions)
         } finally {
@@ -981,6 +988,7 @@ class ComposeViewModel @Inject constructor(
                 file = transcoded.file,
                 mimeType = transcoded.mimeType,
                 serverUrl = server,
+                expectedPubkey = pubkeyHex,
             ).getOrThrow()
             return blob.copy(
                 durationMs = transcoded.durationMs,
@@ -991,6 +999,11 @@ class ComposeViewModel @Inject constructor(
         }
     }
 
+    private fun cancelAttachmentUploads() {
+        attachmentUploadJobs.values.toList().forEach { it.cancel() }
+        attachmentUploadJobs.clear()
+    }
+
     /** Reset state for reuse — ViewModel is activity-scoped, survives recomposition. */
     fun reset() {
         savedStateHandle.set<String?>(SAVED_DRAFT_KEY, null)
@@ -998,8 +1011,7 @@ class ComposeViewModel @Inject constructor(
         editorSelection = null
         restoredFocusId = null
         cancelPendingSigning()
-        attachmentUploadJobs.values.forEach { it.cancel() }
-        attachmentUploadJobs.clear()
+        cancelAttachmentUploads()
         published = false
         publishError = null
         replyToEventId = null
@@ -1112,22 +1124,20 @@ class ComposeViewModel @Inject constructor(
 
     private fun buildCurrentDraft(): Draft? {
         val blocks = _blocks.value
-        val draftBlocks = draftBlocksFrom(blocks)
         val poll = _pollDraft.value
-        if (draftBlocks.isEmpty() && !poll.enabled) return null
+        if (!hasAnyContent(blocks) && !poll.enabled) return null
         val context = currentContext()
         return Draft(
             key = draftKey(context),
             cursor = editorSelection?.let { (id, selection) ->
-                val index = blocks.filterIsInstance<ComposeBlock.Text>().filter { it.content.isNotBlank() }
+                val index = blocks.filterIsInstance<ComposeBlock.Text>()
                     .indexOfFirst { it.id == id }
                 if (index < 0) null else DraftCursor(index, selection.start, selection.end)
             },
-            blocks = draftBlocks,
+            blocks = blocks.map(ComposeBlock::toDraftBlock),
             isSensitive = _isSensitive.value,
             updatedAt = System.currentTimeMillis(),
             context = context,
-            hadUnsavedMedia = hasUnsavedMediaBlocks(blocks),
             poll = poll.takeIf { it.enabled }?.let { active ->
                 DraftPoll(
                     options = active.options.map { DraftPollOption(it.id, it.label) },
@@ -1137,20 +1147,6 @@ class ComposeViewModel @Inject constructor(
             },
         )
     }
-
-    private fun draftBlocksFrom(blocks: List<ComposeBlock>): List<DraftBlock> =
-        blocks.mapNotNull { block ->
-            when (block) {
-                is ComposeBlock.Text -> block.content
-                    .takeIf { it.isNotBlank() }
-                    ?.let { DraftBlock.Text(it) }
-                is ComposeBlock.Attachment ->
-                    (block.state as? AttachmentState.Uploaded)?.blob?.toDraftAttachment()
-            }
-        }
-
-    private fun hasUnsavedMediaBlocks(blocks: List<ComposeBlock>): Boolean =
-        blocks.any { it is ComposeBlock.Attachment && it.state !is AttachmentState.Uploaded }
 
     internal fun hasAnyContent(blocks: List<ComposeBlock>): Boolean =
         blocks.any { block ->
@@ -1252,12 +1248,12 @@ class ComposeViewModel @Inject constructor(
         isReply: Boolean,
         createdAt: Long,
     ): PublishPayloadState? {
-        val publishBlocks = blocks.mapNotNull { block ->
+        val publishBlocks = blocks.map { block ->
             when (block) {
                 is ComposeBlock.Text -> PublishBlock.Text(block.content)
                 is ComposeBlock.Attachment -> {
                     val blob = (block.state as? AttachmentState.Uploaded)?.blob
-                        ?: return@mapNotNull null
+                        ?: return null
                     PublishBlock.Media(
                         PublishMedia(
                             url = blob.url,
