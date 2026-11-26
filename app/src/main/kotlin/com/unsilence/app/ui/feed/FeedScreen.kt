@@ -369,11 +369,11 @@ fun FeedScreen(
         }
     }
 
-    // Pin viewport at item 0 while user intends to be at the live edge.
-    // Gated on isAtTop (intent), not an index window.
-    LaunchedEffect(liveArrivalIds) {
-        if (liveArrivalIds.isNotEmpty() && isAtTop) {
-            listState.scrollToItem(0)
+    // Row projection can finish after the arrival signal. Pin when the new head is displayed.
+    val liveHeadId = events.firstOrNull()?.id?.takeIf { it in liveArrivalIds }
+    LaunchedEffect(liveHeadId) {
+        if (liveHeadId != null && isAtTop && !listState.isScrollInProgress) {
+            listState.requestScrollToItem(0)
         }
     }
 
@@ -656,7 +656,7 @@ fun FeedScreen(
                 pendingCount = viewModel.pendingCount,
                 atTop = isAtTop,
                 onClick = {
-                    viewModel.onDotTapped()
+                    viewModel.showNewest()
                     scrollScope.launch { listState.scrollToItem(0) }
                 },
                 modifier = Modifier

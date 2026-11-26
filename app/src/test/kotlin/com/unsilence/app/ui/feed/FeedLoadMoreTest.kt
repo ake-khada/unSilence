@@ -21,6 +21,9 @@ import org.junit.Assert.*
 import org.junit.Before
 import org.junit.Test
 import java.lang.reflect.Modifier
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit.SECONDS
 import javax.inject.Provider
 
 /** Runs the real loadMore/batch/history/reset methods and TimelineService.
@@ -254,6 +257,41 @@ class FeedLoadMoreTest {
             assertEquals(1000, f.timeline.value.events.size)
             assertEquals(0, f.timeline.value.paging.pages)
             assertTrue(f.pending.value.isEmpty())
+        }
+    }
+
+    @Test fun `returning to live tail while a relay batch is queuing delivers every arrival`() = runTest {
+        Fixture(pagingEvents(0, 40)).use { f ->
+            val waiting = pagingEvents(-1, 1)
+            f.batch(waiting, since = waiting.single().createdAt)
+            assertEquals(waiting, f.pending.value)
+            val arrivals = pagingEvents(-3, 2)
+            val merging = CountDownLatch(1)
+            val resume = CountDownLatch(1)
+            val delayed = object : AbstractList<NostrEvent>() {
+                override val size: Int get() {
+                    merging.countDown()
+                    check(resume.await(5, SECONDS))
+                    return arrivals.size
+                }
+                override fun get(index: Int) = arrivals[index]
+            }
+            val relay = Executors.newSingleThreadExecutor()
+            try {
+                val result = relay.submit {
+                    FeedViewModel::class.java.getDeclaredMethod("handleNewBatch", List::class.java)
+                        .apply { isAccessible = true }.invoke(f.vm, delayed)
+                }
+                assertTrue(merging.await(5, SECONDS))
+                f.vm.showNewest()
+                resume.countDown()
+                result.get(5, SECONDS)
+                assertTrue("Arrivals stranded in the pending buffer at the top", f.pending.value.isEmpty())
+                assertEquals(arrivals + waiting, f.timeline.value.events.take(3))
+            } finally {
+                resume.countDown()
+                relay.shutdownNow()
+            }
         }
     }
 

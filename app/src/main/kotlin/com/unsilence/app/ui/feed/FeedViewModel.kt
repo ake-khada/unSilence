@@ -86,6 +86,7 @@ import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.conflate
 import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.flow.getAndUpdate
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -166,7 +167,7 @@ enum class FeedContentFilter(val value: Int) {
  *   - Timeline state: _events, _newEvents, feedRows, showDot, pendingCount,
  *     isLoading, isLoadingMore (mirrors Jumble NoteList component state)
  *   - Actions: setFeedType, setContentFilter, updateFilter,
- *     onViewportChanged, onDotTapped, loadMore, refresh
+ *     onViewportChanged, showNewest, loadMore, refresh
  *   - pinnedRelays = the user's kind-10012 favorite relay feeds
  */
 @OptIn(FlowPreview::class)
@@ -654,12 +655,6 @@ class FeedViewModel @Inject constructor(
     /** True when there are queued new posts (used by nav bar dot indicator). */
     val hasNewTopPost: Boolean get() = showDot.value
 
-    /** Clear the new-posts indicator (e.g. when user taps the feed tab).
-     *  Sets _isAtTop = true immediately so live-tail events merge into
-     *  _events during the animateScrollToItem(0) animation — prevents
-     *  the blue dot from flickering back while the scroll is in flight. */
-    fun clearNewTopPost() = setAtTop(true)
-
     // -- Warm-zone hydration ---------------------------------------------------
 
     internal val displayWindowReporter = com.unsilence.app.ui.shared.DisplayWindowReporter(memoryEventStore)
@@ -931,28 +926,22 @@ class FeedViewModel @Inject constructor(
         _timeline.update { it.merge(history) }
     }
 
-    /**
-     * Mirrors Jumble NoteList:handleNewEvents for single live-tail events.
-     *   - At top: merge into events (visible immediately)
-     *   - Scrolled: buffer in newEvents (blue-dot)
-     */
-    private fun handleNew(event: NostrEvent) {
+    private fun handleNew(event: NostrEvent) = handleNewBatch(listOf(event))
+
+    private fun handleNewBatch(newEvents: List<NostrEvent>) {
         if (_isAtTop.value) {
-            _liveArrivalIds.update { it + event.id }
-            _timeline.update { it.merge(listOf(event)) }
+            mergeLive(newEvents)
         } else {
-            _newEvents.update { current -> TimelineMerge.merge(current, listOf(event)) }
+            _newEvents.update { current -> TimelineMerge.merge(current, newEvents) }
+            // The reader can return to the top while a relay callback is enqueuing.
+            if (_isAtTop.value) flushPending()
         }
     }
 
-    /** Batch variant of handleNew for the since-filter path. */
-    private fun handleNewBatch(newEvents: List<NostrEvent>) {
-        if (_isAtTop.value) {
-            _liveArrivalIds.update { it + newEvents.map { e -> e.id }.toSet() }
-            _timeline.update { it.merge(newEvents) }
-        } else {
-            _newEvents.update { current -> TimelineMerge.merge(current, newEvents) }
-        }
+    private fun mergeLive(events: List<NostrEvent>) {
+        val ids = events.map { it.id }
+        _liveArrivalIds.update { it + ids }
+        _timeline.update { it.merge(events) }
     }
 
     // ── User actions ──────────────────────────────────────────────────────────
@@ -982,14 +971,11 @@ class FeedViewModel @Inject constructor(
         }
     }
 
-    fun onDotTapped() = setAtTop(true)
+    fun showNewest() = setAtTop(true)
 
     private fun flushPending() {
-        val pending = _newEvents.value
-        if (pending.isEmpty()) return
-        _liveArrivalIds.update { it + pending.map { e -> e.id }.toSet() }
-        _timeline.update { it.merge(pending) }
-        _newEvents.value = emptyList()
+        val pending = _newEvents.getAndUpdate { emptyList() }
+        if (pending.isNotEmpty()) mergeLive(pending)
     }
 
     fun loadMore() {

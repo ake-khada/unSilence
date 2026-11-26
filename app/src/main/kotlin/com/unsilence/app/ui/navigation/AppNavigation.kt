@@ -589,7 +589,7 @@ fun AppNavigation(
                                                 when (tabReselectAction(index, selectedTab)) {
                                                     TabReselectAction.FEED_TOP -> {
                                                         scrollToTopTrigger++
-                                                        feedViewModel.clearNewTopPost()
+                                                        feedViewModel.showNewest()
                                                     }
                                                     TabReselectAction.PROFILE_TOP -> profileScrollToTopTrigger++
                                                     TabReselectAction.NONE -> Unit
