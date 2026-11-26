@@ -42,6 +42,8 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import com.unsilence.app.ui.common.LocalShowSnackbar
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -88,6 +90,13 @@ fun CustomEmojisScreen(onDismiss: () -> Unit, navigationOwnsBack: Boolean = fals
     val subscribedSets  by viewModel.subscribedSets.collectAsStateWithLifecycle()
     val discoverSets    by viewModel.discoverSets.collectAsStateWithLifecycle()
     val pasteState      by viewModel.pasteState.collectAsStateWithLifecycle()
+
+    val showNotice = LocalShowSnackbar.current
+    LaunchedEffect(pasteState) {
+        if (pasteState == PasteState.Subscribed && viewModel.consumeSubscriptionNotice()) {
+            showNotice("Subscribed")
+        }
+    }
 
     // Picker state for pinned strip
     var showPicker by remember { mutableStateOf(false) }
@@ -294,7 +303,7 @@ private fun PasteBar(
 
         // Status feedback
         when (pasteState) {
-            is PasteState.Idle -> {}
+            PasteState.Idle, PasteState.Subscribed -> Unit
             is PasteState.Resolving -> {
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
@@ -314,15 +323,6 @@ private fun PasteBar(
                     text = pasteState.message,
                     color = com.unsilence.app.ui.theme.Error,
                     style = AppTextStyles.bodySmall,
-                    modifier = Modifier.padding(top = Spacing.small),
-                )
-            }
-            is PasteState.Subscribed -> {
-                Text(
-                    text = "Subscribed",
-                    color = BrandDeep,
-                    style = AppTextStyles.bodySmall,
-                    fontWeight = FontWeight.Medium,
                     modifier = Modifier.padding(top = Spacing.small),
                 )
             }

@@ -9,6 +9,9 @@ import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performTextReplacement
+import com.unsilence.app.data.drafts.Draft
+import com.unsilence.app.data.drafts.DraftBlock
+import com.unsilence.app.data.drafts.DraftContext
 import com.unsilence.app.MainActivity
 import com.unsilence.app.ui.common.LocalShowSnackbar
 import com.unsilence.app.ui.theme.UnsilenceTheme
@@ -42,5 +45,25 @@ class DraftSaveDeviceTest {
             assertEquals(0, dismissals)
             assertEquals(listOf("Couldn’t save draft. Try again."), notices)
         }
+    }
+
+    @Test fun failedDeleteFromCloseSheetKeepsTheEditedText() {
+        assertNull("Requires the account-free emulator", compose.activity.keyManager.getPublicKeyHex())
+        val draft = Draft("new", listOf(DraftBlock.Text("Original text")), false, 1, DraftContext.New)
+        compose.runOnUiThread {
+            compose.activity.setContent {
+                UnsilenceTheme {
+                    ComposeScreen(initialDraft = draft, onDismiss = { error("Failed deletion dismissed the composer") })
+                }
+            }
+        }
+        val editor = compose.onNode(hasSetTextAction())
+        editor.performTextReplacement("Keep my changes")
+        compose.onNodeWithContentDescription("Close").performClick()
+        compose.onNodeWithText("Delete draft").performClick()
+        compose.onNodeWithText("Couldn’t delete draft. Try again.").assertIsDisplayed()
+        compose.onNodeWithText("Continue editing").performClick()
+        compose.onNodeWithText("Keep my changes").assertIsDisplayed()
+        editor.performTextReplacement("Still editable")
     }
 }

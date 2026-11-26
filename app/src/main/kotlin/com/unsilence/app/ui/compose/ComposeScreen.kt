@@ -76,6 +76,7 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextDecoration
@@ -110,7 +111,6 @@ import com.unsilence.app.ui.theme.Sizing
 import com.unsilence.app.ui.theme.Spacing
 import com.unsilence.app.ui.theme.TextSecondary
 import com.unsilence.app.ui.theme.Warn
-import kotlinx.coroutines.delay
 
 internal enum class ComposerBackAction { DISMISS, CONFIRM_DISCARD, CONFIRM_DELETE }
 private enum class DraftDeletion { CONFIRM, DELETING, FAILED }
@@ -199,11 +199,11 @@ fun ComposeScreen(
     val isConfirming = sendState is SendState.Confirming
     val isPublishing = sendState is SendState.Publishing
     val isFailed = sendState is SendState.Failed
+    val focusManager = LocalFocusManager.current
     val keyboardController = LocalSoftwareKeyboardController.current
-    var showCloseDraftSheet by remember { mutableStateOf(false) }
+    var showCloseDraftSheet by rememberSaveable(composeSessionKey) { mutableStateOf(false) }
     var closeAfterSave by remember(composeSessionKey) { mutableStateOf<Boolean?>(null) }
     val saving = closeAfterSave != null
-    var saveNotice by remember(composeSessionKey) { mutableStateOf<String?>(null) }
     var initialized by remember(
         effectiveReplyToEventId,
         effectiveQuoteEventId,
@@ -217,34 +217,38 @@ fun ComposeScreen(
     val backAction = composerBackAction(hasUnsavedDraftChanges, clearedSavedDraft)
     var deletion by rememberSaveable(composeSessionKey) { mutableStateOf<DraftDeletion?>(null) }
 
+    fun releaseEditorFocus() {
+        // A closing dialog can otherwise restore the keyboard to the outgoing editor.
+        focusManager.clearFocus()
+        keyboardController?.hide()
+    }
+
     fun finishAndDismiss() {
+        releaseEditorFocus()
         viewModel.finishComposeSession(composeSessionKey)
         onDismiss()
     }
 
     fun saveDraft(andClose: Boolean) {
         if (closeAfterSave != null) return
-        saveNotice = null
-        showCloseDraftSheet = false
         closeAfterSave = andClose
     }
 
     LaunchedEffect(viewModel, composeSessionKey, closeAfterSave) {
         val andClose = closeAfterSave ?: return@LaunchedEffect
         when (viewModel.saveCurrentDraft()) {
-            DraftSaveResult.SAVED -> if (andClose) {
+            DraftSaveResult.SAVED -> {
+                if (andClose) finishAndDismiss() else releaseEditorFocus()
                 showSnackbar("Draft saved")
-                finishAndDismiss()
-            } else {
-                saveNotice = "Draft saved"
             }
-            DraftSaveResult.NEWER_EDITS -> saveNotice = "Earlier edits saved. Save again for the latest changes."
-            DraftSaveResult.EMPTY -> saveNotice = "Nothing to save"
+            DraftSaveResult.NEWER_EDITS -> showSnackbar("Earlier edits saved. Save again for the latest changes.")
+            DraftSaveResult.EMPTY -> showSnackbar("Nothing to save")
             DraftSaveResult.FAILED -> showSnackbar("Couldn’t save draft. Try again.")
             DraftSaveResult.MEDIA_ACCESS -> showSnackbar("Can’t keep access to this file. Remove it and choose it again.")
             DraftSaveResult.MEDIA_LIMIT -> showSnackbar("Too many files held by drafts. Remove unused attachments or drafts and retry.")
             DraftSaveResult.SESSION_CHANGED -> Unit
         }
+        showCloseDraftSheet = false
         closeAfterSave = null
     }
 
@@ -260,6 +264,7 @@ fun ComposeScreen(
             DraftDeleteResult.FAILED -> deletion = DraftDeletion.FAILED
             DraftDeleteResult.SESSION_CHANGED -> deletion = null
         }
+        showCloseDraftSheet = false
     }
 
     fun requestDismiss() {
@@ -314,13 +319,6 @@ fun ComposeScreen(
         (backAction != ComposerBackAction.DISMISS || !navigationOwnsBack), onBack = ::requestDismiss)
 
     BackHandler(enabled = saving) { /* Keep the editor until the save finishes. */ }
-
-    LaunchedEffect(saveNotice) {
-        if (saveNotice != null) {
-            delay(1_800)
-            saveNotice = null
-        }
-    }
 
     // ── Photo picker ────────────────────────────────────────────────────────
     val pickerLauncher = rememberLauncherForActivityResult(
@@ -588,24 +586,6 @@ fun ComposeScreen(
                                     )
                                 }
                             }
-                        }
-                    }
-
-                    Box(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .height(22.dp)
-                            .padding(horizontal = Spacing.medium),
-                        contentAlignment = Alignment.CenterEnd,
-                    ) {
-                        saveNotice?.let { message ->
-                            Text(
-                                text = message,
-                                color = if (message == "Draft saved") Mint else TextSecondary,
-                                style = AppTextStyles.caption,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis,
-                            )
                         }
                     }
 
@@ -978,18 +958,22 @@ fun ComposeScreen(
 
     if (showCloseDraftSheet) {
         CloseDraftSheet(
+            busy = saving || deletion == DraftDeletion.DELETING,
             hasDraftableContent = hasDraftableContent,
             hasUnsavedMedia = hasUnsavedMedia,
             onSaveDraft = { saveDraft(andClose = true) },
             hasSavedDraft = draftKey != null,
             onDiscard = {
-                showCloseDraftSheet = false
-                if (draftKey != null) deletion = DraftDeletion.DELETING else finishAndDismiss()
+                if (draftKey != null) {
+                    deletion = DraftDeletion.DELETING
+                } else {
+                    finishAndDismiss()
+                    showCloseDraftSheet = false
+                }
             },
             onContinueEditing = { showCloseDraftSheet = false },
         )
-    }
-    if (deletion != null) {
+    } else if (deletion != null) {
         val canRespond = deletion != DraftDeletion.DELETING
         AlertDialog(
             onDismissRequest = { if (canRespond) deletion = null },

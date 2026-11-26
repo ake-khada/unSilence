@@ -87,6 +87,8 @@ internal class StartYourGraphViewModel @Inject constructor(
 
     private val landingChannel = Channel<GraphLanding>(capacity = Channel.BUFFERED)
     val landingEvents = landingChannel.receiveAsFlow()
+    private val followFeedbackChannel = Channel<String>(Channel.BUFFERED)
+    val followFeedback = followFeedbackChannel.receiveAsFlow()
 
     private var packs: List<FollowPack> = emptyList()
     private var notablePubkeys: List<String> = emptyList()
@@ -162,15 +164,13 @@ internal class StartYourGraphViewModel @Inject constructor(
                     when (val result = followBatchPublisher.addFollows(selected)) {
                         is FollowPublishResult.Success -> result.follows
                         else -> {
-                            _uiState.value = _uiState.value.copy(error = startGraphFollowError(result))
+                            followFeedbackChannel.send(startGraphFollowError(result))
                             return@launch
                         }
                     }
                 }
                 if (follows == null) {
-                    _uiState.value = _uiState.value.copy(
-                        error = "Couldn't publish follows. Try again.",
-                    )
+                    followFeedbackChannel.send("Couldn't publish follows. Try again.")
                     return@launch
                 }
                 keyManager.completeGraphOnboarding(hasFollows = follows.isNotEmpty())
@@ -178,9 +178,7 @@ internal class StartYourGraphViewModel @Inject constructor(
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (_: Exception) {
-                _uiState.value = _uiState.value.copy(
-                    error = "Couldn't publish follows. Try again.",
-                )
+                followFeedbackChannel.send("Couldn't publish follows. Try again.")
             } finally {
                 _uiState.value = _uiState.value.copy(publishing = false)
             }

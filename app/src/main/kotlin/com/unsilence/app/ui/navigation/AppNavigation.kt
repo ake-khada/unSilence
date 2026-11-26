@@ -70,8 +70,6 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.ModalBottomSheet
-import androidx.compose.material3.SnackbarHost
-import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -90,7 +88,6 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.Saver
 import androidx.compose.runtime.saveable.rememberSaveableStateHolder
@@ -171,7 +168,6 @@ import com.unsilence.app.ui.theme.Spacing
 import com.unsilence.app.ui.theme.Surface1
 import com.unsilence.app.ui.theme.TextSecondary
 import com.unsilence.app.ui.thread.ThreadScreen
-import kotlinx.coroutines.launch
 
 private val NavUnselected = Text3
 
@@ -213,11 +209,7 @@ fun AppNavigation(
     sessionKey: String,
     onLogout: () -> Unit,
 ) {
-    val snackbarHostState = remember { SnackbarHostState() }
-    val scope = rememberCoroutineScope()
-    val showSnackbar: (String) -> Unit = { message ->
-        scope.launch { snackbarHostState.showSnackbar(message) }
-    }
+    val showSnackbar = LocalShowSnackbar.current
     var selectedTab          by rememberSaveable { mutableIntStateOf(0) }
     var barsVisible          by remember { mutableStateOf(true) }
     var showFeedSheet        by rememberSaveable { mutableStateOf(false) }
@@ -387,7 +379,6 @@ fun AppNavigation(
 
     CompositionLocalProvider(
         LocalAppSessionKey provides sessionKey,
-        LocalShowSnackbar provides showSnackbar,
         LocalOpenRelayDetail provides { url -> navigator.push(AppDestination.RelayDetail(url)) },
         LocalZapPreferences provides zapPreferences,
         com.unsilence.app.ui.common.LocalOpenEmojiSettings provides { navigator.push(AppDestination.EmojiSettings) },
@@ -818,6 +809,9 @@ fun AppNavigation(
                 AppDestination.StartGraph -> {
                     val vm: StartYourGraphViewModel = hiltViewModel()
                     val state by vm.uiState.collectAsStateWithLifecycle()
+                    LaunchedEffect(vm, showSnackbar) {
+                        vm.followFeedback.collect { showSnackbar(it) }
+                    }
                     LaunchedEffect(vm) {
                         vm.landingEvents.collect { landing ->
                             navigator.popToTabs()
@@ -879,11 +873,7 @@ fun AppNavigation(
                 )
             }
 
-            // ── Snackbar host ────────────────────────────────────────────────
-            SnackbarHost(
-                hostState = snackbarHostState,
-                modifier  = Modifier.align(Alignment.BottomCenter),
-            )
+
         }
     } // CompositionLocalProvider
 }

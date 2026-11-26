@@ -612,14 +612,6 @@ fun FullScreenVideoDialog(
                     }
             }
 
-            saveController.message?.let { message ->
-                MediaSaveStatusPill(
-                    message = message,
-                    modifier = Modifier
-                        .align(Alignment.BottomCenter)
-                        .padding(bottom = 32.dp),
-                )
-            }
         }
     }
 }

@@ -1,7 +1,7 @@
 package com.unsilence.app.ui.onboarding
 
 import com.unsilence.app.ui.theme.AppTextStyles
-import android.widget.Toast
+import com.unsilence.app.ui.common.LocalShowSnackbar
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.BorderStroke
@@ -70,6 +70,7 @@ private val ButtonPadding = PaddingValues(horizontal = 24.dp, vertical = 16.dp)
 
 @Composable
 fun OnboardingScreen(keyManager: KeyManager, onComplete: () -> Unit) {
+    val showNotice = LocalShowSnackbar.current
     val context = LocalContext.current
     val uriHandler = LocalUriHandler.current
     val clipboardManager = LocalClipboardManager.current
@@ -87,7 +88,7 @@ fun OnboardingScreen(keyManager: KeyManager, onComplete: () -> Unit) {
             keyManager.saveAmberLogin(pubkey)
             onComplete()
         } else {
-            Toast.makeText(context, "Amber sign-in failed or was cancelled", Toast.LENGTH_SHORT).show()
+            showNotice("Amber sign-in failed or was cancelled")
         }
     }
 
@@ -263,7 +264,7 @@ fun OnboardingScreen(keyManager: KeyManager, onComplete: () -> Unit) {
         TextButton(
             onClick = {
                 if (!AmberSigner.isInstalled(context)) {
-                    Toast.makeText(context, "Amber app not installed", Toast.LENGTH_SHORT).show()
+                    showNotice("Amber app not installed")
                 } else {
                     amberLauncher.launch(AmberSigner.createLoginIntent())
                 }

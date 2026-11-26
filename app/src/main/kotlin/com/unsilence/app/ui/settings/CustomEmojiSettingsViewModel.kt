@@ -21,7 +21,6 @@ import com.vitorpamplona.quartz.nip19Bech32.Nip19Parser
 import com.vitorpamplona.quartz.nip19Bech32.entities.NAddress
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -196,6 +195,9 @@ class CustomEmojiSettingsViewModel @Inject constructor(
 
     // ── Actions ─────────────────────────────────────────────────────────────
 
+    fun consumeSubscriptionNotice(): Boolean =
+        _pasteState.compareAndSet(PasteState.Subscribed, PasteState.Idle)
+
     fun subscribeByNaddr(rawInput: String) {
         val pk = pubkeyHex ?: return
         val trimmed = rawInput.trim()
@@ -246,8 +248,6 @@ class CustomEmojiSettingsViewModel @Inject constructor(
             }
 
             _pasteState.value = PasteState.Subscribed
-            delay(1500)
-            _pasteState.value = PasteState.Idle
         }
     }
 

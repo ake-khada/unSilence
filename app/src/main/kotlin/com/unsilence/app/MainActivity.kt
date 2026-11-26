@@ -2,7 +2,10 @@ package com.unsilence.app
 
 import android.content.Intent
 import android.os.Bundle
-import android.widget.Toast
+import androidx.compose.material3.SnackbarDuration
+import com.unsilence.app.ui.common.ActivityNotice
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.flow.receiveAsFlow
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.SystemBarStyle
@@ -45,35 +48,28 @@ class MainActivity : FragmentActivity() {
     @Inject lateinit var deepLinkRouter: DeepLinkRouter
     @Inject lateinit var nip05Verifier: Nip05Verifier
 
+    private val notices = Channel<ActivityNotice>(Channel.BUFFERED)
+    private val noticeFlow = notices.receiveAsFlow()
+
     // Launcher for automatic Amber re-authorize when bootstrap detects
     // missing NIP-44 permissions. Runs round-trip self-test on success.
     private val amberReauthorizeLauncher = registerForActivityResult(
         ActivityResultContracts.StartActivityForResult(),
     ) { result ->
+        val account = keyManager.getPublicKeyHex() ?: return@registerForActivityResult
         val pubkey = AmberSigner.parseLoginResult(result.data)
         if (pubkey != null) {
             lifecycleScope.launch {
-                val ok = appBootstrapper.recoverMuteListAfterAmberAuthorization()
-                if (ok) {
-                    Toast.makeText(
-                        this@MainActivity,
-                        "Amber permissions granted \u2014 mute sync enabled",
-                        Toast.LENGTH_SHORT,
-                    ).show()
+                val recovered = appBootstrapper.recoverMuteListAfterAmberAuthorization()
+                val notice = if (recovered) {
+                    ActivityNotice(account, "Amber permissions granted — mute sync enabled")
                 } else {
-                    Toast.makeText(
-                        this@MainActivity,
-                        "Amber denied NIP-44 permissions \u2014 mutes will stay local only",
-                        Toast.LENGTH_LONG,
-                    ).show()
+                    ActivityNotice(account, "Amber denied NIP-44 permissions — mutes will stay local only", SnackbarDuration.Long)
                 }
+                notices.trySend(notice)
             }
         } else {
-            Toast.makeText(
-                this@MainActivity,
-                "Amber authorization cancelled \u2014 mutes stay local",
-                Toast.LENGTH_SHORT,
-            ).show()
+            notices.trySend(ActivityNotice(account, "Amber authorization cancelled — mutes stay local"))
         }
     }
 
@@ -134,7 +130,7 @@ class MainActivity : FragmentActivity() {
                     com.unsilence.app.ui.common.LocalAvatarFallbackPreferences provides avatarPreferences,
                     LocalNip05VerificationController provides nip05Verifier,
                 ) {
-                    ProvideMinuteClock { RootScreen() }
+                    ProvideMinuteClock { RootScreen(activityNotices = noticeFlow) }
                 }
             }
         }

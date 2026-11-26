@@ -167,6 +167,7 @@ fun DraftsSheet(
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun CloseDraftSheet(
+    busy: Boolean,
     hasDraftableContent: Boolean,
     hasUnsavedMedia: Boolean,
     onSaveDraft: () -> Unit,
@@ -175,7 +176,8 @@ fun CloseDraftSheet(
     hasSavedDraft: Boolean = false,
 ) {
     ModalBottomSheet(
-        onDismissRequest = onContinueEditing,
+        onDismissRequest = { if (!busy) onContinueEditing() },
+        sheetGesturesEnabled = !busy,
         sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
         dragHandle = { BottomSheetDefaults.DragHandle(color = TextSecondary) },
     ) {
@@ -206,7 +208,7 @@ fun CloseDraftSheet(
             Spacer(Modifier.height(Spacing.large))
             Button(
                 onClick = onSaveDraft,
-                enabled = hasDraftableContent,
+                enabled = hasDraftableContent && !busy,
                 shape = RoundedCornerShape(24.dp),
                 colors = ButtonDefaults.buttonColors(
                     containerColor = BrandDeep,
@@ -223,6 +225,7 @@ fun CloseDraftSheet(
             Spacer(Modifier.height(Spacing.small))
             OutlinedButton(
                 onClick = onDiscard,
+                enabled = !busy,
                 shape = RoundedCornerShape(24.dp),
                 border = BorderStroke(1.dp, Like.copy(alpha = 0.45f)),
                 colors = ButtonDefaults.outlinedButtonColors(contentColor = Like),
@@ -232,6 +235,7 @@ fun CloseDraftSheet(
             }
             TextButton(
                 onClick = onContinueEditing,
+                enabled = !busy,
                 modifier = Modifier.fillMaxWidth(),
             ) {
                 Text("Continue editing", color = TextSecondary)

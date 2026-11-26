@@ -1,6 +1,7 @@
 package com.unsilence.app.ui.feed
 
 import com.unsilence.app.ui.theme.AppTextStyles
+import com.unsilence.app.ui.common.LocalShowSnackbar
 import android.content.ClipData
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -26,12 +27,8 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
-import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -55,7 +52,6 @@ import com.unsilence.app.ui.theme.Spacing
 import com.unsilence.app.ui.theme.Surface1
 import com.unsilence.app.ui.theme.TextSecondary
 import com.unsilence.app.ui.theme.Zap
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import java.math.BigDecimal
 import java.text.NumberFormat
@@ -80,14 +76,7 @@ internal fun PaymentTargetCard(
     val uriHandler = LocalUriHandler.current
     val coroutineScope = rememberCoroutineScope()
     val presentation = remember(target) { target.presentation() }
-    var status by remember(target) { mutableStateOf<String?>(null) }
-
-    LaunchedEffect(status) {
-        if (status != null) {
-            delay(1_800L)
-            status = null
-        }
-    }
+    val showNotice = LocalShowSnackbar.current
 
     val shape = RoundedCornerShape(12.dp)
     Column(
@@ -155,23 +144,14 @@ internal fun PaymentTargetCard(
             verticalAlignment = Alignment.CenterVertically,
             modifier = Modifier.fillMaxWidth(),
         ) {
-            status?.let {
-                Text(
-                    text = it,
-                    color = TextSecondary,
-                    style = AppTextStyles.caption,
-                    modifier = Modifier.weight(1f),
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
-            } ?: Spacer(Modifier.weight(1f))
+            Spacer(Modifier.weight(1f))
             TextButton(
                 onClick = {
                     coroutineScope.launch {
                         clipboard.setClipEntry(
                             ClipEntry(ClipData.newPlainText("Payment target", target.copyText)),
                         )
-                        status = "Copied"
+                        showNotice("Copied")
                     }
                 },
                 colors = ButtonDefaults.textButtonColors(contentColor = presentation.accent),
@@ -186,8 +166,8 @@ internal fun PaymentTargetCard(
             }
             TextButton(
                 onClick = {
-                    status = runCatching { uriHandler.openUri(target.walletUri) }
-                        .fold(onSuccess = { null }, onFailure = { "No compatible wallet" })
+                    runCatching { uriHandler.openUri(target.walletUri) }
+                        .onFailure { showNotice("No compatible wallet") }
                 },
                 colors = ButtonDefaults.textButtonColors(contentColor = presentation.accent),
             ) {

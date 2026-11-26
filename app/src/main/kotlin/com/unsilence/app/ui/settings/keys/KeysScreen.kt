@@ -1,6 +1,7 @@
 package com.unsilence.app.ui.settings.keys
 
 import com.unsilence.app.ui.theme.AppTextStyles
+import com.unsilence.app.ui.common.LocalShowSnackbar
 import android.app.Activity
 import android.app.KeyguardManager
 import android.content.ClipData
@@ -115,15 +116,15 @@ fun KeysScreen(
     var showSecretAsHex by remember { mutableStateOf(false) }
     var remainingRevealSeconds by remember { mutableStateOf(0L) }
     var showNoLockWarning by remember { mutableStateOf(false) }
-    var statusMessage by remember { mutableStateOf<String?>(null) }
+    val showNotice = LocalShowSnackbar.current
     val reauthorizeLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.StartActivityForResult(),
     ) { result ->
-        statusMessage = if (AmberSigner.parseLoginResult(result.data) != null) {
+        showNotice(if (AmberSigner.parseLoginResult(result.data) != null) {
             "Amber authorization refreshed."
         } else {
             "Amber authorization cancelled."
-        }
+        })
     }
 
     fun maskSecret() {
@@ -136,7 +137,7 @@ fun KeysScreen(
     fun revealSecret() {
         val privateHex = viewModel.privateKeyHexForReveal()
         if (privateHex == null) {
-            statusMessage = "No local secret key is stored on this device."
+            showNotice("No local secret key is stored on this device.")
             maskSecret()
             return
         }
@@ -147,7 +148,6 @@ fun KeysScreen(
         val revealed = revealMachine.reveal(SystemClock.elapsedRealtime()) as KeyRevealState.Revealed
         revealState = revealed
         remainingRevealSeconds = remainingSeconds(revealed.expiresAtMillis)
-        statusMessage = null
     }
 
     fun startRevealFlow() {
@@ -157,7 +157,7 @@ fun KeysScreen(
         }
         val activity = context.findActivity() as? FragmentActivity
         if (activity == null) {
-            statusMessage = "Device authentication is unavailable in this window."
+            showNotice("Device authentication is unavailable in this window.")
             return
         }
 
@@ -171,14 +171,14 @@ fun KeysScreen(
                 }
 
                 override fun onAuthenticationError(errorCode: Int, errString: CharSequence) {
-                    statusMessage = "Unlock cancelled."
+                    showNotice("Unlock cancelled.")
                     revealedSecret = null
                     remainingRevealSeconds = 0L
                     revealState = revealMachine.cancel()
                 }
 
                 override fun onAuthenticationFailed() {
-                    statusMessage = "Authentication failed."
+                    showNotice("Authentication failed.")
                 }
             },
         )
@@ -256,7 +256,7 @@ fun KeysScreen(
                         onCopy = {
                             uiState.publicNpub?.let {
                                 copyToClipboard(context, "npub", it, sensitive = false)
-                                statusMessage = "Public key copied."
+                                showNotice("Public key copied.")
                             }
                         },
                     )
@@ -265,13 +265,11 @@ fun KeysScreen(
                     if (uiState.isAmberMode) {
                         AmberModeCard(
                             state = uiState,
-                            statusMessage = statusMessage,
                             onOpenAmber = { openAmber(context) },
                             onReauthorize = { pubkey ->
-                                statusMessage = null
                                 reauthorizeLauncher.launch(AmberSigner.createReauthorizeIntent(pubkey))
                             },
-                            setStatus = { statusMessage = it },
+                            setStatus = showNotice,
                         )
                     } else {
                         LocalSecretKeyCard(
@@ -279,13 +277,12 @@ fun KeysScreen(
                             secret = revealedSecret,
                             showHex = showSecretAsHex,
                             remainingSeconds = remainingRevealSeconds,
-                            statusMessage = statusMessage,
                             onUnlock = ::startRevealFlow,
                             onMask = ::maskSecret,
                             onToggleHex = { showSecretAsHex = !showSecretAsHex },
                             onCopy = { value ->
                                 copyToClipboard(context, "secret key", value, sensitive = true)
-                                statusMessage = "Secret key copied."
+                                showNotice("Secret key copied.")
                             },
                         )
                     }
@@ -322,7 +319,7 @@ fun KeysScreen(
                 TextButton(
                     onClick = {
                         showNoLockWarning = false
-                        statusMessage = "Unlock cancelled."
+                        showNotice("Unlock cancelled.")
                     },
                 ) { Text("Cancel") }
             },
@@ -384,7 +381,6 @@ private fun LocalSecretKeyCard(
     secret: RevealedSecret?,
     showHex: Boolean,
     remainingSeconds: Long,
-    statusMessage: String?,
     onUnlock: () -> Unit,
     onMask: () -> Unit,
     onToggleHex: () -> Unit,
@@ -450,21 +446,12 @@ private fun LocalSecretKeyCard(
                 )
             }
         }
-        if (statusMessage != null) {
-            Text(
-                text = statusMessage,
-                color = Text3,
-                style = AppTextStyles.caption,
-                modifier = Modifier.padding(top = Spacing.small),
-            )
-        }
     }
 }
 
 @Composable
 private fun AmberModeCard(
     state: KeysUiState,
-    statusMessage: String?,
     onOpenAmber: () -> Unit,
     onReauthorize: (String) -> Unit,
     setStatus: (String) -> Unit,
@@ -508,14 +495,6 @@ private fun AmberModeCard(
                         onReauthorize(pubkey)
                     }
                 },
-            )
-        }
-        if (statusMessage != null) {
-            Text(
-                text = statusMessage,
-                color = Text3,
-                style = AppTextStyles.caption,
-                modifier = Modifier.padding(top = Spacing.small),
             )
         }
     }
