@@ -1,5 +1,6 @@
 package com.unsilence.app.ui.onboarding
 
+import android.content.ActivityNotFoundException
 import com.unsilence.app.ui.theme.AppTextStyles
 import com.unsilence.app.ui.common.LocalShowSnackbar
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -41,7 +42,6 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalClipboardManager
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.SpanStyle
@@ -71,7 +71,6 @@ private val ButtonPadding = PaddingValues(horizontal = 24.dp, vertical = 16.dp)
 @Composable
 fun OnboardingScreen(keyManager: KeyManager, onComplete: () -> Unit) {
     val showNotice = LocalShowSnackbar.current
-    val context = LocalContext.current
     val uriHandler = LocalUriHandler.current
     val clipboardManager = LocalClipboardManager.current
 
@@ -83,9 +82,8 @@ fun OnboardingScreen(keyManager: KeyManager, onComplete: () -> Unit) {
     val amberLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.StartActivityForResult()
     ) { result ->
-        val pubkey = AmberSigner.parseLoginResult(result.data)
-        if (pubkey != null) {
-            keyManager.saveAmberLogin(pubkey)
+        val pubkey = AmberSigner.parseLoginResult(result)
+        if (pubkey != null && keyManager.signInWithAmber(pubkey)) {
             onComplete()
         } else {
             showNotice("Amber sign-in failed or was cancelled")
@@ -263,10 +261,10 @@ fun OnboardingScreen(keyManager: KeyManager, onComplete: () -> Unit) {
         // 13. TERTIARY — Sign in with Amber
         TextButton(
             onClick = {
-                if (!AmberSigner.isInstalled(context)) {
-                    showNotice("Amber app not installed")
-                } else {
+                try {
                     amberLauncher.launch(AmberSigner.createLoginIntent())
+                } catch (_: ActivityNotFoundException) {
+                    showNotice("Amber app not installed")
                 }
             },
             colors   = ButtonDefaults.textButtonColors(contentColor = TextSecondary),

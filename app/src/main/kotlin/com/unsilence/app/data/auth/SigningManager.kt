@@ -20,7 +20,6 @@ import java.util.concurrent.CopyOnWriteArraySet
 import javax.inject.Inject
 import javax.inject.Singleton
 
-private const val AMBER_PACKAGE = "com.greenart7c3.nostrsigner"
 private const val TAG = "SigningManager"
 
 @Singleton
@@ -50,7 +49,7 @@ class SigningManager @Inject constructor(
         }
 
         val newSigner = if (keyManager.isAmberMode) {
-            NostrSignerExternal(pubkey, AMBER_PACKAGE, contentResolver)
+            NostrSignerExternal(pubkey, AmberSigner.AMBER_PACKAGE, contentResolver)
         } else {
             val privKeyHex = keyManager.getPrivateKeyHex() ?: return null
             NostrSignerInternal(KeyPair(privKey = privKeyHex.hexToByteArray()))

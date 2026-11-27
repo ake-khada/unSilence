@@ -120,7 +120,8 @@ fun KeysScreen(
     val reauthorizeLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.StartActivityForResult(),
     ) { result ->
-        showNotice(if (AmberSigner.parseLoginResult(result.data) != null) {
+        val pubkey = AmberSigner.parseLoginResult(result)
+        showNotice(if (pubkey != null && pubkey == uiState.publicKeyHex) {
             "Amber authorization refreshed."
         } else {
             "Amber authorization cancelled."

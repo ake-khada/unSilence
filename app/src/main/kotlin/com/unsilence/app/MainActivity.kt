@@ -57,8 +57,7 @@ class MainActivity : FragmentActivity() {
         ActivityResultContracts.StartActivityForResult(),
     ) { result ->
         val account = keyManager.getPublicKeyHex() ?: return@registerForActivityResult
-        val pubkey = AmberSigner.parseLoginResult(result.data)
-        if (pubkey != null) {
+        if (AmberSigner.parseLoginResult(result) == account) {
             lifecycleScope.launch {
                 val recovered = appBootstrapper.recoverMuteListAfterAmberAuthorization()
                 val notice = if (recovered) {

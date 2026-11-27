@@ -1,6 +1,7 @@
 package com.unsilence.app.data.auth
 
 import android.content.SharedPreferences
+import com.vitorpamplona.quartz.nip19Bech32.entities.NPub
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
@@ -144,6 +145,58 @@ class KeyManagerCacheTest {
         assertNull("stale private key must be removed", km.getPrivateKeyHex())
         assertTrue("must be in Amber mode", km.isAmberMode)
         assertEquals("Amber pubkey returned directly (no derivation)", amberPubHex, km.getPublicKeyHex())
+    }
+
+    @Test
+    fun `Amber accepts raw hex and npub and stores a lowercase public key`() {
+        val km = createKeyManager()
+        val hex = "a5".repeat(32)
+        val npub = NPub.create(hex)
+        for (input in listOf(hex.uppercase(), npub, npub.uppercase())) {
+            assertTrue(km.saveAmberLogin(input))
+            assertEquals(hex, km.getPublicKeyHex())
+        }
+    }
+
+    @Test
+    fun `invalid Amber replies leave credentials and onboarding markers intact`() {
+        val km = createKeyManager()
+        km.savePrivateKey("12".repeat(32))
+        km.completeGraphOnboarding(hasFollows = false)
+        val before = prefsOf(km).all
+        val npub = NPub.create("ab".repeat(32))
+        val brokenChecksum = npub.dropLast(1) + if (npub.last() == 'q') 'p' else 'q'
+        for (input in listOf("", "01", "g".repeat(64), "０".repeat(64), "npub1invalid",
+            brokenChecksum, npub + ".", npub.replaceFirst("npub", "NPub"), NPub.create("ab"))) {
+            assertFalse(km.saveAmberLogin(input))
+            assertEquals(before, prefsOf(km).all)
+        }
+    }
+
+    @Test
+    fun `failed Amber commit leaves onboarding signed out`() {
+        val km = createKeyManager(commitSucceeds = false)
+        assertFalse(km.signInWithAmber("12".repeat(32)))
+        assertFalse(km.hasKey())
+        assertFalse(km.isAmberMode)
+    }
+
+    @Test
+    fun `late Amber login leaves an active account and its graph markers intact`() {
+        val km = createKeyManager()
+        assertTrue(km.importKey("34".repeat(32)))
+        km.completeGraphOnboarding(hasFollows = false)
+        val before = prefsOf(km).all
+        assertFalse(km.signInWithAmber("12".repeat(32)))
+        assertEquals(before, prefsOf(km).all)
+    }
+
+    @Test
+    fun `signed out onboarding accepts a saved Amber identity`() {
+        val km = createKeyManager()
+        val hex = "12".repeat(32)
+        assertTrue(km.signInWithAmber(hex))
+        assertEquals(hex, km.getPublicKeyHex())
     }
 
     @Test

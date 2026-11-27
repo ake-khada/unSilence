@@ -37,6 +37,16 @@ internal fun isValidPrivateKeyScalar(hexKey: String): Boolean {
 private fun Char.isHexDigit(): Boolean =
     this in '0'..'9' || this in 'a'..'f' || this in 'A'..'F'
 
+internal fun normalizeAmberPubkey(input: String): String? {
+    if (input.length == 64 && input.all(Char::isHexDigit)) return input.lowercase()
+    if (input.length != 63 || !input.startsWith("npub1", ignoreCase = true)) return null
+    val pub = Nip19Parser.uriToRoute(input.lowercase())?.entity as? NPub ?: return null
+    if (pub.hex.length != 64) return null
+    // The URI parser also accepts keys embedded in prose. Require the entire checksummed key.
+    val canonical = NPub.create(pub.hex)
+    return pub.hex.takeIf { input == canonical || input == canonical.uppercase() }
+}
+
 /** Minimal interface for mute-list decrypt — allows test construction without Android Context. */
 interface MuteKeyProvider {
     val isAmberMode: Boolean get() = false
@@ -170,31 +180,35 @@ class KeyManager @Inject constructor(
         return savePrivateKey(hexKey)
     }
 
-    /**
-     * Saves the public key returned by Amber and marks signer mode as AMBER.
-     * No private key is stored.
-     */
-    fun saveAmberLogin(pubkey: String) {
-        // Amber may return npub1… (bech32) or raw hex — normalise to hex
-        val hex = if (pubkey.startsWith("npub1", ignoreCase = true)) {
-            (Nip19Parser.uriToRoute(pubkey)?.entity as? NPub)?.hex
-                ?: error("Invalid npub from Amber: $pubkey")
-        } else {
-            pubkey
+    /** Finish a signed-out onboarding request. A late result cannot replace an active account. */
+    fun signInWithAmber(pubkey: String): Boolean {
+        try {
+            if (hasKey()) return false
+            if (saveAmberLogin(pubkey)) return true
+            // Even a failed disk commit changes SharedPreferences in memory. Bootstrap reads
+            // hasKey() when the activity reopens, so restore the signed-out state here.
+            clear()
+        } catch (_: Exception) {
+            // The encrypted store can also be unavailable during lookup or cleanup.
         }
+        return false
+    }
+
+    internal fun saveAmberLogin(pubkey: String): Boolean {
+        val hex = normalizeAmberPubkey(pubkey) ?: return false
         cachedPubKeyHex = null
-        // Establish a clean Amber state: remove any stale private key, else
-        // getSignerSync()/getPrivateKeyHex() would surface the PREVIOUS account's
-        // private key while logged in via Amber (wrong-identity signing + a key the
-        // user believed was logged out). commit() — bootstrap reads auth immediately.
-        prefs.edit()
-            .putString(KEY_PUB_HEX, hex.lowercase())
-            .putString(KEY_SIGNER_TYPE, SIGNER_AMBER)
-            .remove(KEY_PRIV_HEX)
-            .remove(KEY_GRAPH_ONBOARDING_PENDING)
-            .remove(KEY_GRAPH_ONBOARDING_COMPLETED)
-            .remove(KEY_GRAPH_KNOWN_EMPTY)
-            .commit()
+        return try {
+            prefs.edit()
+                .putString(KEY_PUB_HEX, hex)
+                .putString(KEY_SIGNER_TYPE, SIGNER_AMBER)
+                .remove(KEY_PRIV_HEX)
+                .remove(KEY_GRAPH_ONBOARDING_PENDING)
+                .remove(KEY_GRAPH_ONBOARDING_COMPLETED)
+                .remove(KEY_GRAPH_KNOWN_EMPTY)
+                .commit()
+        } catch (_: Exception) {
+            false
+        }
     }
 
     /** Removes all stored credentials (logout). Uses commit() so the write is
