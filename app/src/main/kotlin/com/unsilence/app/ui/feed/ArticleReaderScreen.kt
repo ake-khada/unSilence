@@ -1,5 +1,7 @@
 package com.unsilence.app.ui.feed
 
+import com.unsilence.app.ui.shared.rememberWotReplyFilter
+import com.unsilence.app.ui.shared.WotHiddenReply
 import com.unsilence.app.ui.shared.AutomaticMediaGate
 import com.unsilence.app.ui.theme.AppTextStyles
 import com.unsilence.app.ui.shared.collectCardDataAsState
@@ -188,20 +190,21 @@ fun ArticleReaderScreen(
     val commentsState = observedComments ?: ArticleCommentsState()
     val comments = commentsState.rows
     val depthComments = commentsState.depthRows
+    val scoreFilter = rememberWotReplyFilter(articleCoord ?: row.id, articleReaderVm.wotScoreFilter, commentsState.authorScores)
     val wotLookup = rememberCardWotLookup(articleReaderVm.wotLookups)
     val feedWotDisplayMode by articleReaderVm.feedWotDisplayMode.collectAsStateWithLifecycle()
     var revealedSpamClusters by rememberSaveable(articleCoord) { mutableStateOf(emptySet<String>()) }
     val commentItems = remember(depthComments, revealedSpamClusters) {
         replyListItems(depthComments, revealedSpamClusters)
     }
-    val commentRows = remember(depthComments) {
+    val commentRows = remember(depthComments, scoreFilter) {
         depthComments
-            .filterNot { it.muted || it.spamClusterId != null }
+            .filterNot { it.muted || it.spamClusterId != null || scoreFilter.hides(it.row) }
             .map { it.row }
     }
     // Use the rendered projection for protection, preserving eager hydration/video selection.
-    val displayedCommentRows = remember(commentItems) {
-        com.unsilence.app.ui.shared.displayedReplyRows(commentItems)
+    val displayedCommentRows = remember(commentItems, scoreFilter) {
+        com.unsilence.app.ui.shared.displayedReplyRows(commentItems).filterNot(scoreFilter::hides)
     }
     ResumedEffect(articleCoord) {
         if (articleCoord != null) {
@@ -748,6 +751,8 @@ fun ArticleReaderScreen(
                                                 vertical = Spacing.small,
                                             ),
                                         )
+                                    } else if (scoreFilter.hides(comment)) {
+                                        WotHiddenReply(comment, scoreFilter)
                                     } else {
                                         val cModel = remember(comment.id) {
                                             commentActionsVm.getEventModel(comment.id) ?: comment.toEventModel()

@@ -1,5 +1,8 @@
 package com.unsilence.app.ui.feed
 
+import com.unsilence.app.ui.shared.rememberWotReplyFilter
+import com.unsilence.app.ui.shared.MutedContentHiddenCard
+import com.unsilence.app.ui.shared.WotHiddenReply
 import com.unsilence.app.ui.theme.AppTextStyles
 import com.unsilence.app.ui.shared.collectCardDataAsState
 
@@ -77,6 +80,7 @@ internal fun ImmersiveEngagementSheet(
         (LocalWindowInfo.current.containerSize.height * 0.53f).toDp()
     }
     val threadState by threadViewModel.uiState.collectAsStateWithLifecycle()
+    val scoreFilter = rememberWotReplyFilter(model.navigateId, threadViewModel.wotScoreFilter, threadState.authorScores)
     val threadWotLookups by threadViewModel.wotLookups.collectAsStateWithLifecycle()
     val row = item.row
     val rowDescribesAuthor = row.pubkey == model.pubkey
@@ -273,7 +277,9 @@ internal fun ImmersiveEngagementSheet(
                         }
                     } else {
                         items(threadState.replies, key = { it.row.id }) { depthRow ->
-                            EventFeedItem(
+                            if (depthRow.muted) MutedContentHiddenCard()
+                            else if (scoreFilter.hides(depthRow.row)) WotHiddenReply(depthRow.row, scoreFilter)
+                            else EventFeedItem(
                                 row = depthRow.row,
                                 engagement = engagement,
                                 host = replyHost,

@@ -1,5 +1,9 @@
 package com.unsilence.app.ui.notifications
 
+import com.unsilence.app.data.relay.WotScoreFilter
+import com.unsilence.app.data.memory.WotAssertionEntity
+import com.unsilence.app.data.memory.WotLookup
+import com.unsilence.app.data.repository.projectScoredNotifications
 import com.unsilence.app.data.repository.projectMutedNotifications
 import com.unsilence.app.data.repository.mutedNotificationsFlow
 
@@ -161,6 +165,24 @@ class NotificationMuteProjectionTest {
         assertEquals(2, result.people)
         assertEquals(2_000L, result.sumSats)
         assertEquals(150L, result.mostRecentAt)
+    }
+
+    @Test fun scoreFilterDropsLowMentionsAndRebuildsMixedActorGroups() {
+        val group = group(actors = listOf(actor("low", 80, createdAt = 300), actor("equal", 50, createdAt = 50)),
+            anonymousCount = 1, anonymousSats = 99, anonymousMostRecentAt = 400)
+        val rows = listOf(group, single("hidden", "low").copy(notifType = "mention"), single("visible", "equal"))
+        val filtered = projectScoredNotifications(rows, WotScoreFilter(enabled = true, minimum = 25)) {
+            WotLookup.Scored(WotAssertionEntity(it, "provider", if (it == "equal") 25 else 24))
+        }
+        assertEquals(listOf("visible", group.key), filtered.map { it.key })
+        val result = filtered.last() as NotificationRow.Grouped
+        assertEquals(listOf("equal"), result.actors.map { it.pubkey })
+        assertEquals(1, result.people)
+        assertEquals(50L, result.sumSats)
+        assertEquals(50L, result.mostRecentAt)
+        assertEquals(0, result.anonymousCount)
+        assertTrue(projectScoredNotifications(rows, WotScoreFilter(true, 1)) { WotLookup.Pending }.isEmpty())
+        assertEquals(rows, projectScoredNotifications(rows, WotScoreFilter()) { error("disabled filter queried a score") })
     }
 
     private fun single(id: String, actor: String) = NotificationRow.Single(

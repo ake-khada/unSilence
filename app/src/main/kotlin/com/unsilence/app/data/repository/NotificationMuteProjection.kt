@@ -39,19 +39,24 @@ internal fun projectMutedNotifications(
                 row.takeUnless { muted }
             }
 
-            is NotificationRow.Grouped -> projectGroupedNotification(row, muteList)
+            is NotificationRow.Grouped -> projectGroupedNotification(row, keepUnknown = true) {
+                !isPubkeyMuted(it, muteList)
+            }
         }
     }.sortedByDescending { it.mostRecentAt }
 }
 
 private fun projectGroupedNotification(
     row: NotificationRow.Grouped,
-    muteList: MuteList,
+    keepUnknown: Boolean,
+    keep: (String) -> Boolean,
 ): NotificationRow.Grouped? {
-    val actors = row.actors.filterNot { actor ->
-        actor.pubkey?.let { isPubkeyMuted(it, muteList) } == true
-    }
-    if (actors.isEmpty() && row.anonymousCount == 0 && row.unverifiedCount == 0) return null
+    val actors = row.actors.filter { actor -> actor.pubkey?.let(keep) ?: keepUnknown }
+    val base = if (keepUnknown) row else row.copy(
+        anonymousCount = 0, anonymousSats = 0L, anonymousMostRecentAt = 0L,
+        unverifiedCount = 0, unverifiedSats = 0L, unverifiedMostRecentAt = 0L,
+    )
+    if (actors.isEmpty() && base.anonymousCount == 0 && base.unverifiedCount == 0) return null
 
     val reactionCounts = actors.asSequence()
         .mapNotNull { it.reaction }
@@ -59,15 +64,29 @@ private fun projectGroupedNotification(
         .eachCount()
     val dominantReaction = reactionCounts.maxByOrNull { it.value }?.key
 
-    return row.copy(
+    return base.copy(
         actors = actors,
-        people = actors.size + row.anonymousCount + row.unverifiedCount,
-        sumSats = actors.sumOf { it.sats } + row.anonymousSats + row.unverifiedSats,
+        people = actors.size + base.anonymousCount + base.unverifiedCount,
+        sumSats = actors.sumOf { it.sats } + base.anonymousSats + base.unverifiedSats,
         dominantReaction = dominantReaction,
         mostRecentAt = maxOf(
             actors.maxOfOrNull { it.createdAt } ?: 0L,
-            row.anonymousMostRecentAt,
-            row.unverifiedMostRecentAt,
+            base.anonymousMostRecentAt,
+            base.unverifiedMostRecentAt,
         ),
     )
+}
+
+internal fun projectScoredNotifications(
+    rows: List<NotificationRow>,
+    filter: com.unsilence.app.data.relay.WotScoreFilter,
+    lookup: (String) -> com.unsilence.app.data.memory.WotLookup,
+): List<NotificationRow> {
+    if (!filter.enabled) return rows
+    return rows.mapNotNull { row ->
+        when (row) {
+            is NotificationRow.Single -> row.takeIf { filter.admits(lookup(it.actorPubkey)) }
+            is NotificationRow.Grouped -> projectGroupedNotification(row, keepUnknown = false) { filter.admits(lookup(it)) }
+        }
+    }.sortedByDescending { it.mostRecentAt }
 }

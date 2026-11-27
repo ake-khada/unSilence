@@ -83,6 +83,7 @@ fun NotificationsScreen(
     val wotLookupState = viewModel.wotLookups.collectAsStateWithLifecycle()
     val wotLookups by wotLookupState
     val wotLookup = rememberCardWotLookup(wotLookupState)
+    val scoreFilter by viewModel.wotScoreFilter.collectAsStateWithLifecycle()
     val feedWotDisplayMode by viewModel.feedWotDisplayMode.collectAsStateWithLifecycle()
     val sensitiveMode by viewModel.sensitiveMode.collectAsStateWithLifecycle()
     val previews by viewModel.previews.collectAsStateWithLifecycle()
@@ -183,8 +184,8 @@ fun NotificationsScreen(
             state.items.isEmpty() -> {
                 EmptyState(
                     icon    = Icons.Outlined.Notifications,
-                    message = "No notifications yet",
-                    hint    = "Interactions will appear here",
+                    message = if (scoreFilter?.enabled == true) "No matching notifications" else "No notifications yet",
+                    hint = scoreFilter?.takeIf { it.enabled }?.let { "Minimum WoT score ${it.minimum}" } ?: "Interactions will appear here",
                 )
             }
 

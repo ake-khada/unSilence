@@ -1,5 +1,7 @@
 package com.unsilence.app.ui.thread
 
+import com.unsilence.app.ui.shared.rememberWotReplyFilter
+import com.unsilence.app.ui.shared.WotHiddenReply
 import com.unsilence.app.ui.theme.AppTextStyles
 import androidx.lifecycle.compose.LifecycleResumeEffect
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -106,6 +108,7 @@ fun ThreadScreen(
     val presentation = remember(viewModel, eventId) { viewModel.presentation(eventId) }
     val state           by presentation.collectCardDataAsState()
     val sensitiveMode   by viewModel.sensitiveContentMode.collectAsStateWithLifecycle()
+    val scoreFilter = rememberWotReplyFilter(eventId, viewModel.wotScoreFilter, state.authorScores)
     val wotLookup = rememberCardWotLookup(viewModel.wotLookups)
     val feedWotDisplayMode by viewModel.feedWotDisplayMode.collectAsStateWithLifecycle()
     val reactedIds      by actionsViewModel.reactedEventIds.collectAsStateWithLifecycle()
@@ -134,9 +137,9 @@ fun ThreadScreen(
     val listState = rememberThreadListState(eventId, state, threadItems)
 
     var autoArticleHandled by rememberSaveable(eventId) { mutableStateOf(false) }
-    ResumedEffect(openArticleOnLoad, state.focusedNote?.id) {
+    ResumedEffect(openArticleOnLoad, state.focusedNote?.id, state.focusedNote?.let(scoreFilter::hides)) {
         val focused = state.focusedNote
-        if (openArticleOnLoad && !autoArticleHandled && focused?.kind == 30023) {
+        if (openArticleOnLoad && !autoArticleHandled && focused?.kind == 30023 && !scoreFilter.hides(focused)) {
             autoArticleHandled = true
             onArticleClick(focused, state.focusedReplyId)
         }
@@ -157,14 +160,14 @@ fun ThreadScreen(
     }
 
     // ── Video playback scope ────────────────────────────────────────────────
-    val allThreadRows = remember(state.focusedNote, state.replies) {
-        listOfNotNull(state.focusedNote) + state.replies
-            .filterNot { it.muted || it.spamClusterId != null }
+    val allThreadRows = remember(state.focusedNote, state.replies, scoreFilter) {
+        listOfNotNull(state.focusedNote?.takeUnless(scoreFilter::hides)) + state.replies
+            .filterNot { it.muted || it.spamClusterId != null || scoreFilter.hides(it.row) }
             .map { it.row }
     }
     // Revealed bodies join the display window; playback selection above is unchanged.
-    val displayedRows = remember(state.focusedNote, threadItems) {
-        listOfNotNull(state.focusedNote) + com.unsilence.app.ui.shared.displayedReplyRows(threadItems)
+    val displayedRows = remember(state.focusedNote, threadItems, scoreFilter) {
+        (listOfNotNull(state.focusedNote) + com.unsilence.app.ui.shared.displayedReplyRows(threadItems)).filterNot(scoreFilter::hides)
     }
     val videoScope = rememberVideoPlaybackScope(
         ownerId            = "thread-$entryId",
@@ -310,21 +313,25 @@ fun ThreadScreen(
                         // Focused (OP) note — plain NoteCard, no border decoration
                         state.focusedNote?.let { note ->
                             item(key = note.id) {
-                                val focusedModel = remember(note.id) {
-                                    actionsViewModel.getEventModel(note.id) ?: note.toEventModel()
+                                if (scoreFilter.hides(note)) {
+                                    WotHiddenReply(note, scoreFilter)
+                                } else {
+                                    val focusedModel = remember(note.id) {
+                                        actionsViewModel.getEventModel(note.id) ?: note.toEventModel()
+                                    }
+                                    EventCard(
+                                        model = focusedModel,
+                                        row = note,
+                                        role = if (note.kind == 30023) CardRole.Article else CardRole.Thread,
+                                        engagement = engagement.forEvent(focusedModel.engagementId),
+                                        host = cardHost.withRelayHints(
+                                            listOf(note.relayUrl) + note.relaysSeen,
+                                        ),
+                                        presentation = EventCardPresentation(
+                                            focused = state.focusedReplyId == null,
+                                        ),
+                                    )
                                 }
-                                EventCard(
-                                    model = focusedModel,
-                                    row = note,
-                                    role = if (note.kind == 30023) CardRole.Article else CardRole.Thread,
-                                    engagement = engagement.forEvent(focusedModel.engagementId),
-                                    host = cardHost.withRelayHints(
-                                        listOf(note.relayUrl) + note.relaysSeen,
-                                    ),
-                                    presentation = EventCardPresentation(
-                                        focused = state.focusedReplyId == null,
-                                    ),
-                                )
                                 FeedDivider()
                                 InlineReplyDrafts(replyDrafts[note.id], actionsViewModel.currentPubkey,
                                     viewModel::profileFlow, "root", 1, onResumeDraft)
@@ -377,6 +384,8 @@ fun ThreadScreen(
                                                         vertical = Spacing.small,
                                                     ),
                                                 )
+                                            } else if (scoreFilter.hides(reply)) {
+                                                WotHiddenReply(reply, scoreFilter)
                                             } else {
                                                 val replyModel = remember(reply.id) {
                                                     actionsViewModel.getEventModel(reply.id) ?: reply.toEventModel()

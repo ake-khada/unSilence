@@ -180,13 +180,14 @@ internal fun NotificationHeader(
     blinkActive: Boolean,
     onToggle: () -> Unit,
     modifier: Modifier = Modifier,
+    minimumScore: Int? = null,
 ) {
     HeaderFrame(
         accent = Brand,
         isRefreshing = false,
         motionEnabled = motionEnabled,
         start = { LogoMark(sizeDp = Spacing.xxl, static = !motionEnabled, blinkActive = blinkActive) },
-        center = { NotificationFilterPill(current, showHint, motionEnabled, onToggle) },
+        center = { NotificationFilterPill(current, showHint, motionEnabled, onToggle, minimumScore = minimumScore) },
         end = {},
         modifier = modifier,
     )
@@ -199,6 +200,7 @@ internal fun NotificationFilterPill(
     motionEnabled: Boolean,
     onToggle: () -> Unit,
     modifier: Modifier = Modifier,
+    minimumScore: Int? = null,
 ) {
     // Hide immediately on the first tap, without waiting for the durable preference write.
     var switched by rememberSaveable { mutableStateOf(false) }
@@ -206,7 +208,7 @@ internal fun NotificationFilterPill(
     Box(modifier, contentAlignment = Alignment.Center) {
         HeaderControl(
             description = "Notification filter",
-            selection = current.name,
+            selection = minimumScore?.let { "${current.name}, minimum WoT score $it" } ?: current.name,
             actionLabel = "Switch to ${current.next().name}",
             onClick = {
                 switched = true
@@ -218,7 +220,7 @@ internal fun NotificationFilterPill(
                 // Stable touch bounds; each complete visible group stays centered.
                 HeaderContents(
                     NotifFilter.Following.name, HeaderJunctionKind.SWITCH,
-                    modifier = Modifier.alpha(0f),
+                    modifier = Modifier.alpha(0f), leadingIcon = minimumScore?.let { Icons.Outlined.GppGood },
                 )
                 Crossfade(
                     targetState = current,
@@ -227,7 +229,8 @@ internal fun NotificationFilterPill(
                     label = "notificationFilter",
                 ) { selection ->
                     Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
-                        HeaderContents(selection.name, HeaderJunctionKind.SWITCH, fillWidth = true)
+                        HeaderContents(selection.name, HeaderJunctionKind.SWITCH, fillWidth = true,
+                            leadingIcon = minimumScore?.let { Icons.Outlined.GppGood }, accent = Mint)
                     }
                 }
             }

@@ -496,6 +496,7 @@ fun AppNavigation(
                                 motionEnabled = headerMotionEnabled,
                                 blinkActive = topBarShown,
                                 onToggle = notifications::toggleFilter,
+                                minimumScore = notifications.wotScoreFilter.collectAsStateWithLifecycle().value?.takeIf { it.enabled }?.minimum,
                             )
                         } else {
                             UnifiedFeedHeader(

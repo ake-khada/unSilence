@@ -1,6 +1,7 @@
 package com.unsilence.app.ui.shared
 
 import com.unsilence.app.data.memory.FeedRow
+import com.unsilence.app.data.memory.WotLookup
 import java.util.Locale
 
 private const val MIN_CLUSTER_AUTHORS = 3
@@ -21,6 +22,18 @@ data class ModeratedReplyRow(
     val muted: Boolean = false,
     val spamClusterId: String? = null,
 )
+
+/** Sample each author once for both spam moderation and the reply threshold. */
+internal fun replyAuthorScores(
+    replies: List<ModeratedReplyRow>,
+    focused: FeedRow? = null,
+    lookup: (String) -> WotLookup,
+): Map<String, WotLookup> = buildMap {
+    if (focused != null) put(focused.pubkey, lookup(focused.pubkey))
+    for (reply in replies) {
+        if (!reply.muted) getOrPut(reply.row.pubkey) { lookup(reply.row.pubkey) }
+    }
+}
 
 /**
  * A lazy-list item derived from a flattened reply tree. Suspected spam remains

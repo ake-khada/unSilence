@@ -31,6 +31,7 @@ import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.flow.onStart
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.stateIn
@@ -90,6 +91,7 @@ class NotificationsViewModel @Inject constructor(
         relayPreferencesStore.feedWotDisplayModeFlow()
             .stateIn(viewModelScope, SharingStarted.Eagerly, FeedWotDisplayMode.NUMBERS)
 
+    val wotScoreFilter = relayPreferencesStore.wotScoreFilter
     val sensitiveMode = relayPreferencesStore.sensitiveContentMode
 
     private val previewTargets = MutableStateFlow<List<String>>(emptyList())
@@ -137,31 +139,32 @@ class NotificationsViewModel @Inject constructor(
     val uiState: StateFlow<NotificationsUiState> = _filter.flatMapLatest { filter ->
         val owner = keyManager.getPublicKeyHex()
         if (owner == null) flowOf(NotificationsUiState(loading = false)) else
-            notifications.rows(owner, followedOnly = filter == NotifFilter.Following).map { items ->
-            // Fetch missing profiles across ALL actors (singles + every
-            // grouped actor), not just one actor per row.
-            val missingPubkeys = items.flatMap { row ->
-                when (row) {
-                    is NotificationRow.Single ->
-                        if (row.actorPicture == null) listOf(row.actorPubkey) else emptyList()
-                    is NotificationRow.Grouped ->
-                        row.actors.filter { it.picture == null && it.pubkey != null }.map { it.pubkey!! }
+            notifications.applyScoreFilter(notifications.rows(owner, followedOnly = filter == NotifFilter.Following).onEach { items ->
+                val actorPubkeys = items.flatMap { row ->
+                    when (row) {
+                        is NotificationRow.Single -> listOf(row.actorPubkey)
+                        is NotificationRow.Grouped -> row.actors.mapNotNull { it.pubkey }
+                    }
+                }.toSet()
+                _wotSubjects.value = actorPubkeys
+                wotHydrationCoalescer.requestHydration(actorPubkeys)
+            }).map { items ->
+                // Fetch missing profiles across ALL actors (singles + every
+                // grouped actor), not just one actor per row.
+                val missingPubkeys = items.flatMap { row ->
+                    when (row) {
+                        is NotificationRow.Single ->
+                            if (row.actorPicture == null) listOf(row.actorPubkey) else emptyList()
+                        is NotificationRow.Grouped ->
+                            row.actors.filter { it.picture == null && it.pubkey != null }.map { it.pubkey!! }
+                    }
+                }.distinct()
+                if (missingPubkeys.isNotEmpty()) {
+                    userRepository.fetchMissingProfiles(missingPubkeys)
                 }
-            }.distinct()
-            if (missingPubkeys.isNotEmpty()) {
-                userRepository.fetchMissingProfiles(missingPubkeys)
-            }
-            val actorPubkeys = items.flatMap { row ->
-                when (row) {
-                    is NotificationRow.Single -> listOf(row.actorPubkey)
-                    is NotificationRow.Grouped -> row.actors.mapNotNull { it.pubkey }
-                }
-            }.toSet()
-            _wotSubjects.value = actorPubkeys
-            wotHydrationCoalescer.requestHydration(actorPubkeys)
                 NotificationsUiState(items = items, loading = false)
             }.onStart { emit(NotificationsUiState()) }
-    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(0), NotificationsUiState())
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(0, replayExpirationMillis = 0), NotificationsUiState())
 
     fun markSeen() {
         val timestamp = uiState.value.items.firstOrNull()?.mostRecentAt ?: return

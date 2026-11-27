@@ -163,6 +163,7 @@ fun FeedScreen(
     val currentFilter by viewModel.filterFlow.collectAsStateWithLifecycle()
     val currentFeedType by viewModel.feedType.collectAsStateWithLifecycle()
     val globalFeedLens by viewModel.globalFeedLens.collectAsStateWithLifecycle()
+    val scoreFilter by viewModel.wotScoreFilter.collectAsStateWithLifecycle()
     val trustedHiddenCount by viewModel.trustedHiddenCount.collectAsStateWithLifecycle()
     val globalDropCounters by viewModel.globalFeedDropCounters.collectAsStateWithLifecycle()
     val reactedIds    by actionsViewModel.reactedEventIds.collectAsStateWithLifecycle()
@@ -526,7 +527,8 @@ fun FeedScreen(
                     ) {
                         item(key = "trusted-global-footer") {
                             Text(
-                                text = "Trusted hides $trustedHiddenCount unscored or spam-shaped notes \u00B7 local filter",
+                                text = if (scoreFilter?.enabled == true) "Trusted hides $trustedHiddenCount posts · minimum WoT score ${scoreFilter?.minimum}"
+                                    else "Trusted hides $trustedHiddenCount unscored or spam-shaped notes \u00B7 local filter",
                                 color = TextSecondary,
                                 style = AppTextStyles.caption,
                                 modifier = Modifier

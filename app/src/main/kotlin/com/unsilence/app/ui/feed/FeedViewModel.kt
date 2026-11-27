@@ -38,6 +38,7 @@ import kotlinx.coroutines.flow.runningFold
 import com.unsilence.app.data.relay.CardHydrator
 import com.unsilence.app.data.relay.ConnectionPurpose
 import com.unsilence.app.data.relay.ENGAGEMENT_LOOKAHEAD
+import com.unsilence.app.data.relay.WotScoreFilter
 import com.unsilence.app.data.relay.FeedWotDisplayMode
 import com.unsilence.app.data.relay.GLOBAL_RELAY_URLS
 import com.unsilence.app.data.relay.OutboxRelayResolver
@@ -72,6 +73,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -199,7 +201,7 @@ class FeedViewModel @Inject constructor(
     private var restoreTimelineOnSubscribe = restoredSession != null
     private var pendingRestoredSession = restoredSession
 
-    val hasNewNotifications = notificationRepository.unread(keyManager.getPublicKeyHex().orEmpty())
+    val hasNewNotifications = notificationRepository.unread(keyManager.getPublicKeyHex().orEmpty(), wotHydrationCoalescer::requestHydration)
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(0), false)
     val graphOnboardingPrompt = graphOnboardingRepository.prompts(keyManager.getPublicKeyHex().orEmpty())
         .stateIn(viewModelScope, SharingStarted.Eagerly, GraphOnboardingPrompt())
@@ -381,8 +383,9 @@ class FeedViewModel @Inject constructor(
         relayPreferencesStore.hashtagCapFlow(),
         relayPreferencesStore.sensitiveContentModeFlow(),
         memoryEventStore.feedSignalFlow,
-    ) { muteList, hashtagCap, sensitiveMode, _ ->
-        FeedSafety(muteList, hashtagCap, sensitiveMode)
+        relayPreferencesStore.wotScoreFilter.filterNotNull(),
+    ) { muteList, hashtagCap, sensitiveMode, _, scoreFilter ->
+        FeedSafety(muteList, hashtagCap, sensitiveMode, scoreFilter)
     }
 
     internal val presentation: StateFlow<FeedPresentation> =
@@ -414,6 +417,7 @@ class FeedViewModel @Inject constructor(
                 candidates = baseCandidates,
                 applyHeuristics = policyMode != FeedPolicyMode.NONE,
                 trustLookup = if (trustedGlobal) memoryEventStore::wotFor else null,
+                scoreFilter = safety.scoreFilter,
             )
             _globalFeedDropCounters.value = policyProjection.counters
             _trustedHiddenCount.value = if (trustedGlobal) policyProjection.counters.total else 0
@@ -460,6 +464,7 @@ class FeedViewModel @Inject constructor(
             candidates,
             applyHeuristics = policy != FeedPolicyMode.NONE,
             trustLookup = if (policy == FeedPolicyMode.TRUSTED) memoryEventStore::wotFor else null,
+            scoreFilter = safety.scoreFilter,
         ).accepted.count { matchesActivityThresholds(it, input.filter) }
     }.flowOn(Dispatchers.Default)
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(0), 0)
@@ -584,6 +589,8 @@ class FeedViewModel @Inject constructor(
         combine(_wotSubjects, memoryEventStore.wotSignalFlow) { subjects, _ ->
             wotLookupSnapshot(subjects, memoryEventStore::displayWotFor)
         }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyMap())
+
+    val wotScoreFilter = relayPreferencesStore.wotScoreFilter
 
     val feedWotDisplayMode =
         relayPreferencesStore.feedWotDisplayModeFlow()
@@ -1542,6 +1549,7 @@ class FeedViewModel @Inject constructor(
         val muteList: MuteList?,
         val hashtagCap: Int?,
         val sensitiveMode: SensitiveContentMode,
+        val scoreFilter: WotScoreFilter,
     )
 
     private data class ResubKey(

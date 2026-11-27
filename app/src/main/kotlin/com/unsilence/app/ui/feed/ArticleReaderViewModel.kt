@@ -23,6 +23,7 @@ import com.unsilence.app.data.relay.wotLookupSnapshot
 import com.unsilence.app.ui.shared.TimelineCardData
 import com.unsilence.app.ui.shared.ModeratedReplyRow
 import com.unsilence.app.ui.shared.markLikelyCoordinatedSpam
+import com.unsilence.app.ui.shared.replyAuthorScores
 import com.unsilence.app.ui.shared.mutedTimelineRowIds
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.Dispatchers
@@ -42,6 +43,7 @@ data class ArticleCommentsState(
     val rows: List<FeedRow> = emptyList(),
     val mutedIds: Set<String> = emptySet(),
     val depthRows: List<ModeratedReplyRow> = emptyList(),
+    val authorScores: Map<String, WotLookup> = emptyMap(),
 )
 
 internal data class ArticleContent(val row: FeedRow, val model: EventModel)
@@ -102,6 +104,8 @@ class ArticleReaderViewModel @Inject constructor(
             wotLookupSnapshot(subjects, memoryEventStore::displayWotFor)
         }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyMap())
 
+    val wotScoreFilter = relayPreferencesStore.wotScoreFilter
+
     val feedWotDisplayMode: StateFlow<FeedWotDisplayMode> =
         relayPreferencesStore.feedWotDisplayModeFlow()
             .stateIn(viewModelScope, SharingStarted.WhileSubscribed(0), FeedWotDisplayMode.NUMBERS)
@@ -129,19 +133,17 @@ class ArticleReaderViewModel @Inject constructor(
             val followedPubkeys = ownPubkey
                 ?.let(memoryEventStore::getFollows)
                 .orEmpty()
-            val trustCache = HashMap<String, Boolean>()
+            val depthRows = flattenArticleComments(rows, mutedIds = mutedIds)
+            val scores = replyAuthorScores(depthRows, lookup = memoryEventStore::wotFor)
             ArticleCommentsState(
                 rows = rows,
                 mutedIds = mutedIds,
+                authorScores = scores,
                 depthRows = markLikelyCoordinatedSpam(
-                    rows = flattenArticleComments(rows, mutedIds = mutedIds),
+                    rows = depthRows,
                     protectedEventIds = protectedEventIds,
                     isTrustedAuthor = { pubkey ->
-                        trustCache.getOrPut(pubkey) {
-                            pubkey == ownPubkey ||
-                                pubkey in followedPubkeys ||
-                                memoryEventStore.wotFor(pubkey) is WotLookup.Scored
-                        }
+                        pubkey == ownPubkey || pubkey in followedPubkeys || scores[pubkey] is WotLookup.Scored
                     },
                 ),
             )

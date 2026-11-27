@@ -2,6 +2,7 @@ package com.unsilence.app.ui.feed
 
 import com.unsilence.app.data.memory.NostrEvent
 import com.unsilence.app.data.memory.WotLookup
+import com.unsilence.app.data.relay.WotScoreFilter
 import com.unsilence.app.data.relay.NostrJson
 import com.unsilence.app.data.relay.normalizeRelayUrl
 import com.unsilence.app.domain.model.GlobalFeedLens
@@ -138,6 +139,7 @@ internal class GlobalFeedPolicy {
     fun project(
         candidates: List<NostrEvent>,
         applyHeuristics: Boolean,
+        scoreFilter: WotScoreFilter = WotScoreFilter(),
         trustLookup: ((String) -> WotLookup)? = null,
     ): GlobalFeedProjection {
         if (!applyHeuristics && trustLookup == null) {
@@ -179,7 +181,12 @@ internal class GlobalFeedPolicy {
                 GlobalFeedVerdict.PASS -> Unit
             }
 
-            when (trustLookup?.invoke(event.pubkey)?.let(::trustedGateVerdict)) {
+            when (trustLookup?.invoke(event.pubkey)?.let { lookup ->
+                when (val verdict = trustedGateVerdict(lookup)) {
+                    TrustedGateVerdict.PASS -> if (scoreFilter.admits(lookup)) verdict else TrustedGateVerdict.DROP
+                    else -> verdict
+                }
+            }) {
                 TrustedGateVerdict.DROP -> unscoredAuthors++
                 TrustedGateVerdict.HOLD -> {
                     pendingAuthorRows++

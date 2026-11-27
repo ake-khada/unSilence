@@ -2,6 +2,7 @@ package com.unsilence.app.ui.profile
 
 import com.unsilence.app.ui.theme.AppTextStyles
 import com.unsilence.app.ui.shared.rememberWriteAwareDismiss
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -19,6 +20,7 @@ import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material.icons.Icons
@@ -34,9 +36,16 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
+import androidx.compose.material3.Slider
+import androidx.compose.material3.ExperimentalMaterial3Api
+import kotlin.math.roundToInt
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -47,6 +56,12 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.drawscope.clipRect
+import androidx.compose.ui.graphics.drawscope.scale
+import androidx.compose.ui.graphics.lerp
+import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -63,6 +78,8 @@ import com.unsilence.app.ui.common.LocalAppSessionKey
 import com.unsilence.app.ui.theme.AppType
 import com.unsilence.app.ui.theme.Black
 import com.unsilence.app.ui.theme.Brand
+import com.unsilence.app.ui.theme.BrandDeep
+import com.unsilence.app.ui.theme.Like
 import com.unsilence.app.ui.theme.Mint
 import com.unsilence.app.ui.theme.Sizing
 import com.unsilence.app.ui.theme.Spacing
@@ -84,6 +101,7 @@ fun FiltersScreen(
     rememberWriteAwareDismiss(viewModel.pendingEdits, navigationOwnsBack, onDismiss)
     val muteList by viewModel.muteList.collectAsStateWithLifecycle()
     val sensitiveMode by viewModel.sensitiveContentMode.collectAsStateWithLifecycle()
+    val scoreFilter by viewModel.wotScoreFilter.collectAsStateWithLifecycle()
     val hashtagCap by viewModel.hashtagCap.collectAsStateWithLifecycle()
     val publishSafe by viewModel.publishSafe.collectAsStateWithLifecycle()
     val muteSyncState by viewModel.muteSyncState.collectAsStateWithLifecycle()
@@ -158,6 +176,12 @@ fun FiltersScreen(
                                 vertical = Spacing.small,
                             ),
                         )
+                    }
+                }
+
+                item {
+                    scoreFilter?.let { filter ->
+                        MinimumScoreControl(filter, viewModel::setMinimumWotScore)
                     }
                 }
 
@@ -649,5 +673,60 @@ private fun MuteSyncBanner(
                 )
             }
         }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+internal fun MinimumScoreControl(
+    filter: com.unsilence.app.data.relay.WotScoreFilter,
+    onMinimum: (Int) -> Unit,
+) {
+    val selected = if (filter.enabled) filter.minimum else 0
+    var value by remember(selected) { mutableIntStateOf(selected) }
+    val accent = when (value) {
+        0 -> TextSecondary
+        in 1..50 -> lerp(Like, BrandDeep, (value - 1) / 49f)
+        else -> lerp(BrandDeep, Mint, (value - 50) / 50f)
+    }
+    val scaleColors = remember { listOf(Like, BrandDeep, Mint) }
+    val description = if (value == 0) "Off" else "$value out of 100"
+    Column(Modifier.fillMaxWidth().padding(horizontal = Spacing.medium, vertical = Spacing.small)) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text("Minimum WoT score", Modifier.weight(1f), color = Color.White, style = AppTextStyles.body)
+            Text(if (value == 0) "Off" else "$value / 100", color = accent,
+                style = AppTextStyles.bodySmall, fontWeight = FontWeight.SemiBold)
+        }
+        Slider(
+            value = value.toFloat(),
+            onValueChange = { value = it.roundToInt() },
+            onValueChangeFinished = { if (value != selected) onMinimum(value) },
+            valueRange = 0f..100f,
+            steps = 99,
+            modifier = Modifier.fillMaxWidth().semantics {
+                contentDescription = "Minimum accepted score"
+                stateDescription = description
+            },
+            thumb = {
+                Box(Modifier.size(22.dp).background(accent.copy(alpha = 0.22f), CircleShape),
+                    contentAlignment = Alignment.Center) {
+                    Box(Modifier.size(14.dp).background(accent, CircleShape))
+                }
+            },
+            track = { slider ->
+                Canvas(Modifier.fillMaxWidth().height(5.dp)) {
+                    val gradient = Brush.horizontalGradient(scaleColors)
+                    val radius = CornerRadius(size.height / 2)
+                    scale(if (layoutDirection == LayoutDirection.Rtl) -1f else 1f, 1f) {
+                        drawRoundRect(gradient, cornerRadius = radius, alpha = 0.38f)
+                        clipRect(right = size.width * slider.value / 100f) {
+                            drawRoundRect(gradient, cornerRadius = radius)
+                        }
+                    }
+                }
+            },
+        )
+        Text("Global Trusted, replies and notifications. Slide fully left for Off.",
+            color = TextSecondary, style = AppTextStyles.caption)
     }
 }

@@ -1,5 +1,6 @@
 package com.unsilence.app.ui.feed
 
+import com.unsilence.app.data.relay.WotScoreFilter
 import com.unsilence.app.data.memory.NostrEvent
 import com.unsilence.app.data.memory.WotAssertionEntity
 import com.unsilence.app.data.memory.WotLookup
@@ -240,6 +241,19 @@ class GlobalFeedPolicyTest {
                 hasVisibleEvents = false,
             ),
         )
+    }
+
+    @Test fun thresholdIsInclusiveAtEveryStepAndRawRemainsAvailable() {
+        val rows = (0..100).map { event("note$it", pubkey = "$it", content = "note $it") }
+        val policy = GlobalFeedPolicy()
+        for (minimum in 1..100) {
+            val filter = WotScoreFilter(true, minimum)
+            val ranked = policy.project(rows, false, filter) { WotLookup.Scored(WotAssertionEntity(it, "provider", it.toInt())) }
+            assertEquals((minimum..100).toList(), ranked.accepted.map { it.pubkey.toInt() })
+            assertEquals(rows, policy.project(rows, false, scoreFilter = filter).accepted)
+            assertFalse(filter.admits(WotLookup.Absent))
+            assertFalse(filter.admits(WotLookup.Scored(WotAssertionEntity("key", "provider", 100), cached = true)))
+        }
     }
 
     private fun scored(pubkey: String): WotLookup.Scored = WotLookup.Scored(

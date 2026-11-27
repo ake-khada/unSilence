@@ -16,6 +16,13 @@ internal const val SEARCH_ELEVATED_VERIFIED_MUTERS = 3L
 internal const val SEARCH_HEAVY_VERIFIED_REPORTERS = 10L
 internal const val SEARCH_NEAR_ZERO_VERIFIED_FOLLOWERS = 1L
 
+data class WotScoreFilter(val enabled: Boolean = false, val minimum: Int = 1) {
+    init { require(minimum in 1..100) }
+
+    fun admits(lookup: WotLookup?): Boolean = !enabled ||
+        (lookup is WotLookup.Scored && !lookup.cached && lookup.assertion.rank >= minimum)
+}
+
 enum class FeedWotDisplayMode {
     NUMBERS,
     EXCEPTIONS_ONLY,

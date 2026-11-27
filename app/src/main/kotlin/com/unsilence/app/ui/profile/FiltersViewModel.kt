@@ -40,6 +40,12 @@ class FiltersViewModel @Inject constructor(
     val sensitiveContentMode: StateFlow<SensitiveContentMode> =
         relayPreferencesStore.sensitiveContentMode
 
+    val wotScoreFilter = relayPreferencesStore.wotScoreFilter
+
+    fun setMinimumWotScore(minimum: Int) {
+        pendingEdits.launch { relayPreferencesStore.setMinimumWotScore(minimum) }
+    }
+
     val hashtagCap: StateFlow<Int?> =
         relayPreferencesStore.hashtagCapFlow()
             .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), com.unsilence.app.data.memory.DEFAULT_HASHTAG_CAP)

@@ -27,6 +27,7 @@ import com.unsilence.app.ui.shared.collectLatestWhileActive
 import kotlinx.coroutines.flow.channelFlow
 import com.unsilence.app.ui.shared.ModeratedReplyRow
 import com.unsilence.app.ui.shared.markLikelyCoordinatedSpam
+import com.unsilence.app.ui.shared.replyAuthorScores
 import com.unsilence.app.ui.shared.mutedTimelineRowIds
 import com.unsilence.app.ui.shared.pruneFullyMutedSubtrees
 import dagger.hilt.android.lifecycle.HiltViewModel
@@ -57,6 +58,7 @@ data class ThreadUiState(
     val replies: List<DepthRow> = emptyList(),
     val loading: Boolean = true,
     val focusedReplyId: String? = null,
+    val authorScores: Map<String, WotLookup> = emptyMap(),
 )
 
 /**
@@ -159,6 +161,8 @@ class ThreadViewModel @Inject constructor(
     val sensitiveContentMode: StateFlow<com.unsilence.app.data.memory.SensitiveContentMode> =
         relayPreferencesStore.sensitiveContentMode
 
+    val wotScoreFilter = relayPreferencesStore.wotScoreFilter
+
     val feedWotDisplayMode: StateFlow<FeedWotDisplayMode> =
         relayPreferencesStore.feedWotDisplayModeFlow()
             .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), FeedWotDisplayMode.NUMBERS)
@@ -167,7 +171,7 @@ class ThreadViewModel @Inject constructor(
     val uiState: StateFlow<ThreadUiState> = _uiState.asStateFlow()
 
     internal fun presentation(eventId: String): CardDataFlow<ThreadUiState> =
-        threadPresentation(eventId, uiState, memoryEventStore::cachedFeedRow) { id ->
+        threadPresentation(eventId, uiState, memoryEventStore::cachedFeedRow, memoryEventStore::wotFor) { id ->
             memoryEventStore.feedRowsByIds(setOf(id))
         }
     private val _baseUiState = MutableStateFlow(ThreadUiState())
@@ -382,17 +386,14 @@ class ThreadViewModel @Inject constructor(
                     val followedPubkeys = ownPubkey
                         ?.let(memoryEventStore::getFollows)
                         .orEmpty()
-                    val trustCache = HashMap<String, Boolean>()
+                    val scores = replyAuthorScores(baseState.replies, baseState.focusedNote, memoryEventStore::wotFor)
                     baseState.copy(
+                        authorScores = scores,
                         replies = markLikelyCoordinatedSpam(
                             rows = baseState.replies,
                             protectedEventIds = setOfNotNull(baseState.focusedReplyId),
                             isTrustedAuthor = { pubkey ->
-                                trustCache.getOrPut(pubkey) {
-                                    pubkey == ownPubkey ||
-                                        pubkey in followedPubkeys ||
-                                        memoryEventStore.wotFor(pubkey) is WotLookup.Scored
-                                }
+                                pubkey == ownPubkey || pubkey in followedPubkeys || scores[pubkey] is WotLookup.Scored
                             },
                         ),
                     )

@@ -58,6 +58,8 @@ private val KEY_LAST_WOT_FETCH = longPreferencesKey("last_wot_fetch_at")
 private val KEY_LAST_WOT_TARGETS_HASH = stringPreferencesKey("last_wot_targets_hash")
 private val KEY_FEED_WOT_DISPLAY_MODE = stringPreferencesKey("feed_wot_display_mode")
 private val KEY_GLOBAL_FEED_LENS = stringPreferencesKey("global_feed_lens")
+private val KEY_WOT_FILTER_ENABLED = booleanPreferencesKey("wot_filter_enabled")
+private val KEY_WOT_FILTER_MINIMUM = intPreferencesKey("wot_filter_minimum")
 private val KEY_HASHTAG_CAP = intPreferencesKey("hashtag_cap")
 private const val HASHTAG_CAP_OFF = 0
 private const val ACCOUNT_WOT_PREFS_PREFIX = "account_wot_prefs_"
@@ -285,6 +287,19 @@ class RelayPreferencesStore internal constructor(
                     ?: SensitiveContentMode.BLUR
             }
             .distinctUntilChanged()
+
+    // Wait for DataStore before presenting rows that a persisted threshold could exclude.
+    val wotScoreFilter: StateFlow<WotScoreFilter?> = dataStore.data.map { prefs ->
+        WotScoreFilter(prefs[KEY_WOT_FILTER_ENABLED] ?: false, (prefs[KEY_WOT_FILTER_MINIMUM] ?: 1).coerceIn(1, 100))
+    }.distinctUntilChanged().stateIn(scope, SharingStarted.Eagerly, null)
+
+    suspend fun setMinimumWotScore(value: Int) {
+        require(value in 0..100)
+        dataStore.edit { prefs ->
+            prefs[KEY_WOT_FILTER_ENABLED] = value > 0
+            if (value > 0) prefs[KEY_WOT_FILTER_MINIMUM] = value
+        }
+    }
 
     suspend fun setSensitiveContentMode(mode: SensitiveContentMode) {
         dataStore.edit { prefs -> prefs[KEY_SENSITIVE_CONTENT_MODE] = mode.name }

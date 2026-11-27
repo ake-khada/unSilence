@@ -1,6 +1,7 @@
 package com.unsilence.app.ui.thread
 
 import com.unsilence.app.data.memory.FeedRow
+import com.unsilence.app.data.memory.WotLookup
 import com.unsilence.app.ui.shared.CardDataFlow
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.StateFlow
@@ -17,6 +18,7 @@ internal fun threadPresentation(
     eventId: String,
     states: StateFlow<ThreadUiState>,
     cachedRow: (String) -> FeedRow?,
+    cachedScore: (String) -> WotLookup = { WotLookup.Pending },
     prepareRow: (String) -> Unit = {},
 ): CardDataFlow<ThreadUiState> {
     fun present(state: ThreadUiState): ThreadUiState {
@@ -26,7 +28,7 @@ internal fun threadPresentation(
         } ?: return state
         // No replies are seeded before their mute/spam projection. The focused
         // root uses the same EventCard and sensitive-content gate as settled UI.
-        return state.copy(focusedNote = root, loading = false)
+        return state.copy(focusedNote = root, loading = false, authorScores = mapOf(root.pubkey to cachedScore(root.pubkey)))
     }
     val updates = states.onStart {
         // A quote may have a parsed model but no FeedRow yet. Project that one
