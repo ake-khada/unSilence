@@ -196,6 +196,7 @@ fun ComposeScreen(
     val replyToModel = viewModel.replyToModel
     val quoteRow = viewModel.quoteRow
     val quoteModel = viewModel.quoteModel
+    val isSigning = sendState is SendState.Signing
     val isConfirming = sendState is SendState.Confirming
     val isPublishing = sendState is SendState.Publishing
     val isFailed = sendState is SendState.Failed
@@ -269,7 +270,7 @@ fun ComposeScreen(
 
     fun requestDismiss() {
         if (saving || isPublishing || deletion != null) return
-        if (isConfirming) {
+        if (isConfirming || isSigning || isFailed) {
             viewModel.cancelSend()
             return
         }
@@ -295,20 +296,17 @@ fun ComposeScreen(
         initialized = true
     }
 
-    // Auto-dismiss once the note is published
-    LaunchedEffect(viewModel.published, initialized) {
-        if (initialized && viewModel.published) finishAndDismiss()
-    }
-
-    // Dismiss on Sent state
     LaunchedEffect(sendState, initialized) {
-        if (initialized && sendState is SendState.Sent) finishAndDismiss()
+        if (initialized && sendState is SendState.Sent) {
+            showSnackbar("Post published")
+            finishAndDismiss()
+        }
         if (sendState is SendState.Confirming) keyboardController?.hide()
     }
 
     // System back during confirm → cancel (blocked during publishing)
     BackHandler(enabled = isPublishing) { /* The entry owns an in-flight publish. */ }
-    BackHandler(enabled = isConfirming || isFailed) {
+    BackHandler(enabled = isConfirming || isSigning || isFailed) {
         viewModel.cancelSend()
     }
 
@@ -349,8 +347,9 @@ fun ComposeScreen(
             ) {
                 Text(
                     text = when {
+                        isSigning -> "Signing"
                         isPublishing -> "Publishing"
-                        isFailed -> "Failed"
+                        isFailed -> "Publish status"
                         isConfirming -> "Confirm"
                         isReply -> "Replying"
                         isQuote -> "Quoting"
@@ -884,6 +883,12 @@ fun ComposeScreen(
                     }
                 }
 
+                SendState.Signing -> {
+                    Box(Modifier.fillMaxWidth().weight(1f), contentAlignment = Alignment.Center) {
+                        Text("Waiting for signature…", style = AppTextStyles.body, color = TextSecondary)
+                    }
+                }
+
                 is SendState.Publishing -> {
                     PublishStatusPanel(
                         statuses = state.statuses,
@@ -1211,7 +1216,8 @@ private fun PublishStatusPanel(
         val accepted = statuses.values.count { it == RelayPublishStatus.Accepted }
         val total = statuses.size
         Text(
-            text = if (accepted == 0) "Publishing to $total relays\u2026"
+            text = if (total == 0) "Preparing to send…"
+                   else if (accepted == 0) "Publishing to $total relays\u2026"
                    else "Published to $accepted of $total relays",
             color = Color.White,
             style = AppTextStyles.body,
@@ -1229,7 +1235,7 @@ private fun PublishStatusPanel(
                     RelayPublishStatus.Rejected -> Icons.Filled.Close to Like
                     RelayPublishStatus.TimedOut -> Icons.Filled.ErrorOutline to Warn
                 }
-                Icon(icon, contentDescription = null, tint = tint,
+                Icon(icon, contentDescription = status.name, tint = tint,
                     modifier = Modifier.size(14.dp))
                 Spacer(Modifier.width(6.dp))
                 Text(

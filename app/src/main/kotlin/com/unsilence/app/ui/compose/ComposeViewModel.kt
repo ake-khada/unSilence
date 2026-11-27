@@ -64,6 +64,7 @@ import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
+import com.vitorpamplona.quartz.nip01Core.core.Event
 import com.vitorpamplona.quartz.nip01Core.core.hexToByteArray
 import com.vitorpamplona.quartz.nip19Bech32.toNpub
 import dagger.hilt.android.lifecycle.HiltViewModel
@@ -221,6 +222,7 @@ sealed interface SendState {
         val notifyCandidates: List<NotifyCandidate>,
         val notifyActive: Set<String>,
     ) : SendState
+    data object Signing : SendState
     data class Publishing(
         val statuses: Map<String, RelayPublishStatus>,
         val confirmation: Confirming,
@@ -228,6 +230,7 @@ sealed interface SendState {
     data class Failed(
         val reason: String,
         val confirmation: Confirming,
+        val signedEvent: Event? = null,
     ) : SendState
     data object Sent : SendState
 }
@@ -278,6 +281,7 @@ class ComposeViewModel @Inject constructor(
 
     internal fun finishComposeSession(sessionKey: String) {
         if (composeSessionGate.finish(sessionKey)) {
+            cancelPendingSigning()
             cancelAttachmentUploads()
             savedStateHandle.remove<String>(ACTIVE_SESSION_KEY)
             savedStateHandle.remove<Bundle>(EDITOR_STATE_KEY)
@@ -292,14 +296,6 @@ class ComposeViewModel @Inject constructor(
         userRepository.userFlow(pk)
             .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
     } ?: MutableStateFlow(null)
-
-    /** True once the note has been signed, published, and inserted into MES. */
-    var published by mutableStateOf(false)
-        private set
-
-    /** Non-null when signing or publishing failed — shown to the user. */
-    var publishError by mutableStateOf<String?>(null)
-        private set
 
     // ── Block-based content model ───────────────────────────────────────────
 
@@ -1012,8 +1008,6 @@ class ComposeViewModel @Inject constructor(
         restoredFocusId = null
         cancelPendingSigning()
         cancelAttachmentUploads()
-        published = false
-        publishError = null
         replyToEventId = null
         replyToRow = null
         replyToModel = null
@@ -1226,7 +1220,7 @@ class ComposeViewModel @Inject constructor(
 
     fun retryPublish() {
         val state = _sendState.value as? SendState.Failed ?: return
-        publishPayload(state.confirmation)
+        publishPayload(state.confirmation, state.signedEvent)
     }
 
     fun toggleNotify(pubkey: String) {
@@ -1424,60 +1418,29 @@ class ComposeViewModel @Inject constructor(
             .ifEmpty { com.unsilence.app.data.relay.GLOBAL_RELAY_URLS.take(6) }
     }
 
-    private fun publishPayload(confirmation: SendState.Confirming) {
+    private fun publishPayload(confirmation: SendState.Confirming, retryEvent: Event? = null) {
+        val owner = pubkeyHex
+        if (owner == null || keyManager.getPublicKeyHex() != owner) {
+            _sendState.value = SendState.Failed("Sign in to publish this post.", confirmation, retryEvent)
+            return
+        }
         val attemptToken = signingAttemptGate.begin() ?: return
-        publishError = null
+        _sendState.value = if (retryEvent == null) SendState.Signing
+                           else SendState.Publishing(emptyMap(), confirmation)
         val job = viewModelScope.launch(start = CoroutineStart.LAZY) {
             try {
                 val payload = confirmation.payload
-                val signed = signingManager.sign(payload.toEventTemplate()) ?: run {
-                    if (signingAttemptGate.isCurrent(attemptToken)) {
-                        _sendState.value = SendState.Failed(
-                            reason = "Signing failed - check your key or Amber connection",
-                            confirmation = confirmation,
-                        )
-                    }
-                    return@launch
-                }
+                val signed = retryEvent ?: signingManager.sign(payload.toEventTemplate(), expectedPubkey = owner)
                 // Back/Close may cancel while Amber is in front. A late result must
                 // never publish a draft the user already returned to editing/discarded.
                 if (!signingAttemptGate.isCurrent(attemptToken)) return@launch
-                signingAttemptGate.complete(attemptToken)
-                signingJob = null
-
-                publishAndTrack(
-                    eventId = signed.id,
-                    eventJson = toEventJson(signed),
-                    signedAuthor = signed.pubKey,
-                    signedTags = signed.tags.map { it.toList() },
-                    replyToId = payload.replyToId,
-                    rootId = payload.rootId,
-                    confirmation = confirmation,
-                ) {
-                    val nowMs = System.currentTimeMillis()
-                    val parsedTags = signed.tags.map { it.toList() }
-                    memoryEventStore.insert(
-                        NostrEvent(
-                            id = signed.id,
-                            pubkey = signed.pubKey,
-                            kind = signed.kind,
-                            content = signed.content,
-                            createdAt = signed.createdAt,
-                            tags = parsedTags,
-                            sig = signed.sig,
-                            relayUrl = "local",
-                            replyToId = payload.replyToId,
-                            rootId = payload.rootId,
-                            hasContentWarning = payload.hasContentWarning,
-                            contentWarningReason = null,
-                            firstSeenAt = nowMs,
-                            relaysSeen = ConcurrentHashMap.newKeySet<String>().apply { add("local") },
-                        )
-                    )
-                    if (payload.kind == 1068) {
-                        relayPool.refreshOwnNotificationSubscription(signed.pubKey)
-                    }
+                if (signed == null || signed.pubKey != owner || keyManager.getPublicKeyHex() != owner) {
+                    _sendState.value = SendState.Failed("Signing failed - check your key or Amber connection", confirmation, retryEvent)
+                    return@launch
                 }
+                _sendState.value = SendState.Publishing(emptyMap(), confirmation)
+
+                publishAndTrack(signed, confirmation, attemptToken)
             } finally {
                 signingAttemptGate.complete(attemptToken)
                 if (signingJob === coroutineContext[Job]) signingJob = null
@@ -1492,28 +1455,26 @@ class ComposeViewModel @Inject constructor(
      * to own writes plus cached recipient inboxes, tracking every target for 6s.
      */
     private suspend fun publishAndTrack(
-        eventId: String,
-        eventJson: String,
-        signedAuthor: String,
-        signedTags: List<List<String>>,
-        replyToId: String?,
-        rootId: String?,
+        signed: Event,
         confirmation: SendState.Confirming,
-        insertIntoMes: suspend () -> Unit,
+        attemptToken: Long,
     ) {
-        val ownPk = pubkeyHex ?: ""
+        val ownPk = signed.pubKey
+        val eventId = signed.id
+        val signedTags = signed.tags.map { it.toList() }
         if (!initGate.relaysReady) {
             withTimeoutOrNull(PUBLISH_RELAY_READINESS_TIMEOUT_MS) {
                 initGate.awaitRelays()
             }
         }
+        if (keyManager.getPublicKeyHex() != ownPk) return
         val relayListSettled = initGate.relaysReady
         val publishRelays = resolveComposePublishRelays(
             configuredWriteRelays = memoryEventStore.writeRelaysFor(ownPk)
                 .mapNotNull(::normalizeRelayUrl),
             relayListSettled = relayListSettled,
             fallbackRelays = GLOBAL_RELAY_URLS,
-            signedAuthor = signedAuthor,
+            signedAuthor = ownPk,
             signedTags = signedTags,
             cachedReadRelays = memoryEventStore::readRelaysFor,
             blocked = memoryEventStore.getBlockedRelayUrls(ownPk).toSet(),
@@ -1529,6 +1490,7 @@ class ComposeViewModel @Inject constructor(
         if (publishRelays.isEmpty()) {
             _sendState.value = SendState.Failed(
                 reason = "Your relay list is still loading. Try again in a moment.",
+                signedEvent = signed,
                 confirmation = confirmation,
             )
             return
@@ -1547,7 +1509,8 @@ class ComposeViewModel @Inject constructor(
             Log.w(TAG, "PUBLISH ${if (success) "OK" else "FAIL"} $relayUrl" +
                 (if (message.isNotBlank()) " — $message" else "") +
                 (if (!isTarget) " (non-target relay)" else ""))
-            if (isTarget) {
+            if (isTarget) viewModelScope.launch {
+                if (!signingAttemptGate.isCurrent(attemptToken)) return@launch
                 _sendState.value = SendState.Publishing(
                     statuses = tracker.snapshot(),
                     confirmation = confirmation,
@@ -1558,12 +1521,26 @@ class ComposeViewModel @Inject constructor(
         try {
             // The signature is authoritative local data. Insert before any network wait so
             // feed/thread flows update immediately; relay failure remains surfaced below.
-            withContext(Dispatchers.IO) { insertIntoMes() }
+            withContext(Dispatchers.IO) {
+                if (keyManager.getPublicKeyHex() != ownPk) return@withContext
+                if (memoryEventStore.getNostrEvent(eventId) == null) {
+                    val payload = confirmation.payload
+                    memoryEventStore.insert(NostrEvent(
+                        id = eventId, pubkey = ownPk, kind = signed.kind, content = signed.content,
+                        createdAt = signed.createdAt, tags = signedTags, sig = signed.sig,
+                        relayUrl = "local", replyToId = payload.replyToId, rootId = payload.rootId,
+                        hasContentWarning = payload.hasContentWarning, contentWarningReason = null,
+                        firstSeenAt = System.currentTimeMillis(),
+                        relaysSeen = ConcurrentHashMap.newKeySet<String>().apply { add("local") },
+                    ))
+                    if (signed.kind == 1068) relayPool.refreshOwnNotificationSubscription(ownPk)
+                }
+            }
 
             // Only the resolved own-write and bounded recipient-read targets receive
             // this signed event. Existing connectAndAwait readiness remains in force.
             withContext(Dispatchers.IO) {
-                relayPool.publish(eventJson, publishRelays)
+                if (keyManager.getPublicKeyHex() == ownPk) relayPool.publish(toEventJson(signed), publishRelays)
             }
 
             // Wait up to 6s for all relays to respond
@@ -1574,6 +1551,7 @@ class ComposeViewModel @Inject constructor(
             }
 
             // Time out any remaining Pending relays
+            if (keyManager.getPublicKeyHex() != ownPk) return
             tracker.expirePending()
             _sendState.value = SendState.Publishing(
                 statuses = tracker.snapshot(),
@@ -1586,18 +1564,24 @@ class ComposeViewModel @Inject constructor(
                 "(event=$eventId, statuses=${statuses.values.groupingBy { it }.eachCount()})")
             if (acceptedCount > 0) {
                 deleteCurrentDraft()
-                // Brief pause to show final state
-                delay(800)
                 _blocks.value = listOf(ComposeBlock.Text(""))
                 _selectedEmojiUrls.value = emptyMap()
                 _pollDraft.value = PollDraft()
-                published = true
                 _sendState.value = SendState.Sent
             } else {
                 _sendState.value = SendState.Failed(
-                    reason = "No relays accepted the event",
+                    reason = if (RelayPublishStatus.TimedOut in statuses.values)
+                        "Publication unconfirmed. You can retry the same post."
+                    else "All target relays rejected this attempt.",
+                    signedEvent = signed,
                     confirmation = confirmation,
                 )
+            }
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (failure: Exception) {
+            if (keyManager.getPublicKeyHex() == ownPk) {
+                _sendState.value = SendState.Failed("Publication unconfirmed. You can retry the same post.", confirmation, signed)
             }
         } finally {
             relayPool.unregisterPublishCallback(eventId)
