@@ -31,6 +31,7 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.JsonPrimitive
@@ -61,7 +62,8 @@ private const val BALANCE_TTL_MS = 60_000L
 private const val PAYMENT_RESPONSE_TIMEOUT_MS = 90_000L
 private val DIAGNOSTIC_CONTROL_REGEX = Regex("[\\p{Cc}\\p{Cf}]+")
 
-class WalletPaymentPendingException(message: String) : Exception(message)
+class WalletPaymentPendingException :
+    Exception("Wallet has not confirmed this zap yet. Check your wallet before retrying.")
 
 /** Parsed fields from a nostr+walletconnect:// URI. */
 data class NwcConnection(
@@ -110,10 +112,11 @@ class NwcManager @Inject constructor(
         okHttpClient.newBuilder().pingInterval(0, TimeUnit.MILLISECONDS).build()
     }
 
-    /** Balance TTL cache: (timestampMs, msats) — settings screens query on every entry. */
-    @Volatile private var lastBalance: Pair<Long, Long>? = null
-    @Volatile private var paymentSession: PaymentSession? = null
-    private val paymentSessionLock = Any()
+    private val lastBalance = MutableStateFlow<Long?>(null)
+    internal val cachedBalanceMsats = lastBalance.asStateFlow()
+    private var balanceUpdatedAtMs = 0L
+    private var activeBalanceRequest: String? = null
+    private var paymentSession: PaymentSession? = null
     private val requestPayloadIds = AtomicLong(System.currentTimeMillis())
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -155,7 +158,8 @@ class NwcManager @Inject constructor(
             .putString(KEY_RELAY,  conn.relayUrl)
             .putString(KEY_SECRET, conn.secret)
             .apply()
-        lastBalance = null
+        lastBalance.value = null
+        activeBalanceRequest = null
         _walletState.value = readWalletState()
         Log.d(TAG, "Saved NWC connection to ${conn.relayUrl}")
         Unit
@@ -164,7 +168,8 @@ class NwcManager @Inject constructor(
     fun clear() = synchronized(configurationLock) {
         closePaymentSession("wallet cleared")
         prefs.edit().clear().apply()
-        lastBalance = null
+        lastBalance.value = null
+        activeBalanceRequest = null
         _walletState.value = readWalletState()
         Log.d(TAG, "NWC connection cleared")
         Unit
@@ -208,8 +213,7 @@ class NwcManager @Inject constructor(
     )
 
     /** Derive per-request crypto material from stored credentials, or null if not configured. */
-    private fun credentials(): NwcCredentials? {
-        val conn = connection() ?: return null
+    private fun credentials(conn: NwcConnection): NwcCredentials {
         val nwcPrivKeyBytes = conn.secret.hexToByteArray()
         val nwcKeyPair      = KeyPair(privKey = nwcPrivKeyBytes)
         return NwcCredentials(
@@ -224,32 +228,20 @@ class NwcManager @Inject constructor(
     private fun paymentSessionKey(creds: NwcCredentials): String =
         "${creds.conn.walletPubkey}|${creds.conn.relayUrl}|${creds.nwcPubkeyHex}"
 
-    private fun currentPaymentSession(): PaymentSession? {
-        val creds = credentials() ?: return null
-        val key = paymentSessionKey(creds)
-        var newSession: PaymentSession? = null
-        val session = synchronized(paymentSessionLock) {
-            paymentSession
-                ?.takeIf { it.key == key && !it.isClosed }
-                ?: PaymentSession(creds, key).also {
-                    paymentSession = it
-                    newSession = it
-                }
+    private fun currentPaymentSession(): PaymentSession? = synchronized(configurationLock) {
+        // Every credential change closes the old session under this same lock.
+        paymentSession?.takeUnless { it.isClosed } ?: run {
+            val creds = credentials(connection() ?: return@synchronized null)
+            PaymentSession(creds, paymentSessionKey(creds)).also {
+                paymentSession = it
+                it.connect()
+            }
         }
-        newSession?.connect()
-        return session
     }
 
     private fun closePaymentSession(reason: String) {
-        val session = synchronized(paymentSessionLock) {
-            paymentSession.also { paymentSession = null }
-        }
-        session?.close(reason)
-    }
-
-    private fun discardPaymentSession(session: PaymentSession) {
-        synchronized(paymentSessionLock) {
-            if (paymentSession === session) paymentSession = null
+        synchronized(configurationLock) {
+            paymentSession?.close(reason)
         }
     }
 
@@ -271,13 +263,10 @@ class NwcManager @Inject constructor(
         bolt11: String,
         amountMsats: Long? = null,
     ): Result<Unit> = withContext(Dispatchers.IO) {
-        val creds = credentials() ?: return@withContext Result.failure(IllegalStateException("NWC not configured"))
-        val key = paymentSessionKey(creds)
-        if (key != warm.sessionKey) {
+        val session = currentPaymentSession()
+        if (session == null || session.key != warm.sessionKey) {
             return@withContext Result.failure(IllegalStateException("Wallet connection changed before payment"))
         }
-        val session = currentPaymentSession()
-            ?: return@withContext Result.failure(IllegalStateException("NWC not configured"))
         session.sendPayment(bolt11, amountMsats)
     }
 
@@ -296,7 +285,8 @@ class NwcManager @Inject constructor(
         private val sendMutex = Mutex()
         private val pending = AtomicReference<PendingPayment?>(null)
         private val subId = "nwc-resp-${System.currentTimeMillis()}"
-        private val relayLabel = creds.conn.relayUrl.toUri().host ?: "unknown"
+        private val request = Request.Builder().url(creds.conn.relayUrl).build()
+        private val relayLabel = request.url.host
 
         @Volatile var isClosed: Boolean = false
             private set
@@ -305,20 +295,22 @@ class NwcManager @Inject constructor(
 
         fun connect() {
             Log.i(TAG, "Payment socket connecting: relay=$relayLabel")
-            val request = Request.Builder().url(creds.conn.relayUrl).build()
             webSocket = okHttpClient.newWebSocket(request, listener())
         }
 
         fun close(reason: String) {
-            isClosed = true
             Log.i(TAG, "Payment socket closing: relay=$relayLabel reason=$reason")
-            if (!ready.isCompleted) {
-                ready.complete(Result.failure(Exception("Wallet relay closed: $reason")))
-            }
-            pending.getAndSet(null)?.deferred?.complete(Result.failure(Exception("Wallet relay closed: $reason")))
+            finish(reason, Exception("Wallet relay closed: $reason"))
+        }
+
+        private fun finish(reason: String, cause: Throwable) = synchronized(configurationLock) {
+            if (isClosed) return@synchronized
+            isClosed = true
+            ready.complete(Result.failure(cause))
+            pending.getAndSet(null)?.deferred?.complete(Result.failure(WalletPaymentPendingException()))
             webSocket?.close(1000, reason.take(120))
             webSocket = null
-            discardPaymentSession(this)
+            if (paymentSession === this) paymentSession = null
         }
 
         suspend fun sendPayment(bolt11: String, amountMsats: Long?): Result<Unit> = sendMutex.withLock {
@@ -368,13 +360,14 @@ class NwcManager @Inject constructor(
                 deferred = CompletableDeferred(),
                 eventCmd = eventCmd,
             )
-            if (!pending.compareAndSet(null, payment)) {
-                return@withLock Result.failure(IllegalStateException("Another wallet payment is already pending"))
-            }
-            if (!ws.send(eventCmd)) {
-                pending.compareAndSet(payment, null)
-                close("send failed")
-                return@withLock Result.failure(IllegalStateException("Wallet relay disconnected before payment was sent"))
+            // AUTH recovery may requeue this event only after the first send succeeded.
+            synchronized(configurationLock) {
+                pending.set(payment)
+                if (isClosed || !ws.send(eventCmd)) {
+                    pending.compareAndSet(payment, null)
+                    close("send failed")
+                    return@withLock Result.failure(IllegalStateException("Wallet relay disconnected before payment was sent"))
+                }
             }
             Log.i(TAG, "Payment request queued: relay=$relayLabel request=${signed.id.take(8)}")
 
@@ -383,11 +376,7 @@ class NwcManager @Inject constructor(
             } catch (e: TimeoutCancellationException) {
                 Log.w(TAG, "Payment response timeout: relay=$relayLabel request=${signed.id.take(8)}")
                 close("payment timeout")
-                Result.failure(
-                    WalletPaymentPendingException(
-                        "Wallet has not confirmed this zap yet. Check your wallet before retrying."
-                    )
-                )
+                Result.failure(WalletPaymentPendingException())
             } catch (e: CancellationException) {
                 throw e
             } finally {
@@ -418,7 +407,9 @@ class NwcManager @Inject constructor(
                         scope.launch {
                             if (sendAuthResponse(webSocket, creds, challenge)) {
                                 val subscriptionQueued = webSocket.send(responseSubscription())
-                                val paymentQueued = pending.get()?.eventCmd?.let { webSocket.send(it) } ?: true
+                                val paymentQueued = synchronized(configurationLock) {
+                                    pending.get()?.eventCmd?.let { webSocket.send(it) } ?: true
+                                }
                                 authRecoveryInFlight = false
                                 if (!subscriptionQueued || !paymentQueued) {
                                     fail(Exception("Wallet relay disconnected during authentication recovery"))
@@ -459,6 +450,10 @@ class NwcManager @Inject constructor(
 
             override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
                 fail(t)
+            }
+
+            override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
+                if (!isClosed) close("relay closing")
             }
 
             override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
@@ -535,17 +530,12 @@ class NwcManager @Inject constructor(
         }
 
         private fun fail(cause: Throwable) {
-            isClosed = true
             Log.w(
                 TAG,
                 "Payment socket failed: relay=$relayLabel request=${pending.get()?.requestEventId?.take(8) ?: "none"} " +
                     "cause=${cause::class.java.simpleName} message=${diagnosticMessage(cause.message.orEmpty())}",
             )
-            if (!ready.isCompleted) ready.complete(Result.failure(cause))
-            pending.getAndSet(null)?.deferred?.complete(Result.failure(cause))
-            webSocket?.close(1000, "failed")
-            webSocket = null
-            discardPaymentSession(this)
+            finish("failed", cause)
         }
     }
 
@@ -566,20 +556,31 @@ class NwcManager @Inject constructor(
      * user-initiated refresh).
      */
     suspend fun getBalance(forceRefresh: Boolean = false): Long? = withContext(Dispatchers.IO) {
-        val nowMs = System.currentTimeMillis()
-        if (!forceRefresh) {
-            lastBalance?.let { (ts, msats) ->
-                if (nowMs - ts < BALANCE_TTL_MS) return@withContext msats
+        val requestPayloadId: String
+        val conn = synchronized(configurationLock) {
+            if (!forceRefresh && System.currentTimeMillis() - balanceUpdatedAtMs < BALANCE_TTL_MS) {
+                lastBalance.value?.let { return@withContext it }
             }
+            val current = connection() ?: return@withContext null
+            requestPayloadId = nextRequestPayloadId()
+            activeBalanceRequest = requestPayloadId
+            current
         }
+        val result = requestBalance(credentials(conn), requestPayloadId)
+        synchronized(configurationLock) {
+            if (activeBalanceRequest != requestPayloadId) return@withContext null
+            activeBalanceRequest = null
+            balanceUpdatedAtMs = System.currentTimeMillis()
+            lastBalance.value = result
+        }
+        result
+    }
 
-        val creds = credentials() ?: return@withContext null
-
+    private suspend fun requestBalance(creds: NwcCredentials, requestPayloadId: String): Long? {
         val nwcPrivKeyBytes = creds.nwcPrivKeyBytes
         val nwcPubkeyHex    = creds.nwcPubkeyHex
         val walletPubBytes  = creds.walletPubBytes
-        val nowSeconds      = nowMs / 1000L
-        val requestPayloadId = nextRequestPayloadId()
+        val nowSeconds      = System.currentTimeMillis() / 1000L
 
         val plaintext = buildJsonObject {
             put("method", "get_balance")
@@ -589,7 +590,7 @@ class NwcManager @Inject constructor(
 
         val encryptedContent = runCatching {
             Nip04.encrypt(plaintext, nwcPrivKeyBytes, walletPubBytes)
-        }.getOrElse { return@withContext null }
+        }.getOrElse { return null }
 
         val template = EventTemplate<Event>(
             createdAt = nowSeconds,
@@ -598,7 +599,7 @@ class NwcManager @Inject constructor(
             content   = encryptedContent,
         )
         val signed = runCatching { creds.nwcSigner.sign(template) }
-            .getOrElse { return@withContext null }
+            .getOrElse { return null }
 
         val deferred = CompletableDeferred<Long?>()
         val subId = "nwc-balance-${System.currentTimeMillis()}"
@@ -689,12 +690,11 @@ class NwcManager @Inject constructor(
         }
 
         val ws = wsClient.newWebSocket(Request.Builder().url(creds.conn.relayUrl).build(), listener)
-        val result = runCatching {
-            withTimeout(10_000) { deferred.await() }
-        }.getOrElse { null }
-        ws.close(1000, "done")
-        if (result != null) lastBalance = nowMs to result
-        result
+        return try {
+            withTimeoutOrNull(10_000) { deferred.await() }
+        } finally {
+            ws.close(1000, "done")
+        }
     }
 
     // ── Helpers ──────────────────────────────────────────────────────────────

@@ -1,6 +1,8 @@
 package com.unsilence.app.data.wallet
 
 import com.unsilence.app.data.auth.SigningManager
+import com.unsilence.app.data.network.UntrustedHttpNetworkGuard
+import com.unsilence.app.data.network.readBoundedUtf8
 import com.unsilence.app.data.relay.NostrJson
 import com.unsilence.app.data.relay.toEventJson
 import com.unsilence.app.data.repository.UserRepository
@@ -23,6 +25,7 @@ import kotlinx.serialization.json.longOrNull
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import okhttp3.ResponseBody
 import javax.inject.Inject
 import javax.inject.Singleton
 import java.util.concurrent.TimeUnit
@@ -40,6 +43,7 @@ data class ZapRequest(
 )
 
 private const val LNURL_CACHE_TTL_MS = 5 * 60 * 1000L
+private const val MAX_LNURL_BODY_BYTES = 1024L * 1024
 internal const val ZAP_NETWORK_LEG_TIMEOUT_MS = 12_000L
 
 class ZapException(message: String) : Exception(message)
@@ -72,14 +76,7 @@ class ZapRepository @Inject constructor(
     private val lnurlMetaInFlight =
         java.util.concurrent.ConcurrentHashMap<String, CompletableDeferred<Result<LnurlMeta>>>()
 
-    /** Plain LNURL HTTP must not inherit the app's WebSocket-tuned readTimeout(0). */
-    private val lnurlClient by lazy {
-        okHttpClient.newBuilder()
-            .callTimeout(ZAP_NETWORK_LEG_TIMEOUT_MS, TimeUnit.MILLISECONDS)
-            .readTimeout(10, TimeUnit.SECONDS)
-            .pingInterval(0, TimeUnit.SECONDS)
-            .build()
-    }
+    private val lnurlClient by lazy { lnurlHttpClient(okHttpClient) }
 
     private fun getCachedMeta(lud16: String): LnurlMeta? {
         val (meta, expiresAt) = lnurlCache[lud16] ?: return null
@@ -310,13 +307,14 @@ class ZapRepository @Inject constructor(
         try {
             val req = Request.Builder().url(url).build()
             lnurlClient.newCall(req).execute().use { resp ->
-                val body = resp.body.string()
+                val body = resp.body.readLnurlBody()
                 if (!resp.isSuccessful) {
                     return@withContext Result.failure(
                         ZapException("Lightning service metadata failed: ${lnurlErrorReason(body, "HTTP ${resp.code}")}")
                     )
                 }
-                if (body.isNullOrBlank()) {
+                if (body == null) return@withContext Result.failure(ZapException("Lightning service metadata failed"))
+                if (body.isBlank()) {
                     return@withContext Result.failure(ZapException("Empty response from lightning service"))
                 }
                 val obj = NostrJson.parseToJsonElement(body).jsonObject
@@ -361,6 +359,19 @@ class ZapRepository @Inject constructor(
         value.length == 64 && value.all { it in '0'..'9' || it in 'a'..'f' }
 }
 
+/** Keep the WebSocket client's unlimited read timeout out of the LNURL path. */
+internal fun lnurlHttpClient(base: OkHttpClient): OkHttpClient = base.newBuilder()
+    .callTimeout(ZAP_NETWORK_LEG_TIMEOUT_MS, TimeUnit.MILLISECONDS)
+    .readTimeout(10, TimeUnit.SECONDS)
+    .pingInterval(0, TimeUnit.SECONDS)
+    .addNetworkInterceptor(UntrustedHttpNetworkGuard)
+    .build()
+
+internal fun ResponseBody.readLnurlBody(): String? {
+    if (contentLength() > MAX_LNURL_BODY_BYTES) return null
+    return readBoundedUtf8(source(), MAX_LNURL_BODY_BYTES)
+}
+
 /** GET the bolt11 invoice from the LNURL callback. */
 internal suspend fun fetchZapInvoice(client: OkHttpClient, callback: String, msats: Long, zapRequestJson: String): Result<String> =
     withContext(Dispatchers.IO) {
@@ -373,7 +384,7 @@ internal suspend fun fetchZapInvoice(client: OkHttpClient, callback: String, msa
                 ?: return@withContext Result.failure(ZapException("Lightning service callback is invalid"))
             val req = Request.Builder().url(url).build()
             client.newCall(req).execute().use { resp ->
-                val body = resp.body.string()
+                val body = resp.body.readLnurlBody()
                 if (!resp.isSuccessful) {
                     val fallback = if (resp.code == 413 || resp.code == 414) {
                         "zap request too large (HTTP ${resp.code})"
@@ -384,7 +395,8 @@ internal suspend fun fetchZapInvoice(client: OkHttpClient, callback: String, msa
                         ZapException("Lightning service rejected the zap: ${lnurlErrorReason(body, fallback)}")
                     )
                 }
-                if (body.isNullOrBlank()) {
+                if (body == null) return@withContext Result.failure(ZapException("No invoice returned by lightning service"))
+                if (body.isBlank()) {
                     return@withContext Result.failure(ZapException("Empty response from lightning service"))
                 }
                 val obj = NostrJson.parseToJsonElement(body).jsonObject

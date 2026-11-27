@@ -214,7 +214,7 @@ class NwcManagerOwnerFenceTest {
     }
 }
 
-private class FakeSharedPreferences : SharedPreferences {
+internal class FakeSharedPreferences : SharedPreferences {
     private val data = mutableMapOf<String, Any?>()
 
     override fun getString(key: String?, defValue: String?) = data[key] as? String ?: defValue

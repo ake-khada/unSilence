@@ -7,9 +7,10 @@ import com.unsilence.app.data.wallet.NwcManager
 import com.unsilence.app.data.wallet.ZapPreferences
 import com.unsilence.app.data.wallet.ZapPreferencesStore
 import dagger.hilt.android.lifecycle.HiltViewModel
-import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import javax.inject.Inject
 
@@ -24,18 +25,12 @@ class ZapSettingsViewModel @Inject constructor(
 
     val walletState = nwcManager.walletState
 
-    private val _balanceSats = MutableStateFlow<Long?>(null)
-    val balanceSats: StateFlow<Long?> = _balanceSats.asStateFlow()
+    val balanceSats = nwcManager.cachedBalanceMsats
+        .map { msats -> msats?.div(1000L) }
+        .stateIn(viewModelScope, SharingStarted.Eagerly, null)
 
     fun refreshBalance() {
-        if (!nwcManager.isConfigured) {
-            _balanceSats.value = null
-            return
-        }
-        viewModelScope.launch {
-            val msats = nwcManager.getBalance()
-            _balanceSats.value = msats?.let { it / 1000 }
-        }
+        viewModelScope.launch { nwcManager.getBalance() }
     }
 
     fun updatePreset(index: Int, amountSats: Long?, message: String?) {
@@ -58,6 +53,5 @@ class ZapSettingsViewModel @Inject constructor(
 
     fun disconnectWallet() {
         nwcManager.clear()
-        _balanceSats.value = null
     }
 }
