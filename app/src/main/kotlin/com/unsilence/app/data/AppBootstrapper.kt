@@ -292,7 +292,9 @@ class AppBootstrapper @Inject constructor(
         // Provider declarations are identity claims. Select/reset the session owner's
         // declaration before EventProcessor, snapshot restore, or a fetch can observe it.
         val sessionWotPrefs = relayPreferencesStore.ensureWotPrefsOwner(pubkeyHex)
-        memoryEventStore.setActiveWotProvider(sessionWotPrefs.pubkey, sessionWotPrefs.relay)
+        val sessionProvider = wotProviderDescriptorFromPrefs(sessionWotPrefs)
+        memoryEventStore.setActiveWotProvider(sessionProvider.providerPubkey, sessionProvider.relayHint,
+            allowDiscovery = sessionWotPrefs.source != WotProviderSource.CUSTOM)
         eventProcessor.start()
         eventProcessor.registerTap(ownMuteRelayTap)
 
@@ -642,8 +644,9 @@ class AppBootstrapper @Inject constructor(
                 wotProviderDescriptorFromPrefs(wotPrefs)
             }
 
-            memoryEventStore.setActiveWotProvider(resolvedProvider.providerPubkey, resolvedProvider.relayHint)
-            val targetsHash = wotTargetsHash(resolvedProvider.providerPubkey, wotTargets)
+            memoryEventStore.setActiveWotProvider(resolvedProvider.providerPubkey, resolvedProvider.relayHint,
+                allowDiscovery = wotPrefs.source != WotProviderSource.CUSTOM)
+            val targetsHash = wotTargetsHash(resolvedProvider.providerPubkey, wotTargets, memoryEventStore.wotQueryRelay)
             val wotAge = System.currentTimeMillis() - relayPreferencesStore.lastWotFetchAt()
             val lastWotTargetsHash = relayPreferencesStore.lastWotTargetsHash()
             if (shouldSkipBootstrapWotFetch(
@@ -665,7 +668,8 @@ class AppBootstrapper @Inject constructor(
                 )
                 if (ok) {
                     logWotCoverageCanary(pubkeyHex, resolvedProvider)
-                    relayPreferencesStore.setLastWotFetch(System.currentTimeMillis(), targetsHash)
+                    relayPreferencesStore.setLastWotFetch(System.currentTimeMillis(),
+                        wotTargetsHash(resolvedProvider.providerPubkey, wotTargets, memoryEventStore.wotQueryRelay))
                 } else {
                     Log.w(TAG, "Phase3: WoT fetch failed — not advancing 12h gate")
                 }
@@ -734,7 +738,7 @@ class AppBootstrapper @Inject constructor(
         val scoredFollows = follows.count { it in scoredSubjects }
         Log.i(
             TAG,
-            "WoT coverage provider=${provider.providerPubkey.take(8)} relay=${provider.relayHint} scoredFollows=$scoredFollows totalFollows=${follows.size} assertions=${scoredSubjects.size}",
+            "WoT coverage provider=${provider.providerPubkey.take(8)} relay=${memoryEventStore.wotQueryRelay} scoredFollows=$scoredFollows totalFollows=${follows.size} assertions=${scoredSubjects.size}",
         )
     }
 

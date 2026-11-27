@@ -45,6 +45,7 @@ class SubscriptionRulesTest {
             "setref-",
             "wot-10040-",
             "wot-30382-",
+            "wot-discovery-",
         )
 
         for (prefix in prefixes) {

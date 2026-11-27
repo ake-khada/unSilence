@@ -94,7 +94,7 @@ class WotFetchPolicyTest {
 
     @Test
     fun `bootstrap gate never skips on cold start without wot data`() {
-        val hash = wotTargetsHash(pubkey(9), listOf(pubkey(1), pubkey(2)))
+        val hash = wotTargetsHash(pubkey(9), listOf(pubkey(1), pubkey(2)), DEFAULT_WOT_RELAY)
 
         assertFalse(
             shouldSkipBootstrapWotFetch(
@@ -125,16 +125,16 @@ class WotFetchPolicyTest {
                 hasWotData = true,
                 ageMs = 1_000L,
                 lastTargetsHash = hash,
-                currentTargetsHash = wotTargetsHash(pubkey(9), listOf(pubkey(3))),
+                currentTargetsHash = wotTargetsHash(pubkey(9), listOf(pubkey(3)), DEFAULT_WOT_RELAY),
             )
         )
     }
 
     @Test
     fun `wot targets hash is stable for target order but changes by provider`() {
-        val a = wotTargetsHash(pubkey(9), listOf(pubkey(2), pubkey(1)))
-        val b = wotTargetsHash(pubkey(9), listOf(pubkey(1), pubkey(2)))
-        val c = wotTargetsHash(pubkey(10), listOf(pubkey(1), pubkey(2)))
+        val a = wotTargetsHash(pubkey(9), listOf(pubkey(2), pubkey(1)), DEFAULT_WOT_RELAY)
+        val b = wotTargetsHash(pubkey(9), listOf(pubkey(1), pubkey(2)), DEFAULT_WOT_RELAY)
+        val c = wotTargetsHash(pubkey(10), listOf(pubkey(1), pubkey(2)), DEFAULT_WOT_RELAY)
 
         assertEquals(a, b)
         assertNotEquals(a, c)
@@ -151,13 +151,13 @@ class WotFetchPolicyTest {
             listOf(
                 "wss://nos.lol",
                 "wss://read.example.com",
-                "wss://nip85.nosfabrica.com",
+                DEFAULT_WOT_RELAY,
                 "wss://nip85.brainstorm.world",
             ),
             targets.relayUrls,
         )
         assertEquals(
-            setOf("wss://nip85.nosfabrica.com", "wss://nip85.brainstorm.world", "wss://nos.lol"),
+            setOf(DEFAULT_WOT_RELAY, "wss://nip85.brainstorm.world", "wss://nos.lol"),
             targets.capabilityBypassRelays,
         )
     }

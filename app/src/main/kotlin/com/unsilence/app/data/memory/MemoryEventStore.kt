@@ -149,7 +149,7 @@ private const val PROFILE_ANCHOR_RECENT_EVENTS = 500
  *  access patterns change — re-scanning per kind-0 insert is a quadratic
  *  livelock (7.5min cold restore on a 37MB snapshot, validated on device). */
 private const val PROFILE_TRIM_NOOP_BACKOFF_MS = 60_000L
-private const val MAX_FUTURE_DRIFT_SECONDS = 60L
+internal const val MAX_FUTURE_DRIFT_SECONDS = 60L
 private const val EVICTION_SAFETY_SWEEP_INTERVAL = 5_000
 internal const val WOT_ASSERTION_CAP = 5_000
 private const val WOT_ASSERTION_TRIM = 500
@@ -994,6 +994,7 @@ class MemoryEventStore @Inject constructor(
                 ownDeletionHistory.clear()
                 synchronized(wotProviderLock) {
                     clearWotAssertionsLocked()
+                    wotQueryRelay = activeWotProviderRelay
                     field = value
                 }
             }
@@ -1119,6 +1120,10 @@ class MemoryEventStore @Inject constructor(
     private val wotProviderLock = Any()
     @Volatile private var activeWotProviderPubkey: String = DEFAULT_WOT_PROVIDER_PUBKEY
     @Volatile private var activeWotProviderRelay: String = DEFAULT_WOT_RELAY
+    @Volatile var allowWotRelayDiscovery: Boolean = true
+        private set
+    @Volatile var wotQueryRelay: String = DEFAULT_WOT_RELAY
+        private set
     @Volatile private var ownWotProviderRegistry: WotProviderDescriptor? = null
     @Volatile private var ownWotProviderEncryptedContent: String? = null
     @Volatile private var ownWotProviderEncryptedUpdatedAt: Long = 0L
@@ -1577,6 +1582,7 @@ class MemoryEventStore @Inject constructor(
         queriedSubjects: Collection<String>,
         queryStartedAt: Long = System.currentTimeMillis(),
         queryOwner: String? = ownPubkey,
+        queryRelay: String = wotQueryRelay,
     ): Int {
         val chunkProvider = normalizeHexPubkey(providerPubkey) ?: return 0
         if (events.isEmpty() && queriedSubjects.isEmpty()) return 0
@@ -1585,7 +1591,7 @@ class MemoryEventStore @Inject constructor(
         var inserted = 0
 
         synchronized(wotProviderLock) {
-            if (chunkProvider != activeWotProviderPubkey || queryOwner != ownPubkey) return 0
+            if (chunkProvider != activeWotProviderPubkey || queryOwner != ownPubkey || queryRelay != wotQueryRelay) return 0
             val returnedSubjects = HashSet<String>()
 
             for (event in events) {
@@ -5620,19 +5626,30 @@ class MemoryEventStore @Inject constructor(
     fun isActiveWotProvider(pubkey: String): Boolean =
         normalizeHexPubkey(pubkey) == activeWotProviderPubkey
 
-    fun setActiveWotProvider(providerPubkey: String, relayHint: String = DEFAULT_WOT_RELAY) {
+    fun setActiveWotProvider(providerPubkey: String, relayHint: String = DEFAULT_WOT_RELAY, allowDiscovery: Boolean = true) {
         val normalizedProvider = normalizeHexPubkey(providerPubkey) ?: DEFAULT_WOT_PROVIDER_PUBKEY
         val normalizedRelay = normalizeRelayUrl(relayHint) ?: DEFAULT_WOT_RELAY
-        var changed = false
         synchronized(wotProviderLock) {
-            changed = normalizedProvider != activeWotProviderPubkey
+            if (normalizedProvider == activeWotProviderPubkey && normalizedRelay == activeWotProviderRelay && allowDiscovery == allowWotRelayDiscovery) return
+            if (normalizedProvider != activeWotProviderPubkey) clearWotAssertionsLocked() else clearWotMissesLocked()
             activeWotProviderPubkey = normalizedProvider
             activeWotProviderRelay = normalizedRelay
-            if (changed) {
-                clearWotAssertionsLocked()
-            }
+            allowWotRelayDiscovery = allowDiscovery
+            wotQueryRelay = normalizedRelay
         }
-        if (changed) _wotSignal.value = System.nanoTime()
+        _wotSignal.value = System.nanoTime()
+    }
+
+    internal fun useWotQueryRelay(owner: String?, signer: String, hint: String, relay: String, allowDiscovery: Boolean): Boolean {
+        synchronized(wotProviderLock) {
+            if (owner != ownPubkey || signer != activeWotProviderPubkey || hint != activeWotProviderRelay ||
+                allowDiscovery != allowWotRelayDiscovery) return false
+            if (relay == wotQueryRelay) return true
+            clearWotMissesLocked()
+            wotQueryRelay = relay
+        }
+        _wotSignal.value = System.nanoTime()
+        return true
     }
 
     fun activeWotProvider(): WotProviderDescriptor =
@@ -5641,6 +5658,10 @@ class MemoryEventStore @Inject constructor(
             relayHint = activeWotProviderRelay,
             updatedAt = 0L,
         )
+
+    fun effectiveWotProvider(): WotProviderDescriptor = synchronized(wotProviderLock) {
+        WotProviderDescriptor(activeWotProviderPubkey, wotQueryRelay, updatedAt = 0L)
+    }
 
     fun ownWotProviderFromRegistry(): WotProviderDescriptor? = ownWotProviderRegistry
 
@@ -5759,6 +5780,13 @@ class MemoryEventStore @Inject constructor(
             clearWotAssertionsLocked()
         }
         if (changed) _wotSignal.value = System.nanoTime()
+    }
+
+    private fun clearWotMissesLocked() {
+        for (subject in wotQueriedSubjects) {
+            if (subject !in wotBySubject.keys) wotAccessedAt.remove(subject)
+        }
+        wotQueriedSubjects.clear()
     }
 
     private fun clearWotAssertionsLocked(): Boolean {

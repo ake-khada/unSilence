@@ -266,7 +266,7 @@ class SocialGraphViewModel @Inject constructor(
     fun publishProviderList() {
         pendingEdits.launch(Dispatchers.IO) {
             val own = ownPubkey ?: return@launch setPublishing(false, "No account is loaded")
-            val activeProvider = memoryEventStore.activeWotProvider()
+            val activeProvider = memoryEventStore.effectiveWotProvider()
             try {
                 setPublishing(true, "Checking your kind 10040 provider list")
                 relayPool.fetchOwn10040(own)
@@ -305,7 +305,7 @@ class SocialGraphViewModel @Inject constructor(
         feedWotDisplayMode: FeedWotDisplayMode,
         local: SocialGraphLocalState,
     ): SocialGraphUiState {
-        val activeProvider = memoryEventStore.activeWotProvider()
+        val activeProvider = memoryEventStore.effectiveWotProvider()
         val declaredProvider = memoryEventStore.ownWotProviderFromRegistry()
         val ownProvider = memoryEventStore.ownWotProviderFromRegistry() ?: local.decryptedOwnProvider
         val follows = ownPubkey?.let { memoryEventStore.getFollows(it) } ?: emptySet()
@@ -377,9 +377,10 @@ class SocialGraphViewModel @Inject constructor(
 
     private suspend fun switchProvider(source: WotProviderSource, provider: WotProviderDescriptor) {
         relayPreferencesStore.setWotProvider(provider.providerPubkey, provider.relayHint, source)
-        memoryEventStore.setActiveWotProvider(provider.providerPubkey, provider.relayHint)
+        memoryEventStore.setActiveWotProvider(provider.providerPubkey, provider.relayHint,
+            allowDiscovery = source != WotProviderSource.CUSTOM)
         userRepository.fetchMissingProfiles(listOf(provider.providerPubkey))
-        startRefresh(provider, replaceExisting = true)
+        startRefresh(memoryEventStore.activeWotProvider(), replaceExisting = true)
     }
 
     private fun startRefresh(provider: WotProviderDescriptor, replaceExisting: Boolean) {
@@ -419,9 +420,9 @@ class SocialGraphViewModel @Inject constructor(
             if (ok) {
                 relayPreferencesStore.setLastWotFetch(
                     System.currentTimeMillis(),
-                    wotTargetsHash(provider.providerPubkey, targets),
+                    wotTargetsHash(provider.providerPubkey, targets, memoryEventStore.wotQueryRelay),
                 )
-                setStatus("Synced from ${provider.relayHint}", generation)
+                setStatus("Synced from ${memoryEventStore.wotQueryRelay}", generation)
             } else if (hasUsefulWotData(own)) {
                 setStatus("Partial sync", generation)
             } else {
@@ -436,7 +437,7 @@ class SocialGraphViewModel @Inject constructor(
         refreshGeneration.get() == generation
 
     private fun isCurrentProvider(provider: WotProviderDescriptor): Boolean =
-        memoryEventStore.activeWotProvider().providerPubkey == provider.providerPubkey
+        memoryEventStore.ownPubkey == ownPubkey && sameProvider(memoryEventStore.activeWotProvider(), provider)
 
     private fun buildWotTargets(own: String): Set<String> =
         (memoryEventStore.getFollows(own) ?: emptySet()) + own

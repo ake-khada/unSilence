@@ -43,6 +43,7 @@ import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.long
 import kotlinx.serialization.json.longOrNull
 import kotlinx.serialization.json.put
+import com.unsilence.app.data.memory.MAX_FUTURE_DRIFT_SECONDS
 import com.unsilence.app.data.memory.NostrEvent
 import com.unsilence.app.data.memory.PaginatedFetchResult
 import com.vitorpamplona.quartz.nip01Core.relay.normalizer.NormalizedRelayUrl
@@ -3635,6 +3636,50 @@ class RelayPool @Inject constructor(
 
     // ── Relay health fetch orchestrators ──────────────────────────────────
 
+    private val wotDiscovery = WotRelayDiscovery(::wotSignerWriteRelays, ::relayServesWotScores)
+
+    private suspend fun wotSignerWriteRelays(signer: String): List<String> {
+        val indexers = relayPreferencesStore.get().indexerRelayUrlsSnapshot()
+        val targets = (indexers.take(3) + WOT_REGISTRY_LOOKUP_RELAYS).distinct()
+        val signed = readWotProviderEvent(signer, 10002, targets)
+        return if (signed != null) parseNip65RelayTags(signed.tags)
+            .filter { it.marker != "read" }.map { it.url }
+        else memoryEventStore.get().writeRelaysFor(signer)
+    }
+
+    private suspend fun relayServesWotScores(signer: String, url: String): Boolean =
+        readWotProviderEvent(signer, 30382, listOf(url)) != null
+
+    /** Look up only the signer during discovery. Profile subjects go to the chosen score relay. */
+    private suspend fun readWotProviderEvent(signer: String, kind: Int, relays: List<String>): NostrEvent? {
+        if (relays.isEmpty()) return null
+        val subId = "${WOT_DISCOVERY_SUB_PREFIX}$kind-${System.nanoTime()}"
+        val req = buildJsonArray {
+            add(JsonPrimitive("REQ"))
+            add(JsonPrimitive(subId))
+            add(NostrFilter(kinds = listOf(kind), authors = listOf(signer), limit = if (kind == 30382) 8 else 1).toWireJsonObject())
+        }.toString()
+        val newest = AtomicReference<NostrEvent?>(null)
+        val tap = RelayMessageTap { message ->
+            if (message is RelayTapMessage.VerifiedEvent && message.subscriptionId == subId) {
+                val e = message.event
+                if (e.kind == kind && e.pubkey == signer && e.relayUrl in relays &&
+                    e.createdAt <= System.currentTimeMillis() / 1000L + MAX_FUTURE_DRIFT_SECONDS &&
+                    (kind != 30382 || e.hasWotRank())
+                ) newest.updateAndGet { old ->
+                    if (shouldAcceptProfileRelayEvent(old?.createdAt, e.createdAt, old?.id, e.id)) e else old
+                }
+            }
+        }
+        processor.registerTap(tap)
+        try {
+            withTimeoutOrNull(5_000L) { fetchOneShotOutcomes(subId, relays, req, 5_000L, includeActiveFeedRelay = true) }
+            return newest.get()
+        } finally {
+            processor.unregisterTap(tap)
+        }
+    }
+
     /**
      * Fetch NIP-85 kind-30382 user WoT assertions for [subjects] from the active provider relay.
      *
@@ -3650,30 +3695,50 @@ class RelayPool @Inject constructor(
         prioritySubjects: Collection<String> = emptyList(),
     ): Boolean {
         val provider = normalizeWotPubkey(providerPubkey) ?: return false
-        val relayUrl = normalizeRelayUrl(relayHint) ?: return false
-        if (relayUrl in blockedUrls || relayCapabilitiesStore.shouldSkip(relayUrl)) return false
-
-        val queryOwner = memoryEventStore.get().ownPubkey
+        val store = memoryEventStore.get()
+        val allowDiscovery = store.allowWotRelayDiscovery
+        val hint = normalizeRelayUrl(relayHint) ?: return false
+        val owner = store.ownPubkey
         val chunks = wotSubjectChunks(subjects, prioritySubjects = prioritySubjects)
         if (chunks.isEmpty()) return false
-
-        return try {
-            runWotChunkBatch(chunks) { chunk, page, totalPages ->
-                try {
-                    fetchWotChunk(relayUrl, provider, chunk, page, totalPages, queryOwner)
-                } catch (e: CancellationException) {
-                    throw e
-                } catch (e: Exception) {
-                    Log.w(TAG, "WoT fetch failed for chunk $page/$totalPages on $relayUrl: ${e.message}")
-                    false
+        var rejected: String? = null
+        try {
+            // At most one rediscovery per batch. A failed route must not confirm an empty page.
+            repeat(if (allowDiscovery) 2 else 1) {
+                val url = wotDiscovery.resolve(owner, provider, hint, allowDiscovery, rejected) {
+                    store.useWotQueryRelay(owner, provider, hint, it, allowDiscovery)
+                } ?: return false
+                var inventory: Boolean? = null
+                suspend fun hasScores() = inventory ?: relayServesWotScores(provider, url).also { inventory = it }
+                val complete = runWotChunkBatch(chunks) { chunk, page, total ->
+                    if (inventory == false) return@runWotChunkBatch false
+                    try {
+                        suspend fun request(subjects: List<String>) = fetchWotChunk(url, provider, subjects, page, owner, ::hasScores)
+                        val result = request(chunk)
+                        if (result == OneShotOutcome.EOSE) true
+                        else if (chunk.size > 1 && (result == OneShotOutcome.TIMEOUT || result == OneShotOutcome.CLOSED) && hasScores()) {
+                            // A relay can stream valid ranks and still exceed the page deadline.
+                            // Retry this page once in smaller requests, retaining signed partial results.
+                            runWotChunkBatch(chunk.chunked((chunk.size + 1) / 2)) { part, _, _ ->
+                                request(part) == OneShotOutcome.EOSE
+                            }
+                        } else false
+                    } catch (e: CancellationException) {
+                        throw e
+                    } catch (e: Exception) {
+                        Log.w(TAG, "WoT fetch failed for chunk $page/$total on $url: ${e.message}")
+                        false
+                    }
                 }
+                if (complete || inventory == true || !allowDiscovery || store.ownPubkey != owner || store.wotQueryRelay != url) return complete
+                rejected = url
             }
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
-            Log.w(TAG, "WoT fetch failed on $relayUrl: ${e.message}")
-            false
+            Log.w(TAG, "WoT fetch failed on $hint: ${e.message}")
         }
+        return false
     }
 
     private suspend fun fetchWotChunk(
@@ -3681,20 +3746,22 @@ class RelayPool @Inject constructor(
         provider: String,
         chunk: List<String>,
         page: Int,
-        totalPages: Int,
         queryOwner: String?,
-    ): Boolean {
-        if (memoryEventStore.get().ownPubkey != queryOwner) return false
+        confirmEmpty: suspend () -> Boolean,
+    ): OneShotOutcome {
+        if (memoryEventStore.get().ownPubkey != queryOwner || memoryEventStore.get().wotQueryRelay != relayUrl ||
+            relayUrl in blockedUrls || relayCapabilitiesStore.shouldSkip(relayUrl)
+        ) return OneShotOutcome.SKIPPED
         // Admit the provider to the unpurposed warm pool. Repeated viewport batches reuse it,
         // while the ordinary sweep/background lifecycle still bounds its lifetime.
         if (getOrCreateConnection(relayUrl, RelayRequestClass.GENERAL) == null) {
             Log.w(TAG, "WoT fetch connect failed on $relayUrl")
-            return false
+            return OneShotOutcome.SKIPPED
         }
 
         val queryStartedAt = System.currentTimeMillis()
-        val subId = "wot-30382-${relayUrl.hashCode().toUInt()}-${System.nanoTime()}-$page"
-        val filter = wotAssertionFilter(provider, chunk) ?: return false
+        val subId = "${WOT_ASSERTION_SUB_PREFIX}${relayUrl.hashCode().toUInt()}-${System.nanoTime()}-$page"
+        val filter = wotAssertionFilter(provider, chunk) ?: return OneShotOutcome.SKIPPED
         val req = buildJsonArray {
             add(JsonPrimitive("REQ"))
             add(JsonPrimitive(subId))
@@ -3702,53 +3769,34 @@ class RelayPool @Inject constructor(
         }.toString()
 
         val verifiedEvents = ConcurrentHashMap<String, NostrEvent>()
-        val sawRealEose = AtomicBoolean(false)
         val evidenceTap = RelayMessageTap { message ->
-            when (message) {
-                is RelayTapMessage.VerifiedEvent -> {
-                    val event = message.event
-                    if (message.subscriptionId == subId &&
-                        event.kind == 30382 &&
-                        normalizeWotPubkey(event.pubkey) == provider
-                    ) {
-                        verifiedEvents.putIfAbsent(event.id, event)
-                    }
-                }
-                is RelayTapMessage.Control -> {
-                    if (message.raw.startsWith("[\"EOSE\"") &&
-                        extractEoseSubId(message.raw) == subId
-                    ) {
-                        sawRealEose.set(true)
-                    }
-                }
+            if (message is RelayTapMessage.VerifiedEvent && message.subscriptionId == subId) {
+                val event = message.event
+                if (event.kind == 30382 && event.pubkey == provider && event.relayUrl == relayUrl &&
+                    event.createdAt <= System.currentTimeMillis() / 1000L + MAX_FUTURE_DRIFT_SECONDS &&
+                    event.hasWotRank() && event.tags.firstOrNull { it.firstOrNull() == "d" }?.getOrNull(1) in chunk
+                ) verifiedEvents.putIfAbsent(event.id, event)
             }
         }
-        val completion = CompletableDeferred<Unit>()
-        oneShotEoseCallbacks[subId] = completion
         processor.registerTap(evidenceTap)
-        val eosed = try {
-            sendOneShotBatch(
-                urls = listOf(relayUrl),
-                reqs = listOf(req),
-                subIds = listOf(subId),
-                timeoutMs = WOT_FETCH_TIMEOUT_MS,
-                requestClass = RelayRequestClass.GENERAL,
-            )
-            withTimeoutOrNull(WOT_FETCH_TIMEOUT_MS) { completion.await() } != null &&
-                sawRealEose.get()
+        val outcome = try {
+            fetchOneShotOutcomes(subId, listOf(relayUrl), req, WOT_FETCH_TIMEOUT_MS,
+                includeActiveFeedRelay = true)[relayUrl] ?: OneShotOutcome.SKIPPED
         } finally {
-            cleanupOneShotSub(subId)
             processor.unregisterTap(evidenceTap)
         }
 
+        val covered = outcome == OneShotOutcome.EOSE && (verifiedEvents.isNotEmpty() || confirmEmpty())
         memoryEventStore.get().insertWotAssertionChunk(
             providerPubkey = provider,
             events = verifiedEvents.values.toList(),
-            queriedSubjects = if (eosed) chunk else emptyList(),
+            queriedSubjects = if (covered) chunk else emptyList(),
             queryStartedAt = queryStartedAt,
             queryOwner = queryOwner,
+            queryRelay = relayUrl,
         )
-        return eosed
+        if (memoryEventStore.get().ownPubkey != queryOwner || memoryEventStore.get().wotQueryRelay != relayUrl) return OneShotOutcome.CANCELLED
+        return if (!covered && outcome == OneShotOutcome.EOSE) OneShotOutcome.FAILED else outcome
     }
 
     /**

@@ -106,9 +106,11 @@ internal fun wotProviderDescriptorFromPrefs(prefs: WotProviderPrefs): WotProvide
     )
 }
 
-internal fun wotTargetsHash(providerPubkey: String, targets: Collection<String>): String {
+internal fun wotTargetsHash(providerPubkey: String, targets: Collection<String>, relay: String): String {
     val normalizedProvider = normalizeWotPubkey(providerPubkey).orEmpty()
     val body = buildString {
+        append(relay)
+        append('\n')
         append(normalizedProvider)
         append('\n')
         wotSubjectChunks(targets).flatten().forEach { target ->

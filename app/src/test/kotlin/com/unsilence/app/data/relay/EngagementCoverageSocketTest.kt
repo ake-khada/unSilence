@@ -24,10 +24,13 @@ import java.util.concurrent.atomic.AtomicInteger
 
 /** Real pooled transport and signed reply fixtures; no external relay contact. */
 class EngagementCoverageSocketTest {
-    private class Fixture(
+    internal class Fixture(
         private val maxFilters: Int? = null,
         private val applyHistoryLimits: Boolean = false,
         private val closedReason: String = "restricted: fixture",
+        private val maxSubjects: Int? = null,
+        fixtureRelays: Set<String> = emptySet(),
+        preferences: Lazy<RelayPreferencesStore> = Lazy { error("No preference discovery in fixture") },
     ) : AutoCloseable {
         val remote = ConcurrentHashMap<String, List<EventDto>>()
         val held = ConcurrentHashMap.newKeySet<String>()
@@ -52,6 +55,10 @@ class EngagementCoverageSocketTest {
                             when (arr[0].jsonPrimitive.content) {
                                 "REQ" -> {
                                     requests += relay to arr
+                                    if (maxSubjects != null && (arr[2].jsonObject["#d"]?.jsonArray?.size ?: 0) > maxSubjects) {
+                                        webSocket.send("""["CLOSED","$id","error: request too large"]""")
+                                        return
+                                    }
                                     if (maxFilters != null && arr.size - 2 > maxFilters) {
                                         webSocket.send("""["CLOSED","$id","error: too many filters"]""")
                                         return
@@ -75,7 +82,7 @@ class EngagementCoverageSocketTest {
         }
         val client = OkHttpClient.Builder().addInterceptor { chain ->
             val request = chain.request()
-            check(request.url.host.endsWith(".test")) { "External network forbidden" }
+            check(request.url.host.endsWith(".test") || "wss://${request.url.host}" in fixtureRelays) { "External network forbidden" }
             chain.proceed(request.newBuilder().header("X-Fixture-Relay", "wss://${request.url.host}").url(server.url("/")).build())
         }.build()
         val context = object : ContextWrapper(null) {}
@@ -88,7 +95,7 @@ class EngagementCoverageSocketTest {
         lateinit var subscription: Subscription
         val pool = RelayPool(
             RelayConnectionFactory(client, capabilities, RelayTrafficMetrics()), processor,
-            Lazy { error("No AUTH or preference discovery in fixture") },
+            preferences,
             SigningManager(keys, object : ContentResolver(context) {}), keys, Lazy { store }, capabilities,
             Lazy { subscription }, monitor, Nip11Fetcher(client, Lazy { store }),
         )

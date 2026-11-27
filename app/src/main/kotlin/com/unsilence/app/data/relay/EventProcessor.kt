@@ -324,6 +324,8 @@ class EventProcessor @Inject constructor(
             if (!request.matches(cached) || !requests.isCurrent(request)) return false
             val relayed = cached.forRelay(relayUrl)
             dispatchToTaps(RelayTapMessage.VerifiedEvent(subscriptionId, relayed))
+            // WoT probes are read-only. Score batches commit once, behind the owner and route checks.
+            if (isWotFetchRequest(subscriptionId)) return true
             // Kind-10040 is account-scoped control state and intentionally
             // re-enters MES: it can first arrive before the owner is established.
             if (cached.kind != 10040 && seenIds.containsKey(eventId) &&
@@ -378,6 +380,7 @@ class EventProcessor @Inject constructor(
         trimVerifiedCacheIfNeeded()
         val relayed = canonical.forRelay(relayUrl)
         dispatchToTaps(RelayTapMessage.VerifiedEvent(subscriptionId, relayed))
+        if (isWotFetchRequest(subscriptionId)) return true
         handleVerifiedEvent(relayed)
         return true
     }

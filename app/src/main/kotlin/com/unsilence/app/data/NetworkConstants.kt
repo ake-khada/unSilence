@@ -8,7 +8,8 @@ const val BROWSER_USER_AGENT =
 const val DEFAULT_WOT_PROVIDER_PUBKEY =
     "e6aefe2087dcc55cfe547a86523e8fc75a04133721254d7acbd7277897f05d56"
 
-const val DEFAULT_WOT_RELAY = "wss://nip85.nosfabrica.com"
+/** Bootstrap address. A provider can move its scores by publishing a new NIP-65 write list. */
+const val DEFAULT_WOT_RELAY = "wss://scores.brainstorm.world"
 
 /** Public kind-10040 provider registries may be hosted separately from assertions. */
 val WOT_REGISTRY_LOOKUP_RELAYS = listOf(

@@ -92,4 +92,4 @@ internal fun threadRequestPayloads(eventId: String, token: String): List<String>
 internal fun isOwnedOneShotRequest(subId: String): Boolean =
     subId.startsWith("thread-") || subId.startsWith("article-comments-") ||
         subId.startsWith("comment-replies-") || subId.startsWith("comment-parents-") ||
-        subId.startsWith("kind10002-") || subId.startsWith("following-history-")
+        subId.startsWith("kind10002-") || subId.startsWith("following-history-") || isWotFetchRequest(subId)
