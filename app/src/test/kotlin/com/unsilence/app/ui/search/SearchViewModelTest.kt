@@ -5,6 +5,7 @@ import com.unsilence.app.data.memory.MuteList
 import com.unsilence.app.data.memory.UserEntity
 import com.unsilence.app.data.memory.WotAssertionEntity
 import com.unsilence.app.data.memory.WotLookup
+import com.unsilence.app.data.relay.WotScoreFilter
 import com.unsilence.app.data.relay.TrendingState
 import com.unsilence.app.data.relay.TrendingOutcome
 import com.unsilence.app.data.relay.TrendingHashtag
@@ -34,6 +35,7 @@ class SearchViewModelTest {
         val store = discoveryStore()
         val provider = MutableStateFlow(TrendingState(outcome = TrendingOutcome.Unavailable))
         val active = MutableStateFlow(true)
+        val policy = MutableStateFlow(WotScoreFilter())
         var scans = 0
         var state = SearchDiscoveryState()
         val hydration = DiscoveryHydration()
@@ -41,13 +43,46 @@ class SearchViewModelTest {
         val job = scope.backgroundScope.launch {
             searchDiscoveryFlow(
                 store, "owner", source ?: provider, active, { store.ownPubkey == "owner" },
-                StandardTestDispatcher(scope.testScheduler),
+                StandardTestDispatcher(scope.testScheduler), scoreFilter = policy,
                 scan = { scans++; store.discoverySnapshot("owner") },
             ).collect {
                 state = it
                 requests += hydration.next(it)
             }
         }
+    }
+
+    @Test fun `voices hydrate all candidates and filter both sources before the eight visible slots`() = runTest {
+        val h = DiscoveryHarness(this)
+        val authors = (1..9).map { it.toString().repeat(64) }
+        val provider = "f".repeat(64)
+        val accepted = authors.last()
+        h.store.setActiveWotProvider(provider)
+        for ((index, author) in authors.withIndex()) h.store.insert(discoveryEvent("post-$index", author, index.toLong()))
+        h.policy.value = WotScoreFilter(true, 25)
+        h.provider.value = providerState(*authors.toTypedArray(), tags = listOf("nostr"))
+        runCurrent()
+        assertTrue(h.state.users.isEmpty())
+        assertEquals(authors.toSet(), h.state.candidatePubkeys)
+        assertEquals("nostr", h.state.hashtags.single().first)
+        h.store.insert(discoveryEvent("rank", provider, kind = 30382, content = "",
+            tags = listOf(listOf("d", accepted), listOf("rank", "25"))))
+        runCurrent()
+        advanceTimeBy(400)
+        runCurrent()
+        assertEquals(listOf(accepted), h.state.users.map { it.pubkey })
+        h.provider.value = providerState(tags = listOf("nostr"))
+        runCurrent()
+        assertEquals(DiscoverySource.Local, h.state.peopleSource)
+        assertEquals(listOf(accepted), h.state.users.map { it.pubkey })
+        val scans = h.scans
+        h.policy.value = WotScoreFilter(true, 26)
+        runCurrent()
+        assertTrue(h.state.users.isEmpty())
+        h.policy.value = WotScoreFilter()
+        runCurrent()
+        assertEquals(8, h.state.users.size)
+        assertEquals(scans, h.scans)
     }
 
     private fun providerState(vararg authors: String, tags: List<String> = emptyList()) = TrendingState(

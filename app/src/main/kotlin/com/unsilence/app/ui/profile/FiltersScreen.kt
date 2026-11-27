@@ -726,7 +726,7 @@ internal fun MinimumScoreControl(
                 }
             },
         )
-        Text("Global Trusted, replies and notifications. Slide fully left for Off.",
+        Text("Global Trusted, replies, notifications and people in Search. Slide fully left for Off.",
             color = TextSecondary, style = AppTextStyles.caption)
     }
 }

@@ -7,6 +7,7 @@ import com.unsilence.app.data.memory.MuteList
 import com.unsilence.app.data.memory.UserEntity
 import com.unsilence.app.data.memory.WotAssertionEntity
 import com.unsilence.app.data.memory.WotLookup
+import com.unsilence.app.data.relay.WotScoreFilter
 import com.unsilence.app.data.relay.EventDto
 import com.unsilence.app.data.relay.protectedProfileFor
 import com.unsilence.app.data.relay.stubTimelineServiceProvider
@@ -354,6 +355,53 @@ class SearchResultProjectionTest {
             val trusted = awaitItem()
             assertTrue(trusted.impersonationRisks.isEmpty())
             assertEquals(listOf(person), trusted.people)
+        }
+    }
+    @Test fun `threshold precedes the display limit and pending candidates can qualify later`() = runTest {
+        val exact = (1..51).map { UserEntity(it.toString(16).padStart(64, '0'), name = "alice") }
+        val partial = UserEntity(author, name = "alice smith")
+        val pending = exact.first()
+        val ranks = mutableMapOf<String, WotLookup>()
+        fun score(key: String, rank: Int, cached: Boolean = false) =
+            WotLookup.Scored(WotAssertionEntity(key, quotedAuthor, rank), cached)
+        ranks[partial.pubkey] = score(partial.pubkey, 25)
+        ranks[exact[1].pubkey] = score(exact[1].pubkey, 99, cached = true)
+        ranks[exact[2].pubkey] = score(exact[2].pubkey, 24)
+        val changes = Channel<SearchResultsBundle>(Channel.UNLIMITED)
+        val bundle = SearchResultsBundle(emptyList(), emptyList(), emptyList(), exact + partial,
+            scoreFilter = WotScoreFilter(true, 25))
+        changes.receiveAsFlow().projectSearchResults("alice", false, { null }, { null },
+            { ranks[it] ?: WotLookup.Pending }, { emptyList() }).test {
+            changes.send(bundle)
+            val first = awaitItem()
+            assertEquals(listOf(partial), first.people)
+            assertTrue(pending.pubkey in first.wotSubjects)
+            ranks[pending.pubkey] = score(pending.pubkey, 26)
+            changes.send(bundle)
+            assertEquals(listOf(pending, partial), awaitItem().people)
+            changes.send(bundle.copy(scoreFilter = WotScoreFilter()))
+            assertEquals(50, awaitItem().people.size)
+        }
+    }
+
+    @Test fun `known low scores do not use the query budget for unresolved names`() = runTest {
+        val people = (0 until 151).map { UserEntity(it.toString(16).padStart(64, '0'), name = "Sam") }
+        val scores = people.take(51).associateTo(mutableMapOf<String, WotLookup>()) {
+            it.pubkey to WotLookup.Scored(WotAssertionEntity(it.pubkey, quotedAuthor, 1))
+        }
+        val updates = Channel<SearchResultsBundle>(Channel.UNLIMITED)
+        val bundle = SearchResultsBundle(emptyList(), emptyList(), emptyList(), people,
+            scoreFilter = WotScoreFilter(true, 25))
+        updates.receiveAsFlow().projectSearchResults("sam", false, { null }, { null },
+            { scores[it] ?: WotLookup.Pending }, { emptyList() }).test {
+            updates.send(bundle)
+            val first = awaitItem()
+            assertTrue(first.people.isEmpty())
+            assertEquals(50, first.wotSubjects.size)
+            assertTrue(first.wotSubjects.none { it in scores })
+            first.wotSubjects.forEach { scores[it] = WotLookup.Absent }
+            updates.send(bundle)
+            assertTrue(awaitItem().wotSubjects.isEmpty())
         }
     }
 }

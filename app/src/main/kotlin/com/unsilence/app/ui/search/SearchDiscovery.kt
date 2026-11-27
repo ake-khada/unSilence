@@ -9,6 +9,7 @@ import com.unsilence.app.data.memory.isPubkeyMuted
 import com.unsilence.app.data.memory.normalizedMutedHashtags
 import com.unsilence.app.data.relay.TrendingOutcome
 import com.unsilence.app.data.relay.TrendingState
+import com.unsilence.app.data.relay.WotScoreFilter
 import com.unsilence.app.data.relay.wotLookupSnapshot
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
@@ -38,6 +39,7 @@ internal data class SearchDiscoveryState(
     val hashtagSource: DiscoverySource = DiscoverySource.Local,
     val peopleSource: DiscoverySource = DiscoverySource.Local,
     val hashtagStatus: DiscoveryStatus = DiscoveryStatus.Empty,
+    val peopleMinimum: Int? = null,
     val peopleStatus: DiscoveryStatus = DiscoveryStatus.Empty,
     val refreshing: Boolean = false,
     val wotLookups: Map<String, WotLookup> = emptyMap(),
@@ -118,6 +120,7 @@ internal fun searchDiscoveryFlow(
     active: StateFlow<Boolean>,
     ownerIsCurrent: () -> Boolean,
     dispatcher: CoroutineDispatcher = Dispatchers.Default,
+    scoreFilter: Flow<WotScoreFilter>,
     scan: () -> LocalDiscoverySnapshot = { store.discoverySnapshot(owner) },
 ): Flow<SearchDiscoveryState> = active.flatMapLatest { isActive ->
     if (!isActive) return@flatMapLatest emptyFlow()
@@ -145,7 +148,7 @@ internal fun searchDiscoveryFlow(
     val ranked = combine(candidates, wotChanges) { current, _ ->
         current to wotLookupSnapshot(current.users.map(UserEntity::pubkey), store::displayWotFor)
     }
-    combine(ranked, safety, store.profileSignalFlow) { (current, ranks), account, _ ->
+    combine(ranked, safety, store.profileSignalFlow, scoreFilter) { (current, ranks), account, _, policy ->
         if (!ownerIsCurrent()) return@combine SearchDiscoveryState()
         val mutedTags = normalizedMutedHashtags(account.muteList)
         val hashtags = current.hashtags
@@ -160,11 +163,13 @@ internal fun searchDiscoveryFlow(
                 if (current.peopleSource == DiscoverySource.Local) store.discoveryUser(it.pubkey)
                 else mergeTrendingUserWithLatest(it, store.discoveryUser(it.pubkey, it))
             }
-        val users = rankTrendingUsers(eligible) { ranks[it] ?: WotLookup.Pending }.take(8)
+        val admitted = if (policy.enabled) eligible.filter { policy.admits(ranks[it.pubkey]) } else eligible
+        val users = rankTrendingUsers(admitted) { ranks[it] ?: WotLookup.Pending }.take(8)
         val filteredAll = (current.users.isNotEmpty() || current.hashtags.isNotEmpty()) &&
             users.isEmpty() && hashtags.isEmpty()
         SearchDiscoveryState(
             hashtags = hashtags, users = users,
+            peopleMinimum = policy.takeIf { it.enabled }?.minimum,
             hashtagSource = current.hashtagSource, peopleSource = current.peopleSource,
             hashtagStatus = if (filteredAll) DiscoveryStatus.Empty else sectionStatus(hashtags.size, current.hashtags.size, current.provider),
             peopleStatus = if (filteredAll) DiscoveryStatus.Empty else sectionStatus(users.size, current.users.size, current.provider),

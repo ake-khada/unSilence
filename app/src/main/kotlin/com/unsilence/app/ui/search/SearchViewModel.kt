@@ -22,6 +22,7 @@ import com.unsilence.app.data.memory.WotLookup
 import com.unsilence.app.data.memory.ZapDetail
 import com.unsilence.app.data.relay.DEFAULT_SEARCH_RELAY_URLS
 import com.unsilence.app.data.relay.FeedWotDisplayMode
+import com.unsilence.app.data.relay.WotScoreFilter
 import com.unsilence.app.data.relay.FollowerCount
 import com.unsilence.app.data.relay.ImpersonationRisk
 import com.unsilence.app.data.relay.ProtectedProfile
@@ -56,6 +57,7 @@ import kotlinx.coroutines.flow.conflate
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flatMapLatest
+import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.map
@@ -72,6 +74,8 @@ private const val TRENDING_WOT_MEASUREMENT_TIMEOUT_MS =
 
 data class SearchUiState(
     val query: String           = "",
+    val peopleMinimum: Int? = null,
+    val entityWot: WotLookup? = null,
     val peopleResults: List<UserEntity> = emptyList(),
     val impersonationRisks: Map<String, ImpersonationRisk> = emptyMap(),
     val noteResults: List<FeedRow>      = emptyList(),
@@ -87,6 +91,7 @@ private data class SearchSafetyBundle(
     val muteList: MuteList?,
     val hashtagCap: Int?,
     val followedPubkeys: Set<String>?,
+    val scoreFilter: WotScoreFilter,
 )
 
 @OptIn(FlowPreview::class, ExperimentalCoroutinesApi::class)
@@ -113,6 +118,8 @@ class SearchViewModel @Inject constructor(
     /** NIP-36 sensitive-content display mode (shared with feed). */
     val sensitiveContentMode: StateFlow<com.unsilence.app.data.memory.SensitiveContentMode> =
         relayPreferencesStore.sensitiveContentMode
+
+    val wotScoreFilter = relayPreferencesStore.wotScoreFilter
 
     private val discoveryOwner = keyManager.getPublicKeyHex().orEmpty()
     private val discoveryActive = MutableStateFlow(false)
@@ -173,6 +180,7 @@ class SearchViewModel @Inject constructor(
         _uiState.value = SearchUiState(
             query = query,
             entityTarget = target,
+            entityWot = (target as? DeepLinkTarget.Profile)?.let { memoryEventStore.displayWotFor(it.pubkey) },
             entityProfile = (target as? DeepLinkTarget.Profile)?.let {
                 memoryEventStore.getUserEntity(it.pubkey)
             },
@@ -211,6 +219,7 @@ class SearchViewModel @Inject constructor(
                 provider = trendingClient.state,
                 active = discoveryActive,
                 ownerIsCurrent = ::discoveryOwnerIsCurrent,
+                scoreFilter = wotScoreFilter.filterNotNull(),
             ).collect { projection ->
                 if (!discoveryOwnerIsCurrent()) {
                     _discovery.value = SearchDiscoveryState()
@@ -262,9 +271,11 @@ class SearchViewModel @Inject constructor(
                 _wotSubjects.update { it + target.pubkey }
                 wotHydrationCoalescer.requestHydration(listOf(target.pubkey))
                 profilePipeline.fetchProfileMetadata(target.pubkey, target.relayHints)
-                memoryEventStore.userEntityFlow(target.pubkey).collect { profile ->
+                combine(memoryEventStore.userEntityFlow(target.pubkey), memoryEventStore.wotSignalFlow) { profile, _ ->
+                    profile to memoryEventStore.displayWotFor(target.pubkey)
+                }.collect { (profile, score) ->
                     if (_entityTarget.value == target) {
-                        _uiState.update { it.copy(entityProfile = profile) }
+                        _uiState.update { it.copy(entityProfile = profile, entityWot = score) }
                     }
                 }
             }
@@ -375,14 +386,16 @@ class SearchViewModel @Inject constructor(
                         memoryEventStore.followsSignalFlow.map {
                             memoryEventStore.getFollows(ownPubkey)?.toSet()
                         }.distinctUntilChanged(),
-                    ) { muteList, hashtagCap, followedPubkeys ->
-                        SearchSafetyBundle(muteList, hashtagCap, followedPubkeys)
+                        wotScoreFilter.filterNotNull(),
+                    ) { muteList, hashtagCap, followedPubkeys, policy ->
+                        SearchSafetyBundle(muteList, hashtagCap, followedPubkeys, policy)
                     }
                     combine(searchResultsFlow, safetyFlow) { results, safety ->
                         results.copy(
                             muteList = safety.muteList,
                             hashtagCap = safety.hashtagCap,
                             followedPubkeys = safety.followedPubkeys,
+                            scoreFilter = safety.scoreFilter,
                         )
                     }.projectSearchResults(
                         query = query,
@@ -414,6 +427,7 @@ class SearchViewModel @Inject constructor(
                                 noteResults   = projection.notes,
                                 tagResults    = projection.tags,
                                 peopleResults = projection.people,
+                                peopleMinimum = projection.peopleMinimum,
                                 impersonationRisks = projection.impersonationRisks,
                             )
                         }

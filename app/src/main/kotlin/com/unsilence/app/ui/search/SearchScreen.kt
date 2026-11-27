@@ -18,6 +18,7 @@ import androidx.compose.foundation.layout.isImeVisible
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -37,10 +38,12 @@ import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.automirrored.filled.OpenInNew
+import androidx.compose.material.icons.outlined.GppGood
 import androidx.compose.material.icons.outlined.SearchOff
 import com.unsilence.app.ui.common.EmptyState
 import com.unsilence.app.ui.theme.AppType
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
@@ -70,6 +73,7 @@ import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.platform.LocalWindowInfo
+import androidx.compose.ui.graphics.RectangleShape
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.text.TextStyle
@@ -88,6 +92,8 @@ import com.unsilence.app.ui.common.rememberAvatarImageRequest
 import com.unsilence.app.data.memory.UserEntity
 import com.unsilence.app.data.memory.WotLookup
 import com.unsilence.app.data.relay.FeedWotDisplayMode
+import com.unsilence.app.data.relay.WotScoreFilter
+import com.unsilence.app.ui.theme.Mint
 import com.unsilence.app.ui.common.IdentIcon
 import com.unsilence.app.ui.common.LocalAppSessionKey
 import com.unsilence.app.ui.common.LocalShowSnackbar
@@ -155,6 +161,8 @@ fun SearchScreen(
 ) {
     val state           by viewModel.uiState.collectAsStateWithLifecycle()
     val sensitiveMode   by viewModel.sensitiveContentMode.collectAsStateWithLifecycle()
+    val scoreFilter by viewModel.wotScoreFilter.collectAsStateWithLifecycle()
+    val minimum = scoreFilter?.takeIf { it.enabled }?.minimum
     val discovery by viewModel.discovery.collectAsStateWithLifecycle()
     val wotLookupState = viewModel.wotLookups.collectAsStateWithLifecycle()
     val wotLookups by wotLookupState
@@ -304,8 +312,9 @@ fun SearchScreen(
         viewModel.openEntityTarget(target)
     }
     val activeEventResults = if (selectedTab == 3) state.tagResults else state.noteResults
-    val peopleBelowEntity = remember(state.entityTarget, state.peopleResults) {
-        peopleBelowEntityResult(state.entityTarget, state.peopleResults)
+    val peopleBelowEntity = remember(state.entityTarget, state.peopleResults, state.peopleMinimum, scoreFilter) {
+        if (scoreFilter == null || state.peopleMinimum != minimum) emptyList()
+        else peopleBelowEntityResult(state.entityTarget, state.peopleResults)
     }
 
     val entityKey = state.entityTarget?.let { "entity:${entityResultKey(it)}" }
@@ -424,7 +433,8 @@ fun SearchScreen(
                         .padding(horizontal = Spacing.medium, vertical = Spacing.small)
                         .background(Surface1, RoundedCornerShape(Spacing.medium))
                         .border(1.dp, BorderSubtle, RoundedCornerShape(Spacing.medium))
-                        .padding(horizontal = Spacing.medium, vertical = 10.dp),
+                        .heightIn(min = 48.dp)
+                        .padding(start = Spacing.medium, end = if (state.query.isEmpty()) Spacing.medium else 0.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     Icon(
@@ -443,7 +453,7 @@ fun SearchScreen(
                         textStyle     = TextStyle(color = Color.White, fontSize = AppType.bodySmall),
                         cursorBrush   = SolidColor(Brand),
                         singleLine    = true,
-                        modifier      = Modifier.weight(1f).focusRequester(focusRequester)
+                        modifier      = Modifier.weight(1f).heightIn(min = 48.dp).focusRequester(focusRequester)
                             .onFocusChanged { if (it.isFocused) onShowControls() },
                         decorationBox = { inner ->
                             // Box centers the placeholder and the text/cursor on the same
@@ -461,19 +471,23 @@ fun SearchScreen(
                             }
                         },
                     )
-                    if (state.query.isNotEmpty()) {
+                    if (minimum != null) {
                         Spacer(Modifier.width(Spacing.small))
-                        Icon(
-                            imageVector        = Icons.Filled.Close,
-                            contentDescription = "Clear search",
-                            tint               = Text3,
-                            modifier           = Modifier
-                                .size(14.dp)
-                                .clickable {
-                                    viewModel.search("")
-                                    focusRequester.requestFocus()
-                                },
-                        )
+                        Icon(Icons.Outlined.GppGood, contentDescription = "People filter, minimum WoT score $minimum",
+                            tint = Mint, modifier = Modifier.size(16.dp))
+                    }
+                    if (state.query.isNotEmpty()) {
+                        IconButton(
+                            onClick = {
+                                viewModel.search("")
+                                focusRequester.requestFocus()
+                            },
+                            modifier = Modifier.size(48.dp),
+                            shape = RectangleShape,
+                        ) {
+                            Icon(Icons.Filled.Close, contentDescription = "Clear search",
+                                tint = Text3, modifier = Modifier.size(18.dp))
+                        }
                     }
                 }
 
@@ -543,7 +557,8 @@ fun SearchScreen(
             when {
                 !state.hasSearched -> {
                     SearchDiscoveryContent(
-                        state = discovery,
+                        state = if (scoreFilter != null && discovery.peopleMinimum == minimum) discovery
+                            else discovery.copy(users = emptyList(), peopleMinimum = minimum),
                         staticBottomPadding = staticBottomPadding,
                         onRetry = viewModel::retryDiscovery,
                         staticTopPadding = staticTopPadding,
@@ -595,7 +610,9 @@ fun SearchScreen(
                     if (!hasAny) {
                         EmptyState(
                             icon    = Icons.Outlined.SearchOff,
-                            message = "No results for \u201c${state.query}\u201d",
+                            message = if (minimum != null && !state.query.trimStart().startsWith("#"))
+                                "No results for “${state.query}”. People need a WoT score of $minimum or higher."
+                            else "No results for “${state.query}”",
                         )
                     } else {
                         val engagement = rememberEngagement(
@@ -612,9 +629,8 @@ fun SearchScreen(
                                     SearchEntityResultRow(
                                         target = target,
                                         profile = state.entityProfile,
-                                        wotLookup = (target as? DeepLinkTarget.Profile)?.let {
-                                            wotLookups[it.pubkey]
-                                        },
+                                        wotLookup = state.entityWot,
+                                        scoreFilter = scoreFilter,
                                         onClick = { onEntityClickDismiss(target) },
                                     )
                                     FeedDivider()
@@ -647,7 +663,8 @@ fun SearchScreen(
                     if (peopleBelowEntity.isEmpty() && profileTarget == null) {
                         EmptyState(
                             icon    = Icons.Outlined.SearchOff,
-                            message = "No results for \u201c${state.query}\u201d",
+                            message = minimum?.let { "No people match your search at WoT $it or higher." }
+                                ?: "No results for \u201c${state.query}\u201d",
                         )
                     } else {
                         AvatarLazyColumn(
@@ -660,7 +677,8 @@ fun SearchScreen(
                                     SearchEntityResultRow(
                                         target = target,
                                         profile = state.entityProfile,
-                                        wotLookup = wotLookups[target.pubkey],
+                                        wotLookup = state.entityWot,
+                                        scoreFilter = scoreFilter,
                                         onClick = { onEntityClickDismiss(target) },
                                     )
                                     FeedDivider()
@@ -706,6 +724,7 @@ fun SearchScreen(
                                         target = target,
                                         profile = null,
                                         wotLookup = null,
+                                        scoreFilter = null,
                                         onClick = { onEntityClickDismiss(target) },
                                     )
                                     FeedDivider()
@@ -772,6 +791,7 @@ private fun SearchEntityResultRow(
     target: DeepLinkTarget,
     profile: UserEntity?,
     wotLookup: WotLookup?,
+    scoreFilter: WotScoreFilter?,
     onClick: () -> Unit,
 ) {
     if (target is DeepLinkTarget.Profile) {
@@ -780,6 +800,11 @@ private fun SearchEntityResultRow(
                 ?: UserEntity(pubkey = target.pubkey),
             wotLookup = wotLookup,
             impersonationRisk = null,
+            thresholdNotice = scoreFilter?.takeUnless { it.admits(wotLookup) }?.let {
+                val score = (wotLookup as? WotLookup.Scored)?.takeUnless { score -> score.cached }
+                val reason = score?.let { current -> "WoT score ${current.assertion.rank}" } ?: "No current WoT score"
+                "$reason · Your minimum is ${it.minimum}"
+            },
             onClick = onClick,
         )
         return
@@ -842,6 +867,7 @@ private fun ProfileCard(
     user: UserEntity,
     wotLookup: WotLookup?,
     impersonationRisk: ImpersonationRisk?,
+    thresholdNotice: String? = null,
     onClick: () -> Unit,
 ) {
     Row(
@@ -905,7 +931,9 @@ private fun ProfileCard(
                     style = AppTextStyles.footnote,
                 )
             }
-            if (!user.about.isNullOrBlank()) {
+            if (thresholdNotice != null) {
+                Text(thresholdNotice, color = TextSecondary, style = AppTextStyles.footnote)
+            } else if (!user.about.isNullOrBlank()) {
                 Text(
                     text     = user.about,
                     color    = TextSecondary,
@@ -917,7 +945,10 @@ private fun ProfileCard(
             }
         }
 
-        if (wotLookup is WotLookup.Scored || wotLookup == WotLookup.Absent) {
+        if (thresholdNotice != null) {
+            Spacer(Modifier.width(Spacing.small))
+            Text("Open profile", color = Brand, style = AppTextStyles.bodySmall)
+        } else if (wotLookup is WotLookup.Scored || wotLookup == WotLookup.Absent) {
             Spacer(Modifier.width(Spacing.small))
             Box(
                 modifier = Modifier.width(WOT_SEARCH_SIGNAL_WIDTH),
@@ -960,6 +991,9 @@ internal fun SearchDiscoveryContent(
     onHashtagClick: (String) -> Unit,
     onUserClick: (String) -> Unit,
 ) {
+    val emptyPeople = state.peopleMinimum?.takeIf {
+        state.users.isEmpty() && state.candidatePubkeys.isNotEmpty()
+    }?.let { "No suggested people meet your minimum WoT score of $it." }
     when {
         state.hasContent -> TrendingDiscovery(
             staticTopPadding = staticTopPadding,
@@ -972,7 +1006,7 @@ internal fun SearchDiscoveryContent(
             onHashtagClick = onHashtagClick,
             onUserClick = onUserClick,
             missingSection = when {
-                state.users.isEmpty() -> discoverySectionMessage("People", state.peopleStatus)
+                state.users.isEmpty() -> emptyPeople ?: discoverySectionMessage("People", state.peopleStatus)
                 state.hashtags.isEmpty() -> discoverySectionMessage("Topics", state.hashtagStatus)
                 else -> null
             },
@@ -985,7 +1019,7 @@ internal fun SearchDiscoveryContent(
         }
         else -> Box(Modifier.padding(top = staticTopPadding)) {
             DiscoveryRetryMessage(
-                message = if (state.unavailable) "Suggestions unavailable" else "No suggestions available yet",
+                message = emptyPeople ?: if (state.unavailable) "Suggestions unavailable" else "No suggestions available yet",
                 onRetry = onRetry,
                 enabled = !state.refreshing,
             )
