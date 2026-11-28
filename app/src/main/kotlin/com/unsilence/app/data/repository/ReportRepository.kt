@@ -19,13 +19,22 @@ import javax.inject.Singleton
 private const val TAG = "ReportRepo"
 
 @Singleton
-class ReportRepository @Inject constructor(
+class ReportRepository internal constructor(
     private val signingManager: SigningManager,
     private val memoryEventStore: MemoryEventStore,
     private val keyManager: KeyManager,
-    private val relayPool: RelayPool,
+    private val scope: CoroutineScope,
+    private val publishToRelays: (String, List<String>) -> Unit,
 ) {
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+    @Inject constructor(
+        signingManager: SigningManager,
+        memoryEventStore: MemoryEventStore,
+        keyManager: KeyManager,
+        relayPool: RelayPool,
+    ) : this(
+        signingManager, memoryEventStore, keyManager,
+        CoroutineScope(SupervisorJob() + Dispatchers.Default), relayPool::publishToRelays,
+    )
 
     /** Fire-and-forget report. Returns immediately; publish happens in background. */
     fun reportEvent(
@@ -34,8 +43,8 @@ class ReportRepository @Inject constructor(
         type: ReportType,
         reason: String = "",
     ) {
+        val ownPubkey = keyManager.getPublicKeyHex() ?: return
         scope.launch {
-            val ownPubkey = keyManager.getPublicKeyHex() ?: return@launch
             val template = EventTemplate<Event>(
                 createdAt = System.currentTimeMillis() / 1000L,
                 kind = 1984,
@@ -45,13 +54,13 @@ class ReportRepository @Inject constructor(
                 ),
                 content = reason,
             )
-            val signed = signingManager.sign(template) ?: run {
+            val signed = signingManager.sign(template, expectedPubkey = ownPubkey) ?: run {
                 Log.w(TAG, "Sign failed for report ${eventId.take(8)}…"); return@launch
             }
             val targets = publishTargetsWithGlobalFallback(
                 memoryEventStore.writeRelaysFor(ownPubkey),
             )
-            relayPool.publishToRelays(toEventJson(signed), targets.toList())
+            publishToRelays(toEventJson(signed), targets.toList())
             Log.i(
                 TAG,
                 "Report dispatch requested event=${eventId.take(8)}… " +
@@ -66,8 +75,8 @@ class ReportRepository @Inject constructor(
         type: ReportType,
         reason: String = "",
     ) {
+        val ownPubkey = keyManager.getPublicKeyHex() ?: return
         scope.launch {
-            val ownPubkey = keyManager.getPublicKeyHex() ?: return@launch
             val template = EventTemplate<Event>(
                 createdAt = System.currentTimeMillis() / 1000L,
                 kind = 1984,
@@ -76,13 +85,13 @@ class ReportRepository @Inject constructor(
                 ),
                 content = reason,
             )
-            val signed = signingManager.sign(template) ?: run {
+            val signed = signingManager.sign(template, expectedPubkey = ownPubkey) ?: run {
                 Log.w(TAG, "Sign failed for profile report ${pubkey.take(8)}…"); return@launch
             }
             val targets = publishTargetsWithGlobalFallback(
                 memoryEventStore.writeRelaysFor(ownPubkey),
             )
-            relayPool.publishToRelays(toEventJson(signed), targets.toList())
+            publishToRelays(toEventJson(signed), targets.toList())
             Log.i(
                 TAG,
                 "Profile report dispatch requested pubkey=${pubkey.take(8)}… " +

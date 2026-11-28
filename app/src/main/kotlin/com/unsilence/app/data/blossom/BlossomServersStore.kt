@@ -9,7 +9,6 @@ import androidx.datastore.preferences.core.intPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.core.stringSetPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
-import com.unsilence.app.data.auth.KeyManager
 import com.unsilence.app.data.auth.SigningManager
 import com.unsilence.app.data.memory.MemoryEventStore
 import com.unsilence.app.data.memory.NostrEvent
@@ -44,15 +43,25 @@ private val KEY_IMAGE_QUALITY = intPreferencesKey("image_quality")
 private val KEY_VIDEO_QUALITY = stringPreferencesKey("video_quality")
 
 @Singleton
-class BlossomServersStore @Inject constructor(
-    @ApplicationContext private val context: Context,
-    private val keyManager: KeyManager,
+class BlossomServersStore internal constructor(
+    preferences: Lazy<DataStore<Preferences>>,
     private val signingManager: SigningManager,
     private val memoryEventStore: MemoryEventStore,
-    private val relayPool: dagger.Lazy<RelayPool>,
+    private val scope: CoroutineScope,
+    private val publishToRelays: (String, List<String>) -> Unit,
 ) {
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-    private val dataStore get() = context.blossomPrefs
+    @Inject constructor(
+        @ApplicationContext context: Context,
+        signingManager: SigningManager,
+        memoryEventStore: MemoryEventStore,
+        relayPool: dagger.Lazy<RelayPool>,
+    ) : this(
+        lazy { context.blossomPrefs }, signingManager, memoryEventStore,
+        CoroutineScope(SupervisorJob() + Dispatchers.IO),
+        { json, targets -> relayPool.get().publishToRelays(json, targets) },
+    )
+
+    private val dataStore by preferences
     private val editMutex = Mutex()
     @Volatile private var activeOwner: String? = null
 
@@ -72,6 +81,7 @@ class BlossomServersStore @Inject constructor(
     private val initMutex = Mutex()
     @Volatile private var initialized = false
 
+    @Synchronized
     fun selectOwner(pubkeyHex: String) {
         val normalized = pubkeyHex.lowercase()
         if (activeOwner == normalized) return
@@ -83,6 +93,7 @@ class BlossomServersStore @Inject constructor(
         _selectedServer.value = ""
     }
 
+    @Synchronized
     fun clearActiveOwner() {
         activeOwner = null
         initialized = false
@@ -98,16 +109,14 @@ class BlossomServersStore @Inject constructor(
      * race this on startup; later callers wait, then return without re-running.
      */
     suspend fun initialize() {
-        if (initialized) return
+        val owner = activeOwner ?: return
         initMutex.withLock {
-            if (initialized) return
-            initialized = true
-            doInitialize()
+            if (initialized || activeOwner != owner) return
+            doInitialize(owner)
         }
     }
 
-    private suspend fun doInitialize() {
-        val owner = activeOwner ?: keyManager.getPublicKeyHex()?.lowercase() ?: return
+    private suspend fun doInitialize(owner: String) {
         // 1. Try MES (published kind-10063)
         val mesServers = memoryEventStore.blossomServersFor(owner)
 
@@ -134,46 +143,66 @@ class BlossomServersStore @Inject constructor(
             }
         }
 
-        _configuredServers.value = servers
-        _selectedServer.value = selected
-        _imageMaxDim.value = prefs[KEY_IMAGE_MAX_DIM] ?: 2048
-        _videoQuality.value = prefs[KEY_VIDEO_QUALITY]?.let { name ->
-            VideoTranscoder.Quality.entries.firstOrNull { it.name == name }
-        } ?: VideoTranscoder.Quality.STANDARD
-        // Persist to DataStore
+        synchronized(this) {
+            if (activeOwner != owner) return
+            _configuredServers.value = servers
+            _selectedServer.value = selected
+            _imageMaxDim.value = prefs[KEY_IMAGE_MAX_DIM] ?: 2048
+            _videoQuality.value = prefs[KEY_VIDEO_QUALITY]?.let { name ->
+                VideoTranscoder.Quality.entries.firstOrNull { it.name == name }
+            } ?: VideoTranscoder.Quality.STANDARD
+        }
         persistServers(owner, servers, selected)
+        synchronized(this) {
+            if (activeOwner == owner) initialized = true
+        }
     }
 
     suspend fun setSelected(url: String) {
-        if (url !in _configuredServers.value) return
-        val owner = activeOwner ?: return
-        _selectedServer.value = url
+        val owner = synchronized(this) {
+            val current = activeOwner ?: return
+            if (url !in _configuredServers.value) return
+            _selectedServer.value = url
+            current
+        }
         editMutex.withLock {
             dataStore.edit { it[selectedServerKey(owner)] = url }
         }
-        schedulePublish()
+        schedulePublish(owner)
     }
 
     suspend fun addServer(url: String) {
         val normalized = url.trimEnd('/')
-        if (normalized in _configuredServers.value) return
-        val updated = _configuredServers.value + normalized
-        _configuredServers.value = updated
-        persistServers(activeOwner ?: return, updated, _selectedServer.value)
-        schedulePublish()
+        val owner: String
+        val updated: List<String>
+        val selected: String
+        synchronized(this) {
+            owner = activeOwner ?: return
+            if (normalized in _configuredServers.value) return
+            updated = _configuredServers.value + normalized
+            _configuredServers.value = updated
+            selected = _selectedServer.value
+        }
+        persistServers(owner, updated, selected)
+        schedulePublish(owner)
     }
 
     suspend fun removeServer(url: String) {
-        val owner = activeOwner ?: return
-        if (url == _selectedServer.value && _configuredServers.value.size <= 1) return
-        val updated = _configuredServers.value - url
-        _configuredServers.value = updated
-        if (_selectedServer.value == url) {
-            val newSelected = updated.firstOrNull() ?: return
-            _selectedServer.value = newSelected
+        val owner: String
+        val updated: List<String>
+        val selected: String
+        synchronized(this) {
+            owner = activeOwner ?: return
+            val servers = _configuredServers.value
+            val current = _selectedServer.value
+            if (url == current && servers.size <= 1) return
+            updated = servers - url
+            selected = if (url == current) updated.first() else current
+            _configuredServers.value = updated
+            _selectedServer.value = selected
         }
-        persistServers(owner, updated, _selectedServer.value)
-        schedulePublish()
+        persistServers(owner, updated, selected)
+        schedulePublish(owner)
     }
 
     suspend fun setImageUploadTier(tier: AttachmentQuality) {
@@ -203,21 +232,25 @@ class BlossomServersStore @Inject constructor(
         }
     }
 
-    private fun schedulePublish() {
+    @Synchronized
+    private fun schedulePublish(owner: String) {
+        // Persistence can finish after the next owner has already queued an edit.
+        if (activeOwner != owner) return
         publishJob?.cancel()
         publishJob = scope.launch {
             delay(PUBLISH_DEBOUNCE_MS)
-            publishKind10063()
+            publishKind10063(owner)
         }
     }
 
-    private suspend fun publishKind10063() {
-        val ownPubkey = keyManager.getPublicKeyHex() ?: return
-        val servers = _configuredServers.value
+    private suspend fun publishKind10063(owner: String) {
+        val (servers, selected) = synchronized(this) {
+            if (activeOwner != owner) return
+            _configuredServers.value to _selectedServer.value
+        }
         if (servers.isEmpty()) return
 
         // Selected server first, then rest in order
-        val selected = _selectedServer.value
         val ordered = buildList {
             if (selected.isNotEmpty()) add(selected)
             for (s in servers) { if (s != selected) add(s) }
@@ -232,7 +265,7 @@ class BlossomServersStore @Inject constructor(
             tags = tags,
             content = "",
         )
-        val signed = signingManager.sign(template) ?: run {
+        val signed = signingManager.sign(template, expectedPubkey = owner) ?: run {
             Log.e(TAG, "publishKind10063: signing failed")
             return
         }
@@ -255,14 +288,19 @@ class BlossomServersStore @Inject constructor(
             firstSeenAt = System.currentTimeMillis(),
             relaysSeen = ConcurrentHashMap.newKeySet(),
         )
-        memoryEventStore.storeLocalEvent(localEvent)
+        synchronized(this) {
+            if (activeOwner != owner) return
+            memoryEventStore.storeLocalEvent(localEvent)
+        }
 
-        val writeRelays = memoryEventStore.writeRelaysFor(ownPubkey)
+        val writeRelays = memoryEventStore.writeRelaysFor(owner)
         if (writeRelays.isEmpty()) {
             Log.w(TAG, "publishKind10063: no write relays")
             return
         }
-        relayPool.get().publishToRelays(toEventJson(signed), writeRelays)
+        val json = toEventJson(signed)
+        if (activeOwner != owner) return
+        publishToRelays(json, writeRelays)
         Log.d(TAG, "publishKind10063: ${ordered.size} servers → ${writeRelays.size} relay(s)")
     }
 
