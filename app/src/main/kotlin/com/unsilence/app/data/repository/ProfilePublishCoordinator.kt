@@ -30,7 +30,7 @@ internal sealed interface ProfilePublishResult {
 internal class ProfilePublishCoordinator(
     private val refreshProfile: suspend (String) -> ProfileMetadataRefreshResult,
     private val loadProfile: (String) -> NostrEvent?,
-    private val sign: suspend (createdAt: Long, content: String) -> SignedProfileMetadata?,
+    private val sign: suspend (pubkey: String, createdAt: Long, metadata: MergedProfileMetadata) -> SignedProfileMetadata?,
     private val publishAndAwait: suspend (pubkey: String, signed: SignedProfileMetadata) -> Boolean,
     private val persistAccepted: (pubkey: String, signed: SignedProfileMetadata) -> Boolean,
     private val nowSeconds: () -> Long,
@@ -62,18 +62,24 @@ internal class ProfilePublishCoordinator(
                 return ProfilePublishResult.FreshnessUnavailable
         }
 
-        val mergedContent = mergeProfileMetadata(existing?.content ?: "{}", edited, original)
-            ?: return ProfilePublishResult.InvalidExistingProfile
+        val metadata = mergeProfileMetadata(
+            existingContent = existing?.content ?: "{}",
+            edited = edited,
+            original = original,
+            existingTags = existing?.tags.orEmpty(),
+        ) ?: return ProfilePublishResult.InvalidExistingProfile
         val createdAt = existing?.let { maxOf(nowSeconds(), it.createdAt + 1L) } ?: nowSeconds()
         val mergeSourceId = existing?.id
 
         val signed = try {
-            sign(createdAt, mergedContent)
+            sign(pubkey, createdAt, metadata)
         } catch (cancelled: CancellationException) {
             throw cancelled
         } catch (_: Exception) {
             null
         } ?: return ProfilePublishResult.SigningFailed
+
+        if (signed.event.pubkey != pubkey) return ProfilePublishResult.SigningFailed
 
         // Amber can suspend for seconds. Never publish a draft merged from a
         // profile that another client replaced while the signer was open.

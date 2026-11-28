@@ -137,6 +137,7 @@ class ProfilePublishCoordinatorTest {
         assertEquals(1, harness.signCalls)
         assertEquals(1, harness.publishCalls)
         assertEquals(123L, harness.profile?.createdAt)
+        assertEquals(emptyList<List<String>>(), requireNotNull(harness.profile).tags)
         assertEquals(
             "First profile",
             requireNotNull(harness.profile).let(::publishedContent)["name"]?.jsonPrimitive?.content,
@@ -212,7 +213,100 @@ class ProfilePublishCoordinatorTest {
         assertEquals("new", publishedContent(published)["name"]?.jsonPrimitive?.content)
     }
 
+    @Test
+    fun `bio edit carries all unrelated tags from the refreshed profile in order`() = runTest {
+        val identity = listOf("i", "github:alice", "proof")
+        val emoji = listOf("emoji", "wave", "https://example.com/wave")
+        val nameMirror = listOf("name", "distinct mirror")
+        val unknown = listOf("custom", "", "keep")
+        val image = listOf("imeta", "url photo", "fallback backup")
+        val preserved = listOf(emptyList(), nameMirror, unknown, image, unknown)
+        val stale = profileEvent("stale", 10, "{}")
+        val fresh = profileEvent("fresh", 20, """{"about":"old bio","name":"relay name","picture":"photo"}""").copy(
+            tags = listOf(identity, listOf("client", "prior editor"), emoji, listOf("about", "old bio", "extra")) +
+                preserved + listOf(listOf("about", "another value")),
+        )
+        val harness = Harness(stale).apply { afterRefresh = { profile = fresh } }
+        val form = fields().copy(about = "old bio")
+
+        val result = harness.coordinator().publish(OWN, form, form.copy(about = "  new bio "))
+
+        assertEquals(ProfilePublishResult.Success, result)
+        val published = requireNotNull(harness.profile)
+        assertEquals("relay name", publishedContent(published)["name"]?.jsonPrimitive?.content)
+        assertEquals(
+            listOf(identity, emoji, listOf("about", "new bio", "extra")) + preserved + listOf(listOf("about", "new bio")),
+            published.tags,
+        )
+    }
+
+    @Test
+    fun `image edit removes only displaced fresh metadata and updates existing mirrors`() = runTest {
+        val retained = listOf(
+            listOf("imeta", "url keep-b"),
+            listOf("imeta", "url form-a"),
+            listOf("imeta", "unrecognized property"),
+            listOf("imeta", "url fresh-a", "url ambiguous"),
+        )
+        val fresh = profileEvent("fresh", 20, """{"avatar":"fresh-a","banner":"keep-b","website":"old"}""").copy(
+            tags = listOf(
+                listOf("imeta", "m image/png", "url fresh-a"),
+                listOf("avatar", "fresh-a", "extra"),
+                listOf("picture", "fresh-a"),
+            ) + retained + listOf(listOf("website", "old"), listOf("website", "duplicate")),
+        )
+        val harness = Harness(fresh)
+        val form = fields().copy(picture = "form-a", banner = "form-b", website = "old")
+
+        val result = harness.coordinator().publish(OWN, form, form.copy(picture = " new ", website = ""))
+
+        assertEquals(ProfilePublishResult.Success, result)
+        assertEquals(
+            listOf(listOf("avatar", "new", "extra"), listOf("picture", "new")) + retained,
+            requireNotNull(harness.profile).tags,
+        )
+    }
+
+    @Test
+    fun `both image tags survive swapping the picture and banner`() = runTest {
+        val tags = listOf(listOf("imeta", "url a"), listOf("imeta", "url b"))
+        val harness = Harness(profileEvent("fresh", 20, """{"picture":"a","banner":"b"}""").copy(tags = tags))
+        val form = fields().copy(picture = "a", banner = "b")
+
+        val result = harness.coordinator().publish(OWN, form, form.copy(picture = "b", banner = "a"))
+
+        assertEquals(ProfilePublishResult.Success, result)
+        assertEquals(tags, requireNotNull(harness.profile).tags)
+    }
+
+    @Test
+    fun `clearing one shared image drops its mirror and retains the other image metadata`() = runTest {
+        val image = listOf("imeta", "url a")
+        val fresh = profileEvent("fresh", 20, """{"picture":"a","banner":"a"}""")
+        val harness = Harness(fresh.copy(tags = listOf(listOf("picture", "a"), image)))
+        val form = fields().copy(picture = "a", banner = "a")
+
+        val result = harness.coordinator().publish(OWN, form, form.copy(picture = ""))
+
+        assertEquals(ProfilePublishResult.Success, result)
+        assertEquals(listOf(image), requireNotNull(harness.profile).tags)
+    }
+
+    @Test
+    fun `a replacement signed by another account never reaches the relay or local store`() = runTest {
+        val base = profileEvent("fresh", 20, "{}").copy(tags = listOf(listOf("i", "github:alice", "proof")))
+        val harness = Harness(base).apply { signerPubkey = "other" }
+
+        val result = harness.coordinator().publish(OWN, fields(), fields(name = "edited"))
+
+        assertEquals(ProfilePublishResult.SigningFailed, result)
+        assertEquals(0, harness.publishCalls)
+        assertEquals(0, harness.persistCalls)
+        assertEquals(base, harness.profile)
+    }
+
     private class Harness(initial: NostrEvent?) {
+        var signerPubkey = OWN
         var profile = initial
         var signCalls = 0
         var publishCalls = 0
@@ -233,12 +327,14 @@ class ProfilePublishCoordinatorTest {
                 refreshResult
             },
             loadProfile = { profile },
-            sign = { createdAt, content ->
+            sign = { owner, createdAt, metadata ->
+                assertEquals(OWN, owner)
                 callOrder += "sign"
                 signCalls++
                 signedCreatedAts += createdAt
                 afterSign()
-                val event = profileEvent("signed-$signCalls", createdAt, content)
+                val event = profileEvent("signed-$signCalls", createdAt, metadata.content)
+                    .copy(pubkey = signerPubkey, tags = metadata.tags)
                 SignedProfileMetadata(event.id, "{}", event)
             },
             publishAndAwait = { _, _ ->

@@ -1,6 +1,7 @@
 package com.unsilence.app.data.repository
 
 import com.unsilence.app.data.relay.NostrJson
+import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.jsonObject
@@ -31,11 +32,20 @@ internal fun profileMetadataHasChanges(
     original.website to edited.website,
 ).any { (before, after) -> before.trim() != after.trim() }
 
+internal data class MergedProfileMetadata(val content: String, val tags: List<List<String>>)
+
+private val profileImageKeys = listOf("picture", "avatar", "image", "banner")
+
+private fun Map<String, JsonElement>.imageUrls(): Set<String> = profileImageKeys.mapNotNullTo(mutableSetOf()) {
+    (this[it] as? JsonPrimitive)?.takeIf { value -> value.isString }?.content?.takeIf(String::isNotBlank)
+}
+
 /**
  * Applies the form-owned fields to an existing kind-0 document.
  *
- * Unknown keys and their JSON value types are retained by default. Blank form
- * values remove their canonical key and any legacy alias understood by MES, so
+ * JSON and tags are merged from the same relay event. Existing field-mirror
+ * tags follow explicit edits. All unrelated extensions retain their order and values.
+ * Blank values remove their canonical key and any legacy alias understood by MES, so
  * clearing a field cannot be undone by an old alias on the next parse.
  * Returns null rather than rebuilding from scratch when the retained document
  * is not a JSON object.
@@ -44,12 +54,14 @@ internal fun mergeProfileMetadata(
     existingContent: String,
     edited: EditableProfileMetadata,
     original: EditableProfileMetadata? = null,
-): String? {
+    existingTags: List<List<String>> = emptyList(),
+): MergedProfileMetadata? {
     val existing = runCatching {
         NostrJson.parseToJsonElement(existingContent).jsonObject
     }.getOrNull() ?: return null
 
     val merged = LinkedHashMap(existing)
+    val changedFields = mutableMapOf<String, String>()
 
     fun applyField(
         key: String,
@@ -63,7 +75,11 @@ internal fun mergeProfileMetadata(
         // edit is allowed to overwrite the relay-fresh document.
         if (originalValue != null && normalized == originalValue.trim()) return
         merged.remove(key)
-        aliases.forEach(merged::remove)
+        changedFields[key] = normalized
+        for (alias in aliases) {
+            merged.remove(alias)
+            changedFields[alias] = normalized
+        }
         normalized.takeIf(String::isNotEmpty)?.let { merged[key] = JsonPrimitive(it) }
     }
 
@@ -86,5 +102,22 @@ internal fun mergeProfileMetadata(
     applyField("lud16", editedValue = edited.lud16, originalValue = original?.lud16)
     applyField("website", editedValue = edited.website, originalValue = original?.website)
 
-    return JsonObject(merged).toString()
+    val displacedImages = if (profileImageKeys.any(changedFields::containsKey)) {
+        (existing.imageUrls() - merged.imageUrls()).mapTo(mutableSetOf()) { "url $it" }
+    } else {
+        emptySet()
+    }
+    val tags = existingTags.mapNotNull { tag ->
+        val key = tag.firstOrNull()
+        val value = changedFields[key]
+        when {
+            key == "client" -> null // The previous editor did not publish this replacement.
+            key == "imeta" && displacedImages.isNotEmpty() &&
+                tag.singleOrNull { it.startsWith("url ") } in displacedImages -> null
+            value == null -> tag
+            value.isEmpty() -> null
+            else -> listOf(tag.first(), value) + tag.drop(2)
+        }
+    }
+    return MergedProfileMetadata(JsonObject(merged).toString(), tags)
 }

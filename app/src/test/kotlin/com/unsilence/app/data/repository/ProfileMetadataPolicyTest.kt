@@ -26,7 +26,7 @@ class ProfileMetadataPolicyTest {
         )
 
         val before = NostrJson.parseToJsonElement(existing).jsonObject
-        val after = NostrJson.parseToJsonElement(requireNotNull(merged)).jsonObject
+        val after = NostrJson.parseToJsonElement(requireNotNull(merged).content).jsonObject
         assertEquals("New", after["name"]?.jsonPrimitive?.content)
         assertEquals("https://example.com", after["website"]?.jsonPrimitive?.content)
         assertEquals(before["lud06"], after["lud06"])
@@ -47,7 +47,7 @@ class ProfileMetadataPolicyTest {
         }""".trimIndent()
 
         val after = NostrJson.parseToJsonElement(
-            requireNotNull(mergeProfileMetadata(existing, fields())),
+            requireNotNull(mergeProfileMetadata(existing, fields())).content,
         ).jsonObject
 
         assertFalse("display_name" in after)
@@ -76,7 +76,7 @@ class ProfileMetadataPolicyTest {
                         website = "website",
                     ),
                 ),
-            ),
+            ).content,
         ).jsonObject
 
         assertEquals(
@@ -102,7 +102,7 @@ class ProfileMetadataPolicyTest {
         }""".trimIndent()
 
         val after = NostrJson.parseToJsonElement(
-            requireNotNull(mergeProfileMetadata(fresh, edited, original)),
+            requireNotNull(mergeProfileMetadata(fresh, edited, original)).content,
         ).jsonObject
 
         assertEquals("New", after["name"]?.jsonPrimitive?.content)
@@ -122,7 +122,7 @@ class ProfileMetadataPolicyTest {
                     edited,
                     original,
                 ),
-            ),
+            ).content,
         ).jsonObject
 
         assertFalse("website" in after)

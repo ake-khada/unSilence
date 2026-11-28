@@ -3,17 +3,17 @@ package com.unsilence.app.data.repository
 import android.util.Log
 import com.unsilence.app.data.auth.SigningManager
 import com.unsilence.app.data.memory.MemoryEventStore
-import com.unsilence.app.data.memory.NostrEvent
 import com.unsilence.app.data.memory.SnapshotScheduler
+import com.unsilence.app.data.relay.EventDto
 import com.unsilence.app.data.relay.RelayPool
 import com.unsilence.app.data.relay.RelayPreferencesStore
 import com.unsilence.app.data.relay.normalizeRelayUrl
 import com.unsilence.app.data.relay.toEventJson
+import com.unsilence.app.data.relay.toNostrEvent
 import com.vitorpamplona.quartz.nip01Core.core.Event
 import com.vitorpamplona.quartz.nip01Core.signers.EventTemplate
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
-import java.util.concurrent.ConcurrentHashMap
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -21,7 +21,7 @@ private const val TAG = "ProfileMetadataPublisher"
 
 @Singleton
 class ProfileMetadataPublisher @Inject constructor(
-    private val signingManager: SigningManager,
+    signingManager: SigningManager,
     private val memoryEventStore: MemoryEventStore,
     private val relayPool: RelayPool,
     private val relayPreferencesStore: RelayPreferencesStore,
@@ -30,7 +30,7 @@ class ProfileMetadataPublisher @Inject constructor(
     private val coordinator = ProfilePublishCoordinator(
         refreshProfile = relayPool::refreshProfileMetadata,
         loadProfile = memoryEventStore::getProfile,
-        sign = ::signProfile,
+        sign = signingManager::signProfileMetadata,
         publishAndAwait = ::publishAndAwait,
         persistAccepted = ::persistAccepted,
         nowSeconds = { System.currentTimeMillis() / 1_000L },
@@ -41,41 +41,6 @@ class ProfileMetadataPublisher @Inject constructor(
         original: EditableProfileMetadata,
         edited: EditableProfileMetadata,
     ): ProfilePublishResult = coordinator.publish(pubkey, original, edited).also(::logResult)
-
-    private suspend fun signProfile(
-        createdAt: Long,
-        content: String,
-    ): SignedProfileMetadata? {
-        val template = EventTemplate<Event>(
-            createdAt = createdAt,
-            kind = 0,
-            tags = emptyArray(),
-            content = content,
-        )
-        val signed = signingManager.sign(template) ?: return null
-        val signedTags = signed.tags.map { it.toList() }
-        val localEvent = NostrEvent(
-            id = signed.id,
-            pubkey = signed.pubKey,
-            kind = signed.kind,
-            content = signed.content,
-            createdAt = signed.createdAt,
-            tags = signedTags,
-            sig = signed.sig,
-            relayUrl = "local",
-            replyToId = null,
-            rootId = null,
-            hasContentWarning = false,
-            contentWarningReason = null,
-            firstSeenAt = System.currentTimeMillis(),
-            relaysSeen = ConcurrentHashMap.newKeySet<String>().apply { add("local") },
-        )
-        return SignedProfileMetadata(
-            eventId = signed.id,
-            eventJson = toEventJson(signed),
-            event = localEvent,
-        )
-    }
 
     private suspend fun publishAndAwait(
         pubkey: String,
@@ -130,4 +95,32 @@ class ProfileMetadataPublisher @Inject constructor(
     private companion object {
         const val PROFILE_PUBLISH_TIMEOUT_MS = 6_000L
     }
+}
+
+internal suspend fun SigningManager.signProfileMetadata(
+    pubkey: String,
+    createdAt: Long,
+    metadata: MergedProfileMetadata,
+): SignedProfileMetadata? {
+    val template = EventTemplate<Event>(
+        createdAt = createdAt,
+        kind = 0,
+        tags = metadata.tags.map { it.toTypedArray() }.toTypedArray(),
+        content = metadata.content,
+    )
+    val signed = sign(template, expectedPubkey = pubkey) ?: return null
+    val localEvent = EventDto(
+        id = signed.id,
+        pubkey = signed.pubKey,
+        kind = signed.kind,
+        content = signed.content,
+        createdAt = signed.createdAt,
+        tags = signed.tags.map { it.toList() },
+        sig = signed.sig,
+    ).toNostrEvent("local")
+    return SignedProfileMetadata(
+        eventId = signed.id,
+        eventJson = toEventJson(signed),
+        event = localEvent,
+    )
 }
