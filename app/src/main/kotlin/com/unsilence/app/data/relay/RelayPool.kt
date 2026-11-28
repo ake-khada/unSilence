@@ -57,6 +57,7 @@ import java.util.concurrent.atomic.AtomicReference
 import javax.inject.Inject
 import javax.inject.Singleton
 
+private const val MAX_VERIFIED_PROFILE_HINT_ATTEMPTS = 2_048 * MAX_SEEN_RELAY_HINTS
 private const val TAG = "RelayPool"
 private val ACCOUNT_METADATA_KINDS = listOf(0, 3, 10002)
 
@@ -686,6 +687,8 @@ class RelayPool @Inject constructor(
     private val oneShotSubEosed = ConcurrentHashMap<String, MutableSet<String>>()
     private val profileFetchAttempted = ConcurrentHashMap<String, Long>()
     private val hintedProfileFetchAttempted = ConcurrentHashMap<String, Long>()
+    // Per-session attempts for verified identity hints. Separate from timed general lookup misses.
+    private val verifiedProfileHintAttempts = mutableMapOf<Pair<String, String>, Any>()
     /** Pubkeys that went through the full indexer+fallback chain and still missed.
      *  5-min TTL prevents scroll-back from re-firing the chain. */
     private val profileFallbackNegCache = ConcurrentHashMap<String, Long>()
@@ -1512,6 +1515,7 @@ class RelayPool @Inject constructor(
         idRequestBackoff.clear()
         profileFetchAttempted.clear()
         hintedProfileFetchAttempted.clear()
+        synchronized(socketLifecycleLock) { verifiedProfileHintAttempts.clear() }
         profileFallbackNegCache.clear()
         bridgeEventFetchAttempted.clear()
     }
@@ -4450,11 +4454,39 @@ class RelayPool @Inject constructor(
         )
     }
 
-    private suspend fun fetchProfilePhase(
+    internal suspend fun fetchVerifiedProfileHints(pubkey: String, hints: List<String>) {
+        val reservation = Any()
+        val targets = synchronized(socketLifecycleLock) {
+            if (socketTransportSuspended.get()) return
+            buildList {
+                for (url in hints) {
+                    if (verifiedProfileHintAttempts.size >= MAX_VERIFIED_PROFILE_HINT_ATTEMPTS) break
+                    val key = pubkey to url
+                    if (url in blockedUrls || key in verifiedProfileHintAttempts) continue
+                    verifiedProfileHintAttempts[key] = reservation
+                    add(url)
+                }
+            }
+        }
+        if (targets.isEmpty()) return
+        val admitted = ConcurrentHashMap.newKeySet<String>()
+        try {
+            fetchProfilePhase(listOf(pubkey), targets, "hint-profiles", includeActiveFeedRelay = true, onAdmitted = admitted::add)
+        } finally {
+            synchronized(socketLifecycleLock) {
+                for (url in targets) {
+                    if (url !in admitted) verifiedProfileHintAttempts.remove(pubkey to url, reservation)
+                }
+            }
+        }
+    }
+
+    internal suspend fun fetchProfilePhase(
         pubkeys: List<String>,
         targetUrls: List<String>,
         subIdPrefix: String,
         includeActiveFeedRelay: Boolean = false,
+        onAdmitted: ((String) -> Unit)? = null,
     ): Set<String> {
         if (pubkeys.isEmpty() || targetUrls.isEmpty()) return emptySet()
         val requests = profileRequestPayloads(pubkeys, "$subIdPrefix-${System.nanoTime()}", listOf(0, 10002))
@@ -4467,6 +4499,7 @@ class RelayPool @Inject constructor(
                 requests.values.toList(),
                 requests.keys.toList(),
                 includeActiveFeedRelay = includeActiveFeedRelay,
+                onAdmitted = onAdmitted,
             )
             withTimeoutOrNull(5_000L) { completions.awaitAll() }
             return selected
@@ -5962,6 +5995,7 @@ class RelayPool @Inject constructor(
             connectionPurposes.clear()
             profileFetchAttempted.clear()
             hintedProfileFetchAttempted.clear()
+            verifiedProfileHintAttempts.clear()
             bridgeEventFetchAttempted.clear()
             // Complete all in-flight monitors so they clean up immediately
             eventFetchInFlight.values.forEach { it.complete(null) }

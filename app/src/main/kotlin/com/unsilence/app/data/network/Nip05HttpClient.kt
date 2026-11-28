@@ -33,8 +33,8 @@ class Nip05HttpClient @Inject constructor(baseClient: OkHttpClient) {
         .addNetworkInterceptor(UntrustedHttpNetworkGuard)
         .build()
 
-    internal suspend fun resolve(key: Nip05VerificationCacheKey): Nip05VerificationStatus? {
-        val target = nip05LookupTarget(key.nip05) ?: return Nip05VerificationStatus.UNVERIFIED
+    internal suspend fun resolve(key: Nip05VerificationCacheKey): Nip05Resolution? {
+        val target = nip05LookupTarget(key.nip05) ?: return Nip05Resolution(Nip05VerificationStatus.UNVERIFIED)
         val request = Request.Builder()
             .url(target.url)
             .header("Accept", "application/json")
@@ -48,14 +48,14 @@ class Nip05HttpClient @Inject constructor(baseClient: OkHttpClient) {
             } else {
                 null
             }
-            nip05StatusFromHttpResponse(response.code, body, target, key.pubkey)
+            nip05ResolutionFromHttpResponse(response.code, body, target, key.pubkey)
         }
     }
 
     private suspend fun executeAndParse(
         call: Call,
-        parse: (Response) -> Nip05VerificationStatus,
-    ): Nip05VerificationStatus? = suspendCancellableCoroutine { continuation ->
+        parse: (Response) -> Nip05Resolution,
+    ): Nip05Resolution? = suspendCancellableCoroutine { continuation ->
         continuation.invokeOnCancellation { call.cancel() }
         call.enqueue(object : Callback {
             override fun onFailure(call: Call, e: IOException) {
@@ -65,7 +65,7 @@ class Nip05HttpClient @Inject constructor(baseClient: OkHttpClient) {
             override fun onResponse(call: Call, response: Response) {
                 response.use { closedResponse ->
                     val result = runCatching { parse(closedResponse) }
-                        .getOrDefault(Nip05VerificationStatus.UNVERIFIED)
+                        .getOrDefault(Nip05Resolution(Nip05VerificationStatus.UNVERIFIED))
                     if (continuation.isActive) continuation.resume(result)
                 }
             }

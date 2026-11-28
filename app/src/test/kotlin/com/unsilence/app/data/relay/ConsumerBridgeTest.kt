@@ -74,14 +74,14 @@ class ConsumerBridgeTest {
         store.insert(event(
             id = "bridged-reply",
             pubkey = "bridged-author",
-            relayUrl = "wss://relay.mostr.pub",
+            relayUrl = "wss://relay.ditto.pub",
             replyToId = "bridged-parent",
         ))
 
         val stored = requireNotNull(store.getNostrEvent("bridged-reply"))
         assertEquals(
             listOf(
-                "wss://relay.mostr.pub",
+                "wss://relay.ditto.pub",
                 "wss://browse.example",
                 "wss://parent-hint.example",
             ),
@@ -166,7 +166,7 @@ class ConsumerBridgeTest {
         store.insert(event(
             id = "p-mostr", kind = 0, pubkey = "bridged-author",
             content = """{"name":"Bridged","nip05":"alice@mostr.pub"}""",
-            relayUrl = "wss://relay.mostr.pub",
+            relayUrl = "wss://relay.ditto.pub",
         ))
         store.insert(event(
             id = "p-ordinary", kind = 0, pubkey = "ordinary-author",
@@ -175,7 +175,7 @@ class ConsumerBridgeTest {
 
         assertTrue(store.writeRelaysFor("bridged-author").isEmpty())
         assertEquals(
-            listOf("wss://relay.mostr.pub"),
+            listOf("wss://relay.ditto.pub"),
             store.lookupWriteRelaysFor("bridged-author"),
         )
         assertTrue(store.lookupWriteRelaysFor("ordinary-author").isEmpty())

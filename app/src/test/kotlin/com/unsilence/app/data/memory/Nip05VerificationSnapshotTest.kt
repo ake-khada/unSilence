@@ -5,6 +5,7 @@ import com.unsilence.app.data.network.Nip05VerificationCacheEntry
 import com.unsilence.app.data.network.Nip05VerificationStatus
 import com.unsilence.app.data.network.nip05VerificationCacheKey
 import com.unsilence.app.data.relay.stubTimelineServiceProvider
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -32,6 +33,7 @@ class Nip05VerificationSnapshotTest {
                     status = Nip05VerificationStatus.VERIFIED,
                     checkedAtMs = now,
                     resolvedPubkey = profile.uppercase(),
+                    relayHints = listOf("wss://author.example"),
                 ),
                 now,
             ),
@@ -44,10 +46,63 @@ class Nip05VerificationSnapshotTest {
         DataInputStream(ByteArrayInputStream(bytes.toByteArray())).use {
             restored.restoreSnapshotBinary(it)
         }
+        assertEquals(listOf("wss://author.example"), restored.nip05VerificationSnapshot(now).single().relayHints)
         assertEquals(
             Nip05VerificationStatus.VERIFIED,
             restored.currentNip05Verification(key, now),
         )
+    }
+
+    @Test
+    fun `legacy record retains badge and timestamp and v2 drops only invalid hints`() {
+        val now = System.currentTimeMillis()
+        val key = requireNotNull(nip05VerificationCacheKey(profile, address))
+        val store = store()
+        fun record(version: Int, vararg hints: String): ByteArray {
+            val bytes = ByteArrayOutputStream()
+            DataOutputStream(bytes).use { out ->
+                fun string(value: String) {
+                    val data = value.toByteArray()
+                    out.writeInt(data.size)
+                    out.write(data)
+                }
+                out.writeByte(version)
+                string(profile)
+                string(address)
+                out.writeByte(1)
+                out.writeLong(now)
+                out.writeBoolean(true)
+                string(profile)
+                for (hint in hints) {
+                    val data = hint.toByteArray()
+                    out.writeShort(data.size)
+                    out.write(data)
+                }
+            }
+            return bytes.toByteArray()
+        }
+        assertTrue(store.restoreNip05VerificationCacheRecord(record(1), now))
+        val legacy = store.nip05VerificationSnapshot(now).single()
+        assertEquals(Nip05VerificationCacheEntry(key, Nip05VerificationStatus.VERIFIED, now, profile), legacy)
+        val mixed = record(2, "ws://bad.example", "wss://large.example/" + "a".repeat(513), "wss://ok.example")
+        assertTrue(store.restoreNip05VerificationCacheRecord(mixed, now))
+        assertEquals(listOf("wss://ok.example"), store.nip05VerificationSnapshot(now).single().relayHints)
+    }
+
+    @Test
+    fun `only an incomplete current profile gets unseen verified hints`() = runTest {
+        val store = store()
+        val key = requireNotNull(nip05VerificationCacheKey(profile, address))
+        val partial = profileEvent("profile-1", 1, address)
+        store.insert(partial)
+        val now = System.currentTimeMillis()
+        val hints = listOf("wss://relay.example", "wss://new.example")
+        store.storeNip05Verification(Nip05VerificationCacheEntry(key, Nip05VerificationStatus.VERIFIED, now, profile, hints), now)
+        assertEquals(listOf("wss://new.example"), store.missingPictureRelayHints(profile).first())
+        store.insert(partial.copy(id = "profile-2", createdAt = 2, content = """{"nip05":"$address","picture":"https://image.example/me.jpg"}"""))
+        assertTrue(store.missingPictureRelayHints(profile).first().isEmpty())
+        store.insert(profileEvent("profile-3", 3, "bob@elsewhere.example"))
+        assertTrue(store.missingPictureRelayHints(profile).first().isEmpty())
     }
 
     @Test

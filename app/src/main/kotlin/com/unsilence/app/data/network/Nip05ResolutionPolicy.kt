@@ -1,8 +1,10 @@
 package com.unsilence.app.data.network
 
-import kotlinx.serialization.json.contentOrNull
-import kotlinx.serialization.json.jsonObject
-import kotlinx.serialization.json.jsonPrimitive
+import com.unsilence.app.data.relay.MAX_SEEN_RELAY_HINTS
+import com.unsilence.app.data.relay.normalizeRelayUrl
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.Json
 import okhttp3.HttpUrl
 
@@ -11,6 +13,7 @@ internal const val NIP05_NEGATIVE_TTL_MS = 6L * 60 * 60 * 1_000
 internal const val NIP05_CACHE_CAP = 2_048
 internal const val NIP05_CACHE_RECORD_MAX_BYTES = 4 * 1_024
 
+internal const val MAX_NIP05_RELAY_URL_LENGTH = 512
 private const val MAX_CACHE_FUTURE_DRIFT_MS = 5 * 60 * 1_000L
 private val HEX_PUBKEY = Regex("^[0-9a-fA-F]{64}$")
 private val NIP05_LOCAL_PART = Regex("^[A-Za-z0-9._-]+$")
@@ -32,6 +35,7 @@ internal data class Nip05VerificationCacheEntry(
     val checkedAtMs: Long,
     /** Mapping returned by `names[local]`; required and rechecked for VERIFIED. */
     val resolvedPubkey: String?,
+    val relayHints: List<String> = emptyList(),
 )
 
 internal data class Nip05LookupTarget(
@@ -86,29 +90,41 @@ internal fun nip05LookupTarget(nip05: String): Nip05LookupTarget? {
     return Nip05LookupTarget(local = local, domain = url.host, url = url)
 }
 
-internal fun nip05StatusFromHttpResponse(
+internal data class Nip05Resolution(
+    val status: Nip05VerificationStatus,
+    val relayHints: List<String> = emptyList(),
+)
+
+internal fun normalizeNip05RelayHint(raw: String): String? {
+    if (raw.length > MAX_NIP05_RELAY_URL_LENGTH || !raw.startsWith("wss://")) return null
+    val relay = normalizeRelayUrl(raw) ?: return null
+    val url = parseAllowedUntrustedHttpUrl("https://" + relay.removePrefix("wss://")) ?: return null
+    // Canonicalize the host, default port and path before deduplication.
+    return ("wss://" + url.toString().removePrefix("https://").removeSuffix("/"))
+        .takeIf { it.length <= MAX_NIP05_RELAY_URL_LENGTH }
+}
+
+internal fun boundedNip05RelayHints(hints: Sequence<String>): List<String> =
+    hints.mapNotNull(::normalizeNip05RelayHint).distinct().take(MAX_SEEN_RELAY_HINTS).toList()
+
+internal fun nip05ResolutionFromHttpResponse(
     statusCode: Int,
     body: String?,
     target: Nip05LookupTarget,
     expectedPubkey: String,
-): Nip05VerificationStatus {
-    if (statusCode != 200 || body == null) return Nip05VerificationStatus.UNVERIFIED
-    val mapped = runCatching {
-        Json.parseToJsonElement(body)
-            .jsonObject["names"]
-            ?.jsonObject
-            ?.get(target.local)
-            ?.jsonPrimitive
-            ?.contentOrNull
-    }.getOrNull()?.trim()
-    if (mapped == null || !HEX_PUBKEY.matches(mapped)) {
-        return Nip05VerificationStatus.UNVERIFIED
-    }
-    return if (mapped.equals(expectedPubkey, ignoreCase = true)) {
-        Nip05VerificationStatus.VERIFIED
-    } else {
-        Nip05VerificationStatus.UNVERIFIED
-    }
+): Nip05Resolution {
+    val unverified = Nip05Resolution(Nip05VerificationStatus.UNVERIFIED)
+    if (statusCode != 200 || body == null) return unverified
+    val document = runCatching { Json.parseToJsonElement(body) }.getOrNull() as? JsonObject ?: return unverified
+    val names = document["names"] as? JsonObject
+    val name = names?.get(target.local) as? JsonPrimitive ?: return unverified
+    if (!name.isString) return unverified
+    val mapped = name.content.trim()
+    if (!HEX_PUBKEY.matches(mapped) || !mapped.equals(expectedPubkey, ignoreCase = true)) return unverified
+    val relays = document["relays"] as? JsonObject
+    val advertised = relays?.get(expectedPubkey.lowercase()) as? JsonArray
+    val hints = advertised.orEmpty().asSequence().mapNotNull { (it as? JsonPrimitive)?.takeIf { p -> p.isString }?.content }
+    return Nip05Resolution(Nip05VerificationStatus.VERIFIED, boundedNip05RelayHints(hints))
 }
 
 internal fun Nip05VerificationCacheEntry.isValidAt(nowMs: Long): Boolean {

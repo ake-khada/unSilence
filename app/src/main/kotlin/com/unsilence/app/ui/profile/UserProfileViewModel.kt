@@ -314,6 +314,15 @@ class UserProfileViewModel @Inject constructor(
                 } else FeedContentFilter.NOTES_ONLY
             }
         }
+        viewModelScope.launch(Dispatchers.IO) {
+            _pubkeyHex.filterNotNull().collectLatestWhileActive(screenActive) { pubkey ->
+                if (pubkey != myPubkey) {
+                    memoryEventStore.missingPictureRelayHints(pubkey).collect { hints ->
+                        if (hints.isNotEmpty()) relayPool.fetchVerifiedProfileHints(pubkey, hints)
+                    }
+                }
+            }
+        }
         // Notes/Replies share a subscription. Covering stops it; returning retains
         // loaded pages and subscribes anew. The handle cannot outlive this collector.
         viewModelScope.launch {

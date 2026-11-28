@@ -123,8 +123,8 @@ class EventReferencePolicyTest {
             ),
             ladder.address?.all,
         )
-        assertEquals(listOf("wss://relay.mostr.pub"), ladder.eventIdBridgeFallback)
-        assertEquals(listOf("wss://relay.mostr.pub"), ladder.addressBridgeFallback)
+        assertEquals(listOf("wss://relay.ditto.pub"), ladder.eventIdBridgeFallback)
+        assertEquals(listOf("wss://relay.ditto.pub"), ladder.addressBridgeFallback)
         assertEquals(
             listOf(
                 EventReferenceRelayPhase.EVENT_ID_STANDARD,
@@ -141,8 +141,8 @@ class EventReferencePolicyTest {
         val reference = buildReplyParentReference(
             eventId = "bridged-parent-id",
             tagsJson = """[["A","34236:bridged-author:post"],["P","bridged-author"]]""",
-            sourceRelay = "wss://relay.mostr.pub/",
-            sourceRelayHints = listOf("relay.mostr.pub"),
+            sourceRelay = "wss://relay.ditto.pub/",
+            sourceRelayHints = listOf("relay.ditto.pub"),
         )
         val ladder = eventReferenceRelayLadder(
             target = requireNotNull(reference),
@@ -152,7 +152,7 @@ class EventReferencePolicyTest {
         )
 
         assertEquals(
-            listOf("wss://relay.mostr.pub", "wss://browse.example"),
+            listOf("wss://relay.ditto.pub", "wss://browse.example"),
             ladder.eventId?.hints,
         )
         assertEquals(ladder.eventId?.hints, ladder.address?.hints)

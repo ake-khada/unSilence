@@ -144,14 +144,14 @@ class SeenRelayHintsTest {
     @Test
     fun `bridge fallback is one normalized relay deduped against prior fanout`() {
         assertEquals(
-            listOf("wss://relay.mostr.pub"),
+            listOf("wss://relay.ditto.pub"),
             bridgeFallbackRelayTargets(
                 listOf("wss://one.example/", "one.example"),
             ),
         )
         assertTrue(
             bridgeFallbackRelayTargets(
-                listOf("relay.mostr.pub", "wss://relay.mostr.pub/"),
+                listOf("relay.ditto.pub", "wss://relay.ditto.pub/"),
             ).isEmpty(),
         )
         assertTrue(BRIDGE_FALLBACK_RELAY_URLS.none { it in GLOBAL_RELAY_URLS })
@@ -159,7 +159,7 @@ class SeenRelayHintsTest {
 
     @Test
     fun `bridge fallback identity is normalization safe`() {
-        assertTrue(isBridgeFallbackRelay("relay.mostr.pub/"))
+        assertTrue(isBridgeFallbackRelay("relay.ditto.pub/"))
         assertFalse(isBridgeFallbackRelay("wss://relay.example"))
         assertFalse(isBridgeFallbackRelay("not a relay"))
     }
@@ -167,11 +167,14 @@ class SeenRelayHintsTest {
     @Test
     fun `mostr nip05 derives lookup outbox while ordinary nip05 does not`() {
         assertEquals(
-            listOf("wss://relay.mostr.pub"),
+            listOf("wss://relay.ditto.pub"),
             profileDerivedBridgeOutbox("  Alice@MOSTR.PUB  "),
         )
         assertTrue(profileDerivedBridgeOutbox("alice@example.com").isEmpty())
-        assertTrue(profileDerivedBridgeOutbox("alice@sub.mostr.pub").isEmpty())
+        assertEquals(listOf("wss://relay.ditto.pub"), profileDerivedBridgeOutbox("alice@sub.mostr.pub"))
+        assertTrue(profileDerivedBridgeOutbox("alice@spoofmostr.pub").isEmpty())
+        assertTrue(profileDerivedBridgeOutbox("alice@sub.mostr.pub.example").isEmpty())
+        assertTrue(profileDerivedBridgeOutbox("alice@foo@sub.mostr.pub").isEmpty())
         assertTrue(profileDerivedBridgeOutbox(null).isEmpty())
     }
 }

@@ -32,7 +32,7 @@ class Nip05HttpClientTest {
                         .setHeader("Location", "http://target.onion/identity")
                 } else MockResponse().setBody(validBody)
         }
-        val status = runBlocking { client.resolve(key) }
+        val status = runBlocking { client.resolve(key)?.status }
         // Assert transport behavior first: a matching target must never rescue a redirect.
         assertEquals("redirect target received a request", 1, server.requestCount)
         assertEquals(Nip05VerificationStatus.UNVERIFIED, status)
@@ -49,7 +49,7 @@ class Nip05HttpClientTest {
 
     private fun assertBody(body: String, expected: Nip05VerificationStatus) = withClient { server, client ->
         server.enqueue(MockResponse().setBody(body))
-        assertEquals(expected, runBlocking { client.resolve(key) })
+        assertEquals(expected, runBlocking { client.resolve(key)?.status })
         assertEquals(1, server.requestCount)
     }
 

@@ -720,12 +720,7 @@ class RelayRequestPacingTest {
         f: Fixture, url: String, authors: List<String>,
         prefix: String = "hint-profiles", urls: List<String> = listOf(url),
     ) {
-        kotlin.coroutines.intrinsics.suspendCoroutineUninterceptedOrReturn<Any?> { continuation ->
-            RelayPool::class.java.getDeclaredMethod(
-                "fetchProfilePhase", List::class.java, List::class.java, String::class.java,
-                Boolean::class.javaPrimitiveType, kotlin.coroutines.Continuation::class.java,
-            ).apply { isAccessible = true }.invoke(f.pool, authors, urls, prefix, true, continuation)
-        }
+        f.pool.fetchProfilePhase(authors, urls, prefix, includeActiveFeedRelay = true)
     }
 
     /** Completed request IDs must not accumulate in pool-owned maps or active-ID sets. */

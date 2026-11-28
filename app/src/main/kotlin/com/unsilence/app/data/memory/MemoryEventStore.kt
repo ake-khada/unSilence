@@ -4,11 +4,14 @@ import android.util.Log
 // FeedRow, EventEntity, UserEntity are in the same package (data.memory.Models)
 import com.unsilence.app.data.DEFAULT_WOT_PROVIDER_PUBKEY
 import com.unsilence.app.data.DEFAULT_WOT_RELAY
+import com.unsilence.app.data.network.MAX_NIP05_RELAY_URL_LENGTH
+import com.unsilence.app.data.network.normalizeNip05RelayHint
 import com.unsilence.app.data.network.NIP05_CACHE_CAP
 import com.unsilence.app.data.network.NIP05_CACHE_RECORD_MAX_BYTES
 import com.unsilence.app.data.network.Nip05VerificationCacheEntry
 import com.unsilence.app.data.network.Nip05VerificationCacheKey
 import com.unsilence.app.data.network.Nip05VerificationStatus
+import com.unsilence.app.data.network.boundedNip05RelayHints
 import com.unsilence.app.data.network.isValidAt
 import com.unsilence.app.data.network.nip05VerificationCacheKey
 import com.unsilence.app.data.relay.NostrJson
@@ -57,6 +60,7 @@ import com.unsilence.app.data.relay.normalizeRelayUrl
 import com.unsilence.app.data.relay.parseNip22Threading
 import com.unsilence.app.data.relay.parseNip51RelayTags
 import com.unsilence.app.data.relay.parseNip65RelayTags
+import com.unsilence.app.data.relay.profileMissingPicture
 import com.unsilence.app.data.relay.profileDerivedBridgeOutbox
 import com.unsilence.app.data.relay.shouldAcceptProfileRelayEvent
 import com.unsilence.app.data.relay.wotProviderDescriptorFromTags
@@ -5382,6 +5386,21 @@ class MemoryEventStore @Inject constructor(
             .distinctUntilChanged()
             .flowOn(Dispatchers.Default)
 
+    /** A resumed profile can receive its verified relay hints before or after its metadata. */
+    internal fun missingPictureRelayHints(pubkey: String): Flow<List<String>> =
+        combine(userEntityFlow(pubkey), nip05VerificationSignal) { user, _ ->
+            if (!profileMissingPicture(user)) return@combine emptyList()
+            val key = user?.nip05?.let { nip05VerificationCacheKey(pubkey, it) } ?: return@combine emptyList()
+            val entry = nip05VerificationCache[key] ?: return@combine emptyList()
+            if (entry.status != Nip05VerificationStatus.VERIFIED || entry.relayHints.isEmpty() ||
+                !entry.isValidAt(System.currentTimeMillis())
+            ) return@combine emptyList()
+            val profile = getProfile(pubkey) ?: return@combine emptyList()
+            val seen = (sequenceOf(profile.relayUrl) + profile.relaysSeen.asSequence())
+                .mapNotNull(::normalizeNip05RelayHint).toSet()
+            entry.relayHints.filterNot(seen::contains)
+        }.distinctUntilChanged()
+
     internal fun nip05VerificationFlow(
         pubkey: String,
         nip05: String,
@@ -7035,8 +7054,12 @@ class MemoryEventStore @Inject constructor(
             out.writeInt(nip05Entries.size)
             for (entry in nip05Entries) {
                 val record = encodeNip05VerificationCacheRecord(entry)
-                out.writeInt(record.size)
-                out.write(record)
+                if (record.size <= NIP05_CACHE_RECORD_MAX_BYTES) {
+                    out.writeInt(record.size)
+                    out.write(record)
+                } else {
+                    out.writeInt(0)
+                }
             }
         }
         val totalBytes = out.size()
@@ -7613,7 +7636,8 @@ class MemoryEventStore @Inject constructor(
     ): ByteArray {
         val bytes = ByteArrayOutputStream(256)
         DataOutputStream(bytes).use { record ->
-            record.writeByte(1) // record format version
+            val hints = entry.relayHints
+            record.writeByte(if (hints.isEmpty()) 1 else 2)
             record.writeStr(entry.key.pubkey)
             record.writeStr(entry.key.nip05)
             record.writeByte(
@@ -7625,6 +7649,12 @@ class MemoryEventStore @Inject constructor(
             )
             record.writeLong(entry.checkedAtMs)
             record.writeStrOrNull(entry.resolvedPubkey)
+            for (hint in hints) {
+                val encoded = hint.toByteArray(Charsets.UTF_8)
+                if (record.size() + 2 + encoded.size > NIP05_CACHE_RECORD_MAX_BYTES) continue
+                record.writeShort(encoded.size)
+                record.write(encoded)
+            }
         }
         return bytes.toByteArray()
     }
@@ -7633,9 +7663,11 @@ class MemoryEventStore @Inject constructor(
         recordBytes: ByteArray,
         nowMs: Long = System.currentTimeMillis(),
     ): Boolean {
+        if (recordBytes.size > NIP05_CACHE_RECORD_MAX_BYTES) return false
         val entry = runCatching {
             DataInputStream(ByteArrayInputStream(recordBytes)).use { record ->
-                if (record.readUnsignedByte() != 1) return@use null
+                val version = record.readUnsignedByte()
+                if (version !in 1..2) return@use null
                 val key = nip05VerificationCacheKey(record.readStr(), record.readStr())
                     ?: return@use null
                 val status = when (record.readUnsignedByte()) {
@@ -7645,12 +7677,24 @@ class MemoryEventStore @Inject constructor(
                 }
                 val checkedAtMs = record.readLong()
                 val resolvedPubkey = record.readStrOrNull()
-                if (record.available() != 0) return@use null
+                if (version == 1 && record.available() != 0) return@use null
+                val hints = sequence {
+                    while (record.available() >= 2) {
+                        val length = record.readUnsignedShort()
+                        if (length > record.available()) break
+                        if (length > MAX_NIP05_RELAY_URL_LENGTH) {
+                            record.skipBytes(length)
+                            continue
+                        }
+                        yield(String(ByteArray(length).also(record::readFully), Charsets.UTF_8))
+                    }
+                }
                 Nip05VerificationCacheEntry(
                     key = key,
                     status = status,
                     checkedAtMs = checkedAtMs,
                     resolvedPubkey = resolvedPubkey,
+                    relayHints = if (status == Nip05VerificationStatus.VERIFIED) boundedNip05RelayHints(hints) else emptyList(),
                 )
             }
         }.getOrNull() ?: return false

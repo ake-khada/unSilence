@@ -1,5 +1,6 @@
 package com.unsilence.app.data.relay
 
+import com.unsilence.app.data.network.nip05LookupTarget
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
@@ -114,12 +115,12 @@ internal fun isBridgeFallbackRelay(url: String): Boolean {
 }
 
 /** NIP-05 bootstrap for identities bridged by mostr. */
-internal fun profileDerivedBridgeOutbox(nip05: String?): List<String> =
-    if (nip05?.trim()?.lowercase()?.endsWith("@mostr.pub") == true) {
-        BRIDGE_FALLBACK_RELAY_URLS
-    } else {
-        emptyList()
-    }
+internal fun profileDerivedBridgeOutbox(nip05: String?): List<String> {
+    val address = nip05?.trim() ?: return emptyList()
+    if (!address.endsWith("mostr.pub", ignoreCase = true) || '@' !in address) return emptyList()
+    val domain = nip05LookupTarget(address)?.domain ?: return emptyList()
+    return if (domain == "mostr.pub" || domain.endsWith(".mostr.pub")) BRIDGE_FALLBACK_RELAY_URLS else emptyList()
+}
 
 /** Shared with ProfileResolver's collection window; each wire REQ stays bounded. */
 internal const val MAX_PROFILE_AUTHORS_PER_REQ = 100

@@ -97,5 +97,5 @@ val GLOBAL_RELAY_URLS = listOf(
  * targets miss and must never become default feed subscriptions.
  */
 val BRIDGE_FALLBACK_RELAY_URLS = listOf(
-    "wss://relay.mostr.pub",
+    "wss://relay.ditto.pub",
 )

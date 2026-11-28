@@ -140,7 +140,7 @@ class Nip05VerifierTest {
             memoryEventStore = store,
             fetch = {
                 calls++
-                Nip05VerificationStatus.VERIFIED
+                Nip05Resolution(Nip05VerificationStatus.VERIFIED)
             },
             onStored = {},
             scope = backgroundScope,
@@ -183,7 +183,7 @@ class Nip05VerifierTest {
         fetch: suspend (Nip05VerificationCacheKey) -> Nip05VerificationStatus?,
     ) = Nip05ResolutionCoordinator(
         memoryEventStore = store,
-        fetch = fetch,
+        fetch = { key -> fetch(key)?.let { Nip05Resolution(it) } },
         onStored = {},
         scope = backgroundScope,
         staggerMs = { 0L },

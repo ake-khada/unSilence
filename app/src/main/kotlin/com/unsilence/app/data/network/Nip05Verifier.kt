@@ -55,7 +55,7 @@ class Nip05Verifier @Inject constructor(
 
 internal class Nip05ResolutionCoordinator(
     private val memoryEventStore: MemoryEventStore,
-    private val fetch: suspend (Nip05VerificationCacheKey) -> Nip05VerificationStatus?,
+    private val fetch: suspend (Nip05VerificationCacheKey) -> Nip05Resolution?,
     private val onStored: () -> Unit,
     private val scope: CoroutineScope,
     private val nowMs: () -> Long = System::currentTimeMillis,
@@ -167,7 +167,7 @@ internal class Nip05ResolutionCoordinator(
 
         val fetched = networkPermits.withPermit { fetch(key) }
         if (synchronizeOwner() != ownerAtStart) return Nip05VerificationStatus.UNKNOWN
-        if (fetched == null || fetched == Nip05VerificationStatus.UNKNOWN) {
+        if (fetched == null || fetched.status == Nip05VerificationStatus.UNKNOWN) {
             transientFailureAt[key] = nowMs()
             trimTransientFailures()
             return Nip05VerificationStatus.UNKNOWN
@@ -176,15 +176,16 @@ internal class Nip05ResolutionCoordinator(
         val completedAt = nowMs()
         val entry = Nip05VerificationCacheEntry(
             key = key,
-            status = fetched,
+            status = fetched.status,
             checkedAtMs = completedAt,
-            resolvedPubkey = key.pubkey.takeIf { fetched == Nip05VerificationStatus.VERIFIED },
+            relayHints = fetched.relayHints,
+            resolvedPubkey = key.pubkey.takeIf { fetched.status == Nip05VerificationStatus.VERIFIED },
         )
         if (memoryEventStore.storeNip05Verification(entry, completedAt)) {
             transientFailureAt.remove(key)
             forgetVisibleClaim(key)
             onStored()
-            return fetched
+            return fetched.status
         }
         forgetVisibleClaim(key)
         return Nip05VerificationStatus.UNKNOWN
